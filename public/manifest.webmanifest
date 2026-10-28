@@ -1,0 +1,55 @@
+{
+  "name": "LuantiHub – Decentralized Package Registry & Content Hub",
+  "short_name": "LuantiHub",
+  "description": "Discover, install, and share decentralized Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB.",
+  "display": "standalone",
+  "orientation": "any",
+  "scope": "./",
+  "start_url": "./",
+  "theme_color": "#020617",
+  "background_color": "#020617",
+  "categories": ["games", "developer", "utilities", "entertainment"],
+  "shortcuts": [
+    {
+      "name": "Browse Catalog",
+      "short_name": "Browse",
+      "description": "Explore trending mods, games, and texture packs",
+      "url": "./",
+      "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "Submit Git Package",
+      "short_name": "Submit",
+      "description": "Publish a mod or game from a Git repository",
+      "url": "./submit",
+      "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "In-Game Setup Guide",
+      "short_name": "In-Game URL",
+      "description": "Configure Luanti minetest.conf to install mods in-game",
+      "url": "./setup",
+      "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
+    }
+  ],
+  "icons": [
+    {
+      "src": "logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

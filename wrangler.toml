@@ -1,0 +1,11 @@
+name = "luanti-hub"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "dist/luanti-hub/browser"
+
+# Cloudflare D1 Database Binding
+# After creating your database on Cloudflare, paste your database_id below:
+[[d1_databases]]
+binding = "DB"
+database_name = "luanti-registry-db"
+database_id = "paste-your-d1-database-id-here"

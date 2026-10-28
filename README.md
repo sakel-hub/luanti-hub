@@ -1,59 +1,104 @@
-# LuantiHub
+# LuantiHub 🎮⚡
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.2.4.
+**The Decentralized Package Registry & Content Hub for Luanti (formerly Minetest)**
 
-## Development server
+[![Luanti Engine](https://img.shields.io/badge/Luanti-5.0+-38bdf8?style=flat-square&logo=cube)](https://www.luanti.org)
+[![Angular 22](https://img.shields.io/badge/Angular-22.2-dd0031?style=flat-square&logo=angular)](https://angular.dev)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-38bdf8?style=flat-square&logo=tailwindcss)](https://tailwindcss.com)
+[![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1-f38020?style=flat-square&logo=cloudflare)](https://pages.cloudflare.com)
+[![PWA Ready](https://img.shields.io/badge/PWA-Offline%20First-emerald-500?style=flat-square)](https://web.dev/progressive-web-apps/)
 
-To start a local development server, run:
+LuantiHub is a next-generation package discovery platform and decentralized content repository for Luanti voxel game mods, games, and texture packs. It delivers a modern, Netflix-style cinematic browsing experience on the web while serving as a direct drop-in replacement for the in-game Luanti **Content** tab.
 
-```bash
-ng serve
-```
+---
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+## 🌟 Key Features
 
-## Code scaffolding
+* **In-Game Content Tab Compatibility:** Seamlessly compatible with the Luanti game engine. Simply configure `contentdb_url = https://luanti-hub.pages.dev` in your `minetest.conf` to search, download, and update decentralized mods directly inside the game client.
+* **Decentralized Git Ingestion:** Creators can submit and index their mods directly from **GitHub**, **Codeberg**, or **GitLab** without centralized bottlenecks or mod storage costs.
+* **High-Availability Fallback Mirror:** Automatically fails over between the official ContentDB API (`content.luanti.org`) and the community mirror (`contentdb.milcho.org`), ensuring 100% uptime for players and server operators.
+* **Mixed Community Reviews:** Aggregates official ContentDB reviews with native LuantiHub community comments and star ratings into a unified discussion thread.
+* **SPDX License & Legal Protection:** Automated gatekeeping checks code and media licenses against recognized Open Source and Free Culture standards (MIT, LGPL, GPL, CC-BY-SA), maintaining Safe Harbor compliance under DMCA §512 and EU DSA.
+* **Netflix-Style UI:** Features an immersive hero billboard, horizontal smooth-scrolling swimlanes, interactive card hover expansions, and detailed mod drawers.
+* **Offline-First PWA:** Installable across desktop and mobile, with automatic background update toasts, offline caching of package manifests, and Web Share API integration.
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+---
 
-```bash
-ng generate component component-name
-```
+## 🚀 Quick Start (Local Development)
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
-
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
+### Prerequisites
+* **Node.js** >= `v24.0.0`
+* **npm** >= `11.0.0`
 
 ```bash
-ng test
+# Clone the repository
+cd /Users/juraj/Documents/gits/luanti-hub
+
+# Install dependencies
+npm install
+
+# Start local Angular development server
+npm start
 ```
 
-## Running end-to-end tests
+Navigate to `http://localhost:4200` to explore the catalog!
 
-For end-to-end (e2e) testing, run:
+---
 
+## ☁️ Free Cloudflare Deployment Guide
+
+LuantiHub runs 100% free on Cloudflare's serverless edge ecosystem:
+
+### 1. Create Cloudflare D1 Database
 ```bash
-ng e2e
+# Login to Cloudflare CLI
+npx wrangler login
+
+# Create the free D1 database
+npx wrangler d1 create luanti-registry-db
+
+# Run schema migrations
+npx wrangler d1 execute luanti-registry-db --file=./functions/schema.sql
 ```
 
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
+Copy the generated `database_id` into `wrangler.toml`:
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "luanti-registry-db"
+database_id = "YOUR_DATABASE_ID_HERE"
+```
 
-## Additional Resources
+### 2. Connect to Cloudflare Pages
+1. Go to [Cloudflare Dashboard ➔ Workers & Pages](https://dash.cloudflare.com/?to=/:account/workers-and-pages).
+2. Click **Create Application** ➔ **Pages** ➔ **Connect to Git**.
+3. Select your GitHub repository.
+4. Set build settings:
+   * **Framework:** `Angular`
+   * **Build command:** `npm run build`
+   * **Output directory:** `dist/luanti-hub/browser`
+5. Under **Settings ➔ Functions ➔ D1 Database Bindings**, bind `DB` to `luanti-registry-db`.
+6. Click **Save and Deploy**!
 
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+---
+
+## 🎮 In-Game Luanti Configuration
+
+To browse and install mods from LuantiHub directly inside Luanti:
+
+### Option A: `minetest.conf`
+Add this line to your `minetest.conf`:
+```ini
+contentdb_url = https://luanti-hub.pages.dev
+```
+
+### Option B: Settings GUI
+1. Launch **Luanti** ➔ Click **Settings** ➔ **All Settings**.
+2. Search for `contentdb_url`.
+3. Enter `https://luanti-hub.pages.dev` and click **Save**.
+4. Open the **Content** tab in-game!
+
+---
+
+## ⚖️ Legal & DMCA Compliance
+LuantiHub functions strictly as an information directory and linking platform. Mod archives are downloaded directly from the creator's Git forge release endpoints. For copyright issues or unauthorized asset reports, email `dmca@luantihub.org` for immediate delisting.

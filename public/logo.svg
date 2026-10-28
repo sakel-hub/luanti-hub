@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#020617"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="cubeTop" x1="128" y1="120" x2="384" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="cubeLeft" x1="128" y1="240" x2="256" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="cubeRight" x1="256" y1="240" x2="384" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="24" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Background rounded canvas -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <rect width="508" height="508" x="2" y="2" rx="110" stroke="#38bdf8" stroke-opacity="0.2" stroke-width="3"/>
+
+  <!-- Network Hub Connections -->
+  <g stroke="#38bdf8" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="6 6">
+    <line x1="256" y1="80" x2="256" y2="150"/>
+    <line x1="90" y1="256" x2="160" y2="256"/>
+    <line x1="422" y1="256" x2="352" y2="256"/>
+    <line x1="160" y1="380" x2="210" y2="340"/>
+    <line x1="352" y1="380" x2="302" y2="340"/>
+  </g>
+
+  <!-- Node Dots -->
+  <circle cx="256" cy="80" r="10" fill="#38bdf8" filter="url(#neonGlow)"/>
+  <circle cx="90" cy="256" r="8" fill="#818cf8"/>
+  <circle cx="422" cy="256" r="8" fill="#38bdf8"/>
+
+  <!-- Isometric Luanti Hub Cube -->
+  <g filter="url(#neonGlow)">
+    <!-- Top Face -->
+    <path d="M256 120 L384 194 L256 268 L128 194 Z" fill="url(#cubeTop)"/>
+    
+    <!-- Left Face -->
+    <path d="M128 194 L256 268 L256 392 L128 318 Z" fill="url(#cubeLeft)"/>
+    
+    <!-- Right Face -->
+    <path d="M256 268 L384 194 L384 318 L256 392 Z" fill="url(#cubeRight)"/>
+
+    <!-- Inner Core Hub Emissary -->
+    <path d="M256 220 L300 245 L256 270 L212 245 Z" fill="#ffffff" fill-opacity="0.7"/>
+  </g>
+
+  <!-- Git Fork / Hub Symbol on Front Faces -->
+  <circle cx="256" cy="268" r="7" fill="#ffffff"/>
+  <circle cx="192" cy="256" r="5" fill="#e0f2fe"/>
+  <circle cx="320" cy="256" r="5" fill="#ede9fe"/>
+</svg>
