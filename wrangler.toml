@@ -8,4 +8,4 @@ pages_build_output_dir = "dist/luanti-hub/browser"
 [[d1_databases]]
 binding = "DB"
 database_name = "luanti-registry-db"
-database_id = "paste-your-d1-database-id-here"
+database_id = "4facd457-15a0-453d-bc77-d3493b9eae04"
