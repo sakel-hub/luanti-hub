@@ -1,104 +1,33 @@
 <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-sky-500 selection:text-white">
   
+  <!-- Skip to Content for WCAG AA Accessibility -->
+  <a 
+    href="#main-content" 
+    class="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[999] focus:px-4 focus:py-2 focus:bg-sky-500 focus:text-slate-950 focus:font-bold focus:rounded-xl focus:shadow-2xl focus:outline-none">
+    {{ 'common.skipToContent' | translate }}
+  </a>
+
   <!-- Top Navigation Header -->
   <app-header></app-header>
 
-  <!-- Main Content Area -->
-  <main class="flex-1 pb-16">
-    
-    @if (packageService.searchQuery()) {
-      <!-- Active Search Grid View -->
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
-          <div>
-            <h1 class="text-xl font-bold text-white flex items-center gap-2">
-              <span>Results for "{{ packageService.searchQuery() }}"</span>
-              <span class="text-xs font-normal text-slate-400">({{ packageService.filteredPackages().length }} found)</span>
-            </h1>
-            <p class="text-xs text-slate-400">Showing packages across ContentDB and Git community</p>
-          </div>
-        </div>
-
-        @if (packageService.filteredPackages().length === 0) {
-          <div class="py-16 text-center space-y-3">
-            <div class="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto text-slate-500">
-              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
-            </div>
-            <h3 class="text-sm font-semibold text-slate-300">No matching packages found</h3>
-            <p class="text-xs text-slate-500 max-w-sm mx-auto">
-              Know of a Git repository for this mod? You can be the first to submit it to the decentralized registry!
-            </p>
-            <button 
-              (click)="packageService.openSubmitModal()"
-              class="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow transition">
-              Submit This Git Repo
-            </button>
-          </div>
-        } @else {
-          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-            @for (pkg of packageService.filteredPackages(); track pkg.id) {
-              <div class="flex justify-center">
-                <app-package-card [package]="pkg" class="w-full"></app-package-card>
-              </div>
-            }
-          </div>
-        }
-      </div>
-
-    } @else {
-      <!-- Netflix Home Experience (Billboard + Horizontal Swimlanes) -->
-      <app-hero-billboard></app-hero-billboard>
-
-      <div class="relative z-20 -mt-10 sm:-mt-14 space-y-6">
-        
-        <!-- Swimlane 1: Trending Today -->
-        <app-package-carousel 
-          title="🔥 Trending This Week" 
-          [packages]="packageService.trendingPackages()">
-        </app-package-carousel>
-
-        <!-- Swimlane 2: Decentralized Git Community Packages -->
-        <app-package-carousel 
-          title="⚡ Fresh from Git (Decentralized Community Releases)" 
-          [packages]="packageService.decentralizedGitPackages()">
-        </app-package-carousel>
-
-        <!-- Swimlane 3: Standalone Voxel Games -->
-        <app-package-carousel 
-          title="🎮 Complete Standalone Games" 
-          [packages]="packageService.standaloneGames()">
-        </app-package-carousel>
-
-        <!-- Swimlane 4: High-Tech Automation & Machinery -->
-        <app-package-carousel 
-          title="⚡ Mesecons Circuitry &amp; Automation" 
-          [packages]="packageService.automationMods()">
-        </app-package-carousel>
-
-        <!-- Swimlane 5: High-Definition Texture Packs -->
-        <app-package-carousel 
-          title="🎨 HD Texture &amp; Audio Packs" 
-          [packages]="packageService.texturePacks()">
-        </app-package-carousel>
-
-      </div>
-    }
-
+  <!-- Main Content Area with Routing -->
+  <main id="main-content" class="flex-1 pb-16 focus:outline-none" tabindex="-1">
+    <router-outlet></router-outlet>
   </main>
 
   <!-- PWA Automatic Update Banner -->
   @if (pwaService.updateAvailable()) {
-    <div class="fixed bottom-6 right-6 z-50 p-4 bg-sky-600 text-white rounded-2xl shadow-2xl flex items-center gap-4 animate-in slide-in-from-bottom duration-300">
+    <div 
+      role="alert"
+      class="fixed bottom-6 right-6 z-50 p-4 bg-sky-600/95 backdrop-blur-md text-white rounded-2xl shadow-2xl border border-sky-400/30 flex items-center gap-4 animate-in slide-in-from-bottom duration-300">
       <div class="text-xs font-medium">
-        <p class="font-bold">New Version Available</p>
-        <p class="text-sky-100">LuantiHub has updated in the background.</p>
+        <p class="font-bold">{{ 'pwa.updateAvailable' | translate }}</p>
+        <p class="text-sky-100">{{ 'pwa.updateDesc' | translate }}</p>
       </div>
       <button 
         (click)="pwaService.applyUpdate()"
         class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow">
-        Reload Now
+        {{ 'pwa.reloadNow' | translate }}
       </button>
     </div>
   }
@@ -132,27 +61,27 @@
           <img src="logo.svg" alt="LuantiHub" width="28" height="28" class="w-7 h-7 rounded-lg" />
           <span class="font-bold text-white text-sm">LuantiHub</span>
           <span class="text-slate-500">•</span>
-          <span>Decentralized Content Hub</span>
+          <span>{{ 'footer.about' | translate }}</span>
         </div>
 
         <div class="flex flex-wrap items-center gap-6">
           <button (click)="packageService.openSetupModal()" class="hover:text-sky-400 transition">
-            In-Game Minetest Config
+            {{ 'footer.inGameSetup' | translate }}
           </button>
           <a href="https://contentdb.milcho.org/about_api.php" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition">
-            Milcho Mirror API
+            {{ 'footer.upstreamMirror' | translate }}
           </a>
           <a href="https://www.luanti.org" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition">
-            Luanti Engine
+            {{ 'footer.engineSite' | translate }}
           </a>
           <a href="mailto:dmca@luantihub.org" class="hover:text-sky-400 transition">
-            DMCA / Takedowns
+            {{ 'footer.dmca' | translate }}
           </a>
         </div>
       </div>
 
       <p class="text-center sm:text-left text-[11px] text-slate-500 leading-relaxed max-w-3xl">
-        LuantiHub is an independent, decentralized open-source community platform and is not officially affiliated with or endorsed by Luanti core. Packages are indexed directly from public open-source Git repositories and community mirrors. All trademarks and voxel assets belong to their respective creators.
+        {{ 'footer.disclaimer' | translate }}
       </p>
     </div>
   </footer>

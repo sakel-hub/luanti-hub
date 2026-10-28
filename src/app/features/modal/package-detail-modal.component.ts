@@ -7,11 +7,13 @@ import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 
 @Component({
   selector: 'app-package-detail-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule, ImgFallbackDirective],
+  imports: [CommonModule, FormsModule, ImgFallbackDirective, TooltipDirective, TranslatePipe],
   template: `
     @if (package) {
       <div 
@@ -39,7 +41,8 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
             <!-- Close Button -->
             <button 
               (click)="packageService.closePackageModal()"
-              aria-label="Close dialog"
+              [attr.aria-label]="'modal.close' | translate"
+              [appTooltip]="'modal.close' | translate"
               class="absolute top-4 right-4 p-2 rounded-full bg-slate-950/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition z-20">
               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -79,12 +82,13 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
                   </svg>
-                  <span>Install In-Game</span>
+                  <span>{{ 'modal.installInGame' | translate }}</span>
                 </button>
 
                 <button 
                   (click)="pwaService.sharePackage(package.title, package.short_desc, shareUrl)"
-                  title="Share package"
+                  [appTooltip]="'modal.shareTooltip' | translate"
+                  [attr.aria-label]="'modal.sharePackage' | translate"
                   class="p-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/>
@@ -100,17 +104,17 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
             <button 
               (click)="activeTab.set('overview')"
               [class]="activeTab() === 'overview' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              Overview &amp; Code
+              {{ 'modal.tabOverview' | translate }}
             </button>
             <button 
               (click)="activeTab.set('reviews')"
               [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              Mixed Reviews &amp; Comments ({{ reviews().length }})
+              {{ 'modal.tabReviews' | translate }} ({{ reviews().length }})
             </button>
             <button 
               (click)="activeTab.set('compliance')"
               [class]="activeTab() === 'compliance' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              Licenses &amp; Legal
+              {{ 'modal.tabCompliance' | translate }}
             </button>
           </div>
 

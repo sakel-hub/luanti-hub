@@ -1,9 +1,7 @@
 import { Component, inject, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { RouterModule } from '@angular/router';
 import { HeaderComponent } from './features/header/header.component';
-import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
-import { PackageCarouselComponent } from './features/carousel/package-carousel.component';
-import { PackageCardComponent } from './features/card/package-card.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { SetupGuideModalComponent } from './features/setup-guide/setup-guide-modal.component';
@@ -12,16 +10,16 @@ import { ProfileDrawerComponent } from './features/profile/profile-drawer.compon
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
+import { TranslatePipe } from './core/i18n/translate.pipe';
 
 @Component({
   selector: 'app-root',
   standalone: true,
   imports: [
     CommonModule,
+    RouterModule,
+    TranslatePipe,
     HeaderComponent,
-    HeroBillboardComponent,
-    PackageCarouselComponent,
-    PackageCardComponent,
     PackageDetailModalComponent,
     SubmitModalComponent,
     SetupGuideModalComponent,

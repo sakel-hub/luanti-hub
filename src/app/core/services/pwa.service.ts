@@ -24,11 +24,14 @@ export class PwaService {
 
   private checkIfInstalled(): boolean {
     if (typeof window === 'undefined') return false;
-    return (
-      window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as any).standalone === true ||
-      document.referrer.includes('android-app://')
-    );
+    try {
+      const isStandaloneMedia = typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)')?.matches;
+      const isNavigatorStandalone = (window.navigator as any)?.standalone === true;
+      const isAndroidReferrer = typeof document !== 'undefined' && document.referrer?.includes('android-app://');
+      return Boolean(isStandaloneMedia || isNavigatorStandalone || isAndroidReferrer);
+    } catch {
+      return false;
+    }
   }
 
   private initSwUpdate(): void {

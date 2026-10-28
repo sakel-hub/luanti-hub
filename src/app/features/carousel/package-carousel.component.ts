@@ -2,11 +2,13 @@ import { Component, Input, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LuantiPackage } from '../../core/models/package.model';
 import { PackageCardComponent } from '../card/package-card.component';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 
 @Component({
   selector: 'app-package-carousel',
   standalone: true,
-  imports: [CommonModule, PackageCardComponent],
+  imports: [CommonModule, PackageCardComponent, TooltipDirective, TranslatePipe],
   template: `
     @if (packages.length > 0) {
       <section class="py-4 space-y-3 select-none">
@@ -27,7 +29,8 @@ import { PackageCardComponent } from '../card/package-card.component';
           <div class="hidden sm:flex items-center gap-1.5">
             <button 
               (click)="scrollLeft()"
-              aria-label="Scroll left"
+              [attr.aria-label]="'carousel.scrollLeft' | translate"
+              [appTooltip]="'carousel.scrollLeft' | translate"
               class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
@@ -35,7 +38,8 @@ import { PackageCardComponent } from '../card/package-card.component';
             </button>
             <button 
               (click)="scrollRight()"
-              aria-label="Scroll right"
+              [attr.aria-label]="'carousel.scrollRight' | translate"
+              [appTooltip]="'carousel.scrollRight' | translate"
               class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>

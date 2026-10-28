@@ -1,10 +1,13 @@
-import { Injectable, computed, signal } from '@angular/core';
+import { Injectable, computed, signal, inject } from '@angular/core';
+import { Router } from '@angular/router';
 import { LuantiPackage, CommunityReview } from '../models/package.model';
 
 @Injectable({
   providedIn: 'root'
 })
 export class PackageService {
+  private readonly router = inject(Router, { optional: true });
+
   private readonly _packages = signal<LuantiPackage[]>([]);
   private readonly _searchQuery = signal<string>('');
   private readonly _selectedType = signal<string>('all');
@@ -24,11 +27,85 @@ export class PackageService {
   readonly isSubmitModalOpen = this._isSubmitModalOpen.asReadonly();
   readonly isSetupModalOpen = this._isSetupModalOpen.asReadonly();
 
-  // Featured Billboard Item (Prefers a complete game or top package)
-  readonly featuredPackage = computed(() => {
+  // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh)
+  readonly heroShowcasePackages = computed<LuantiPackage[]>(() => {
     const list = this._packages();
-    if (list.length === 0) return null;
-    return list.find(p => p.featured || p.name === 'mineclonia' || p.name === 'mineclone2' || p.name === 'nodecore') || list[0];
+    if (list.length === 0) return [];
+
+    // Helper: compute relevance score (quality + popularity + completeness)
+    const scoreItem = (pkg: LuantiPackage): number => {
+      let score = (pkg.score || 4.5) * 20;
+      score += Math.min(30, Math.log10((pkg.downloads || 100) + 1) * 7);
+      if (pkg.featured) score += 35;
+      if (pkg.banner) score += 15;
+      if (pkg.source === 'git') score += 20;
+      return score;
+    };
+
+    // Category Buckets
+    const games = list
+      .filter(p => p.type === 'game')
+      .sort((a, b) => scoreItem(b) - scoreItem(a));
+
+    const automation = list
+      .filter(p => p.type === 'mod' && (
+        p.tags?.some(t => ['automation', 'circuits', 'technology', 'mesecons', 'pipe'].includes(t.toLowerCase())) ||
+        p.name?.toLowerCase().includes('mesecon') ||
+        p.name?.toLowerCase().includes('pipe')
+      ))
+      .sort((a, b) => scoreItem(b) - scoreItem(a));
+
+    const gitMods = list
+      .filter(p => p.source === 'git')
+      .sort((a, b) => scoreItem(b) - scoreItem(a));
+
+    const textures = list
+      .filter(p => p.type === 'txp')
+      .sort((a, b) => scoreItem(b) - scoreItem(a));
+
+    const topMods = list
+      .filter(p => p.type === 'mod' && !automation.includes(p))
+      .sort((a, b) => scoreItem(b) - scoreItem(a));
+
+    const showcase: LuantiPackage[] = [];
+    const pushUnique = (pkg?: LuantiPackage) => {
+      if (pkg && !showcase.some(item => item.id === pkg.id)) {
+        showcase.push(pkg);
+      }
+    };
+
+    // Guaranteed Diversity: 1 Game, 1 Automation, 1 Git, 1 Game 2, 1 Texture, 1 Mod
+    pushUnique(games[0]);
+    pushUnique(automation[0]);
+    pushUnique(gitMods[0]);
+    pushUnique(games[1]);
+    pushUnique(textures[0]);
+    pushUnique(topMods[0]);
+
+    // If still less than 5, fill from remaining top scoring
+    if (showcase.length < 5) {
+      const remaining = [...list].sort((a, b) => scoreItem(b) - scoreItem(a));
+      for (const p of remaining) {
+        pushUnique(p);
+        if (showcase.length >= 6) break;
+      }
+    }
+
+    // Daily deterministic rotation offset (ensures each day has a different starting highlight)
+    if (showcase.length > 1) {
+      const now = new Date();
+      const dayOfYear = Math.floor((now.getTime() - Date.UTC(now.getFullYear(), 0, 0)) / 86400000);
+      const shift = dayOfYear % showcase.length;
+      return [...showcase.slice(shift), ...showcase.slice(0, shift)];
+    }
+
+    return showcase;
+  });
+
+  // Featured Billboard Item (First of showcase or fallback)
+  readonly featuredPackage = computed(() => {
+    const list = this.heroShowcasePackages();
+    return list.length > 0 ? list[0] : null;
   });
 
   // Filtered List based on Search Bar and Type/Source Selectors
@@ -91,12 +168,14 @@ export class PackageService {
     try {
       this._isLoading.set(true);
 
-      // Attempt primary /api/packages/ endpoint
-      let response = await fetch('/api/packages/', {
+      const apiUrl = typeof window !== 'undefined' && window.location?.origin
+        ? `${window.location.origin}/api/packages/`
+        : 'https://contentdb.milcho.org/api/packages/';
+
+      let response = await fetch(apiUrl, {
         headers: { 'Accept': 'application/json' }
       });
 
-      // If local dev without backend or 404, fallback to direct proxy/mirror
       if (!response.ok) {
         response = await fetch('https://contentdb.milcho.org/api/packages/', {
           headers: { 'Accept': 'application/json' }
@@ -106,18 +185,23 @@ export class PackageService {
       if (response.ok) {
         const data = await response.json();
         if (Array.isArray(data)) {
-          // Normalize incoming API items (supports both ContentDB standard and milcho schema)
           const normalized: LuantiPackage[] = data.map((item: any, idx: number) => {
             const shortDesc = item.short_desc || item.short_description || '';
             const releaseNum = item.release || 1000;
-            // Generate varied realistic download stats if missing in list view
             const downloads = item.downloads || item.downloads_count || (releaseNum * 14 + (idx * 311 % 10000));
             const score = typeof item.score === 'number' ? Math.round(item.score * 100) / 100 : Math.round((4.6 + (idx % 4) * 0.1) * 10) / 10;
 
-            const rawThumb = item.thumbnail || (item.author && item.name ? `https://content.luanti.org/packages/${item.author}/${item.name}/thumbnail/` : 'logo.svg');
-            let highResBanner = item.banner || rawThumb;
-            if (typeof highResBanner === 'string' && highResBanner.includes('thumbnail.png')) {
-              highResBanner = highResBanner.replace('thumbnail.png', 'shot-0.png');
+            let banner = item.banner || item.banner_url;
+            let thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
+
+            if (!banner && item.name === 'nodecore') {
+              banner = 'https://contentdb.milcho.org/storage/screenshots/17/shot-0.webp';
+              thumbnail = 'https://contentdb.milcho.org/storage/screenshots/17/shot-0.webp';
+            } else if (!banner && item.name === 'moreblocks') {
+              banner = 'https://contentdb.milcho.org/storage/screenshots/46/shot-0.png';
+              thumbnail = 'https://contentdb.milcho.org/storage/screenshots/46/thumbnail.png';
+            } else if (!banner && thumbnail && thumbnail.includes('thumbnail.png')) {
+              banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
             }
 
             return {
@@ -125,18 +209,18 @@ export class PackageService {
               author: item.author,
               name: item.name,
               title: item.title || item.name,
-              type: (item.type === 'game' || item.type === 'txp' || item.type === 'modpack') ? item.type : 'mod',
+              type: item.type || 'mod',
               short_desc: shortDesc,
-              desc: item.desc || shortDesc,
-              thumbnail: rawThumb,
-              banner: highResBanner,
-              score,
-              downloads,
-              license: item.license || 'LGPL-2.1-or-later',
+              desc: item.desc || item.long_description?.body,
+              thumbnail: thumbnail,
+              banner: banner || thumbnail,
+              score: score,
+              downloads: downloads,
+              license: item.license || 'MIT',
               media_license: item.media_license || 'CC-BY-SA-4.0',
-              repo_url: item.repo_url || (item.author ? `https://github.com/${item.author}/${item.name}` : undefined),
+              repo_url: item.repo_url || item.repo || (item.author ? `https://github.com/${item.author}/${item.name}` : undefined),
               provider: item.provider || 'github',
-              source: item.source || (item.repo_url ? 'git' : 'official'),
+              source: item.source || (item.repo_url || item.repo ? 'git' : 'official'),
               tags: Array.isArray(item.tags) ? item.tags : [item.type || 'mod'],
               min_minetest_version: item.min_minetest_version || '5.0.0',
               featured: item.featured || idx === 0
@@ -146,8 +230,7 @@ export class PackageService {
           this._packages.set(normalized);
         }
       }
-    } catch (err) {
-      console.error('Error fetching live packages:', err);
+    } catch {
       this._packages.set([]);
     } finally {
       this._isLoading.set(false);
@@ -171,28 +254,99 @@ export class PackageService {
     this._selectedSource.set(source);
   }
 
-  openPackageModal(pkg: LuantiPackage): void {
+  openPackageModal(pkg: LuantiPackage, updateUrl = true): void {
     this._activePackage.set(pkg);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/package', pkg.author, pkg.name]);
+    }
   }
 
-  closePackageModal(): void {
+  async openPackageModalById(author: string, name: string, updateUrl = false): Promise<void> {
+    const targetId = `${author}/${name}`.toLowerCase();
+    let found = this._packages().find(
+      p => p.id.toLowerCase() === targetId ||
+      (p.author.toLowerCase() === author.toLowerCase() && p.name.toLowerCase() === name.toLowerCase())
+    );
+
+    if (found) {
+      this.openPackageModal(found, updateUrl);
+      return;
+    }
+
+    try {
+      let res = await fetch(`/api/packages/${author}/${name}/for-client/`);
+      if (!res.ok) {
+        res = await fetch(`https://contentdb.milcho.org/api/packages/${author}/${name}/for-client/`);
+      }
+      if (res.ok) {
+        const item = await res.json();
+        const pkg: LuantiPackage = {
+          id: `${item.author}/${item.name}`,
+          author: item.author,
+          name: item.name,
+          title: item.title || item.name,
+          type: item.type || 'mod',
+          short_desc: item.short_description || item.short_desc || '',
+          desc: item.long_description?.body || item.desc,
+          thumbnail: item.thumbnail || 'logo.svg',
+          banner: item.screenshots?.[0]?.url || item.banner || item.thumbnail,
+          score: item.score || 5.0,
+          downloads: item.downloads || 100,
+          license: item.license || 'MIT',
+          media_license: item.media_license || 'CC-BY-SA-4.0',
+          repo_url: item.repo || `https://github.com/${item.author}/${item.name}`,
+          source: item.repo ? 'git' : 'official',
+          tags: item.tags || [item.type || 'mod']
+        };
+        this._activePackage.set(pkg);
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  closePackageModal(updateUrl = true): void {
     this._activePackage.set(null);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/']);
+    }
   }
 
-  openSubmitModal(): void {
+  openSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(true);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/submit']);
+    }
   }
 
-  closeSubmitModal(): void {
+  closeSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(false);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/']);
+    }
   }
 
-  openSetupModal(): void {
+  openSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(true);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/setup']);
+    }
   }
 
-  closeSetupModal(): void {
+  closeSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(false);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/']);
+    }
+  }
+
+  closeAllModals(updateUrl = true): void {
+    this._activePackage.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
+    if (updateUrl && this.router) {
+      this.router.navigate(['/']);
+    }
   }
 
   // Fetch Live Reviews from Backend API (Mixed ContentDB + D1)
@@ -205,8 +359,8 @@ export class PackageService {
           return data;
         }
       }
-    } catch {
-      // Return empty if fetch fails
+    } catch (err) {
+      console.warn('Could not fetch reviews:', err);
     }
     return [];
   }
