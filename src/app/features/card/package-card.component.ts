@@ -4,11 +4,12 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 
 @Component({
   selector: 'app-package-card',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, ImgFallbackDirective],
   template: `
     <div 
       (click)="packageService.openPackageModal(package)"
@@ -19,14 +20,15 @@ import { PwaService } from '../../core/services/pwa.service';
       [attr.aria-label]="package.title + ' by ' + package.author"
       class="group relative flex-shrink-0 w-64 sm:w-72 rounded-xl bg-slate-900/90 border border-slate-800/80 hover:border-sky-500/50 shadow-lg hover:shadow-sky-500/10 overflow-hidden cursor-pointer transition-all duration-300 hover:-translate-y-1.5 focus:outline-none focus:ring-2 focus:ring-sky-500">
       
-      <!-- Thumbnail with 16:9 Aspect Ratio -->
+      <!-- Thumbnail with 16:9 Aspect Ratio & High-Res Auto-Upgrade -->
       <div class="relative w-full h-36 sm:h-40 bg-slate-950 overflow-hidden">
         <img 
-          [src]="package.thumbnail" 
+          [src]="package.banner || package.thumbnail" 
+          [fallbackThumbnail]="package.thumbnail"
+          appImgFallback
           [alt]="package.title"
           loading="lazy"
-          (error)="onImgError($event)"
-          class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+          class="w-full h-full object-cover group-hover:scale-108 transition-transform duration-500"
         />
         <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent"></div>
 
@@ -100,10 +102,5 @@ export class PackageCardComponent {
   onFavoriteClick(event: MouseEvent): void {
     event.stopPropagation();
     this.settingsService.toggleFavorite(this.package.id);
-  }
-
-  onImgError(event: Event): void {
-    const target = event.target as HTMLImageElement;
-    target.src = 'logo.svg';
   }
 }

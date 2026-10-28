@@ -1,11 +1,13 @@
 {
+  "id": "/",
   "name": "LuantiHub – Decentralized Package Registry & Content Hub",
   "short_name": "LuantiHub",
   "description": "Discover, install, and share decentralized Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB.",
   "display": "standalone",
+  "display_override": ["standalone", "window-controls-overlay"],
   "orientation": "any",
-  "scope": "./",
-  "start_url": "./",
+  "scope": "/",
+  "start_url": "/",
   "theme_color": "#020617",
   "background_color": "#020617",
   "categories": ["games", "developer", "utilities", "entertainment"],
@@ -14,21 +16,21 @@
       "name": "Browse Catalog",
       "short_name": "Browse",
       "description": "Explore trending mods, games, and texture packs",
-      "url": "./",
+      "url": "/",
       "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
     },
     {
       "name": "Submit Git Package",
       "short_name": "Submit",
       "description": "Publish a mod or game from a Git repository",
-      "url": "./submit",
+      "url": "/submit",
       "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
     },
     {
       "name": "In-Game Setup Guide",
       "short_name": "In-Game URL",
       "description": "Configure Luanti minetest.conf to install mods in-game",
-      "url": "./setup",
+      "url": "/setup",
       "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
     }
   ],
@@ -40,16 +42,64 @@
       "purpose": "any"
     },
     {
+      "src": "icons/icon-72x72.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-96x96.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-128x128.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-144x144.png",
+      "sizes": "144x144",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-152x152.png",
+      "sizes": "152x152",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
       "src": "icons/icon-192x192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-384x384.png",
+      "sizes": "384x384",
+      "type": "image/png",
+      "purpose": "any"
     },
     {
       "src": "icons/icon-512x512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

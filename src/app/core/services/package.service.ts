@@ -114,6 +114,12 @@ export class PackageService {
             const downloads = item.downloads || item.downloads_count || (releaseNum * 14 + (idx * 311 % 10000));
             const score = typeof item.score === 'number' ? Math.round(item.score * 100) / 100 : Math.round((4.6 + (idx % 4) * 0.1) * 10) / 10;
 
+            const rawThumb = item.thumbnail || (item.author && item.name ? `https://content.luanti.org/packages/${item.author}/${item.name}/thumbnail/` : 'logo.svg');
+            let highResBanner = item.banner || rawThumb;
+            if (typeof highResBanner === 'string' && highResBanner.includes('thumbnail.png')) {
+              highResBanner = highResBanner.replace('thumbnail.png', 'shot-0.png');
+            }
+
             return {
               id: item.id || `${item.author}/${item.name}`,
               author: item.author,
@@ -122,8 +128,8 @@ export class PackageService {
               type: (item.type === 'game' || item.type === 'txp' || item.type === 'modpack') ? item.type : 'mod',
               short_desc: shortDesc,
               desc: item.desc || shortDesc,
-              thumbnail: item.thumbnail || (item.author && item.name ? `https://content.luanti.org/packages/${item.author}/${item.name}/thumbnail/` : 'logo.svg'),
-              banner: item.banner || item.thumbnail,
+              thumbnail: rawThumb,
+              banner: highResBanner,
               score,
               downloads,
               license: item.license || 'LGPL-2.1-or-later',

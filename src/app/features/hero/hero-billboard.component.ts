@@ -2,21 +2,24 @@ import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 
 @Component({
   selector: 'app-hero-billboard',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, ImgFallbackDirective],
   template: `
     @if (featured(); as pkg) {
       <div class="relative w-full h-[480px] sm:h-[560px] overflow-hidden select-none bg-slate-950">
         
-        <!-- Backdrop Image with Ken Burns subtle zoom -->
+        <!-- High-Resolution Backdrop with Auto-Fallback -->
         <div class="absolute inset-0">
           <img 
             [src]="pkg.banner || pkg.thumbnail" 
+            [fallbackThumbnail]="pkg.thumbnail"
+            appImgFallback
             [alt]="pkg.title"
-            class="w-full h-full object-cover object-center filter brightness-60 scale-105 transition-transform duration-1000"
+            class="w-full h-full object-cover object-center filter brightness-65 scale-105 transition-transform duration-1000"
           />
           <!-- Multi-Directional Gradient Mask for Netflix Look -->
           <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/70 to-transparent"></div>
