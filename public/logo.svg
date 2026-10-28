@@ -1,63 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <defs>
-    <linearGradient id="bgGrad" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#020617"/>
-      <stop offset="50%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#020617"/>
-    </linearGradient>
-    <linearGradient id="cubeTop" x1="128" y1="120" x2="384" y2="240" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="100%" stop-color="#0284c7"/>
-    </linearGradient>
-    <linearGradient id="cubeLeft" x1="128" y1="240" x2="256" y2="400" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0284c7"/>
-      <stop offset="100%" stop-color="#0369a1"/>
-    </linearGradient>
-    <linearGradient id="cubeRight" x1="256" y1="240" x2="384" y2="400" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#818cf8"/>
-      <stop offset="100%" stop-color="#4f46e5"/>
-    </linearGradient>
-    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="24" result="blur"/>
-      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
-    </filter>
-  </defs>
-
-  <!-- Background rounded canvas -->
-  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
-  <rect width="508" height="508" x="2" y="2" rx="110" stroke="#38bdf8" stroke-opacity="0.2" stroke-width="3"/>
-
-  <!-- Network Hub Connections -->
-  <g stroke="#38bdf8" stroke-opacity="0.35" stroke-width="3" stroke-dasharray="6 6">
-    <line x1="256" y1="80" x2="256" y2="150"/>
-    <line x1="90" y1="256" x2="160" y2="256"/>
-    <line x1="422" y1="256" x2="352" y2="256"/>
-    <line x1="160" y1="380" x2="210" y2="340"/>
-    <line x1="352" y1="380" x2="302" y2="340"/>
-  </g>
-
-  <!-- Node Dots -->
-  <circle cx="256" cy="80" r="10" fill="#38bdf8" filter="url(#neonGlow)"/>
-  <circle cx="90" cy="256" r="8" fill="#818cf8"/>
-  <circle cx="422" cy="256" r="8" fill="#38bdf8"/>
-
-  <!-- Isometric Luanti Hub Cube -->
-  <g filter="url(#neonGlow)">
-    <!-- Top Face -->
-    <path d="M256 120 L384 194 L256 268 L128 194 Z" fill="url(#cubeTop)"/>
-    
-    <!-- Left Face -->
-    <path d="M128 194 L256 268 L256 392 L128 318 Z" fill="url(#cubeLeft)"/>
-    
-    <!-- Right Face -->
-    <path d="M256 268 L384 194 L384 318 L256 392 Z" fill="url(#cubeRight)"/>
-
-    <!-- Inner Core Hub Emissary -->
-    <path d="M256 220 L300 245 L256 270 L212 245 Z" fill="#ffffff" fill-opacity="0.7"/>
-  </g>
-
-  <!-- Git Fork / Hub Symbol on Front Faces -->
-  <circle cx="256" cy="268" r="7" fill="#ffffff"/>
-  <circle cx="192" cy="256" r="5" fill="#e0f2fe"/>
-  <circle cx="320" cy="256" r="5" fill="#ede9fe"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 6 104 104" width="512" height="512">
+  <path d="M 64.00 74.00 L 104.00 94.00 L 64.00 108.00 L 24.00 94.00 Z" style="fill:#020617;stroke:none;opacity:0.35;"/>
+  <path d="M 44.00 54.00 L 64.00 64.00 L 64.00 82.00 L 44.00 72.00 Z" style="fill:#475569;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 64.00 L 84.00 54.00 L 84.00 72.00 L 64.00 82.00 Z" style="fill:#334155;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 44.00 L 84.00 54.00 L 64.00 64.00 L 44.00 54.00 Z" style="fill:#64748b;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 24.00 64.00 L 44.00 74.00 L 44.00 92.00 L 24.00 82.00 Z" style="fill:#475569;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 74.00 L 64.00 64.00 L 64.00 82.00 L 44.00 92.00 Z" style="fill:#334155;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 54.00 L 64.00 64.00 L 44.00 74.00 L 24.00 64.00 Z" style="fill:#64748b;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 64.00 L 84.00 74.00 L 84.00 92.00 L 64.00 82.00 Z" style="fill:#475569;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 74.00 L 104.00 64.00 L 104.00 82.00 L 84.00 92.00 Z" style="fill:#334155;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 54.00 L 104.00 64.00 L 84.00 74.00 L 64.00 64.00 Z" style="fill:#64748b;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 74.00 L 64.00 84.00 L 64.00 102.00 L 44.00 92.00 Z" style="fill:#334155;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 84.00 L 84.00 74.00 L 84.00 92.00 L 64.00 102.00 Z" style="fill:#1e293b;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 64.00 L 84.00 74.00 L 64.00 84.00 L 44.00 74.00 Z" style="fill:#475569;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 36.00 L 64.00 46.00 L 64.00 64.00 L 44.00 54.00 Z" style="fill:#b4781e;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 46.00 L 84.00 36.00 L 84.00 54.00 L 64.00 64.00 Z" style="fill:#8f5902;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 36.00 L 64.00 46.00 L 64.00 51.40 L 44.00 41.40 Z" style="fill:#4e9a06;stroke:none;"/>
+  <path d="M 64.00 46.00 L 84.00 36.00 L 84.00 41.40 L 64.00 51.40 Z" style="fill:#3a7504;stroke:none;"/>
+  <path d="M 44.00 36.00 L 64.00 46.00 L 64.00 64.00 L 44.00 54.00 Z" style="fill:none;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 46.00 L 84.00 36.00 L 84.00 54.00 L 64.00 64.00 Z" style="fill:none;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 26.00 L 84.00 36.00 L 64.00 46.00 L 44.00 36.00 Z" style="fill:#73d216;stroke:#274e05;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 24.00 46.00 L 44.00 56.00 L 44.00 74.00 L 24.00 64.00 Z" style="fill:#b4781e;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 56.00 L 64.00 46.00 L 64.00 64.00 L 44.00 74.00 Z" style="fill:#8f5902;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 24.00 46.00 L 44.00 56.00 L 44.00 61.40 L 24.00 51.40 Z" style="fill:#4e9a06;stroke:none;"/>
+  <path d="M 44.00 56.00 L 64.00 46.00 L 64.00 51.40 L 44.00 61.40 Z" style="fill:#3a7504;stroke:none;"/>
+  <path d="M 24.00 46.00 L 44.00 56.00 L 44.00 74.00 L 24.00 64.00 Z" style="fill:none;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 56.00 L 64.00 46.00 L 64.00 64.00 L 44.00 74.00 Z" style="fill:none;stroke:#1e293b;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 36.00 L 64.00 46.00 L 44.00 56.00 L 24.00 46.00 Z" style="fill:#73d216;stroke:#274e05;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 46.00 L 84.00 56.00 L 84.00 74.00 L 64.00 64.00 Z" style="fill:#eab308;stroke:#713f12;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 56.00 L 104.00 46.00 L 104.00 64.00 L 84.00 74.00 Z" style="fill:#ca8a04;stroke:#713f12;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 36.00 L 104.00 46.00 L 84.00 56.00 L 64.00 46.00 Z" style="fill:#fde68a;stroke:#713f12;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 56.00 L 64.00 66.00 L 64.00 84.00 L 44.00 74.00 Z" style="fill:#38bdf8;stroke:#0c4a6e;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 66.00 L 84.00 56.00 L 84.00 74.00 L 64.00 84.00 Z" style="fill:#0284c7;stroke:#0c4a6e;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 64.00 46.00 L 84.00 56.00 L 64.00 66.00 L 44.00 56.00 Z" style="fill:#7dd3fc;stroke:#0c4a6e;stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 57.00 56.00 L 65.00 52.00 L 67.00 53.00 L 59.00 57.00 Z" style="fill:#e0f2fe;stroke:none;opacity:0.92;"/>
+  <path d="M 62.00 60.00 L 70.00 56.00 L 72.00 57.00 L 64.00 61.00 Z" style="fill:#e0f2fe;stroke:none;opacity:0.92;"/>
+  <path d="M 44.00 39.50 L 57.00 46.00 L 44.00 52.50 L 31.00 46.00 Z" style="fill:#1e293b;stroke:none;opacity:0.28;"/>
+  <path d="M 39.50 32.00 L 44.00 34.25 L 44.00 48.25 L 39.50 46.00 Z" style="fill:#b4781e;stroke:#452804;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 34.25 L 48.50 32.00 L 48.50 46.00 L 44.00 48.25 Z" style="fill:#784408;stroke:#452804;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 29.75 L 48.50 32.00 L 44.00 34.25 L 39.50 32.00 Z" style="fill:#e9b96e;stroke:#452804;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 32.00 20.00 L 44.00 26.00 L 44.00 37.00 L 32.00 31.00 Z" style="fill:#73d216;stroke:#274e05;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 26.00 L 56.00 20.00 L 56.00 31.00 L 44.00 37.00 Z" style="fill:#4e9a06;stroke:#274e05;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 14.00 L 56.00 20.00 L 44.00 26.00 L 32.00 20.00 Z" style="fill:#8ae234;stroke:#274e05;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 36.50 14.50 L 44.00 18.25 L 44.00 23.75 L 36.50 20.00 Z" style="fill:#8ae234;stroke:#274e05;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 18.25 L 51.50 14.50 L 51.50 20.00 L 44.00 23.75 Z" style="fill:#5eb010;stroke:#274e05;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 44.00 10.75 L 51.50 14.50 L 44.00 18.25 L 36.50 14.50 Z" style="fill:#a3f545;stroke:#274e05;stroke-width:1.0;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 39.50 L 97.00 46.00 L 84.00 52.50 L 71.00 46.00 Z" style="fill:#451a03;stroke:none;opacity:0.32;"/>
+  <path d="M 72.50 37.00 L 84.00 42.75 L 84.00 51.75 L 72.50 46.00 Z" style="fill:#b45309;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 42.75 L 95.50 37.00 L 95.50 46.00 L 84.00 51.75 Z" style="fill:#78350f;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 31.25 L 95.50 37.00 L 84.00 42.75 L 72.50 37.00 Z" style="fill:#d97706;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 72.00 32.75 L 84.00 38.75 L 84.00 42.75 L 72.00 36.75 Z" style="fill:#eab308;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 38.75 L 96.00 32.75 L 96.00 36.75 L 84.00 42.75 Z" style="fill:#ca8a04;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 84.00 26.75 L 96.00 32.75 L 84.00 38.75 L 72.00 32.75 Z" style="fill:#fde047;stroke:#291002;stroke-width:1.1;stroke-linejoin:round;stroke-linecap:round;"/>
+  <path d="M 88.00 41.00 L 92.00 39.00 L 92.00 44.50 L 88.00 46.50 Z" style="fill:#38bdf8;stroke:#075985;stroke-width:0.8;stroke-linejoin:round;stroke-linecap:round;"/>
 </svg>

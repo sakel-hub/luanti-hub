@@ -57,7 +57,7 @@ import {
         <!-- Left: Logo & Category Tabs -->
         <div class="flex items-center gap-3 xl:gap-5 flex-shrink-0">
           <a href="#" class="flex items-center gap-2.5 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0">
-            <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-8 h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
+            <img src="logo.svg" alt="LuantiHub" width="36" height="36" class="w-9 h-9 drop-shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
             <div class="flex items-center gap-2">
               <span class="text-base sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
                 Luanti<span class="text-sky-400">Hub</span>
