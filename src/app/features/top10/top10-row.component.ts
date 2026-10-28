@@ -1,4 +1,11 @@
-import { Component, inject, ViewChild, ElementRef } from '@angular/core';
+import {
+  Component,
+  inject,
+  ViewChild,
+  ElementRef,
+  AfterViewInit,
+  signal
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
@@ -64,27 +71,38 @@ import {
               </button>
             </div>
 
-            <!-- Scroll Buttons -->
-            <button
-              (click)="scrollLeft()"
-              [attr.aria-label]="'carousel.scrollLeft' | translate"
-              [appTooltip]="'carousel.scrollLeft' | translate"
-              class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition hidden sm:inline-flex">
-              <svg lucideChevronLeft class="w-4 h-4"></svg>
-            </button>
-            <button
-              (click)="scrollRight()"
-              [attr.aria-label]="'carousel.scrollRight' | translate"
-              [appTooltip]="'carousel.scrollRight' | translate"
-              class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition hidden sm:inline-flex">
-              <svg lucideChevronRight class="w-4 h-4"></svg>
-            </button>
+            <!-- Scroll Buttons (Only visible if scrollable) -->
+            @if (isScrollable()) {
+              <div class="hidden sm:flex items-center gap-1.5">
+                <button
+                  (click)="scrollLeft()"
+                  [disabled]="!canScrollLeft()"
+                  [class.opacity-30]="!canScrollLeft()"
+                  [class.pointer-events-none]="!canScrollLeft()"
+                  [attr.aria-label]="'carousel.scrollLeft' | translate"
+                  [appTooltip]="'carousel.scrollLeft' | translate"
+                  class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
+                  <svg lucideChevronLeft class="w-4 h-4"></svg>
+                </button>
+                <button
+                  (click)="scrollRight()"
+                  [disabled]="!canScrollRight()"
+                  [class.opacity-30]="!canScrollRight()"
+                  [class.pointer-events-none]="!canScrollRight()"
+                  [attr.aria-label]="'carousel.scrollRight' | translate"
+                  [appTooltip]="'carousel.scrollRight' | translate"
+                  class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
+                  <svg lucideChevronRight class="w-4 h-4"></svg>
+                </button>
+              </div>
+            }
           </div>
         </div>
 
         <!-- Scrollable Track with Netflix Numerals + Portrait Cards -->
         <div
           #trackRef
+          (scroll)="onTrackScroll()"
           tabindex="0"
           role="region"
           aria-label="Top 10 packages list"
@@ -99,18 +117,34 @@ import {
               [attr.aria-label]="'#' + (idx + 1) + ' ' + pkg.title"
               class="relative flex items-end flex-shrink-0 group cursor-pointer snap-start transition-transform duration-300 hover:-translate-y-2 focus:outline-none">
 
-              <!-- Iconic Giant Netflix Rank Numeral (1 to 10) -->
-              <span class="netflix-rank-number text-7xl sm:text-8xl lg:text-9xl -mr-3 sm:-mr-5 z-0">
-                {{ idx + 1 }}
-              </span>
+              <!-- Iconic Netflix Style SVG Stroked Rank Numeral (Height matches tile, transparent fill, zero broken lines) -->
+              <svg
+                [attr.viewBox]="idx === 9 ? '0 0 170 160' : '0 0 100 160'"
+                class="h-48 sm:h-60 md:h-64 w-auto -mr-4 sm:-mr-6 md:-mr-8 z-0 pointer-events-none select-none overflow-visible flex-shrink-0">
+                <text
+                  x="50%"
+                  y="86%"
+                  text-anchor="middle"
+                  font-family="Impact, Haettenschweiler, 'Arial Black', sans-serif"
+                  font-weight="900"
+                  font-size="150"
+                  fill="transparent"
+                  stroke="#52525b"
+                  stroke-width="5"
+                  stroke-linejoin="round"
+                  stroke-linecap="round"
+                  class="group-hover:stroke-slate-300 transition-colors">
+                  {{ idx + 1 }}
+                </text>
+              </svg>
 
               <!-- Portrait Poster Card -->
               <div class="relative w-32 h-48 sm:w-40 sm:h-60 md:w-44 md:h-64 rounded-xl bg-slate-900 border border-slate-800 group-hover:border-rose-500/70 shadow-2xl overflow-hidden z-10 flex flex-col justify-end transition-all">
 
-                <!-- Poster Image -->
+                <!-- High-Resolution Poster Image -->
                 <img
-                  [src]="pkg.thumbnail || pkg.banner"
-                  [fallbackThumbnail]="pkg.banner"
+                  [src]="pkg.banner || pkg.thumbnail"
+                  [fallbackThumbnail]="pkg.thumbnail"
                   appImgFallback
                   [alt]="pkg.title"
                   loading="lazy"
@@ -165,14 +199,42 @@ import {
     }
   `
 })
-export class Top10RowComponent {
+export class Top10RowComponent implements AfterViewInit {
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
 
   @ViewChild('trackRef') trackRef!: ElementRef<HTMLDivElement>;
 
+  readonly isScrollable = signal<boolean>(false);
+  readonly canScrollLeft = signal<boolean>(false);
+  readonly canScrollRight = signal<boolean>(false);
+
+  ngAfterViewInit(): void {
+    setTimeout(() => this.updateScrollState(), 100);
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', () => {
+        this.updateScrollState();
+      }, { passive: true });
+    }
+  }
+
+  onTrackScroll(): void {
+    this.updateScrollState();
+  }
+
+  private updateScrollState(): void {
+    if (!this.trackRef?.nativeElement) return;
+    const el = this.trackRef.nativeElement;
+    const scrollable = el.scrollWidth > el.clientWidth + 5;
+    this.isScrollable.set(scrollable);
+    this.canScrollLeft.set(el.scrollLeft > 10);
+    this.canScrollRight.set(el.scrollLeft < (el.scrollWidth - el.clientWidth - 10));
+  }
+
   setTimeframe(timeframe: 'today' | 'week'): void {
     this.packageService.setTop10Timeframe(timeframe);
+    setTimeout(() => this.updateScrollState(), 100);
   }
 
   openDetails(pkg: LuantiPackage): void {
@@ -186,11 +248,15 @@ export class Top10RowComponent {
 
   scrollLeft(): void {
     if (!this.trackRef?.nativeElement) return;
-    this.trackRef.nativeElement.scrollBy({ left: -600, behavior: 'smooth' });
+    const el = this.trackRef.nativeElement;
+    const distance = Math.max(300, el.clientWidth * 0.75);
+    el.scrollBy({ left: -distance, behavior: 'smooth' });
   }
 
   scrollRight(): void {
     if (!this.trackRef?.nativeElement) return;
-    this.trackRef.nativeElement.scrollBy({ left: 600, behavior: 'smooth' });
+    const el = this.trackRef.nativeElement;
+    const distance = Math.max(300, el.clientWidth * 0.75);
+    el.scrollBy({ left: distance, behavior: 'smooth' });
   }
 }

@@ -3,7 +3,7 @@ import { TranslationDictionary } from '../translation.types';
 export const en: TranslationDictionary = {
   header: {
     title: 'LuantiHub',
-    subtitle: 'Decentralized Package Registry & Content Hub',
+    subtitle: 'Package Registry & Content Hub',
     searchPlaceholder: 'Search mods, games, textures (Press "/" to focus)...',
     searchTooltip: 'Press / to search packages',
     filterAll: 'All',
@@ -14,7 +14,7 @@ export const en: TranslationDictionary = {
     installApp: 'Install App',
     installAppTooltip: 'Install LuantiHub PWA to your desktop or mobile home screen',
     inGameSetup: 'In-Game Setup',
-    inGameSetupTooltip: 'Configure your minetest.conf to browse & install packages in-game',
+    inGameSetupTooltip: 'Configure your luanti.conf to browse & install packages in-game',
     submitRepo: 'Submit Git Repo',
     submitRepoTooltip: 'Publish your open-source mod or game from GitHub, GitLab, or Codeberg',
     favorites: 'Favorites',
@@ -26,7 +26,7 @@ export const en: TranslationDictionary = {
   },
   hero: {
     featuredBadge: '#1 Featured Package',
-    playInstall: 'Install In-Game',
+    playInstall: 'Download',
     viewGit: 'View Git Repo',
     viewDetails: 'View Details',
     rating: 'Rating',
@@ -34,7 +34,7 @@ export const en: TranslationDictionary = {
     categoryGame: 'Standalone Voxel Game',
     categoryMod: 'Engine Mod',
     categoryTxp: 'HD Texture Pack',
-    categoryGit: 'Decentralized Community Release',
+    categoryGit: 'Community Git Release',
     prevSlide: 'Previous showcase',
     nextSlide: 'Next showcase',
     pauseAutoPlay: 'Pause auto-slide',
@@ -42,10 +42,10 @@ export const en: TranslationDictionary = {
   },
   carousel: {
     trending: 'Trending This Week',
-    freshGit: 'Fresh from Git (Decentralized Community Releases)',
+    freshGit: 'Git Community Releases',
     standaloneGames: 'Complete Standalone Games',
-    automation: 'Mesecons Circuitry & Automation',
-    texturePacks: 'HD Texture & Audio Packs',
+    automation: 'Essential Mods & Addons',
+    texturePacks: 'HD Texture Packs',
     top10Title: 'Top 10 Packages',
     top10Today: 'Today',
     top10Week: 'This Week',
@@ -59,23 +59,23 @@ export const en: TranslationDictionary = {
     byAuthor: 'by',
     license: 'License',
     matchScore: '{score}% Match',
-    quickInstall: 'Quick In-Game Setup',
+    quickInstall: 'Download Package',
     moreInfo: 'More Info & Details',
     favoriteTooltip: 'Add to favorites',
     unfavoriteTooltip: 'Remove from favorites',
-    gitSourceTooltip: 'Decentralized package indexed directly from Git repository',
+    gitSourceTooltip: 'Package indexed directly from Git repository',
     clickToOpen: 'Click to view package details and install commands'
   },
   modal: {
     close: 'Close dialog (Esc)',
-    installInGame: 'Install In-Game',
+    installInGame: 'Download',
     viewGitRepo: 'View Git Repository',
     sharePackage: 'Share Package',
     shareTooltip: 'Copy package link or share',
     top10Rank: '#{rank} in Luanti Today',
     tabOverview: 'Overview & Info',
     tabReviews: 'Community Reviews',
-    tabCompliance: 'SPDX License & Legal',
+    tabCompliance: 'License & Compliance',
     author: 'Author',
     category: 'Category',
     source: 'Package Source',
@@ -87,25 +87,25 @@ export const en: TranslationDictionary = {
     noReviews: 'No reviews yet for this release.',
     leaveReview: 'Be the first to review on ContentDB or LuantiHub community!',
     stars: 'stars',
-    spdxNotice: 'This package has passed automated SPDX open-source license verification.',
-    safeHarborNotice: 'LuantiHub indexes decentralized Git repositories under DMCA §512 and EU DSA safe harbor provisions.'
+    spdxNotice: 'This package has open-source license information verified.',
+    safeHarborNotice: 'LuantiHub indexes open-source Git repositories under DMCA §512 and EU DSA safe harbor provisions.'
   },
   setup: {
     title: 'In-Game Luanti Engine Configuration',
     subtitle: 'Point your Luanti / Minetest client to LuantiHub to browse and install packages in-game',
-    step1Title: 'Step 1: Open minetest.conf',
-    step1Desc: 'Locate your minetest.conf file in your user directory or configuration folder.',
+    step1Title: 'Step 1: Open luanti.conf',
+    step1Desc: 'Locate your luanti.conf (or legacy minetest.conf) file in your user directory or configuration folder.',
     step2Title: 'Step 2: Add LuantiHub Registry URL',
-    step2Desc: 'Paste the following line into your minetest.conf configuration file:',
+    step2Desc: 'Paste the following line into your luanti.conf configuration file:',
     step3Title: 'Step 3: Launch Luanti & Browse',
-    step3Desc: 'Restart Luanti, click the "Content" tab in the main menu, and enjoy decentralized packages!',
+    step3Desc: 'Restart Luanti, click the "Content" tab in the main menu, and enjoy packages!',
     configKey: 'contentdb_url = https://luanti-hub.pages.dev',
     copyTooltip: 'Copy configuration to clipboard',
     copied: 'Copied!',
     close: 'Close Guide'
   },
   submit: {
-    title: 'Submit Decentralized Git Package',
+    title: 'Submit Git Package',
     subtitle: 'Publish your open-source mod, game, or texture pack from GitHub, Codeberg, or GitLab',
     repoUrlLabel: 'Git Repository URL',
     repoUrlPlaceholder: 'https://github.com/your-name/your-mod',
@@ -140,11 +140,11 @@ export const en: TranslationDictionary = {
     skipToContent: 'Skip to main content'
   },
   footer: {
-    about: 'Decentralized Package Registry & Content Hub for the Luanti Voxel Game Engine.',
+    about: 'Package Registry & Content Hub for the Luanti Voxel Game Engine.',
     inGameSetup: 'In-Game Minetest Config',
     upstreamMirror: 'ContentDB Mirror API',
     engineSite: 'Luanti Engine Site',
     dmca: 'DMCA / Takedowns',
-    disclaimer: 'LuantiHub is an independent, decentralized open-source community platform and is not officially affiliated with or endorsed by Luanti core. All trademarks belong to their respective creators.'
+    disclaimer: 'LuantiHub is an independent open-source community platform and is not officially affiliated with or endorsed by Luanti core. All trademarks belong to their respective creators.'
   }
 };

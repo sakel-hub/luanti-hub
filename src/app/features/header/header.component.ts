@@ -56,18 +56,15 @@ import {
   ],
   template: `
     <header class="sticky top-0 z-40 w-full bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 transition-colors duration-200">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3 lg:gap-4">
+      <div class="w-full px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3 lg:gap-6">
 
-        <!-- Left: Logo & Category Tabs -->
-        <div class="flex items-center gap-3 xl:gap-5 flex-shrink-0">
+        <!-- Left: Logo & Category Tabs (Aligned to Left Corner) -->
+        <div class="flex items-center gap-3 xl:gap-5 flex-shrink-0 justify-start">
           <a href="#" class="flex items-center gap-2.5 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0">
             <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-8 h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
             <div class="flex items-center gap-2">
               <span class="text-base sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
                 Luanti<span class="text-sky-400">Hub</span>
-              </span>
-              <span class="text-[9px] uppercase tracking-wider font-bold bg-sky-500/15 text-sky-400 border border-sky-500/30 px-1.5 py-0.5 rounded-full hidden 2xl:inline-flex whitespace-nowrap">
-                Decentralized
               </span>
             </div>
           </a>
@@ -121,8 +118,8 @@ import {
           </nav>
         </div>
 
-        <!-- Center: Search Input -->
-        <div class="flex-1 max-w-xs md:max-w-sm lg:max-w-md relative min-w-[120px]">
+        <!-- Center: Expanded Search Input -->
+        <div class="flex-1 max-w-xl mx-2 sm:mx-4 relative min-w-[140px]">
           <div class="relative">
             <input
               type="text"
@@ -149,8 +146,8 @@ import {
           </div>
         </div>
 
-        <!-- Right: Actions, Language & Prominent Install Button -->
-        <div class="flex items-center gap-2 flex-shrink-0">
+        <!-- Right: Actions, Language & Prominent Install Button (Aligned to Right Corner) -->
+        <div class="flex items-center gap-2 flex-shrink-0 justify-end">
 
           <!-- Prominent "Install App" Button (Always Single Line) -->
           <button
@@ -229,10 +226,11 @@ import {
             @if (isSettingsMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-56 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl p-1.5 z-50 space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                class="absolute right-0 mt-2 w-64 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl p-2 z-50 space-y-1.5 animate-in fade-in zoom-in-95 duration-150">
                 <button
                   (click)="onCheckUpdates()"
-                  class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 transition text-left">
+                  [disabled]="pwaService.checkingForUpdate()"
+                  class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition text-left">
                   <svg
                     lucideRefreshCw
                     class="w-4 h-4 text-sky-400"
@@ -240,6 +238,34 @@ import {
                   </svg>
                   <span>{{ 'header.checkForUpdates' | translate }}</span>
                 </button>
+
+                @if (updateFeedback()) {
+                  <div class="px-2.5 py-2 rounded-lg text-[11px] font-medium transition flex items-center gap-2"
+                    [class.bg-sky-950/60]="pwaService.checkingForUpdate()"
+                    [class.text-sky-300]="pwaService.checkingForUpdate()"
+                    [class.bg-emerald-950/60]="!pwaService.checkingForUpdate() && !pwaService.updateAvailable()"
+                    [class.text-emerald-300]="!pwaService.checkingForUpdate() && !pwaService.updateAvailable()"
+                    [class.bg-amber-950/60]="pwaService.updateAvailable()"
+                    [class.text-amber-300]="pwaService.updateAvailable()">
+                    @if (pwaService.checkingForUpdate()) {
+                      <svg lucideRefreshCw class="w-3.5 h-3.5 animate-spin flex-shrink-0 text-sky-400"></svg>
+                    } @else if (pwaService.updateAvailable()) {
+                      <svg lucideDownload class="w-3.5 h-3.5 flex-shrink-0 text-amber-400"></svg>
+                    } @else {
+                      <svg lucideCheck class="w-3.5 h-3.5 flex-shrink-0 text-emerald-400"></svg>
+                    }
+                    <span class="flex-1">{{ updateFeedback() }}</span>
+                    @if (pwaService.updateAvailable()) {
+                      <button 
+                        (click)="pwaService.activateUpdate()"
+                        class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] whitespace-nowrap">
+                        Reload
+                      </button>
+                    }
+                  </div>
+                }
+
+                <div class="h-px bg-slate-800 my-1"></div>
 
                 <button
                   (click)="onClearCache()"
@@ -290,6 +316,7 @@ export class HeaderComponent {
 
   readonly isLanguageMenuOpen = signal<boolean>(false);
   readonly isSettingsMenuOpen = signal<boolean>(false);
+  readonly updateFeedback = signal<string | null>(null);
 
   currentLocaleMeta() {
     return this.supportedLocales.find(l => l.id === this.currentLocale()) || this.supportedLocales[0];
@@ -329,9 +356,19 @@ export class HeaderComponent {
     this.packageService.setSourceFilter(current === source ? 'all' : source);
   }
 
-  onCheckUpdates(): void {
-    this.pwaService.checkForUpdate(true);
-    this.isSettingsMenuOpen.set(false);
+  async onCheckUpdates(): Promise<void> {
+    this.updateFeedback.set('Checking for updates...');
+    const hasUpdate = await this.pwaService.checkForUpdate(true);
+    if (hasUpdate) {
+      this.updateFeedback.set('New update available!');
+    } else {
+      this.updateFeedback.set('You are on the latest version.');
+      setTimeout(() => {
+        if (this.updateFeedback() === 'You are on the latest version.') {
+          this.updateFeedback.set(null);
+        }
+      }, 4000);
+    }
   }
 
   onClearCache(): void {

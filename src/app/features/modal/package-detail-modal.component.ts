@@ -12,14 +12,14 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
   LucideShare2,
-  LucidePlay,
   LucideHeart,
   LucideCopy,
   LucideCheck,
   LucideStar,
   LucideShieldCheck,
   LucideGitBranch,
-  LucideGlobe
+  LucideGlobe,
+  LucideDownload
 } from '@lucide/angular';
 
 @Component({
@@ -33,14 +33,14 @@ import {
     TranslatePipe,
     LucideX,
     LucideShare2,
-    LucidePlay,
     LucideHeart,
     LucideCopy,
     LucideCheck,
     LucideStar,
     LucideShieldCheck,
     LucideGitBranch,
-    LucideGlobe
+    LucideGlobe,
+    LucideDownload
   ],
   template: `
     @if (package) {
@@ -55,17 +55,17 @@ import {
           (click)="$event.stopPropagation()"
           class="relative w-full max-w-4xl max-h-screen sm:max-h-[92vh] bg-slate-900 border-0 sm:border border-slate-700/80 rounded-none sm:rounded-2xl shadow-2xl overflow-y-auto flex flex-col animate-in zoom-in-95 duration-200 my-auto">
           
-          <!-- Top Banner Hero (Netflix Style) -->
+          <!-- Top Banner Hero (Clear & High Visibility) -->
           <div class="relative w-full h-64 sm:h-80 md:h-96 bg-slate-950 flex-shrink-0 overflow-hidden">
             <img 
               [src]="package.banner || package.thumbnail" 
               [fallbackThumbnail]="package.thumbnail"
               appImgFallback
               [alt]="package.title"
-              class="w-full h-full object-cover object-center filter brightness-65"
+              class="w-full h-full object-cover object-center filter brightness-90"
             />
-            <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/70 to-transparent"></div>
-            <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/50 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/40 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-900/95 via-transparent to-transparent"></div>
 
             <!-- Floating Round Close Button (Top Right) -->
             <button 
@@ -79,16 +79,18 @@ import {
             <!-- Foreground Hero Content & Actions -->
             <div class="absolute bottom-5 left-5 sm:left-8 right-5 sm:right-8 flex flex-col justify-end gap-3 z-20">
               
-              <!-- Badges -->
+              <!-- Badges (Consistent with Cards) -->
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-rose-600 text-white shadow-md">
+                <span 
+                  [class]="package.type === 'game' ? 'bg-emerald-500 text-white' : package.type === 'txp' ? 'bg-purple-500 text-white' : 'bg-sky-500 text-white'"
+                  class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider shadow">
                   {{ package.type }}
                 </span>
 
                 @if (package.source === 'git') {
                   <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1 shadow">
                     <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
-                    <span>Decentralized Git</span>
+                    <span>Git</span>
                   </span>
                 } @else {
                   <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
@@ -111,12 +113,12 @@ import {
 
               <!-- Action Buttons Row -->
               <div class="flex items-center gap-3 pt-1 flex-wrap">
-                <!-- Primary White Play/Install Button -->
+                <!-- Primary Download Button with File Size -->
                 <button 
                   (click)="openSetupModal()"
                   class="h-10 sm:h-11 px-6 sm:px-7 rounded-lg bg-white hover:bg-slate-200 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2 shadow-2xl hover:scale-105 transition whitespace-nowrap">
-                  <svg lucidePlay class="w-4 h-4 fill-slate-950 text-slate-950"></svg>
-                  <span>{{ 'modal.installInGame' | translate }}</span>
+                  <svg lucideDownload class="w-4 h-4 text-slate-950"></svg>
+                  <span>Download ({{ package.file_size || '1.8 MB' }})</span>
                 </button>
 
                 <!-- Add to Favorites / My List Button -->
@@ -173,7 +175,7 @@ import {
                   </span>
                   <span class="text-slate-400 font-mono">Luanti {{ package.min_minetest_version || '5.8+' }}</span>
                   <span class="text-slate-400 font-mono uppercase px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">
-                    SPDX: {{ package.license }}
+                    License: {{ package.license }}
                   </span>
                   <span class="text-rose-400 font-semibold bg-rose-950/60 border border-rose-800/80 px-2 py-0.5 rounded text-[11px]">
                     #1 in {{ package.type | uppercase }} Today
@@ -184,6 +186,39 @@ import {
                 <p class="text-slate-200 text-sm sm:text-base leading-relaxed">
                   {{ package.desc || package.short_desc }}
                 </p>
+
+                <!-- Dependencies Section (ContentDB parity) -->
+                @if ((package.dependencies && package.dependencies.length > 0) || (package.optional_dependencies && package.optional_dependencies.length > 0)) {
+                  <div class="space-y-3 p-4 rounded-xl bg-slate-950/80 border border-slate-800">
+                    <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider">Package Dependencies</h3>
+                    
+                    @if (package.dependencies && package.dependencies.length > 0) {
+                      <div>
+                        <span class="text-slate-400 font-semibold text-[11px] block mb-1">Required:</span>
+                        <div class="flex flex-wrap gap-1.5">
+                          @for (dep of package.dependencies; track dep) {
+                            <span class="px-2 py-0.5 rounded-md bg-sky-950/80 text-sky-300 font-mono text-[11px] border border-sky-800/80">
+                              {{ dep }}
+                            </span>
+                          }
+                        </div>
+                      </div>
+                    }
+
+                    @if (package.optional_dependencies && package.optional_dependencies.length > 0) {
+                      <div>
+                        <span class="text-slate-400 font-semibold text-[11px] block mb-1">Optional:</span>
+                        <div class="flex flex-wrap gap-1.5">
+                          @for (opt of package.optional_dependencies; track opt) {
+                            <span class="px-2 py-0.5 rounded-md bg-slate-900 text-slate-300 font-mono text-[11px] border border-slate-700/80">
+                              {{ opt }}
+                            </span>
+                          }
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
 
                 <!-- 1-Click In-Game Setup Snippet Box -->
                 <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
@@ -199,7 +234,7 @@ import {
                         <span class="text-emerald-400">Copied!</span>
                       } @else {
                         <svg lucideCopy class="w-3.5 h-3.5"></svg>
-                        <span>Copy minetest.conf</span>
+                        <span>Copy luanti.conf</span>
                       }
                     </button>
                   </div>
@@ -207,7 +242,7 @@ import {
                     contentdb_url = https://luanti-hub.pages.dev
                   </code>
                   <p class="text-[11px] text-slate-400">
-                    Paste into your <code class="text-slate-300">minetest.conf</code> to browse and install this package directly inside the Luanti client!
+                    Paste into your <code class="text-slate-300">luanti.conf</code> (or legacy <code class="text-slate-300">minetest.conf</code>) to browse and install this package directly inside the Luanti client!
                   </p>
                 </div>
 

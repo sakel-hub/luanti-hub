@@ -29,7 +29,7 @@
     {
       "name": "In-Game Setup Guide",
       "short_name": "In-Game URL",
-      "description": "Configure Luanti minetest.conf to install mods in-game",
+      "description": "Configure Luanti luanti.conf to install mods in-game",
       "url": "/setup",
       "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
     }

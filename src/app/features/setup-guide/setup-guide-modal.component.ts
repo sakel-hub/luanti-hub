@@ -62,7 +62,7 @@ import {
         <!-- Copyable Config Snippet -->
         <div class="space-y-2">
           <span class="text-xs font-semibold text-slate-300">
-            Option A: Quick Configuration in <code>minetest.conf</code>
+            Option A: Quick Configuration in <code>luanti.conf</code> (or <code>minetest.conf</code>)
           </span>
           <div class="relative flex items-center">
             <pre class="w-full p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-sky-400 font-mono text-xs overflow-x-auto select-all">contentdb_url = {{ settingsService.contentDbUrl() }}</pre>

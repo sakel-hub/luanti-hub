@@ -25,6 +25,9 @@ export interface LuantiPackage {
   min_minetest_version?: string;
   max_minetest_version?: string;
   featured?: boolean;
+  dependencies?: string[];
+  optional_dependencies?: string[];
+  file_size?: string;
 }
 
 export interface PackageRelease {

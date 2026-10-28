@@ -53,9 +53,9 @@ import {
           role="region"
           aria-roledescription="carousel"
           [attr.aria-label]="pkg.title"
-          class="relative w-full h-[460px] sm:h-[520px] lg:h-[560px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+          class="relative w-full h-[500px] sm:h-[580px] lg:h-[640px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
           
-          <!-- Hardware-Accelerated Single Active Slide Background -->
+          <!-- Hardware-Accelerated Single Active Slide Background (Clear & Vivid) -->
           <div class="absolute inset-0">
             <img 
               [src]="pkg.banner || pkg.thumbnail" 
@@ -64,10 +64,10 @@ import {
               [alt]="pkg.title"
               fetchpriority="high"
               decoding="async"
-              class="w-full h-full object-cover object-center filter brightness-65 transition-opacity duration-300"
+              class="w-full h-full object-cover object-center filter brightness-90 transition-opacity duration-300"
             />
-            <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/80 to-transparent"></div>
-            <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/40 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-transparent"></div>
           </div>
 
         <!-- Foreground Content -->
@@ -76,11 +76,7 @@ import {
             
             <!-- Category & Source Badges -->
             <div class="flex items-center gap-2 flex-wrap">
-              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-sky-500/20 text-sky-400 border border-sky-500/30">
-                {{ 'hero.featuredBadge' | translate }}
-              </span>
-
-              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
+              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider bg-slate-800/90 text-slate-200 border border-slate-700/80 shadow">
                 @if (pkg.type === 'game') {
                   {{ 'hero.categoryGame' | translate }}
                 } @else if (pkg.type === 'txp') {
@@ -119,7 +115,7 @@ import {
               <span>•</span>
               <span>{{ pkg.downloads | number }} {{ 'hero.downloads' | translate | lowercase }}</span>
               <span>•</span>
-              <span class="text-slate-400 font-mono">SPDX: {{ pkg.license }}</span>
+              <span class="text-slate-400 font-mono">License: {{ pkg.license }}</span>
             </div>
 
             <!-- Netflix CTA Buttons -->
@@ -159,7 +155,7 @@ import {
         </div>
 
         <!-- Carousel Navigation Controls & Indicators -->
-        <div class="absolute bottom-5 right-6 sm:right-8 z-20 flex items-center gap-2.5">
+        <div class="absolute bottom-5 right-6 sm:right-8 z-30 pointer-events-auto flex items-center gap-2.5">
           
           <!-- Slide Number Indicator -->
           <span class="text-xs font-mono text-slate-400 bg-slate-900/80 px-2 py-1 rounded-md border border-slate-800">
@@ -200,7 +196,7 @@ import {
         </div>
 
         <!-- Slide Indicators / Dots -->
-        <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-20 hidden md:flex items-center gap-2">
+        <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 pointer-events-auto hidden md:flex items-center gap-2">
           @for (item of showcase(); track item.id; let idx = $index) {
             <button 
               (click)="goTo(idx)"

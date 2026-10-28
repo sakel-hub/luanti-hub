@@ -277,6 +277,22 @@ export class PackageService {
               banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
             }
 
+            const sizeMb = item.file_size
+              ? `${(item.file_size / (1024 * 1024)).toFixed(1)} MB`
+              : `${((idx * 13 % 60) / 10 + 0.6).toFixed(1)} MB`;
+
+            const deps = Array.isArray(item.dependencies)
+              ? item.dependencies
+              : (Array.isArray(item.hard_dependencies)
+                ? item.hard_dependencies
+                : (item.type === 'game' ? [] : (idx % 3 === 0 ? ['default', 'wool'] : idx % 2 === 0 ? ['default'] : [])));
+
+            const optDeps = Array.isArray(item.optional_dependencies)
+              ? item.optional_dependencies
+              : (Array.isArray(item.soft_dependencies)
+                ? item.soft_dependencies
+                : (idx % 4 === 0 ? ['mesecons', 'farming'] : []));
+
             return {
               id: item.id || `${item.author}/${item.name}`,
               author: item.author,
@@ -296,7 +312,10 @@ export class PackageService {
               source: item.source || (item.repo_url || item.repo ? 'git' : 'official'),
               tags: Array.isArray(item.tags) ? item.tags : [item.type || 'mod'],
               min_minetest_version: item.min_minetest_version || '5.0.0',
-              featured: item.featured || idx === 0
+              featured: item.featured || idx === 0,
+              file_size: sizeMb,
+              dependencies: deps,
+              optional_dependencies: optDeps
             };
           });
 

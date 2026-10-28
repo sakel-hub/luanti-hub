@@ -75,7 +75,7 @@ import { LucideSearchX } from '@lucide/angular';
       <!-- Netflix Home Experience (Billboard + Horizontal Swimlanes) -->
       <app-hero-billboard></app-hero-billboard>
 
-      <div class="relative z-20 -mt-10 sm:-mt-14 space-y-6">
+      <div class="relative z-10 mt-6 sm:mt-8 space-y-8 pb-16">
         
         <!-- Swimlane 1: Trending Today -->
         <app-package-carousel 

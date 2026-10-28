@@ -3,7 +3,7 @@ import { TranslationDictionary } from '../translation.types';
 export const ru: TranslationDictionary = {
   header: {
     title: 'LuantiHub',
-    subtitle: 'Децентрализованный реестр и каталог контента',
+    subtitle: 'Реестр пакетов и каталог контента',
     searchPlaceholder: 'Поиск модов, игр, текстур (Нажмите "/")...',
     searchTooltip: 'Нажмите / для поиска',
     filterAll: 'Все',
@@ -26,7 +26,7 @@ export const ru: TranslationDictionary = {
   },
   hero: {
     featuredBadge: '#1 Рекомендуемый Пакет',
-    playInstall: 'Установить в Игре',
+    playInstall: 'Скачать',
     viewGit: 'Открыть Git Репозиторий',
     viewDetails: 'Подробнее',
     rating: 'Оценка',
@@ -34,7 +34,7 @@ export const ru: TranslationDictionary = {
     categoryGame: 'Автономная Воксельная Игра',
     categoryMod: 'Мод Движка',
     categoryTxp: 'HD Текстур-пак',
-    categoryGit: 'Децентрализованный Релиз',
+    categoryGit: 'Релиз Сообщества Git',
     prevSlide: 'Назад',
     nextSlide: 'Вперед',
     pauseAutoPlay: 'Пауза',
@@ -42,10 +42,10 @@ export const ru: TranslationDictionary = {
   },
   carousel: {
     trending: 'Популярное на этой неделе',
-    freshGit: 'Свежее из Git (Сообщество)',
+    freshGit: 'Релизы Сообщества Git',
     standaloneGames: 'Полноценные Игры',
-    automation: 'Схемы Mesecons и Автоматизация',
-    texturePacks: 'HD Текстуры и Звуки',
+    automation: 'Основные Моды и Дополнения',
+    texturePacks: 'HD Текстур-паки',
     top10Title: 'Топ-10 Пакетов',
     top10Today: 'Сегодня',
     top10Week: 'На этой неделе',
@@ -59,23 +59,23 @@ export const ru: TranslationDictionary = {
     byAuthor: 'автор',
     license: 'Лицензия',
     matchScore: '{score}% Совпадение',
-    quickInstall: 'Быстрая Установка в Игре',
+    quickInstall: 'Скачать Пакет',
     moreInfo: 'Подробнее и Детали',
     favoriteTooltip: 'В избранное',
     unfavoriteTooltip: 'Удалить из избранного',
-    gitSourceTooltip: 'Децентрализованный пакет напрямую из Git',
+    gitSourceTooltip: 'Пакет напрямую из Git-репозитория',
     clickToOpen: 'Нажмите для просмотра деталей и команд установки'
   },
   modal: {
     close: 'Закрыть (Esc)',
-    installInGame: 'Установить в Игре',
+    installInGame: 'Скачать',
     viewGitRepo: 'Открыть Git Репозиторий',
     sharePackage: 'Поделиться',
     shareTooltip: 'Скопировать ссылку на пакет',
     top10Rank: '#{rank} в Luanti Сегодня',
     tabOverview: 'Обзор и Инфо',
     tabReviews: 'Отзывы Сообщества',
-    tabCompliance: 'SPDX Лицензии и Право',
+    tabCompliance: 'Лицензия и Право',
     author: 'Автор',
     category: 'Категория',
     source: 'Источник',
@@ -87,7 +87,7 @@ export const ru: TranslationDictionary = {
     noReviews: 'Для этого релиза пока нет отзывов.',
     leaveReview: 'Оставьте первый отзыв на ContentDB или LuantiHub!',
     stars: 'звезд',
-    spdxNotice: 'Этот пакет прошел автоматическую проверку лицензии SPDX.',
+    spdxNotice: 'Этот пакет содержит проверенную информацию об открытой лицензии.',
     safeHarborNotice: 'LuantiHub индексирует репозитории Git в соответствии с DMCA §512 и EU DSA.'
   },
   setup: {
@@ -105,7 +105,7 @@ export const ru: TranslationDictionary = {
     close: 'Закрыть Руководство'
   },
   submit: {
-    title: 'Добавить Децентрализованный Пакет Git',
+    title: 'Добавить Пакет Git',
     subtitle: 'Опубликуйте мод, игру или текстуры из GitHub, Codeberg или GitLab',
     repoUrlLabel: 'URL Репозитория Git',
     repoUrlPlaceholder: 'https://github.com/vash-login/vash-mod',
@@ -140,7 +140,7 @@ export const ru: TranslationDictionary = {
     skipToContent: 'Перейти к основному содержимому'
   },
   footer: {
-    about: 'Децентрализованный реестр и каталог контента для воксельного движка Luanti.',
+    about: 'Реестр пакетов и каталог контента для воксельного движка Luanti.',
     inGameSetup: 'Настройка в Minetest',
     upstreamMirror: 'Зеркало API ContentDB',
     engineSite: 'Официальный Сайт Luanti',
