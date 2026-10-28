@@ -25,6 +25,7 @@ import { PwaService } from '../../core/services/pwa.service';
           [src]="package.thumbnail" 
           [alt]="package.title"
           loading="lazy"
+          (error)="onImgError($event)"
           class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
         />
         <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent"></div>
@@ -99,5 +100,10 @@ export class PackageCardComponent {
   onFavoriteClick(event: MouseEvent): void {
     event.stopPropagation();
     this.settingsService.toggleFavorite(this.package.id);
+  }
+
+  onImgError(event: Event): void {
+    const target = event.target as HTMLImageElement;
+    target.src = 'logo.svg';
   }
 }

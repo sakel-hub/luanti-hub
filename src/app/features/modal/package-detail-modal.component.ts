@@ -27,6 +27,7 @@ import { PwaService } from '../../core/services/pwa.service';
             <img 
               [src]="package.banner || package.thumbnail" 
               [alt]="package.title"
+              (error)="onImgError($event)"
               class="w-full h-full object-cover object-center filter brightness-60"
             />
             <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent"></div>
@@ -259,5 +260,10 @@ export class PackageDetailModalComponent implements OnInit {
 
   onBackdropClick(event: MouseEvent): void {
     this.packageService.closePackageModal();
+  }
+
+  onImgError(event: Event): void {
+    const target = event.target as HTMLImageElement;
+    target.src = 'logo.svg';
   }
 }

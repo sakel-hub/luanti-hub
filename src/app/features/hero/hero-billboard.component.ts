@@ -16,6 +16,7 @@ import { SettingsService } from '../../core/services/settings.service';
           <img 
             [src]="pkg.banner || pkg.thumbnail" 
             [alt]="pkg.title"
+            (error)="onImgError($event)"
             class="w-full h-full object-cover object-center filter brightness-60 scale-105 transition-transform duration-1000"
           />
           <!-- Multi-Directional Gradient Mask for Netflix Look -->
@@ -115,4 +116,9 @@ import { SettingsService } from '../../core/services/settings.service';
 export class HeroBillboardComponent {
   readonly packageService = inject(PackageService);
   readonly featured = this.packageService.featuredPackage;
+
+  onImgError(event: Event): void {
+    const target = event.target as HTMLImageElement;
+    target.src = 'logo.svg';
+  }
 }
