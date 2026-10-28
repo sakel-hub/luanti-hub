@@ -77,13 +77,13 @@ import {
           </div>
         </div>
 
-        <!-- Scrollable Track -->
+        <!-- Scrollable Track with Hover Expansion Breathing Room -->
         <div 
           #carouselTrack
           tabindex="0"
           role="region"
           [attr.aria-label]="title + ' carousel'"
-          class="flex items-center gap-4 overflow-x-auto snap-x snap-mandatory px-4 sm:px-6 lg:px-8 py-2 no-scrollbar scroll-smooth">
+          class="flex items-center gap-4 overflow-x-auto snap-x snap-mandatory px-4 sm:px-6 lg:px-8 py-6 -my-4 no-scrollbar scroll-smooth">
           @for (pkg of packages; track pkg.id) {
             <div class="snap-start">
               <app-package-card [package]="pkg"></app-package-card>

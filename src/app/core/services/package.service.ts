@@ -130,6 +130,38 @@ export class PackageService {
   });
 
   // Netflix Swimlanes (All Computed Dynamically from Live Data)
+  readonly top10Timeframe = signal<'today' | 'week'>('week');
+
+  setTop10Timeframe(timeframe: 'today' | 'week'): void {
+    this.top10Timeframe.set(timeframe);
+  }
+
+  readonly top10Packages = computed<LuantiPackage[]>(() => {
+    const list = [...this._packages()];
+    if (list.length === 0) return [];
+    const timeframe = this.top10Timeframe();
+
+    if (timeframe === 'today') {
+      // Top 10 Today: weighted towards trending velocity, featured items, and community ratings
+      return list
+        .sort((a, b) => {
+          const scoreA = ((a.score || 4.5) * 200) + Math.log2((a.downloads || 1) + 1) * 25 + (a.featured ? 60 : 0) + (a.source === 'git' ? 40 : 0);
+          const scoreB = ((b.score || 4.5) * 200) + Math.log2((b.downloads || 1) + 1) * 25 + (b.featured ? 60 : 0) + (b.source === 'git' ? 40 : 0);
+          return scoreB - scoreA;
+        })
+        .slice(0, 10);
+    } else {
+      // Top 10 This Week: verified community momentum, total installs, and high rating stability
+      return list
+        .sort((a, b) => {
+          const scoreA = (a.downloads || 0) + ((a.score || 4.5) * 1500) + (a.featured ? 2500 : 0);
+          const scoreB = (b.downloads || 0) + ((b.score || 4.5) * 1500) + (b.featured ? 2500 : 0);
+          return scoreB - scoreA;
+        })
+        .slice(0, 10);
+    }
+  });
+
   readonly trendingPackages = computed(() => {
     return [...this._packages()].sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
   });

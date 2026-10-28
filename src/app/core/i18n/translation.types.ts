@@ -61,6 +61,10 @@ export interface TranslationDictionary {
     standaloneGames: string;
     automation: string;
     texturePacks: string;
+    top10Title: string;
+    top10Today: string;
+    top10Week: string;
+    top10Badge: string;
     scrollLeft: string;
     scrollRight: string;
   };
@@ -69,6 +73,9 @@ export interface TranslationDictionary {
     rating: string;
     byAuthor: string;
     license: string;
+    matchScore: string;
+    quickInstall: string;
+    moreInfo: string;
     favoriteTooltip: string;
     unfavoriteTooltip: string;
     gitSourceTooltip: string;
@@ -80,6 +87,7 @@ export interface TranslationDictionary {
     viewGitRepo: string;
     sharePackage: string;
     shareTooltip: string;
+    top10Rank: string;
     tabOverview: string;
     tabReviews: string;
     tabCompliance: string;

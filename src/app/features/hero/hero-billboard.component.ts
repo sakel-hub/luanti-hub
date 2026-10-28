@@ -18,8 +18,6 @@ import {
   LucidePause,
   LucideChevronLeft,
   LucideChevronRight,
-  LucideDownload,
-  LucideExternalLink,
   LucideInfo,
   LucideStar,
   LucideGitBranch
@@ -37,41 +35,40 @@ import {
     LucidePause,
     LucideChevronLeft,
     LucideChevronRight,
-    LucideDownload,
-    LucideExternalLink,
     LucideInfo,
     LucideStar,
     LucideGitBranch
   ],
   template: `
     @if (showcase().length > 0 && currentPkg(); as pkg) {
-      <div 
-        (mouseenter)="onMouseEnter()"
-        (mouseleave)="onMouseLeave()"
-        (touchstart)="onTouchStart($event)"
-        (touchend)="onTouchEnd($event)"
-        (keydown.arrowleft)="prev()"
-        (keydown.arrowright)="next()"
-        tabindex="0"
-        role="region"
-        aria-roledescription="carousel"
-        [attr.aria-label]="pkg.title"
-        class="relative w-full h-[480px] sm:h-[540px] overflow-hidden select-none bg-slate-950 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
-        
-        <!-- Hardware-Accelerated Single Active Slide Background -->
-        <div class="absolute inset-0">
-          <img 
-            [src]="pkg.banner || pkg.thumbnail" 
-            [fallbackThumbnail]="pkg.thumbnail"
-            appImgFallback
-            [alt]="pkg.title"
-            fetchpriority="high"
-            decoding="async"
-            class="w-full h-full object-cover object-center filter brightness-60 transition-opacity duration-300"
-          />
-          <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/75 to-transparent"></div>
-          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/30 to-transparent"></div>
-        </div>
+      <div class="relative w-full max-w-7xl mx-auto sm:px-4 lg:px-8 mt-1 sm:mt-3">
+        <div 
+          (mouseenter)="onMouseEnter()"
+          (mouseleave)="onMouseLeave()"
+          (touchstart)="onTouchStart($event)"
+          (touchend)="onTouchEnd($event)"
+          (keydown.arrowleft)="prev()"
+          (keydown.arrowright)="next()"
+          tabindex="0"
+          role="region"
+          aria-roledescription="carousel"
+          [attr.aria-label]="pkg.title"
+          class="relative w-full h-[460px] sm:h-[520px] lg:h-[560px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+          
+          <!-- Hardware-Accelerated Single Active Slide Background -->
+          <div class="absolute inset-0">
+            <img 
+              [src]="pkg.banner || pkg.thumbnail" 
+              [fallbackThumbnail]="pkg.thumbnail"
+              appImgFallback
+              [alt]="pkg.title"
+              fetchpriority="high"
+              decoding="async"
+              class="w-full h-full object-cover object-center filter brightness-65 transition-opacity duration-300"
+            />
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/80 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
+          </div>
 
         <!-- Foreground Content -->
         <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-14 sm:pb-16 z-10">
@@ -125,22 +122,24 @@ import {
               <span class="text-slate-400 font-mono">SPDX: {{ pkg.license }}</span>
             </div>
 
-            <!-- CTA Buttons -->
+            <!-- Netflix CTA Buttons -->
             <div class="flex items-center gap-3 pt-2">
-              <button 
-                (click)="packageService.openPackageModal(pkg)"
-                [appTooltip]="'hero.viewDetails' | translate"
-                class="px-5 py-2.5 rounded-xl bg-white hover:bg-slate-200 text-slate-950 font-bold text-xs sm:text-sm flex items-center gap-2 shadow-xl hover:scale-105 transition-all whitespace-nowrap">
-                <svg lucideInfo class="w-4 h-4"></svg>
-                <span>{{ 'hero.viewDetails' | translate }}</span>
-              </button>
-
+              <!-- Primary White Play/Install Button -->
               <button 
                 (click)="packageService.openSetupModal()"
                 [appTooltip]="'hero.playInstall' | translate"
-                class="px-5 py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700/90 text-white font-medium text-xs sm:text-sm border border-slate-700/80 flex items-center gap-2 transition whitespace-nowrap">
-                <svg lucideDownload class="w-4 h-4 text-sky-400"></svg>
+                class="h-11 px-6 sm:px-8 rounded-lg bg-white hover:bg-slate-200 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2.5 shadow-2xl hover:scale-105 transition-all whitespace-nowrap">
+                <svg lucidePlay class="w-5 h-5 fill-slate-950 text-slate-950"></svg>
                 <span>{{ 'hero.playInstall' | translate }}</span>
+              </button>
+
+              <!-- Secondary Translucent More Info Button -->
+              <button 
+                (click)="packageService.openPackageModal(pkg)"
+                [appTooltip]="'hero.viewDetails' | translate"
+                class="h-11 px-5 sm:px-6 rounded-lg bg-slate-600/70 hover:bg-slate-600/90 text-white font-bold text-xs sm:text-sm backdrop-blur-md border border-white/20 flex items-center gap-2.5 transition whitespace-nowrap">
+                <svg lucideInfo class="w-5 h-5 text-white"></svg>
+                <span>{{ 'hero.viewDetails' | translate }}</span>
               </button>
 
               @if (pkg.repo_url) {
@@ -149,9 +148,9 @@ import {
                   target="_blank" 
                   rel="noopener noreferrer"
                   [appTooltip]="'hero.viewGit' | translate"
-                  class="p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 transition"
+                  class="h-11 w-11 rounded-lg bg-slate-700/60 hover:bg-slate-700/90 text-white backdrop-blur-md border border-white/20 flex items-center justify-center transition"
                   [attr.aria-label]="'hero.viewGit' | translate">
-                  <svg lucideExternalLink class="w-4 h-4"></svg>
+                  <svg lucideGitBranch class="w-5 h-5"></svg>
                 </a>
               }
             </div>
@@ -209,7 +208,7 @@ import {
               [attr.aria-label]="'Go to slide ' + (idx + 1) + ': ' + item.title"
               class="h-1.5 rounded-full transition-all duration-300 overflow-hidden"
               [class.w-8]="idx === currentIndex()"
-              [class.bg-sky-400]="idx === currentIndex()"
+              [class.bg-white]="idx === currentIndex()"
               [class.w-2.5]="idx !== currentIndex()"
               [class.bg-slate-600]="idx !== currentIndex()"
               [class.hover:bg-slate-400]="idx !== currentIndex()">
@@ -218,6 +217,7 @@ import {
         </div>
 
       </div>
+    </div>
     } @else {
       <!-- Dynamic Skeleton / Loading State -->
       <div class="relative w-full h-[400px] sm:h-[480px] bg-slate-950 flex items-center justify-center p-6 border-b border-slate-900">

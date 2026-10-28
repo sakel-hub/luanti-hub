@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { HeroBillboardComponent } from '../hero/hero-billboard.component';
 import { PackageCarouselComponent } from '../carousel/package-carousel.component';
 import { PackageCardComponent } from '../card/package-card.component';
+import { Top10RowComponent } from '../top10/top10-row.component';
 import { PackageService } from '../../core/services/package.service';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -16,6 +17,7 @@ import { LucideSearchX } from '@lucide/angular';
     HeroBillboardComponent,
     PackageCarouselComponent,
     PackageCardComponent,
+    Top10RowComponent,
     TooltipDirective,
     TranslatePipe,
     LucideSearchX
@@ -81,6 +83,9 @@ import { LucideSearchX } from '@lucide/angular';
           [title]="'carousel.trending' | translate" 
           [packages]="packageService.trendingPackages()">
         </app-package-carousel>
+
+        <!-- Netflix Featured: Top 10 Packages Row (Today / This Week Toggle) -->
+        <app-top10-row></app-top10-row>
 
         <!-- Swimlane 2: Decentralized Git Community Packages -->
         <app-package-carousel 

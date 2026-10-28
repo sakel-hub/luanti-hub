@@ -107,3 +107,22 @@ html, body {
   outline: 2px solid #38bdf8;
   outline-offset: 2px;
 }
+
+/* Netflix Style Top 10 Stroked Typography */
+.netflix-rank-number {
+  font-family: -apple-system, BlinkMacSystemFont, "Impact", "Arial Black", "Trebuchet MS", sans-serif;
+  font-weight: 900;
+  line-height: 0.78;
+  letter-spacing: -0.06em;
+  -webkit-text-stroke: 4px #52525b;
+  -webkit-text-fill-color: #09090b;
+  color: #09090b;
+  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.95));
+  user-select: none;
+}
+
+@media (min-width: 640px) {
+  .netflix-rank-number {
+    -webkit-text-stroke: 5px #71717a;
+  }
+}

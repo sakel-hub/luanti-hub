@@ -11,9 +11,11 @@ import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
-  LucideDownload,
   LucideShare2,
-  LucideExternalLink,
+  LucidePlay,
+  LucideHeart,
+  LucideCopy,
+  LucideCheck,
   LucideStar,
   LucideShieldCheck,
   LucideGitBranch,
@@ -30,9 +32,11 @@ import {
     TooltipDirective,
     TranslatePipe,
     LucideX,
-    LucideDownload,
     LucideShare2,
-    LucideExternalLink,
+    LucidePlay,
+    LucideHeart,
+    LucideCopy,
+    LucideCheck,
     LucideStar,
     LucideShieldCheck,
     LucideGitBranch,
@@ -45,291 +49,356 @@ import {
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-package-title"
-        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
+        class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
         
         <div 
           (click)="$event.stopPropagation()"
-          class="relative w-full max-w-4xl max-h-[92vh] bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
+          class="relative w-full max-w-4xl max-h-screen sm:max-h-[92vh] bg-slate-900 border-0 sm:border border-slate-700/80 rounded-none sm:rounded-2xl shadow-2xl overflow-y-auto flex flex-col animate-in zoom-in-95 duration-200 my-auto">
           
-          <!-- Top Banner Hero -->
-          <div class="relative w-full h-56 sm:h-72 bg-slate-950 flex-shrink-0 overflow-hidden">
+          <!-- Top Banner Hero (Netflix Style) -->
+          <div class="relative w-full h-64 sm:h-80 md:h-96 bg-slate-950 flex-shrink-0 overflow-hidden">
             <img 
               [src]="package.banner || package.thumbnail" 
               [fallbackThumbnail]="package.thumbnail"
               appImgFallback
               [alt]="package.title"
-              class="w-full h-full object-cover object-center filter brightness-60"
+              class="w-full h-full object-cover object-center filter brightness-65"
             />
-            <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/70 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/50 to-transparent"></div>
 
-            <!-- Close Button -->
+            <!-- Floating Round Close Button (Top Right) -->
             <button 
               (click)="packageService.closePackageModal()"
               [attr.aria-label]="'modal.close' | translate"
               [appTooltip]="'modal.close' | translate"
-              class="absolute top-4 right-4 p-2 rounded-full bg-slate-950/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition z-20">
+              class="absolute top-4 right-4 w-9 h-9 rounded-full bg-slate-950/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 flex items-center justify-center transition z-30 shadow-lg">
               <svg lucideX class="w-5 h-5"></svg>
             </button>
 
-            <!-- Foreground Title & Actions -->
-            <div class="absolute bottom-4 left-6 right-6 flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4">
-              <div class="space-y-1">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-500 text-white">
-                    {{ package.type }}
+            <!-- Foreground Hero Content & Actions -->
+            <div class="absolute bottom-5 left-5 sm:left-8 right-5 sm:right-8 flex flex-col justify-end gap-3 z-20">
+              
+              <!-- Badges -->
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-rose-600 text-white shadow-md">
+                  {{ package.type }}
+                </span>
+
+                @if (package.source === 'git') {
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1 shadow">
+                    <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
+                    <span>Decentralized Git</span>
                   </span>
-                  @if (package.source === 'git') {
-                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1">
-                      <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
-                      <span>Decentralized Git</span>
-                    </span>
-                  } @else {
-                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
-                      <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
-                      <span>ContentDB</span>
-                    </span>
-                  }
-                </div>
-                <h2 id="modal-package-title" class="text-2xl sm:text-3xl font-extrabold text-white">
-                  {{ package.title }}
-                </h2>
-                <p class="text-xs text-slate-300">
-                  By <strong class="text-white">{{ package.author }}</strong> • Technical ID: <code class="text-sky-300 bg-slate-950/60 px-1 py-0.5 rounded font-mono">{{ package.name }}</code>
-                </p>
+                } @else {
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                    <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
+                    <span>ContentDB</span>
+                  </span>
+                }
+
+                @if (package.featured) {
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                    Featured
+                  </span>
+                }
               </div>
 
-              <!-- Action Buttons -->
-              <div class="flex items-center gap-2">
+              <!-- Title -->
+              <h2 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
+                {{ package.title }}
+              </h2>
+
+              <!-- Action Buttons Row -->
+              <div class="flex items-center gap-3 pt-1 flex-wrap">
+                <!-- Primary White Play/Install Button -->
                 <button 
-                  (click)="packageService.openSetupModal()"
-                  class="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg shadow-sky-600/30 transition whitespace-nowrap">
-                  <svg lucideDownload class="w-4 h-4"></svg>
+                  (click)="openSetupModal()"
+                  class="h-10 sm:h-11 px-6 sm:px-7 rounded-lg bg-white hover:bg-slate-200 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2 shadow-2xl hover:scale-105 transition whitespace-nowrap">
+                  <svg lucidePlay class="w-4 h-4 fill-slate-950 text-slate-950"></svg>
                   <span>{{ 'modal.installInGame' | translate }}</span>
                 </button>
 
+                <!-- Add to Favorites / My List Button -->
+                <button 
+                  (click)="onFavoriteClick()"
+                  [appTooltip]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
+                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full border border-slate-500 bg-slate-900/80 hover:border-white text-white flex items-center justify-center transition shadow hover:scale-105">
+                  <svg 
+                    lucideHeart 
+                    class="w-4 h-4 transition-colors"
+                    [class.fill-rose-500]="settingsService.isFavorite(package.id)"
+                    [class.text-rose-500]="settingsService.isFavorite(package.id)">
+                  </svg>
+                </button>
+
+                <!-- Share Button -->
                 <button 
                   (click)="pwaService.sharePackage(package.title, package.short_desc, shareUrl)"
                   [appTooltip]="'modal.shareTooltip' | translate"
-                  [attr.aria-label]="'modal.sharePackage' | translate"
-                  class="p-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full border border-slate-500 bg-slate-900/80 hover:border-white text-white flex items-center justify-center transition shadow hover:scale-105">
                   <svg lucideShare2 class="w-4 h-4"></svg>
                 </button>
+
+                <!-- Git Repository Link Button -->
+                @if (package.repo_url) {
+                  <a 
+                    [href]="package.repo_url" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    [appTooltip]="'modal.viewGitRepo' | translate"
+                    class="w-10 sm:w-11 h-10 sm:h-11 rounded-full border border-slate-500 bg-slate-900/80 hover:border-white text-white flex items-center justify-center transition shadow hover:scale-105"
+                    [attr.aria-label]="'modal.viewGitRepo' | translate">
+                    <svg lucideGitBranch class="w-4 h-4"></svg>
+                  </a>
+                }
               </div>
+
             </div>
 
           </div>
 
-          <!-- Navigation Tabs -->
-          <div class="flex items-center gap-4 px-6 border-b border-slate-800 bg-slate-950/40 text-xs font-semibold">
-            <button 
-              (click)="activeTab.set('overview')"
-              [class]="activeTab() === 'overview' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              {{ 'modal.tabOverview' | translate }}
-            </button>
-            <button 
-              (click)="activeTab.set('reviews')"
-              [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              {{ 'modal.tabReviews' | translate }} ({{ reviews().length }})
-            </button>
-            <button 
-              (click)="activeTab.set('compliance')"
-              [class]="activeTab() === 'compliance' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              {{ 'modal.tabCompliance' | translate }}
-            </button>
-          </div>
-
-          <!-- Scrollable Body Content -->
-          <div class="p-6 overflow-y-auto space-y-6 text-sm flex-1">
+          <!-- Netflix 2-Column Details Body -->
+          <div class="p-5 sm:p-8 space-y-6">
             
-            <!-- Tab 1: Overview -->
-            @if (activeTab() === 'overview') {
-              <div class="space-y-4">
-                <p class="text-slate-200 leading-relaxed text-sm sm:text-base">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
+              
+              <!-- Left Column: Synopsis, Engine Compatibility & 1-Click Setup -->
+              <div class="lg:col-span-2 space-y-4">
+                
+                <!-- Metrics Bar -->
+                <div class="flex items-center gap-3 text-xs sm:text-sm flex-wrap">
+                  <span class="text-emerald-400 font-bold">
+                    {{ ((package.score || 4.5) * 20) | number:'1.0-0' }}% Match
+                  </span>
+                  <span class="text-slate-400 font-mono">Luanti {{ package.min_minetest_version || '5.8+' }}</span>
+                  <span class="text-slate-400 font-mono uppercase px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">
+                    SPDX: {{ package.license }}
+                  </span>
+                  <span class="text-rose-400 font-semibold bg-rose-950/60 border border-rose-800/80 px-2 py-0.5 rounded text-[11px]">
+                    #1 in {{ package.type | uppercase }} Today
+                  </span>
+                </div>
+
+                <!-- Description / Synopsis -->
+                <p class="text-slate-200 text-sm sm:text-base leading-relaxed">
                   {{ package.desc || package.short_desc }}
                 </p>
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <div class="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1">
-                    <span class="text-xs text-slate-400 font-medium">Compatible Luanti Engines</span>
-                    <p class="font-bold text-white text-xs sm:text-sm">
-                      {{ package.min_minetest_version || '5.0.0' }} and newer
-                    </p>
+                <!-- 1-Click In-Game Setup Snippet Box -->
+                <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                  <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
+                      In-Game Registry Configuration
+                    </span>
+                    <button 
+                      (click)="copyRegistryConfig()"
+                      class="text-[11px] font-semibold text-sky-400 hover:text-white flex items-center gap-1 transition">
+                      @if (copied()) {
+                        <svg lucideCheck class="w-3.5 h-3.5 text-emerald-400"></svg>
+                        <span class="text-emerald-400">Copied!</span>
+                      } @else {
+                        <svg lucideCopy class="w-3.5 h-3.5"></svg>
+                        <span>Copy minetest.conf</span>
+                      }
+                    </button>
                   </div>
-                  <div class="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1">
-                    <span class="text-xs text-slate-400 font-medium">Total Downloads</span>
-                    <p class="font-bold text-white text-xs sm:text-sm">
-                      {{ package.downloads | number }}
-                    </p>
+                  <code class="block text-xs font-mono text-slate-300 bg-slate-900 p-2.5 rounded-lg border border-slate-800 break-all select-all">
+                    contentdb_url = https://luanti-hub.pages.dev
+                  </code>
+                  <p class="text-[11px] text-slate-400">
+                    Paste into your <code class="text-slate-300">minetest.conf</code> to browse and install this package directly inside the Luanti client!
+                  </p>
+                </div>
+
+              </div>
+
+              <!-- Right Column: Author, Tags, License & Source Forge Info -->
+              <div class="space-y-4 text-xs text-slate-300 border-t lg:border-t-0 lg:border-l border-slate-800 lg:pl-6 pt-4 lg:pt-0">
+                
+                <!-- Author & Maintainer -->
+                <div>
+                  <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                    Author
+                  </span>
+                  <div class="flex items-center gap-2 mt-1">
+                    <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs">
+                      {{ package.author.charAt(0).toUpperCase() }}
+                    </div>
+                    <span class="font-bold text-white text-sm">{{ package.author }}</span>
                   </div>
                 </div>
 
-                @if (package.repo_url) {
-                  <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between">
-                    <div>
-                      <span class="text-xs text-slate-400">Git Source Repository</span>
-                      <p class="font-mono text-xs text-sky-400 truncate max-w-sm sm:max-w-md">
-                        {{ package.repo_url }}
-                      </p>
+                <!-- Technical ID -->
+                <div>
+                  <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                    Technical Identifier
+                  </span>
+                  <code class="text-sky-300 bg-slate-950 px-1.5 py-0.5 rounded font-mono text-xs mt-1 inline-block">
+                    {{ package.name }}
+                  </code>
+                </div>
+
+                <!-- Downloads & Community Score -->
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      Downloads
+                    </span>
+                    <span class="font-bold text-white text-xs mt-0.5 block">
+                      {{ package.downloads | number }}
+                    </span>
+                  </div>
+                  <div>
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      Rating
+                    </span>
+                    <div class="flex items-center gap-1 text-amber-400 font-bold text-xs mt-0.5">
+                      <svg lucideStar class="w-3.5 h-3.5 fill-amber-400 text-amber-400"></svg>
+                      <span>{{ package.score }} / 5.0</span>
                     </div>
-                    <a 
-                      [href]="package.repo_url" 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap">
-                      <span>Open Git</span>
-                      <svg lucideExternalLink class="w-3.5 h-3.5"></svg>
-                    </a>
+                  </div>
+                </div>
+
+                <!-- SPDX License -->
+                <div>
+                  <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                    License
+                  </span>
+                  <p class="font-mono text-xs text-slate-300 mt-0.5">
+                    Code: {{ package.license }}
+                    @if (package.media_license) {
+                      <br>Media: {{ package.media_license }}
+                    }
+                  </p>
+                </div>
+
+                <!-- Tags Pills -->
+                @if (package.tags && package.tags.length > 0) {
+                  <div>
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px] mb-1.5">
+                      Genres &amp; Tags
+                    </span>
+                    <div class="flex flex-wrap gap-1.5">
+                      @for (tag of package.tags; track tag) {
+                        <span class="px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 text-[10px] font-medium border border-slate-700/80">
+                          {{ tag }}
+                        </span>
+                      }
+                    </div>
                   </div>
                 }
+
               </div>
-            }
 
-            <!-- Tab 2: Reviews & Discussion -->
-            @if (activeTab() === 'reviews') {
-              <div class="space-y-6">
-                
-                <!-- Add Review Form -->
-                <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
-                  <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300">
-                    Leave a Community Review
-                  </h4>
+            </div>
 
+            <!-- Tabbed Navigation: Reviews & SPDX Legal Compliance -->
+            <div class="pt-4 border-t border-slate-800">
+              <div class="flex items-center gap-4 border-b border-slate-800 text-xs font-semibold">
+                <button 
+                  (click)="activeTab.set('reviews')"
+                  [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold' : 'text-slate-400 hover:text-white py-2.5'">
+                  {{ 'modal.tabReviews' | translate }} ({{ reviews().length }})
+                </button>
+                <button 
+                  (click)="activeTab.set('compliance')"
+                  [class]="activeTab() === 'compliance' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold' : 'text-slate-400 hover:text-white py-2.5'">
+                  {{ 'modal.tabCompliance' | translate }}
+                </button>
+              </div>
+
+              <!-- Reviews Content -->
+              @if (activeTab() === 'reviews') {
+                <div class="pt-4 space-y-4">
+                  <!-- Write Review Box -->
                   @if (authService.currentUser(); as user) {
-                    <form (ngSubmit)="onSubmitReview()" class="space-y-3">
-                      <!-- Star Rating Selector -->
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs text-slate-400">Your Rating:</span>
-                        <div class="flex items-center gap-1 text-amber-400">
+                    <form (ngSubmit)="onSubmitReview()" class="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+                      <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold text-slate-200">Leave a Review</span>
+                        <div class="flex items-center gap-1">
                           @for (star of [1, 2, 3, 4, 5]; track star) {
                             <button 
-                              type="button"
+                              type="button" 
                               (click)="userRating.set(star)"
-                              class="p-0.5 hover:scale-125 transition-transform focus:outline-none">
+                              class="focus:outline-none">
                               <svg 
                                 lucideStar 
-                                class="w-5 h-5" 
-                                [class.fill-amber-400]="userRating() >= star" 
+                                class="w-4 h-4 transition-colors"
+                                [class.fill-amber-400]="userRating() >= star"
                                 [class.text-amber-400]="userRating() >= star"
                                 [class.text-slate-600]="userRating() < star">
                               </svg>
                             </button>
                           }
                         </div>
-                        <span class="text-xs font-bold text-amber-400">{{ userRating() }} / 5 Stars</span>
                       </div>
-
                       <input 
                         type="text" 
                         [(ngModel)]="reviewTitle" 
-                        name="reviewTitle"
-                        placeholder="Review Headline (e.g. Works great on Luanti 5.8!)" 
-                        class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        name="reviewTitle" 
+                        placeholder="Review title (optional)" 
+                        class="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500" 
                       />
-
                       <textarea 
                         [(ngModel)]="reviewComment" 
-                        name="reviewComment"
-                        required
-                        rows="3" 
-                        placeholder="Share your experience, tips, or compatibility notes with the community..."
-                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
-                      </textarea>
-
-                      <div class="flex items-center justify-between">
-                        <span class="text-[11px] text-slate-500">Posting as <strong class="text-slate-300">&#64;{{ user.username }}</strong></span>
+                        name="reviewComment" 
+                        required 
+                        rows="2" 
+                        placeholder="What do you think of this package? Share your thoughts..." 
+                        class="w-full bg-slate-900 border border-slate-700/80 rounded-lg p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"></textarea>
+                      <div class="flex justify-end">
                         <button 
                           type="submit" 
-                          [disabled]="isSubmittingReview() || !reviewComment.trim()"
-                          class="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs shadow transition">
-                          {{ isSubmittingReview() ? 'Posting...' : 'Post Review' }}
+                          [disabled]="isSubmittingReview() || !reviewComment.trim()" 
+                          class="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs disabled:opacity-50 transition">
+                          Post Review
                         </button>
                       </div>
                     </form>
+                  }
+
+                  <!-- Reviews List -->
+                  @if (reviews().length === 0) {
+                    <p class="text-xs text-slate-500 text-center py-4">{{ 'modal.noReviews' | translate }}</p>
                   } @else {
-                    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-2">
-                      <p class="text-xs text-slate-400">
-                        Sign in with Codeberg, GitLab, or GitHub to post a review.
-                      </p>
-                      <button 
-                        (click)="authService.openAuthModal()"
-                        class="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs transition">
-                        Sign In to Review
-                      </button>
-                    </div>
-                  }
-                </div>
-
-                <!-- Reviews Thread -->
-                <div class="space-y-3">
-                  @for (rev of reviews(); track rev.id) {
-                    <div class="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
-                      <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2.5">
-                          <img [src]="rev.author.avatar_url" [alt]="rev.author.username" class="w-6 h-6 rounded-full" />
-                          <span class="font-semibold text-xs text-slate-200">{{ rev.author.display_name || rev.author.username }}</span>
-                          
-                          @if (rev.source === 'contentdb') {
-                            <span class="px-1.5 py-0.2 rounded text-[10px] font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30">
-                              ContentDB Official
-                            </span>
-                          } @else {
-                            <span class="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                              LuantiHub Verified
-                            </span>
+                    <div class="space-y-3">
+                      @for (rev of reviews(); track rev.id) {
+                        <div class="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1.5 text-xs">
+                          <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                              <span class="font-bold text-white">{{ rev.author.display_name || rev.author.username }}</span>
+                              <div class="flex items-center gap-0.5 text-amber-400">
+                                <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400"></svg>
+                                <span class="font-bold text-[11px]">{{ rev.rating }}/5</span>
+                              </div>
+                            </div>
+                            <span class="text-[10px] text-slate-500">{{ rev.created_at | date }}</span>
+                          </div>
+                          @if (rev.title) {
+                            <h4 class="font-bold text-slate-200 text-xs">{{ rev.title }}</h4>
                           }
+                          <p class="text-slate-300 leading-relaxed">{{ rev.comment }}</p>
                         </div>
-                        <div class="flex items-center gap-2">
-                        <div class="flex items-center gap-1 text-amber-400 text-xs font-bold">
-                          <svg lucideStar class="w-3.5 h-3.5 fill-amber-400 text-amber-400"></svg>
-                          <span>{{ rev.rating }}/5</span>
-                        </div>
-                          <span class="text-[11px] text-slate-500">{{ rev.created_at | date }}</span>
-                        </div>
-                      </div>
-
-                      @if (rev.title) {
-                        <h4 class="text-xs font-bold text-white">{{ rev.title }}</h4>
                       }
-                      <p class="text-xs text-slate-300 leading-relaxed">{{ rev.comment }}</p>
                     </div>
                   }
                 </div>
+              }
 
-              </div>
-            }
-
-            <!-- Tab 3: Compliance & Legal -->
-            @if (activeTab() === 'compliance') {
-              <div class="space-y-4 text-xs">
-                <div class="p-4 rounded-xl bg-emerald-950/30 border border-emerald-800/50 space-y-1">
-                  <h4 class="font-bold text-emerald-400 flex items-center gap-1.5">
-                    <svg lucideShieldCheck class="w-4 h-4"></svg>
-                    <span>SPDX Open-Source Verified</span>
-                  </h4>
-                  <p class="text-slate-300 leading-relaxed">
-                    This package has been audited against our open source whitelist. Code and media adhere to recognized Free/Libre Open Source licenses.
+              <!-- Compliance Content -->
+              @if (activeTab() === 'compliance') {
+                <div class="pt-4 space-y-3 text-xs text-slate-300 leading-relaxed">
+                  <div class="flex items-start gap-2.5 p-3 rounded-xl bg-emerald-950/30 border border-emerald-800/40 text-emerald-300">
+                    <svg lucideShieldCheck class="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-400"></svg>
+                    <span>{{ 'modal.spdxNotice' | translate }}</span>
+                  </div>
+                  <p class="text-slate-400 text-[11px]">
+                    {{ 'modal.safeHarborNotice' | translate }}
                   </p>
                 </div>
-
-                <div class="grid grid-cols-2 gap-3">
-                  <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                    <span class="text-slate-500">Code License:</span>
-                    <p class="font-mono font-bold text-sky-400">{{ package.license }}</p>
-                  </div>
-                  <div class="p-3 rounded-lg bg-slate-950/60 border border-slate-800">
-                    <span class="text-slate-500">Media License:</span>
-                    <p class="font-mono font-bold text-sky-400">{{ package.media_license || 'CC-BY-SA-3.0' }}</p>
-                  </div>
-                </div>
-
-                <div class="p-3.5 rounded-lg bg-slate-950/40 border border-slate-800/80 text-slate-400">
-                  <p>
-                    Suspect a copyright infringement or unauthorized asset rip? 
-                    <a href="mailto:dmca@luantihub.org" class="text-sky-400 underline">Report this package for immediate DMCA review</a>.
-                  </p>
-                </div>
-              </div>
-            }
+              }
+            </div>
 
           </div>
 
@@ -347,8 +416,9 @@ export class PackageDetailModalComponent implements OnInit {
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
 
-  readonly activeTab = signal<'overview' | 'reviews' | 'compliance'>('overview');
+  readonly activeTab = signal<'reviews' | 'compliance'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
+  readonly copied = signal(false);
 
   // Review Form state
   readonly userRating = signal(5);
@@ -368,6 +438,22 @@ export class PackageDetailModalComponent implements OnInit {
     this.packageService.closePackageModal();
   }
 
+  openSetupModal(): void {
+    this.packageService.openSetupModal();
+  }
+
+  onFavoriteClick(): void {
+    this.settingsService.toggleFavorite(this.package.id);
+  }
+
+  copyRegistryConfig(): void {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText('contentdb_url = https://luanti-hub.pages.dev');
+      this.copied.set(true);
+      setTimeout(() => this.copied.set(false), 2000);
+    }
+  }
+
   async onSubmitReview(): Promise<void> {
     if (!this.reviewComment.trim()) return;
 
@@ -381,7 +467,6 @@ export class PackageDetailModalComponent implements OnInit {
     this.isSubmittingReview.set(false);
 
     if (res.success && res.review) {
-      // Optimistic update
       const newReview: CommunityReview = {
         ...res.review,
         author: {
