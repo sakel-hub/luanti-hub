@@ -6,7 +6,7 @@ import { filter } from 'rxjs/operators';
   providedIn: 'root'
 })
 export class PwaService {
-  private readonly swUpdate = inject(SwUpdate);
+  private readonly swUpdate = inject(SwUpdate, { optional: true });
 
   readonly updateAvailable = signal<boolean>(false);
   readonly canInstall = signal<boolean>(false);
@@ -19,7 +19,7 @@ export class PwaService {
   }
 
   private initSwUpdate(): void {
-    if (this.swUpdate.isEnabled) {
+    if (this.swUpdate?.isEnabled) {
       this.swUpdate.versionUpdates
         .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
         .subscribe(() => {
