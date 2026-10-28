@@ -6,12 +6,17 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s fast timeout
 
+  const defaultHeaders = {
+    'User-Agent': 'LuantiHub-Proxy/1.0',
+    'Accept': 'application/json'
+  };
+
   try {
     const res = await fetch(`${PRIMARY_UPSTREAM}${path}`, {
       ...options,
       signal: controller.signal,
       headers: {
-        'User-Agent': 'LuantiHub-Proxy/1.0',
+        ...defaultHeaders,
         ...(options.headers || {})
       }
     });
@@ -25,7 +30,7 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
     return fetch(`${MIRROR_UPSTREAM}${path}`, {
       ...options,
       headers: {
-        'User-Agent': 'LuantiHub-Proxy/1.0',
+        ...defaultHeaders,
         ...(options.headers || {})
       }
     });

@@ -60,12 +60,16 @@
         },
         "serve": {
           "builder": "@angular/build:dev-server",
+          "options": {
+            "proxyConfig": "proxy.conf.json"
+          },
           "configurations": {
             "production": {
               "buildTarget": "luanti-hub:build:production"
             },
             "development": {
-              "buildTarget": "luanti-hub:build:development"
+              "buildTarget": "luanti-hub:build:development",
+              "proxyConfig": "proxy.conf.json"
             }
           },
           "defaultConfiguration": "development"
