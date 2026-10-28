@@ -6,11 +6,12 @@ import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 
 @Component({
   selector: 'app-package-detail-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, ImgFallbackDirective],
   template: `
     @if (package) {
       <div 
@@ -28,6 +29,8 @@ import { AuthService } from '../../core/services/auth.service';
           <div class="relative w-full h-56 sm:h-72 bg-slate-950 flex-shrink-0 overflow-hidden">
             <img 
               [src]="package.banner || package.thumbnail" 
+              [fallbackThumbnail]="package.thumbnail"
+              appImgFallback
               [alt]="package.title"
               class="w-full h-full object-cover object-center filter brightness-60"
             />

@@ -15,34 +15,88 @@ html, body {
   scroll-behavior: smooth;
 }
 
-/* Hide scrollbar for Chrome, Safari and Opera */
+/* Hide scrollbar utility */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
-
-/* Hide scrollbar for IE, Edge and Firefox */
 .no-scrollbar {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;  /* Firefox */
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
-/* Custom sleek scrollbar for modals / detail views */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* Sleek Themed Custom Scrollbars */
+.custom-scrollbar,
+body,
+aside *,
+main *,
+nav *,
+dialog *,
+div[role="dialog"] * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 189, 248, 0.35) rgba(15, 23, 42, 0.65);
 }
 
-::-webkit-scrollbar-track {
-  background: #020617;
+.custom-scrollbar::-webkit-scrollbar,
+body::-webkit-scrollbar,
+aside *::-webkit-scrollbar,
+main *::-webkit-scrollbar,
+nav *::-webkit-scrollbar,
+dialog *::-webkit-scrollbar,
+div[role="dialog"] *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
-::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 4px;
+.custom-scrollbar::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track,
+aside *::-webkit-scrollbar-track,
+main *::-webkit-scrollbar-track,
+nav *::-webkit-scrollbar-track,
+dialog *::-webkit-scrollbar-track,
+div[role="dialog"] *::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.65);
+  border-radius: 9999px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #334155;
+.custom-scrollbar::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb,
+aside *::-webkit-scrollbar-thumb,
+main *::-webkit-scrollbar-thumb,
+nav *::-webkit-scrollbar-thumb,
+dialog *::-webkit-scrollbar-thumb,
+div[role="dialog"] *::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.75);
+  border-radius: 9999px;
+  border: 1px solid rgba(15, 23, 42, 0.5);
+  transition: background-color 0.15s ease;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover,
+aside *::-webkit-scrollbar-thumb:hover,
+main *::-webkit-scrollbar-thumb:hover,
+nav *::-webkit-scrollbar-thumb:hover,
+dialog *::-webkit-scrollbar-thumb:hover,
+div[role="dialog"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.75);
+}
+
+/* Custom Tooltip Styling */
+.luanti-tooltip {
+  background-color: rgba(15, 23, 42, 0.96) !important;
+  color: #f1f5f9 !important;
+  border-color: rgba(51, 65, 85, 0.85) !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3) !important;
+}
+
+.luanti-tooltip span {
+  color: #f1f5f9 !important;
+}
+
+.luanti-tooltip kbd {
+  background-color: #1e293b !important;
+  color: #38bdf8 !important;
+  border-color: #334155 !important;
 }
 
 /* Glassmorphism utility */
@@ -59,4 +113,27 @@ html, body {
 
 .glow-purple {
   box-shadow: 0 0 25px -5px rgba(129, 140, 248, 0.3);
+}
+
+/* Mobile Safe-Area Utilities */
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+}
+
+.pt-safe {
+  padding-top: max(0.25rem, env(safe-area-inset-top, 0px));
+}
+
+.min-h-touch {
+  min-height: 44px;
+}
+
+.min-w-touch {
+  min-width: 44px;
+}
+
+/* Focus Visible for AA Accessibility */
+:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
 }
