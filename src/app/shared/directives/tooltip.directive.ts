@@ -1,0 +1,243 @@
+import {
+  Directive,
+  ElementRef,
+  HostListener,
+  Input,
+  OnDestroy,
+  inject
+} from '@angular/core';
+import { TranslationService } from '../../core/i18n/translation.service';
+import { TranslationKey } from '../../core/i18n/translation.types';
+
+@Directive({
+  selector: '[appTooltip]',
+  standalone: true
+})
+export class TooltipDirective implements OnDestroy {
+  private el: ElementRef | null = null;
+  private translationService: TranslationService | null = null;
+
+  @Input() appTooltip: string = '';
+  @Input() appTooltipKey?: TranslationKey;
+  @Input() appTooltipShortcut?: string;
+  @Input() appTooltipPlacement: 'top' | 'bottom' | 'left' | 'right' = 'bottom';
+  @Input('tooltipPosition')
+  set tooltipPositionAlias(pos: 'top' | 'bottom' | 'left' | 'right' | undefined) {
+    if (pos) {
+      this.appTooltipPlacement = pos;
+    }
+  }
+  @Input() appTooltipDelay: number = 150;
+
+  private tooltipEl: HTMLElement | null = null;
+  private currentTooltipId: string | null = null;
+  private showTimeout: any = null;
+  private lastTouchTime = 0;
+
+  constructor() {
+    try {
+      this.el = inject(ElementRef);
+    } catch {
+      this.el = null;
+    }
+
+    try {
+      this.translationService = inject(TranslationService);
+    } catch {
+      this.translationService = null;
+    }
+  }
+
+  @HostListener('touchstart')
+  onTouchStart(): void {
+    this.lastTouchTime = Date.now();
+    this.hide();
+  }
+
+  @HostListener('mouseenter')
+  onMouseEnter(): void {
+    if (Date.now() - this.lastTouchTime < 800) return;
+    this.scheduleShow();
+  }
+
+  @HostListener('mouseleave')
+  onMouseLeave(): void {
+    this.hide();
+  }
+
+  @HostListener('focusin')
+  onFocusIn(): void {
+    if (Date.now() - this.lastTouchTime < 800) return;
+    this.scheduleShow();
+  }
+
+  @HostListener('focusout')
+  onFocusOut(): void {
+    this.hide();
+  }
+
+  @HostListener('click')
+  onClick(): void {
+    this.hide();
+  }
+
+  @HostListener('window:keydown.escape')
+  onEscape(): void {
+    this.hide();
+  }
+
+  ngOnDestroy(): void {
+    this.hide();
+  }
+
+  private scheduleShow(): void {
+    this.clearTimeout();
+    if (!this.appTooltip && !this.appTooltipKey) return;
+
+    this.showTimeout = setTimeout(() => {
+      this.show();
+    }, this.appTooltipDelay);
+  }
+
+  private clearTimeout(): void {
+    if (this.showTimeout) {
+      clearTimeout(this.showTimeout);
+      this.showTimeout = null;
+    }
+  }
+
+  private resolveTooltipText(): string {
+    if (this.appTooltipKey && this.translationService) {
+      return this.translationService.t(this.appTooltipKey);
+    }
+
+    const text = this.appTooltip;
+    if (this.translationService && text && !text.includes(' ') && text.includes('.')) {
+      const translated = this.translationService.t(text as TranslationKey);
+      if (translated !== text) {
+        return translated;
+      }
+    }
+
+    return text;
+  }
+
+  private show(): void {
+    if (this.tooltipEl || typeof document === 'undefined' || !this.el) return;
+
+    let text = this.resolveTooltipText();
+    let shortcut = this.appTooltipShortcut;
+
+    if (!shortcut && text.includes('|')) {
+      const parts = text.split('|');
+      text = parts[0].trim();
+      shortcut = parts[1].trim();
+    }
+
+    const tipId = `luanti-tip-${Math.random().toString(36).substring(2, 9)}`;
+    this.currentTooltipId = tipId;
+
+    const tip = document.createElement('div');
+    tip.id = tipId;
+    tip.className =
+      'luanti-tooltip fixed z-[9999] px-2.5 py-1 text-xs font-medium border rounded-lg shadow-2xl backdrop-blur-md pointer-events-none flex items-center gap-1.5 whitespace-nowrap transition-opacity duration-150';
+    tip.style.opacity = '0';
+    tip.setAttribute('role', 'tooltip');
+
+    const span = document.createElement('span');
+    span.textContent = text;
+    tip.appendChild(span);
+
+    if (shortcut) {
+      const kbd = document.createElement('kbd');
+      kbd.className = 'px-1.5 py-0.5 text-[10px] font-mono font-semibold border rounded shadow-sm';
+      kbd.textContent = shortcut;
+      tip.appendChild(kbd);
+    }
+
+    document.body.appendChild(tip);
+    this.tooltipEl = tip;
+
+    if (this.el.nativeElement && typeof this.el.nativeElement.setAttribute === 'function') {
+      this.el.nativeElement.setAttribute('aria-describedby', tipId);
+    }
+
+    this.positionTooltip();
+    tip.style.opacity = '1';
+  }
+
+  private positionTooltip(): void {
+    if (!this.tooltipEl || !this.el) return;
+
+    const hostRect = this.el.nativeElement.getBoundingClientRect();
+    const tipRect = this.tooltipEl.getBoundingClientRect();
+    const gap = 6;
+
+    let top = 0;
+    let left = 0;
+
+    switch (this.appTooltipPlacement) {
+      case 'top':
+        top = hostRect.top - tipRect.height - gap;
+        left = hostRect.left + (hostRect.width - tipRect.width) / 2;
+        break;
+      case 'left':
+        top = hostRect.top + (hostRect.height - tipRect.height) / 2;
+        left = hostRect.left - tipRect.width - gap;
+        break;
+      case 'right':
+        top = hostRect.top + (hostRect.height - tipRect.height) / 2;
+        left = hostRect.right + gap;
+        break;
+      case 'bottom':
+      default:
+        top = hostRect.bottom + gap;
+        left = hostRect.left + (hostRect.width - tipRect.width) / 2;
+        break;
+    }
+
+    const padding = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    if (top < padding && this.appTooltipPlacement === 'top') {
+      top = hostRect.bottom + gap;
+    } else if (top + tipRect.height > viewportHeight - padding && this.appTooltipPlacement === 'bottom') {
+      top = hostRect.top - tipRect.height - gap;
+    }
+
+    if (left < padding) {
+      left = padding;
+    } else if (left + tipRect.width > viewportWidth - padding) {
+      left = viewportWidth - tipRect.width - padding;
+    }
+
+    if (top < padding) {
+      top = padding;
+    } else if (top + tipRect.height > viewportHeight - padding) {
+      top = viewportHeight - tipRect.height - padding;
+    }
+
+    this.tooltipEl.style.top = `${Math.round(top)}px`;
+    this.tooltipEl.style.left = `${Math.round(left)}px`;
+  }
+
+  public hide(): void {
+    this.clearTimeout();
+    if (this.tooltipEl) {
+      this.tooltipEl.remove();
+      this.tooltipEl = null;
+    }
+    if (
+      this.currentTooltipId &&
+      this.el &&
+      this.el.nativeElement &&
+      typeof this.el.nativeElement.getAttribute === 'function'
+    ) {
+      if (this.el.nativeElement.getAttribute('aria-describedby') === this.currentTooltipId) {
+        this.el.nativeElement.removeAttribute('aria-describedby');
+      }
+      this.currentTooltipId = null;
+    }
+  }
+}
