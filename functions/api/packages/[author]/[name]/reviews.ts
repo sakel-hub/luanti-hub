@@ -16,15 +16,15 @@ export async function onRequestGet(context: { params: { author: string; name: st
     .then(r => r.ok ? r.json() : [])
     .catch(() => []);
 
-  // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1
+  // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1 (case-insensitive package_id match)
   let localPromise = Promise.resolve([]);
   if (context.env.DB) {
     localPromise = context.env.DB.prepare(`
       SELECT r.id, r.rating, r.title, r.comment, r.created_at,
              u.username, u.display_name, u.avatar_url
       FROM reviews r
-      JOIN users u ON r.user_id = u.id
-      WHERE r.package_id = ?
+      LEFT JOIN users u ON r.user_id = u.id
+      WHERE LOWER(r.package_id) = LOWER(?)
       ORDER BY r.created_at DESC
     `).bind(packageId).all()
       .then((res: any) => res.results || [])
@@ -33,18 +33,18 @@ export async function onRequestGet(context: { params: { author: string; name: st
 
   const [officialReviews, localReviews] = await Promise.all([officialPromise, localPromise]);
 
-  // 3. Normalize ContentDB Reviews
+  // 3. Normalize ContentDB Reviews (recommends: true = 5★, neutral = 3★, false = 1★)
   const normalizedOfficial = (Array.isArray(officialReviews) ? officialReviews : []).map((r: any) => ({
     id: `cdb_${r.id || Math.random()}`,
     source: 'contentdb',
-    rating: r.rating || 5,
+    rating: r.rating ? Math.min(5, Math.max(1, Number(r.rating))) : (r.recommends === false ? 1 : r.recommends === true ? 5 : 3),
     title: r.title,
-    comment: r.comment,
+    comment: r.comment || r.text || '',
     created_at: r.created_at,
     author: {
-      username: r.user?.username || 'contentdb_user',
-      display_name: r.user?.display_name || r.user?.username,
-      avatar_url: `https://github.com/${r.user?.username || 'octocat'}.png`
+      username: r.author || r.user?.username || 'contentdb_user',
+      display_name: r.author || r.user?.display_name || r.user?.username || 'Community Member',
+      avatar_url: `https://github.com/${r.author || r.user?.username || 'octocat'}.png`
     }
   }));
 
@@ -112,13 +112,13 @@ export async function onRequestPost(context: { request: Request; params: { autho
     // 3. Recalculate Average Package Score
     const avgResult = await context.env.DB.prepare(`
       SELECT AVG(rating) as avg_score, COUNT(*) as total_reviews
-      FROM reviews WHERE package_id = ?
+      FROM reviews WHERE LOWER(package_id) = LOWER(?)
     `).bind(packageId).first();
 
     if (avgResult && avgResult.avg_score) {
-      const roundedScore = Math.round(avgResult.avg_score * 100) / 100;
+      const roundedScore = Math.round(avgResult.avg_score * 10) / 10;
       await context.env.DB.prepare(`
-        UPDATE packages SET score = ? WHERE id = ?
+        UPDATE packages SET score = ? WHERE LOWER(id) = LOWER(?)
       `).bind(roundedScore, packageId).run();
     }
   }

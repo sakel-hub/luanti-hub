@@ -1,12 +1,12 @@
 {
   "/api": {
-    "target": "https://contentdb.milcho.org",
+    "target": "https://luanti-hub.pages.dev",
     "secure": true,
     "changeOrigin": true,
     "logLevel": "info",
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "LuantiHub-Proxy/1.0"
+      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
     }
   }
 }
