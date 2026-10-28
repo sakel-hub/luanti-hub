@@ -103,7 +103,15 @@
     </div>
   }
 
-  <!-- Modals -->
+  <!-- Modals & Drawers -->
+  @if (authService.isAuthModalOpen()) {
+    <app-auth-modal></app-auth-modal>
+  }
+
+  @if (authService.isProfileDrawerOpen()) {
+    <app-profile-drawer></app-profile-drawer>
+  }
+
   @if (packageService.activePackage(); as pkg) {
     <app-package-detail-modal [package]="pkg"></app-package-detail-modal>
   }

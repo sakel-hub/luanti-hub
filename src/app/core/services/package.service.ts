@@ -179,6 +179,28 @@ export class PackageService {
     ];
   }
 
+  // Submit Interactive Review to D1
+  async submitReview(pkg: LuantiPackage, payload: {
+    rating: number;
+    title?: string;
+    comment: string;
+  }): Promise<{ success: boolean; review?: CommunityReview; message?: string }> {
+    try {
+      const res = await fetch(`/api/packages/${pkg.author}/${pkg.name}/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, message: data.error || 'Failed to submit review.' };
+      }
+      return { success: true, review: data.review };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Error submitting review.' };
+    }
+  }
+
   // Register New Decentralized Git Package
   async submitGitPackage(payload: {
     repoUrl: string;

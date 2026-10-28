@@ -1,14 +1,16 @@
 import { Component, Input, inject, signal, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { LuantiPackage, CommunityReview } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
+import { AuthService } from '../../core/services/auth.service';
 
 @Component({
   selector: 'app-package-detail-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule],
   template: `
     @if (package) {
       <div 
@@ -27,7 +29,6 @@ import { PwaService } from '../../core/services/pwa.service';
             <img 
               [src]="package.banner || package.thumbnail" 
               [alt]="package.title"
-              (error)="onImgError($event)"
               class="w-full h-full object-cover object-center filter brightness-60"
             />
             <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent"></div>
@@ -101,7 +102,7 @@ import { PwaService } from '../../core/services/pwa.service';
             <button 
               (click)="activeTab.set('reviews')"
               [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-3' : 'text-slate-400 hover:text-white py-3'">
-              Mixed Reviews &amp; Comments
+              Mixed Reviews &amp; Comments ({{ reviews().length }})
             </button>
             <button 
               (click)="activeTab.set('compliance')"
@@ -113,6 +114,7 @@ import { PwaService } from '../../core/services/pwa.service';
           <!-- Scrollable Body Content -->
           <div class="p-6 overflow-y-auto space-y-6 text-sm flex-1">
             
+            <!-- Tab 1: Overview -->
             @if (activeTab() === 'overview') {
               <div class="space-y-4">
                 <p class="text-slate-200 leading-relaxed text-sm sm:text-base">
@@ -157,16 +159,78 @@ import { PwaService } from '../../core/services/pwa.service';
               </div>
             }
 
+            <!-- Tab 2: Reviews & Discussion -->
             @if (activeTab() === 'reviews') {
-              <div class="space-y-4">
-                <div class="flex items-center justify-between">
-                  <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                    <span>Community Discussion &amp; Reviews</span>
-                    <span class="text-xs text-slate-400">({{ reviews().length }})</span>
-                  </h3>
-                  <span class="text-xs text-slate-400">Combined from ContentDB + LuantiHub</span>
+              <div class="space-y-6">
+                
+                <!-- Add Review Form -->
+                <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+                  <h4 class="text-xs font-bold uppercase tracking-wider text-slate-300">
+                    Leave a Community Review
+                  </h4>
+
+                  @if (authService.currentUser(); as user) {
+                    <form (ngSubmit)="onSubmitReview()" class="space-y-3">
+                      <!-- Star Rating Selector -->
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs text-slate-400">Your Rating:</span>
+                        <div class="flex items-center gap-1 text-amber-400">
+                          @for (star of [1, 2, 3, 4, 5]; track star) {
+                            <button 
+                              type="button"
+                              (click)="userRating.set(star)"
+                              class="p-0.5 hover:scale-125 transition-transform focus:outline-none">
+                              <svg class="w-5 h-5" [class.fill-amber-400]="userRating() >= star" [class.fill-transparent]="userRating() < star" stroke="currentColor" viewBox="0 0 20 20">
+                                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
+                              </svg>
+                            </button>
+                          }
+                        </div>
+                        <span class="text-xs font-bold text-amber-400">{{ userRating() }} / 5 Stars</span>
+                      </div>
+
+                      <input 
+                        type="text" 
+                        [(ngModel)]="reviewTitle" 
+                        name="reviewTitle"
+                        placeholder="Review Headline (e.g. Works great on Luanti 5.8!)" 
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      />
+
+                      <textarea 
+                        [(ngModel)]="reviewComment" 
+                        name="reviewComment"
+                        required
+                        rows="3" 
+                        placeholder="Share your experience, tips, or compatibility notes with the community..."
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
+                      </textarea>
+
+                      <div class="flex items-center justify-between">
+                        <span class="text-[11px] text-slate-500">Posting as <strong class="text-slate-300">&#64;{{ user.username }}</strong></span>
+                        <button 
+                          type="submit" 
+                          [disabled]="isSubmittingReview() || !reviewComment.trim()"
+                          class="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs shadow transition">
+                          {{ isSubmittingReview() ? 'Posting...' : 'Post Review' }}
+                        </button>
+                      </div>
+                    </form>
+                  } @else {
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-2">
+                      <p class="text-xs text-slate-400">
+                        Sign in with Codeberg, GitLab, or GitHub to post a review.
+                      </p>
+                      <button 
+                        (click)="authService.openAuthModal()"
+                        class="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs transition">
+                        Sign In to Review
+                      </button>
+                    </div>
+                  }
                 </div>
 
+                <!-- Reviews Thread -->
                 <div class="space-y-3">
                   @for (rev of reviews(); track rev.id) {
                     <div class="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
@@ -185,7 +249,10 @@ import { PwaService } from '../../core/services/pwa.service';
                             </span>
                           }
                         </div>
-                        <span class="text-[11px] text-slate-500">{{ rev.created_at | date }}</span>
+                        <div class="flex items-center gap-2">
+                          <span class="text-amber-400 text-xs font-bold">★ {{ rev.rating }}/5</span>
+                          <span class="text-[11px] text-slate-500">{{ rev.created_at | date }}</span>
+                        </div>
                       </div>
 
                       @if (rev.title) {
@@ -195,9 +262,11 @@ import { PwaService } from '../../core/services/pwa.service';
                     </div>
                   }
                 </div>
+
               </div>
             }
 
+            <!-- Tab 3: Compliance & Legal -->
             @if (activeTab() === 'compliance') {
               <div class="space-y-4 text-xs">
                 <div class="p-4 rounded-xl bg-emerald-950/30 border border-emerald-800/50 space-y-1">
@@ -246,9 +315,16 @@ export class PackageDetailModalComponent implements OnInit {
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
+  readonly authService = inject(AuthService);
 
   readonly activeTab = signal<'overview' | 'reviews' | 'compliance'>('overview');
   readonly reviews = signal<CommunityReview[]>([]);
+
+  // Review Form state
+  readonly userRating = signal(5);
+  reviewTitle = '';
+  reviewComment = '';
+  readonly isSubmittingReview = signal(false);
 
   get shareUrl(): string {
     return typeof window !== 'undefined' ? `${window.location.origin}/#${this.package.id}` : '';
@@ -262,8 +338,33 @@ export class PackageDetailModalComponent implements OnInit {
     this.packageService.closePackageModal();
   }
 
-  onImgError(event: Event): void {
-    const target = event.target as HTMLImageElement;
-    target.src = 'logo.svg';
+  async onSubmitReview(): Promise<void> {
+    if (!this.reviewComment.trim()) return;
+
+    this.isSubmittingReview.set(true);
+    const res = await this.packageService.submitReview(this.package, {
+      rating: this.userRating(),
+      title: this.reviewTitle.trim() || undefined,
+      comment: this.reviewComment.trim()
+    });
+
+    this.isSubmittingReview.set(false);
+
+    if (res.success && res.review) {
+      // Optimistic update
+      const newReview: CommunityReview = {
+        ...res.review,
+        author: {
+          username: this.authService.currentUser()?.username || 'user',
+          display_name: this.authService.currentUser()?.display_name,
+          avatar_url: this.authService.currentUser()?.avatar_url || 'https://github.com/octocat.png'
+        }
+      };
+      this.reviews.update(list => [newReview, ...list]);
+      this.reviewTitle = '';
+      this.reviewComment = '';
+    } else {
+      alert(res.message || 'Failed to post review.');
+    }
   }
 }

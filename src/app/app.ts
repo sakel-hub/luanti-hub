@@ -7,8 +7,11 @@ import { PackageCardComponent } from './features/card/package-card.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { SetupGuideModalComponent } from './features/setup-guide/setup-guide-modal.component';
+import { AuthModalComponent } from './features/auth/auth-modal.component';
+import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
+import { AuthService } from './core/services/auth.service';
 
 @Component({
   selector: 'app-root',
@@ -21,7 +24,9 @@ import { PwaService } from './core/services/pwa.service';
     PackageCardComponent,
     PackageDetailModalComponent,
     SubmitModalComponent,
-    SetupGuideModalComponent
+    SetupGuideModalComponent,
+    AuthModalComponent,
+    ProfileDrawerComponent
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
@@ -29,6 +34,7 @@ import { PwaService } from './core/services/pwa.service';
 export class App {
   readonly packageService = inject(PackageService);
   readonly pwaService = inject(PwaService);
+  readonly authService = inject(AuthService);
 
   // Keyboard Shortcuts: '/' to search, 'Escape' to close modals
   @HostListener('window:keydown', ['$event'])
@@ -37,7 +43,11 @@ export class App {
       event.preventDefault();
       document.getElementById('main-search-input')?.focus();
     } else if (event.key === 'Escape') {
-      if (this.packageService.activePackage()) {
+      if (this.authService.isAuthModalOpen()) {
+        this.authService.closeAuthModal();
+      } else if (this.authService.isProfileDrawerOpen()) {
+        this.authService.closeProfileDrawer();
+      } else if (this.packageService.activePackage()) {
         this.packageService.closePackageModal();
       } else if (this.packageService.isSubmitModalOpen()) {
         this.packageService.closeSubmitModal();

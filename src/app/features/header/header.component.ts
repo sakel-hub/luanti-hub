@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
 import { PwaService } from '../../core/services/pwa.service';
+import { AuthService } from '../../core/services/auth.service';
 
 @Component({
   selector: 'app-header',
@@ -91,8 +92,9 @@ import { PwaService } from '../../core/services/pwa.service';
           </div>
         </div>
 
-        <!-- Right: Actions & Modals -->
+        <!-- Right: Actions & User Profile -->
         <div class="flex items-center gap-2.5">
+          
           <!-- In-Game Setup Button -->
           <button 
             (click)="packageService.openSetupModal()"
@@ -111,20 +113,32 @@ import { PwaService } from '../../core/services/pwa.service';
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
             </svg>
-            <span class="hidden sm:inline">Submit Git Repo</span>
+            <span class="hidden sm:inline">Submit Mod</span>
           </button>
 
-          <!-- Install PWA Button (if available) -->
-          @if (pwaService.canInstall()) {
+          <!-- User Authentication Section -->
+          @if (authService.currentUser(); as user) {
+            <!-- Logged In: Avatar button -->
             <button 
-              (click)="pwaService.installPwa()"
-              class="px-2.5 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1 transition">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              (click)="authService.openProfileDrawer()"
+              class="flex items-center gap-2 p-1 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 transition">
+              <img [src]="user.avatar_url" [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
+              <span class="hidden lg:inline text-xs font-bold text-white pr-2 max-w-[100px] truncate">
+                {{ user.display_name || user.username }}
+              </span>
+            </button>
+          } @else {
+            <!-- Not Logged In: Sign In button -->
+            <button 
+              (click)="authService.openAuthModal()"
+              class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 transition">
+              <svg class="w-3.5 h-3.5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
               </svg>
-              <span>Install PWA</span>
+              <span>Sign In</span>
             </button>
           }
+
         </div>
 
       </div>
@@ -134,6 +148,7 @@ import { PwaService } from '../../core/services/pwa.service';
 export class HeaderComponent {
   readonly packageService = inject(PackageService);
   readonly pwaService = inject(PwaService);
+  readonly authService = inject(AuthService);
 
   readonly searchQuery = this.packageService.searchQuery;
   readonly selectedType = this.packageService.selectedType;

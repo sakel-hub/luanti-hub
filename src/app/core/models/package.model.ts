@@ -1,5 +1,6 @@
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
+export type GitProvider = 'codeberg' | 'gitlab' | 'github' | 'contentdb';
 
 export interface LuantiPackage {
   id: string; // "author/name"
@@ -16,6 +17,7 @@ export interface LuantiPackage {
   license: string;
   media_license?: string;
   repo_url?: string;
+  provider?: GitProvider;
   default_branch?: string;
   source: PackageSource;
   tags: string[];
@@ -52,11 +54,20 @@ export interface CommunityReview {
   };
 }
 
-export interface UserProfile {
+export interface UserIdentity {
+  provider: GitProvider;
+  username: string;
+  profile_url?: string;
+  avatar_url?: string;
+  verified?: boolean;
+}
+
+export interface AuthUser {
   id: string;
   username: string;
   display_name?: string;
   avatar_url: string;
   bio?: string;
-  packagesCount: number;
+  identities: UserIdentity[];
+  packages?: any[];
 }
