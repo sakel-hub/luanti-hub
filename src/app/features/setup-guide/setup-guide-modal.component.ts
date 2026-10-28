@@ -1,60 +1,62 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideTerminal,
   LucideX,
   LucideCopy,
   LucideCheck,
-  LucideShieldCheck,
-  LucideChevronRight
+  LucideShieldCheck
 } from '@lucide/angular';
 
 @Component({
   selector: 'app-setup-guide-modal',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
+    TranslatePipe,
     LucideTerminal,
     LucideX,
     LucideCopy,
     LucideCheck,
-    LucideShieldCheck,
-    LucideChevronRight
+    LucideShieldCheck
   ],
   template: `
-    <div 
+    <div
       (click)="packageService.closeSetupModal()"
       role="dialog"
       aria-modal="true"
       aria-labelledby="setup-modal-title"
       class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
-      
-      <div 
+
+      <div
         (click)="$event.stopPropagation()"
-        class="w-full max-w-xl bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-6 animate-in zoom-in-95 duration-200">
-        
+        class="w-full max-w-xl glass-modal rounded-3xl p-6 sm:p-8 space-y-6 animate-in zoom-in-95 duration-200">
+
         <!-- Header -->
-        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+        <div class="flex items-center justify-between border-b border-white/10 pb-4">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
+            <div class="w-10 h-10 rounded-xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-sky-400">
               <svg lucideTerminal class="w-5 h-5"></svg>
             </div>
             <div>
               <h2 id="setup-modal-title" class="text-lg font-bold text-white">
-                Use LuantiHub Inside Your Game
+                {{ 'setup.title' | translate }}
               </h2>
               <p class="text-xs text-slate-400">
-                Browse and install community mods directly in the Luanti "Content" tab.
+                {{ 'setup.subtitle' | translate }}
               </p>
             </div>
           </div>
 
-          <button 
+          <button
+            type="button"
             (click)="packageService.closeSetupModal()"
             aria-label="Close setup dialog"
-            class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
+            class="p-1.5 rounded-lg glass-icon-btn text-slate-400 hover:text-white transition cursor-pointer">
             <svg lucideX class="w-5 h-5"></svg>
           </button>
         </div>
@@ -62,50 +64,50 @@ import {
         <!-- Copyable Config Snippet -->
         <div class="space-y-2">
           <span class="text-xs font-semibold text-slate-300">
-            Option A: Quick Configuration in <code>luanti.conf</code> (or <code>minetest.conf</code>)
+            {{ 'setup.optionA' | translate }}
           </span>
           <div class="relative flex items-center">
-            <pre class="w-full p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-sky-400 font-mono text-xs overflow-x-auto select-all">contentdb_url = {{ settingsService.contentDbUrl() }}</pre>
-            <button 
+            <pre class="w-full p-3.5 bg-slate-950/85 border border-white/10 rounded-xl text-sky-400 font-mono text-xs overflow-x-auto select-all">contentdb_url = {{ settingsService.contentDbUrl() }}</pre>
+            <button
+              type="button"
               (click)="copyConfig()"
-              class="absolute right-2 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow transition flex items-center gap-1.5">
+              class="absolute right-2 px-3 py-1.5 rounded-lg glass-btn-sky text-white text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer">
               @if (copied()) {
                 <svg lucideCheck class="w-3.5 h-3.5"></svg>
-                <span>Copied!</span>
+                <span>{{ 'setup.copied' | translate }}</span>
               } @else {
                 <svg lucideCopy class="w-3.5 h-3.5"></svg>
-                <span>Copy</span>
+                <span>{{ 'setup.copy' | translate }}</span>
               }
             </button>
           </div>
         </div>
 
         <!-- Step-by-step instructions -->
-        <div class="space-y-3 text-xs text-slate-300">
-          <span class="font-semibold text-white block">Option B: In-Game Settings Menu</span>
+        <div class="space-y-3 text-xs text-slate-300 p-4 rounded-2xl glass-panel">
+          <span class="font-semibold text-white block">{{ 'setup.optionB' | translate }}</span>
           <ol class="list-decimal list-inside space-y-1.5 leading-relaxed text-slate-300">
-            <li>Launch <strong>Luanti</strong> (or Minetest).</li>
-            <li>Click <strong>Settings</strong> <svg lucideChevronRight class="w-3.5 h-3.5 inline text-slate-500 mx-0.5"></svg> <strong>All Settings</strong>.</li>
-            <li>In the search box, type <code class="text-sky-300 bg-slate-950 px-1 py-0.5 rounded">contentdb_url</code>.</li>
-            <li>Paste <code class="text-sky-300 bg-slate-950 px-1 py-0.5 rounded font-mono">{{ settingsService.contentDbUrl() }}</code> into the field.</li>
-            <li>Click <strong>Save</strong> and navigate to the <strong>Content</strong> tab.</li>
+            <li>{{ 'setup.step1' | translate }}</li>
+            <li>{{ 'setup.step2' | translate }}</li>
+            <li>{{ 'setup.step3' | translate }}</li>
+            <li>{{ 'setup.step4' | translate }} (<code class="text-sky-300 bg-slate-950/90 px-1.5 py-0.5 rounded font-mono border border-white/10">{{ settingsService.contentDbUrl() }}</code>)</li>
+            <li>{{ 'setup.step5' | translate }}</li>
           </ol>
         </div>
 
         <!-- High-Availability Fallback Info -->
-        <div class="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-start gap-2.5 text-xs text-slate-400">
+        <div class="p-3.5 rounded-2xl glass-panel flex items-start gap-2.5 text-xs text-slate-300">
           <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5"></svg>
-          <span>
-            <strong>Failover Enabled:</strong> LuantiHub automatically bridges requests to official ContentDB and the <code>contentdb.milcho.org</code> mirror, ensuring your in-game content browser never goes down.
-          </span>
+          <span>{{ 'setup.failoverNote' | translate }}</span>
         </div>
 
         <!-- Close Button -->
         <div class="flex justify-end pt-2">
-          <button 
+          <button
+            type="button"
             (click)="packageService.closeSetupModal()"
-            class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition">
-            Got it, thanks!
+            class="px-5 py-2.5 rounded-xl glass-btn text-white font-bold text-xs transition cursor-pointer">
+            {{ 'setup.doneBtn' | translate }}
           </button>
         </div>
 

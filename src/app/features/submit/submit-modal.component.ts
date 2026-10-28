@@ -1,114 +1,300 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
-import { LucidePlus, LucideX } from '@lucide/angular';
+import { GitAuditReport } from '../../core/models/package.model';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import {
+  LucidePlus,
+  LucideX,
+  LucideCheck,
+  LucideCopy,
+  LucideShieldCheck,
+  LucideShieldAlert,
+  LucideTerminal,
+  LucideLoader2,
+  LucideTag
+} from '@lucide/angular';
 
 @Component({
   selector: 'app-submit-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule, LucidePlus, LucideX],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    CommonModule,
+    FormsModule,
+    TranslatePipe,
+    LucidePlus,
+    LucideX,
+    LucideCheck,
+    LucideCopy,
+    LucideShieldCheck,
+    LucideShieldAlert,
+    LucideTerminal,
+    LucideLoader2,
+    LucideTag
+  ],
   template: `
-    <div 
+    <div
       (click)="packageService.closeSubmitModal()"
       role="dialog"
       aria-modal="true"
       aria-labelledby="submit-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
-      
-      <div 
+      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
+
+      <div
         (click)="$event.stopPropagation()"
-        class="w-full max-w-xl bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-6 animate-in zoom-in-95 duration-200">
-        
+        class="w-full max-w-2xl max-h-[92vh] overflow-y-auto glass-modal rounded-3xl p-5 sm:p-7 space-y-5 animate-in zoom-in-95 duration-200 my-auto">
+
         <!-- Header -->
-        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+        <div class="flex items-center justify-between border-b border-white/10 pb-4">
           <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+            <div class="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-400/30 flex items-center justify-center text-amber-400">
               <svg lucidePlus class="w-5 h-5"></svg>
             </div>
             <div>
               <h2 id="submit-modal-title" class="text-lg font-bold text-white">
-                Submit Git Package
+                {{ 'submit.title' | translate }}
               </h2>
               <p class="text-xs text-slate-400">
-                Index your mod, game, or texture pack directly from GitHub, Codeberg, or GitLab.
+                {{ 'submit.subtitle' | translate }}
               </p>
             </div>
           </div>
 
-          <button 
+          <button
+            type="button"
             (click)="packageService.closeSubmitModal()"
             aria-label="Close submit dialog"
-            class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
+            class="p-1.5 rounded-lg glass-icon-btn text-slate-400 hover:text-white transition cursor-pointer">
             <svg lucideX class="w-5 h-5"></svg>
           </button>
         </div>
 
         <!-- Form Body -->
-        <form (ngSubmit)="onSubmit()" class="space-y-4">
-          
-          <!-- Git URL Input -->
+        <form (ngSubmit)="onPublish()" class="space-y-4">
+
+          <!-- Git URL Input + Run Audit Button -->
           <div class="space-y-1.5">
             <label for="git-url" class="block text-xs font-semibold text-slate-300">
-              Git Repository HTTPS URL <span class="text-rose-400">*</span>
+              {{ 'submit.repoUrlLabel' | translate }} <span class="text-rose-400">*</span>
             </label>
-            <input 
-              id="git-url"
-              type="url"
-              [(ngModel)]="repoUrl"
-              name="repoUrl"
-              required
-              placeholder="https://github.com/your-username/my_awesome_mod"
-              class="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500 font-mono transition"
-            />
-            <span class="text-[11px] text-slate-500 block">
-              Must contain a valid <code class="text-slate-400">mod.conf</code> or <code class="text-slate-400">game.conf</code> and an open-source license.
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input
+                id="git-url"
+                type="url"
+                [(ngModel)]="repoUrl"
+                (ngModelChange)="onUrlChange()"
+                name="repoUrl"
+                required
+                [placeholder]="'submit.repoUrlPlaceholder' | translate"
+                class="flex-1 glass-input rounded-xl px-4 py-2.5 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none font-mono transition"
+              />
+              <button
+                type="button"
+                (click)="onRunAudit()"
+                [disabled]="isAuditing() || !repoUrl.trim()"
+                class="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-black text-xs flex items-center justify-center gap-2 transition whitespace-nowrap shadow cursor-pointer">
+                @if (isAuditing()) {
+                  <svg lucideLoader2 class="w-4 h-4 text-slate-950 animate-spin"></svg>
+                  <span>{{ 'submit.runningAudit' | translate }}</span>
+                } @else {
+                  <svg lucideTerminal class="w-4 h-4"></svg>
+                  <span>{{ 'submit.runAuditBtn' | translate }}</span>
+                }
+              </button>
+            </div>
+            <span class="text-[11px] text-slate-400 block">
+              {{ 'submit.repoUrlHint' | translate }}
             </span>
           </div>
 
+          <!-- Pre-Flight Audit & Luacheck Static Analysis Report -->
+          @if (auditReport(); as report) {
+            <div class="p-4 rounded-2xl glass-panel space-y-3 text-xs">
+              <div class="flex items-center justify-between flex-wrap gap-2 border-b border-white/10 pb-2.5">
+                <div class="flex items-center gap-2">
+                  @if (report.valid) {
+                    <svg lucideShieldCheck class="w-4 h-4 text-emerald-400"></svg>
+                    <span class="font-bold text-emerald-400">{{ 'submit.auditPassed' | translate }}</span>
+                  } @else {
+                    <svg lucideShieldAlert class="w-4 h-4 text-rose-400"></svg>
+                    <span class="font-bold text-rose-400">{{ 'submit.auditFailed' | translate }}</span>
+                  }
+                </div>
+
+                <!-- Summary Pills -->
+                <div class="flex items-center gap-1.5 flex-wrap text-[10px] font-bold">
+                  <span
+                    [class]="report.configFound ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
+                    class="px-2 py-0.5 rounded border">
+                    {{ report.configFound || 'Missing *.conf' }}
+                  </span>
+                  <span
+                    [class]="report.licenseValid ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
+                    class="px-2 py-0.5 rounded border">
+                    SPDX License
+                  </span>
+                  <span
+                    [class]="report.luacheckPassed ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
+                    class="px-2 py-0.5 rounded border">
+                    Luacheck
+                  </span>
+                </div>
+              </div>
+
+              <!-- Detected Metadata Preview -->
+              @if (report.metadata; as meta) {
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 rounded-xl bg-slate-950/70 border border-white/10 text-[11px]">
+                  <div>
+                    <span class="text-slate-500 block text-[10px]">ID</span>
+                    <code class="text-sky-300 font-mono font-bold">{{ meta.author }}/{{ meta.name }}</code>
+                  </div>
+                  <div>
+                    <span class="text-slate-500 block text-[10px]">Title</span>
+                    <span class="text-white font-semibold truncate block">{{ meta.title }}</span>
+                  </div>
+                  <div>
+                    <span class="text-slate-500 block text-[10px]">Type</span>
+                    <span class="text-emerald-400 font-bold uppercase">{{ meta.type }}</span>
+                  </div>
+                  <div>
+                    <span class="text-slate-500 block text-[10px]">License</span>
+                    <span class="text-slate-300 font-mono">{{ meta.license }}</span>
+                  </div>
+                </div>
+              }
+
+              <!-- Diagnostics List -->
+              <div class="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                @for (diag of report.diagnostics; track diag.code + (diag.line || 0)) {
+                  <div
+                    [class]="diag.severity === 'error' ? 'bg-rose-950/35 border-rose-800/80' : diag.severity === 'warning' ? 'bg-amber-950/30 border-amber-800/70' : 'bg-emerald-950/25 border-emerald-800/60'"
+                    class="p-3 rounded-xl border space-y-2">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span
+                          [class]="diag.severity === 'error' ? 'bg-rose-600 text-white' : diag.severity === 'warning' ? 'bg-amber-500 text-slate-950' : 'bg-emerald-600 text-white'"
+                          class="px-1.5 py-0.5 rounded text-[10px] font-black font-mono uppercase">
+                          {{ diag.code }}
+                        </span>
+                        <span class="font-bold text-white">{{ diag.title }}</span>
+                      </div>
+                      <code class="text-[10px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800">
+                        {{ diag.file }}{{ diag.line ? ':' + diag.line : '' }}
+                      </code>
+                    </div>
+
+                    <p class="text-slate-300 leading-relaxed text-[11px]">{{ diag.message }}</p>
+
+                    @if (diag.howToFix) {
+                      <div class="p-2.5 rounded-lg bg-slate-950/80 border border-white/10 space-y-1.5">
+                        <div class="flex items-center justify-between">
+                          <span class="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                            {{ 'submit.howToFix' | translate }}
+                          </span>
+                          @if (diag.snippet) {
+                            <button
+                              type="button"
+                              (click)="copySnippet(diag.snippet, diag.code)"
+                              class="text-[10px] font-semibold text-sky-400 hover:text-white flex items-center gap-1 transition cursor-pointer">
+                              @if (copiedCode() === diag.code) {
+                                <svg lucideCheck class="w-3 h-3 text-emerald-400"></svg>
+                                <span class="text-emerald-400">{{ 'common.copiedToClipboard' | translate }}</span>
+                              } @else {
+                                <svg lucideCopy class="w-3 h-3"></svg>
+                                <span>{{ 'submit.copySnippet' | translate }}</span>
+                              }
+                            </button>
+                          }
+                        </div>
+                        <p class="text-[11px] text-slate-300">{{ diag.howToFix }}</p>
+                        @if (diag.snippet) {
+                          <pre class="p-2 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto select-all">{{ diag.snippet }}</pre>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          <!-- Custom Git Package Tags Selector (Optional, up to 5) -->
+          <div class="p-4 rounded-2xl glass-panel space-y-2.5 text-xs">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5 font-bold text-sky-400 uppercase tracking-wider text-[10px]">
+                <svg lucideTag class="w-3.5 h-3.5"></svg>
+                <span>Package Tags (Optional — {{ selectedTags().length }}/5)</span>
+              </div>
+              @if (selectedTags().length > 0) {
+                <button
+                  type="button"
+                  (click)="selectedTags.set([])"
+                  class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
+                  Clear tags
+                </button>
+              }
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Select up to 5 ContentDB-compatible tags (or define <code class="text-sky-300 font-mono">tags = ...</code> in your <code class="text-sky-300 font-mono">mod.conf</code>).
+            </p>
+            <div class="flex items-center gap-1.5 flex-wrap max-h-32 overflow-y-auto pr-1 pt-0.5">
+              @for (tag of packageService.availableTags(); track tag.name) {
+                <button
+                  type="button"
+                  (click)="toggleTag(tag.name)"
+                  [class]="isTagSelected(tag.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/50 shadow-sm' : 'glass-pill text-slate-300 hover:text-white'"
+                  class="px-2.5 py-1 rounded-full border text-[11px] font-medium transition whitespace-nowrap cursor-pointer">
+                  #{{ tag.title }}
+                </button>
+              }
+            </div>
+          </div>
+
           <!-- Legal & Compliance Checkboxes -->
-          <div class="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-3 text-xs">
+          <div class="p-4 rounded-2xl glass-panel space-y-3 text-xs">
             <h3 class="font-bold text-sky-400 uppercase tracking-wider text-[10px]">
-              Legal Warranties &amp; Safe Harbor Compliance
+              {{ 'submit.warrantiesTitle' | translate }}
             </h3>
 
             <label class="flex items-start gap-2.5 cursor-pointer text-slate-300">
-              <input 
-                type="checkbox" 
-                [(ngModel)]="warrantyOwnership" 
+              <input
+                type="checkbox"
+                [(ngModel)]="warrantyOwnership"
                 name="warrantyOwnership"
                 required
-                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500" 
+                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 cursor-pointer"
               />
-              <span>I confirm I am the author or have full rights to distribute this repository.</span>
+              <span>{{ 'submit.warrantyOwnership' | translate }}</span>
             </label>
 
             <label class="flex items-start gap-2.5 cursor-pointer text-slate-300">
-              <input 
-                type="checkbox" 
-                [(ngModel)]="warrantyAssets" 
+              <input
+                type="checkbox"
+                [(ngModel)]="warrantyAssets"
                 name="warrantyAssets"
                 required
-                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500" 
+                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 cursor-pointer"
               />
-              <span>I certify all textures, audio, and meshes are Free/Open Source and contain no ripped Minecraft or copyrighted assets.</span>
+              <span>{{ 'submit.warrantyLicense' | translate }}</span>
             </label>
 
             <label class="flex items-start gap-2.5 cursor-pointer text-slate-300">
-              <input 
-                type="checkbox" 
-                [(ngModel)]="warrantyTakedown" 
+              <input
+                type="checkbox"
+                [(ngModel)]="warrantyTakedown"
                 name="warrantyTakedown"
                 required
-                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500" 
+                class="mt-0.5 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500 cursor-pointer"
               />
-              <span>I understand that any DMCA copyright violation will result in immediate delisting.</span>
+              <span>{{ 'submit.warrantyTakedown' | translate }}</span>
             </label>
           </div>
 
           <!-- Status / Error Message -->
           @if (statusMessage()) {
-            <div 
+            <div
               [class]="statusSuccess() ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-rose-950/60 text-rose-400 border-rose-800'"
               class="p-3 rounded-xl border text-xs leading-relaxed">
               {{ statusMessage() }}
@@ -117,22 +303,22 @@ import { LucidePlus, LucideX } from '@lucide/angular';
 
           <!-- Submit Buttons -->
           <div class="flex items-center justify-end gap-3 pt-2">
-            <button 
-              type="button" 
+            <button
+              type="button"
               (click)="packageService.closeSubmitModal()"
-              class="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-semibold transition">
-              Cancel
+              class="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-semibold transition cursor-pointer">
+              {{ 'submit.cancel' | translate }}
             </button>
 
-            <button 
+            <button
               type="submit"
-              [disabled]="isSubmitting() || !isFormValid"
-              class="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs shadow-lg shadow-sky-600/30 flex items-center gap-2 transition">
+              [disabled]="isSubmitting() || !canPublish()"
+              class="px-5 py-2.5 rounded-xl glass-btn-sky disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs flex items-center gap-2 transition cursor-pointer">
               @if (isSubmitting()) {
-                <div class="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                <span>Auditing &amp; Ingesting...</span>
+                <svg lucideLoader2 class="w-4 h-4 text-white animate-spin"></svg>
+                <span>{{ 'submit.submitting' | translate }}</span>
               } @else {
-                <span>Publish to LuantiHub</span>
+                <span>{{ 'submit.submitBtn' | translate }}</span>
               }
             </button>
           </div>
@@ -152,36 +338,101 @@ export class SubmitModalComponent {
   warrantyAssets = false;
   warrantyTakedown = false;
 
+  readonly isAuditing = signal(false);
   readonly isSubmitting = signal(false);
+  readonly auditReport = signal<GitAuditReport | null>(null);
   readonly statusMessage = signal<string | null>(null);
   readonly statusSuccess = signal(false);
+  readonly copiedCode = signal<string | null>(null);
+  readonly selectedTags = signal<string[]>([]);
 
-  get isFormValid(): boolean {
-    return Boolean(this.repoUrl && this.warrantyOwnership && this.warrantyAssets && this.warrantyTakedown);
+  isTagSelected(tagName: string): boolean {
+    return this.selectedTags().includes(tagName.toLowerCase());
   }
 
-  async onSubmit(): Promise<void> {
-    if (!this.isFormValid) return;
+  toggleTag(tagName: string): void {
+    const normalized = tagName.toLowerCase();
+    const current = this.selectedTags();
+    if (current.includes(normalized)) {
+      this.selectedTags.set(current.filter(t => t !== normalized));
+    } else if (current.length < 5) {
+      this.selectedTags.set([...current, normalized]);
+    }
+  }
+
+  onUrlChange(): void {
+    this.auditReport.set(null);
+    this.statusMessage.set(null);
+  }
+
+  canPublish(): boolean {
+    return Boolean(
+      this.repoUrl.trim() &&
+      this.warrantyOwnership &&
+      this.warrantyAssets &&
+      this.warrantyTakedown &&
+      (!this.auditReport() || this.auditReport()?.valid)
+    );
+  }
+
+  copySnippet(snippet: string, code: string): void {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(snippet);
+      this.copiedCode.set(code);
+      setTimeout(() => this.copiedCode.set(null), 2000);
+    }
+  }
+
+  async onRunAudit(): Promise<void> {
+    if (!this.repoUrl.trim()) return;
+    this.isAuditing.set(true);
+    this.statusMessage.set(null);
+
+    const res = await this.packageService.auditOrSubmitGitPackage({
+      repoUrl: this.repoUrl.trim(),
+      warrantiesAccepted: true,
+      dryRun: true,
+      tags: this.selectedTags()
+    });
+
+    this.isAuditing.set(false);
+    if (res.audit) {
+      this.auditReport.set(res.audit);
+    }
+    if (!res.success && !res.audit) {
+      this.statusSuccess.set(false);
+      this.statusMessage.set(res.message || 'Could not reach repository.');
+    }
+  }
+
+  async onPublish(): Promise<void> {
+    if (!this.canPublish()) return;
 
     this.isSubmitting.set(true);
     this.statusMessage.set(null);
 
-    const res = await this.packageService.submitGitPackage({
+    const res = await this.packageService.auditOrSubmitGitPackage({
       repoUrl: this.repoUrl.trim(),
-      warrantiesAccepted: true
+      warrantiesAccepted: true,
+      dryRun: false,
+      tags: this.selectedTags()
     });
 
     this.isSubmitting.set(false);
 
+    if (res.audit) {
+      this.auditReport.set(res.audit);
+    }
+
     if (res.success) {
       this.statusSuccess.set(true);
-      this.statusMessage.set('Package successfully audited and indexed! It is now live in the catalog and available in-game.');
+      this.statusMessage.set(res.message || 'Package successfully audited and indexed! It is now live in the catalog.');
       setTimeout(() => {
         this.packageService.closeSubmitModal();
       }, 1500);
     } else {
       this.statusSuccess.set(false);
-      this.statusMessage.set(res.message || 'Failed to validate repository.');
+      this.statusMessage.set(res.message || 'Pre-flight audit found blocking issues. Please fix the errors above and try again.');
     }
   }
 }

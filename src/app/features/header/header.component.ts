@@ -1,7 +1,15 @@
-import { Component, inject, signal } from '@angular/core';
+import {
+  Component,
+  ChangeDetectionStrategy,
+  inject,
+  signal,
+  ElementRef,
+  HostListener
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
+import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
 import { TranslationService } from '../../core/i18n/translation.service';
@@ -19,18 +27,23 @@ import {
   LucideChevronDown,
   LucideRefreshCw,
   LucideTrash,
-  LucideLayers,
+  LucideHouse,
   LucideGamepad2,
   LucideCpu,
   LucidePalette,
   LucideCheck,
   LucideGitBranch,
-  LucideLanguages
+  LucideLanguages,
+  LucideHeart,
+  LucideShieldAlert,
+  LucideMenu
 } from '@lucide/angular';
 
 @Component({
   selector: 'app-header',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  styles: [':host { display: block; position: sticky; top: 0; z-index: 40; width: 100%; }'],
   imports: [
     CommonModule,
     FormsModule,
@@ -46,165 +59,200 @@ import {
     LucideChevronDown,
     LucideRefreshCw,
     LucideTrash,
-    LucideLayers,
+    LucideHouse,
     LucideGamepad2,
     LucideCpu,
     LucidePalette,
     LucideCheck,
     LucideGitBranch,
-    LucideLanguages
+    LucideLanguages,
+    LucideHeart,
+    LucideShieldAlert,
+    LucideMenu
   ],
   template: `
-    <header class="sticky top-0 z-40 w-full bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 transition-colors duration-200">
-      <div class="w-full px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3 lg:gap-6">
+    <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header transition-colors duration-200">
+      <div class="w-full px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 lg:gap-5">
 
-        <!-- Left: Logo & Category Tabs (Aligned to Left Corner) -->
-        <div class="flex items-center gap-3 xl:gap-5 flex-shrink-0 justify-start">
-          <a href="#" class="flex items-center gap-2.5 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0">
-            <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-8 h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
-            <div class="flex items-center gap-2">
-              <span class="text-base sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
-                Luanti<span class="text-sky-400">Hub</span>
-              </span>
-            </div>
-          </a>
+        <!-- Left: Logo & Category Tabs -->
+        <div class="flex items-center gap-2.5 xl:gap-4 flex-shrink-0 justify-start">
+          <button
+            type="button"
+            (click)="onHomeClick()"
+            class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer">
+            <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
+            <span class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
+              Luanti<span class="text-sky-400">Hub</span>
+            </span>
+          </button>
 
-          <!-- Category Nav Tabs (Visible on large screens) -->
+          <!-- Category Nav Tabs (Desktop xl+) -->
           <nav class="hidden xl:flex items-center gap-1 text-xs font-semibold flex-shrink-0" aria-label="Category navigation">
             <button
-              (click)="setTypeFilter('all')"
+              type="button"
+              (click)="selectNavTab('all')"
               [appTooltip]="'header.filterAll' | translate"
-              [class]="selectedType() === 'all' && selectedSource() === 'all' ? 'text-sky-400 bg-sky-950/60 border-sky-800/80' : 'text-slate-400 hover:text-white border-transparent'"
-              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
-              <svg lucideLayers class="w-3.5 h-3.5"></svg>
+              [class]="!packageService.hasActiveFilters() ? 'text-sky-300 bg-sky-500/20 border-sky-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              <svg lucideHouse class="w-3.5 h-3.5"></svg>
               <span>{{ 'header.filterAll' | translate }}</span>
             </button>
 
             <button
-              (click)="setTypeFilter('game')"
+              type="button"
+              (click)="selectNavTab('game')"
               [appTooltip]="'header.filterGames' | translate"
-              [class]="selectedType() === 'game' ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/80' : 'text-slate-400 hover:text-white border-transparent'"
-              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
+              [class]="selectedType() === 'game' ? 'text-emerald-300 bg-emerald-500/20 border-emerald-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
               <svg lucideGamepad2 class="w-3.5 h-3.5"></svg>
               <span>{{ 'header.filterGames' | translate }}</span>
             </button>
 
             <button
-              (click)="setTypeFilter('mod')"
+              type="button"
+              (click)="selectNavTab('mod')"
               [appTooltip]="'header.filterMods' | translate"
-              [class]="selectedType() === 'mod' ? 'text-sky-400 bg-sky-950/60 border-sky-800/80' : 'text-slate-400 hover:text-white border-transparent'"
-              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
+              [class]="selectedType() === 'mod' ? 'text-sky-300 bg-sky-500/20 border-sky-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
               <svg lucideCpu class="w-3.5 h-3.5"></svg>
               <span>{{ 'header.filterMods' | translate }}</span>
             </button>
 
             <button
-              (click)="setTypeFilter('txp')"
+              type="button"
+              (click)="selectNavTab('txp')"
               [appTooltip]="'header.filterTxp' | translate"
-              [class]="selectedType() === 'txp' ? 'text-purple-400 bg-purple-950/60 border-purple-800/80' : 'text-slate-400 hover:text-white border-transparent'"
-              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
+              [class]="selectedType() === 'txp' ? 'text-purple-300 bg-purple-500/20 border-purple-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
               <svg lucidePalette class="w-3.5 h-3.5"></svg>
               <span>{{ 'header.filterTxp' | translate }}</span>
             </button>
 
             <button
-              (click)="setSourceFilter('git')"
+              type="button"
+              (click)="selectNavTab('git')"
               [appTooltip]="'header.filterGit' | translate"
-              [class]="selectedSource() === 'git' ? 'text-amber-400 bg-amber-950/60 border-amber-800/80' : 'text-slate-400 hover:text-white border-transparent'"
-              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
+              [class]="selectedSource() === 'git' ? 'text-amber-300 bg-amber-500/20 border-amber-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
               <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
               <span>{{ 'header.filterGit' | translate }}</span>
+            </button>
+
+            <button
+              type="button"
+              (click)="selectNavTab('favorites')"
+              [appTooltip]="'header.favoritesFilter' | translate"
+              [class]="packageService.showFavoritesOnly() ? 'text-rose-300 bg-rose-500/20 border-rose-400/40 shadow-sm' : 'text-slate-400 hover:text-white hover:bg-white/5 border-transparent'"
+              class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              <svg
+                lucideHeart
+                class="w-3.5 h-3.5 text-rose-400"
+                [style.fill]="packageService.showFavoritesOnly() ? '#f43f5e' : 'none'"
+                [color]="'#fb7185'">
+              </svg>
+              <span>{{ 'header.favoritesFilter' | translate }}</span>
+              @if (settingsService.favorites().length > 0) {
+                <span class="px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-300 text-[10px] font-bold">
+                  {{ settingsService.favorites().length }}
+                </span>
+              }
             </button>
           </nav>
         </div>
 
-        <!-- Center: Expanded Wide Search Input -->
-        <div class="flex-1 max-w-2xl mx-2 sm:mx-6 relative min-w-[160px]">
+        <!-- Center: Elastic Debounced Search Input -->
+        <div class="flex-1 min-w-0 max-w-xl mx-1 sm:mx-3 relative">
           <div class="relative">
             <input
-              type="text"
-              [value]="searchQuery()"
+              type="search"
+              [value]="searchInput()"
               (input)="onSearchInput($event)"
               [placeholder]="'header.searchPlaceholder' | translate"
               [attr.aria-label]="'header.searchPlaceholder' | translate"
               [appTooltip]="'header.searchTooltip' | translate"
               appTooltipShortcut="/"
               id="main-search-input"
-              class="w-full bg-slate-900/90 border border-slate-700/80 text-white placeholder-slate-400 text-xs sm:text-sm rounded-xl pl-9 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500 transition shadow-inner"
+              class="w-full glass-input text-white placeholder-slate-400 text-xs sm:text-sm rounded-xl pl-8 sm:pl-9 pr-7 sm:pr-8 py-1.5 sm:py-2 focus:outline-none transition"
             />
-            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
-              <svg lucideSearch class="w-4 h-4"></svg>
+            <div class="absolute inset-y-0 left-0 pl-2.5 sm:pl-3 flex items-center pointer-events-none text-slate-400">
+              <svg lucideSearch class="w-3.5 h-3.5 sm:w-4 sm:h-4"></svg>
             </div>
-            @if (searchQuery()) {
+            @if (searchInput()) {
               <button
+                type="button"
                 (click)="clearSearch()"
-                class="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-white"
+                class="absolute inset-y-0 right-0 pr-2.5 flex items-center text-slate-400 hover:text-white cursor-pointer"
                 aria-label="Clear search">
-                <svg lucideX class="w-4 h-4"></svg>
+                <svg lucideX class="w-3.5 h-3.5 sm:w-4 sm:h-4"></svg>
               </button>
             }
           </div>
         </div>
 
-        <!-- Right: Actions, Language & Prominent Install Button (Aligned to Right Corner) -->
-        <div class="flex items-center gap-2 sm:gap-2.5 flex-shrink-0 justify-end">
+        <!-- Right: Actions, Language, Profile & Mobile Hamburger Toggle -->
+        <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 justify-end">
 
-          <!-- Prominent "Install App" Button (Always Single Line) -->
+          <!-- Prominent "Install App" Button (md+) -->
           <button
+            type="button"
             (click)="pwaService.installPwa()"
             [appTooltip]="'header.installAppTooltip' | translate"
-            [class]="pwaService.canInstall() ? 'bg-sky-600 hover:bg-sky-500 text-white shadow-lg shadow-sky-600/30 animate-pulse' : 'bg-slate-800/90 hover:bg-slate-700 text-sky-400 border border-slate-700/80'"
-            class="h-9 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
+            [class]="pwaService.canInstall() ? 'glass-btn-sky text-white animate-pulse' : 'glass-btn text-sky-400'"
+            class="hidden md:flex h-9 px-3 rounded-lg text-xs font-bold items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
             <svg lucideDownload class="w-4 h-4 flex-shrink-0"></svg>
             <span class="whitespace-nowrap">{{ 'header.installApp' | translate }}</span>
           </button>
 
-          <!-- In-Game Setup Button -->
+          <!-- In-Game Setup Button (lg+) -->
           <button
+            type="button"
             (click)="packageService.openSetupModal()"
             [appTooltip]="'header.inGameSetupTooltip' | translate"
-            class="hidden md:flex h-9 px-3 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
+            class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-slate-200 hover:text-white text-xs font-medium items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
             <svg lucideTerminal class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
             <span class="whitespace-nowrap">{{ 'header.inGameSetup' | translate }}</span>
           </button>
 
-          <!-- Submit Mod Button -->
+          <!-- Submit Mod Button (lg+) -->
           <button
+            type="button"
             (click)="packageService.openSubmitModal()"
             [appTooltip]="'header.submitRepoTooltip' | translate"
-            class="hidden lg:flex h-9 px-3 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
+            class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
             <svg lucidePlus class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
             <span class="whitespace-nowrap">{{ 'header.submitRepo' | translate }}</span>
           </button>
 
-          <!-- Language Selector Dropdown -->
-          <div class="relative flex-shrink-0">
+          <!-- Language Selector Dropdown (md+) -->
+          <div #langMenuContainer class="hidden md:block relative flex-shrink-0">
             <button
-              (click)="toggleLanguageMenu()"
+              type="button"
+              (click)="toggleLanguageMenu($event)"
               [appTooltip]="'header.languageTooltip' | translate"
               aria-label="Change language"
-              class="h-9 px-2.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
+              [attr.aria-expanded]="isLanguageMenuOpen()"
+              class="h-9 px-2.5 rounded-lg glass-btn text-slate-200 hover:text-white text-xs font-medium flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
               <svg lucideLanguages class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
               <span class="text-[11px] font-bold uppercase tracking-wider font-mono">{{ currentLocaleMeta().id }}</span>
-              <svg lucideChevronDown class="w-3.5 h-3.5 text-slate-400"></svg>
+              <svg lucideChevronDown [class]="isLanguageMenuOpen() ? 'w-3.5 h-3.5 text-slate-400 transition-transform rotate-180' : 'w-3.5 h-3.5 text-slate-400 transition-transform'"></svg>
             </button>
 
-            <!-- Language Menu Dropdown -->
             @if (isLanguageMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-44 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
+                class="absolute right-0 mt-2 w-44 rounded-xl glass-dropdown py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
                 @for (loc of supportedLocales; track loc.id) {
                   <button
+                    type="button"
                     (click)="selectLanguage(loc.id)"
-                    [class.bg-sky-600]="loc.id === currentLocale()"
+                    [class.bg-sky-500/25]="loc.id === currentLocale()"
                     [class.text-white]="loc.id === currentLocale()"
                     [class.text-slate-300]="loc.id !== currentLocale()"
-                    class="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium hover:bg-slate-800 transition text-left">
+                    class="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium hover:bg-white/10 transition text-left cursor-pointer">
                     <span class="text-xs font-mono font-bold text-sky-400 w-5 uppercase">{{ loc.id }}</span>
                     <span class="flex-1">{{ loc.nativeLabel }}</span>
                     @if (loc.id === currentLocale()) {
-                      <svg lucideCheck class="w-3.5 h-3.5 text-white"></svg>
+                      <svg lucideCheck class="w-3.5 h-3.5 text-sky-400"></svg>
                     }
                   </button>
                 }
@@ -212,72 +260,54 @@ import {
             }
           </div>
 
-          <!-- PWA & Cache Settings Menu Toggle -->
-          <div class="relative flex-shrink-0">
+          <!-- PWA & Cache Settings Menu Toggle (md+) -->
+          <div #settingsMenuContainer class="hidden md:block relative flex-shrink-0">
             <button
-              (click)="toggleSettingsMenu()"
+              type="button"
+              (click)="toggleSettingsMenu($event)"
               [appTooltip]="'pwa.clearCacheTitle' | translate"
               aria-label="PWA and Cache Settings"
-              class="h-9 w-9 flex items-center justify-center rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700/80 transition flex-shrink-0">
+              [attr.aria-expanded]="isSettingsMenuOpen()"
+              class="h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-300 hover:text-white transition flex-shrink-0 cursor-pointer">
               <svg lucideSettings class="w-4 h-4"></svg>
             </button>
 
-            <!-- Click-outside backdrop -->
-            @if (isSettingsMenuOpen()) {
-              <div class="fixed inset-0 z-40" (click)="isSettingsMenuOpen.set(false)"></div>
-            }
-
-            <!-- Settings Menu Dropdown -->
             @if (isSettingsMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-72 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+                class="absolute right-0 mt-2 w-72 rounded-xl glass-dropdown p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
                 <button
+                  type="button"
                   (click)="onCheckUpdates($event)"
                   [disabled]="isCheckingUpdates()"
-                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition text-left">
+                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-50 transition text-left cursor-pointer">
                   <svg
                     lucideRefreshCw
-                    class="w-4 h-4 text-sky-400 flex-shrink-0"
-                    [class.animate-spin]="isCheckingUpdates()">
+                    [class]="isCheckingUpdates() ? 'w-4 h-4 text-sky-400 flex-shrink-0 animate-spin' : 'w-4 h-4 text-sky-400 flex-shrink-0'">
                   </svg>
                   <span>{{ 'header.checkForUpdates' | translate }}</span>
                 </button>
 
                 @if (updateFeedback()) {
-                  <div class="px-3 py-2 rounded-lg text-[11px] font-medium transition flex items-center gap-2 border"
-                    [class.bg-sky-950/70]="isCheckingUpdates()"
-                    [class.text-sky-300]="isCheckingUpdates()"
-                    [class.border-sky-800/80]="isCheckingUpdates()"
-                    [class.bg-emerald-950/70]="!isCheckingUpdates() && !pwaService.updateAvailable()"
-                    [class.text-emerald-300]="!isCheckingUpdates() && !pwaService.updateAvailable()"
-                    [class.border-emerald-800/80]="!isCheckingUpdates() && !pwaService.updateAvailable()"
-                    [class.bg-amber-950/70]="pwaService.updateAvailable()"
-                    [class.text-amber-300]="pwaService.updateAvailable()"
-                    [class.border-amber-800/80]="pwaService.updateAvailable()">
-                    @if (isCheckingUpdates()) {
-                      <svg lucideRefreshCw class="w-3.5 h-3.5 animate-spin flex-shrink-0 text-sky-400"></svg>
-                    } @else if (pwaService.updateAvailable()) {
-                      <svg lucideDownload class="w-3.5 h-3.5 flex-shrink-0 text-amber-400"></svg>
-                    } @else {
-                      <svg lucideCheck class="w-3.5 h-3.5 flex-shrink-0 text-emerald-400"></svg>
-                    }
+                  <div class="px-3 py-2 rounded-lg text-[11px] font-medium transition flex items-center gap-2 border bg-slate-950/80 border-white/10 text-slate-300">
                     <span class="flex-1">{{ updateFeedback() }}</span>
                     @if (pwaService.updateAvailable()) {
-                      <button 
+                      <button
+                        type="button"
                         (click)="pwaService.activateUpdate()"
-                        class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] whitespace-nowrap">
-                        Reload
+                        class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] whitespace-nowrap cursor-pointer">
+                        {{ 'pwa.updateReload' | translate }}
                       </button>
                     }
                   </div>
                 }
 
-                <div class="h-px bg-slate-800 my-1"></div>
+                <div class="h-px bg-white/10 my-1"></div>
 
                 <button
+                  type="button"
                   (click)="onClearCache()"
-                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-950/40 hover:text-rose-200 transition text-left">
+                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200 transition text-left cursor-pointer">
                   <svg lucideTrash class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
                   <span>{{ 'header.clearCache' | translate }}</span>
                 </button>
@@ -288,35 +318,202 @@ import {
           <!-- User Authentication Section -->
           @if (authService.currentUser(); as user) {
             <button
+              type="button"
               (click)="authService.openProfileDrawer()"
-              class="h-9 flex items-center gap-2 p-1 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 transition flex-shrink-0">
+              class="relative h-9 flex items-center gap-2 p-1 rounded-xl glass-btn transition flex-shrink-0 cursor-pointer">
               <img [src]="user.avatar_url" [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
-              <span class="hidden lg:inline text-xs font-bold text-white pr-2 max-w-[90px] truncate">
+              <span class="hidden lg:inline text-xs font-bold text-white pr-2 max-w-[96px] truncate">
                 {{ user.display_name || user.username }}
               </span>
+              @if (authService.isAdmin()) {
+                <span class="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[9px] font-black uppercase mr-1">
+                  <svg lucideShieldAlert class="w-2.5 h-2.5"></svg>
+                  Admin
+                </span>
+              }
+              @if (authService.openReportsCount() > 0) {
+                <span class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-rose-600 text-white text-[10px] font-black flex items-center justify-center shadow">
+                  {{ authService.openReportsCount() }}
+                </span>
+              }
             </button>
           } @else {
             <button
+              type="button"
               (click)="authService.openAuthModal()"
-              class="h-9 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
+              [attr.aria-label]="'header.signIn' | translate"
+              class="h-9 px-2.5 sm:px-3 rounded-lg glass-btn text-white font-semibold text-xs flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
               <svg lucideUser class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
-              <span class="whitespace-nowrap">Sign In</span>
+              <span class="hidden sm:inline whitespace-nowrap">{{ 'header.signIn' | translate }}</span>
             </button>
           }
+
+          <!-- Hamburger Menu Button for Small / Tablet Screens (< lg) -->
+          <button
+            type="button"
+            (click)="toggleMobileMenu($event)"
+            [attr.aria-expanded]="isMobileMenuOpen()"
+            aria-label="Toggle navigation menu"
+            class="lg:hidden h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-200 hover:text-white transition flex-shrink-0 cursor-pointer">
+            @if (isMobileMenuOpen()) {
+              <svg lucideX class="w-5 h-5 text-sky-400"></svg>
+            } @else {
+              <svg lucideMenu class="w-5 h-5"></svg>
+            }
+          </button>
 
         </div>
 
       </div>
+
+      <!-- Mobile / Tablet Horizontally Scrollable Category Strip (< xl) -->
+      <div class="xl:hidden border-t border-white/5 bg-slate-950/80 px-3 sm:px-4 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
+        <button
+          type="button"
+          (click)="selectNavTab('all')"
+          [class]="!packageService.hasActiveFilters() ? 'text-sky-300 bg-sky-500/20 border-sky-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg lucideHouse class="w-3 h-3"></svg>
+          <span>{{ 'header.filterAll' | translate }}</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="selectNavTab('game')"
+          [class]="selectedType() === 'game' ? 'text-emerald-300 bg-emerald-500/20 border-emerald-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg lucideGamepad2 class="w-3 h-3"></svg>
+          <span>{{ 'header.filterGames' | translate }}</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="selectNavTab('mod')"
+          [class]="selectedType() === 'mod' ? 'text-sky-300 bg-sky-500/20 border-sky-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg lucideCpu class="w-3 h-3"></svg>
+          <span>{{ 'header.filterMods' | translate }}</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="selectNavTab('txp')"
+          [class]="selectedType() === 'txp' ? 'text-purple-300 bg-purple-500/20 border-purple-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg lucidePalette class="w-3 h-3"></svg>
+          <span>{{ 'header.filterTxp' | translate }}</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="selectNavTab('git')"
+          [class]="selectedSource() === 'git' ? 'text-amber-300 bg-amber-500/20 border-amber-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg lucideGitBranch class="w-3 h-3 text-amber-400"></svg>
+          <span>{{ 'header.filterGit' | translate }}</span>
+        </button>
+
+        <button
+          type="button"
+          (click)="selectNavTab('favorites')"
+          [class]="packageService.showFavoritesOnly() ? 'text-rose-300 bg-rose-500/20 border-rose-400/40' : 'text-slate-400 border-white/10'"
+          class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          <svg
+            lucideHeart
+            class="w-3 h-3 text-rose-400"
+            [style.fill]="packageService.showFavoritesOnly() ? '#f43f5e' : 'none'"
+            [color]="'#fb7185'">
+          </svg>
+          <span>{{ 'header.favoritesFilter' | translate }} ({{ settingsService.favorites().length }})</span>
+        </button>
+      </div>
+
+      <!-- Mobile / Tablet Hamburger Drawer Menu (< lg) -->
+      @if (isMobileMenuOpen()) {
+        <div
+          (click)="$event.stopPropagation()"
+          class="lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto">
+
+          <!-- Quick Actions Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <button
+              type="button"
+              (click)="packageService.openSubmitModal(); isMobileMenuOpen.set(false)"
+              class="px-3.5 py-2.5 rounded-xl glass-btn text-amber-300 font-semibold text-xs flex items-center gap-2 cursor-pointer">
+              <svg lucidePlus class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
+              <span>{{ 'header.submitRepo' | translate }}</span>
+            </button>
+
+            <button
+              type="button"
+              (click)="packageService.openSetupModal(); isMobileMenuOpen.set(false)"
+              class="px-3.5 py-2.5 rounded-xl glass-btn text-sky-300 font-semibold text-xs flex items-center gap-2 cursor-pointer">
+              <svg lucideTerminal class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+              <span>{{ 'header.inGameSetup' | translate }}</span>
+            </button>
+
+            <button
+              type="button"
+              (click)="pwaService.installPwa(); isMobileMenuOpen.set(false)"
+              class="px-3.5 py-2.5 rounded-xl glass-btn text-emerald-300 font-semibold text-xs flex items-center gap-2 cursor-pointer">
+              <svg lucideDownload class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+              <span>{{ 'header.installApp' | translate }}</span>
+            </button>
+          </div>
+
+          <!-- Language Selector Pills -->
+          <div class="space-y-1.5 pt-2 border-t border-white/10">
+            <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <svg lucideLanguages class="w-3.5 h-3.5 text-sky-400"></svg>
+              <span>{{ 'header.languageTooltip' | translate }}</span>
+            </span>
+            <div class="flex flex-wrap gap-1.5">
+              @for (loc of supportedLocales; track loc.id) {
+                <button
+                  type="button"
+                  (click)="selectLanguage(loc.id)"
+                  [class]="loc.id === currentLocale() ? 'bg-sky-500/25 text-white border-sky-400/50' : 'glass-pill text-slate-300 hover:text-white'"
+                  class="px-2.5 py-1 rounded-lg border text-xs font-medium flex items-center gap-1.5 cursor-pointer">
+                  <span class="font-mono font-bold text-sky-400 uppercase text-[11px]">{{ loc.id }}</span>
+                  <span>{{ loc.nativeLabel }}</span>
+                </button>
+              }
+            </div>
+          </div>
+
+          <!-- App Updates & Offline Cache Controls -->
+          <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10">
+            <button
+              type="button"
+              (click)="onCheckUpdates($event)"
+              [disabled]="isCheckingUpdates()"
+              class="px-3 py-1.5 rounded-lg glass-btn text-xs font-semibold text-slate-200 flex items-center gap-2 cursor-pointer">
+              <svg lucideRefreshCw [class]="isCheckingUpdates() ? 'w-3.5 h-3.5 text-sky-400 animate-spin' : 'w-3.5 h-3.5 text-sky-400'"></svg>
+              <span>{{ 'header.checkForUpdates' | translate }}</span>
+            </button>
+
+            <button
+              type="button"
+              (click)="onClearCache()"
+              class="px-3 py-1.5 rounded-lg glass-btn text-xs font-semibold text-rose-300 flex items-center gap-2 cursor-pointer">
+              <svg lucideTrash class="w-3.5 h-3.5 text-rose-400"></svg>
+              <span>{{ 'header.clearCache' | translate }}</span>
+            </button>
+          </div>
+        </div>
+      }
     </header>
   `
 })
 export class HeaderComponent {
   readonly packageService = inject(PackageService);
+  readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
   readonly translationService = inject(TranslationService);
+  private readonly hostEl = inject(ElementRef<HTMLElement>);
 
-  readonly searchQuery = this.packageService.searchQuery;
+  readonly searchInput = this.packageService.searchInput;
   readonly selectedType = this.packageService.selectedType;
   readonly selectedSource = this.packageService.selectedSource;
   readonly currentLocale = this.translationService.currentLocale;
@@ -324,26 +521,75 @@ export class HeaderComponent {
 
   readonly isLanguageMenuOpen = signal<boolean>(false);
   readonly isSettingsMenuOpen = signal<boolean>(false);
+  readonly isMobileMenuOpen = signal<boolean>(false);
   readonly isCheckingUpdates = signal<boolean>(false);
   readonly updateFeedback = signal<string | null>(null);
+
+  @HostListener('document:click', ['$event'])
+  onDocumentClick(event: MouseEvent): void {
+    if (!this.isLanguageMenuOpen() && !this.isSettingsMenuOpen() && !this.isMobileMenuOpen()) return;
+    const target = event.target as Node | null;
+    if (target && !this.hostEl.nativeElement.contains(target)) {
+      this.isLanguageMenuOpen.set(false);
+      this.isSettingsMenuOpen.set(false);
+      this.isMobileMenuOpen.set(false);
+    } else {
+      this.isLanguageMenuOpen.set(false);
+      this.isSettingsMenuOpen.set(false);
+    }
+  }
+
+  @HostListener('document:keydown.escape')
+  onEscapeKey(): void {
+    this.isLanguageMenuOpen.set(false);
+    this.isSettingsMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
+  }
 
   currentLocaleMeta() {
     return this.supportedLocales.find(l => l.id === this.currentLocale()) || this.supportedLocales[0];
   }
 
-  toggleLanguageMenu(): void {
-    this.isLanguageMenuOpen.update(v => !v);
+  onHomeClick(): void {
+    this.isMobileMenuOpen.set(false);
+    this.packageService.resetFilters(true);
+  }
+
+  selectNavTab(tab: 'all' | 'game' | 'mod' | 'txp' | 'git' | 'favorites'): void {
+    this.isMobileMenuOpen.set(false);
+    if (tab === 'all') {
+      this.onHomeClick();
+      return;
+    }
+    this.packageService.closeAllModals(false);
+    this.packageService.selectPrimaryNavTab(tab);
+  }
+
+  toggleMobileMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isMobileMenuOpen.update(v => !v);
+    this.isLanguageMenuOpen.set(false);
     this.isSettingsMenuOpen.set(false);
   }
 
-  toggleSettingsMenu(): void {
+  toggleLanguageMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isLanguageMenuOpen.update(v => !v);
+    this.isSettingsMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
+  }
+
+  toggleSettingsMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
     this.isSettingsMenuOpen.update(v => !v);
     this.isLanguageMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
   }
 
   selectLanguage(locale: LocaleId): void {
     this.translationService.setLocale(locale);
     this.isLanguageMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
   }
 
   onSearchInput(event: Event): void {
@@ -355,41 +601,28 @@ export class HeaderComponent {
     this.packageService.setSearchQuery('');
   }
 
-  setTypeFilter(type: string): void {
-    const current = this.selectedType();
-    this.packageService.setTypeFilter(current === type ? 'all' : type);
-  }
-
-  setSourceFilter(source: string): void {
-    const current = this.selectedSource();
-    this.packageService.setSourceFilter(current === source ? 'all' : source);
-  }
-
   async onCheckUpdates(event?: MouseEvent): Promise<void> {
     if (event) event.stopPropagation();
     this.isCheckingUpdates.set(true);
-    this.updateFeedback.set('Checking for updates...');
+    this.updateFeedback.set(this.translationService.translate('pwa.checking'));
 
-    // Guaranteed minimum feedback duration so the user sees the checking status
-    await new Promise(resolve => setTimeout(resolve, 800));
+    await new Promise(resolve => setTimeout(resolve, 600));
 
     const hasUpdate = await this.pwaService.checkForUpdate(true);
     this.isCheckingUpdates.set(false);
 
     if (hasUpdate) {
-      this.updateFeedback.set('New update available!');
+      this.updateFeedback.set(this.translationService.translate('pwa.updateAvailable'));
     } else {
-      this.updateFeedback.set('App is up to date (v1.0.0)');
+      this.updateFeedback.set(this.translationService.translate('pwa.upToDate'));
       setTimeout(() => {
-        if (this.updateFeedback()?.startsWith('App is up to date')) {
-          this.updateFeedback.set(null);
-        }
+        this.updateFeedback.set(null);
       }, 4000);
     }
   }
 
   onClearCache(): void {
-    if (confirm('Clear all cached files, service workers, and reload LuantiHub?')) {
+    if (confirm(this.translationService.translate('pwa.clearCacheDesc'))) {
       this.pwaService.forceClearCacheAndReload();
     }
     this.isSettingsMenuOpen.set(false);

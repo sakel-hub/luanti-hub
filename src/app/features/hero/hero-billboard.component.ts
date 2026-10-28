@@ -1,5 +1,6 @@
 import {
   Component,
+  ChangeDetectionStrategy,
   inject,
   signal,
   computed,
@@ -14,35 +15,36 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
-  LucidePlay,
-  LucidePause,
   LucideChevronLeft,
   LucideChevronRight,
   LucideInfo,
   LucideStar,
-  LucideGitBranch
+  LucideGitBranch,
+  LucideGlobe,
+  LucideDownload
 } from '@lucide/angular';
 
 @Component({
   selector: 'app-hero-billboard',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
     ImgFallbackDirective,
     TooltipDirective,
     TranslatePipe,
-    LucidePlay,
-    LucidePause,
     LucideChevronLeft,
     LucideChevronRight,
     LucideInfo,
     LucideStar,
-    LucideGitBranch
+    LucideGitBranch,
+    LucideGlobe,
+    LucideDownload
   ],
   template: `
     @if (showcase().length > 0 && currentPkg(); as pkg) {
       <div class="relative w-full max-w-7xl mx-auto sm:px-4 lg:px-8 mt-1 sm:mt-3">
-        <div 
+        <div
           (mouseenter)="onMouseEnter()"
           (mouseleave)="onMouseLeave()"
           (touchstart)="onTouchStart($event)"
@@ -53,176 +55,211 @@ import {
           role="region"
           aria-roledescription="carousel"
           [attr.aria-label]="pkg.title"
-          class="relative w-full h-[540px] sm:h-[620px] lg:h-[680px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
-          
-          <!-- Hardware-Accelerated Single Active Slide Background (Clear & Vivid) -->
-          <div class="absolute inset-0">
-            <img 
-              [src]="pkg.banner || pkg.thumbnail" 
-              [fallbackThumbnail]="pkg.thumbnail"
-              appImgFallback
-              [alt]="pkg.title"
-              fetchpriority="high"
-              decoding="async"
-              class="w-full h-full object-cover object-center filter brightness-100 transition-opacity duration-300"
-            />
-            <!-- High-Visibility Directional Gradients for Netflix Look -->
-            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/30 to-transparent w-full md:w-3/5"></div>
-            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/20 to-transparent"></div>
-          </div>
+          class="relative w-full aspect-video min-h-[360px] max-h-[720px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-white/10 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
 
-        <!-- Foreground Content -->
-        <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10 pointer-events-none">
-          <div class="max-w-2xl space-y-4 pointer-events-auto">
-            
-            <!-- Category & Source Badges -->
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wider bg-slate-800/90 text-slate-200 border border-slate-700/80 shadow">
-                @if (pkg.type === 'game') {
-                  {{ 'hero.categoryGame' | translate }}
-                } @else if (pkg.type === 'txp') {
-                  {{ 'hero.categoryTxp' | translate }}
-                } @else if (pkg.source === 'git') {
-                  {{ 'hero.categoryGit' | translate }}
-                } @else {
-                  {{ 'hero.categoryMod' | translate }}
-                }
-              </span>
+          <!-- Hardware-Accelerated Horizontal Slide Track (Smooth Slide-In/Out without Image Flash) -->
+          <div
+            class="flex w-full h-full transition-transform duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform"
+            [style.transform]="'translate3d(-' + (currentIndex() * 100) + '%, 0, 0)'">
+            @for (slidePkg of showcase(); track slidePkg.id; let idx = $index) {
+              <div
+                class="w-full h-full flex-shrink-0 relative overflow-hidden"
+                [attr.aria-hidden]="idx !== currentIndex()">
 
-              @if (pkg.source === 'git') {
-                <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-                  <svg lucideGitBranch class="w-3 h-3 text-amber-400"></svg>
-                  <span>{{ 'header.filterGit' | translate }}</span>
-                </span>
-              }
-            </div>
+                <!-- Slide Background Image with Subtle Ken-Burns Scale Transition -->
+                <div class="absolute inset-0">
+                  <img
+                    [src]="slidePkg.banner || slidePkg.thumbnail"
+                    [fallbackThumbnail]="slidePkg.thumbnail"
+                    appImgFallback
+                    [alt]="slidePkg.title"
+                    [attr.fetchpriority]="idx === 0 ? 'high' : 'auto'"
+                    decoding="async"
+                    [class]="idx === currentIndex() ? 'w-full h-full object-cover object-center scale-100 transition-transform duration-1000 ease-out' : 'w-full h-full object-cover object-center scale-105 transition-transform duration-1000 ease-out'"
+                  />
+                  <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/40 to-transparent w-full md:w-3/5"></div>
+                  <div class="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/25 to-transparent"></div>
+                </div>
 
-            <!-- Title -->
-            <h1 class="text-3xl sm:text-5xl font-black tracking-tight text-white drop-shadow-md">
-              {{ pkg.title }}
-            </h1>
+                <!-- Slide Foreground Content with Staggered Fade + Slide-Up Reveal -->
+                <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10 pointer-events-none">
+                  <div
+                    [class]="idx === currentIndex() ? 'max-w-2xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
 
-            <!-- Description -->
-            <p class="text-sm sm:text-base text-slate-300 line-clamp-3 leading-relaxed drop-shadow">
-              {{ pkg.short_desc }}
-            </p>
+                    <!-- Category & Source Badges (Consistent with Package Tiles & Detail Modal) -->
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span
+                        [class]="slidePkg.type === 'game' ? 'bg-emerald-500/90 text-white' : slidePkg.type === 'txp' ? 'bg-purple-500/90 text-white' : 'bg-sky-500/90 text-white'"
+                        class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider backdrop-blur-md shadow">
+                        {{ slidePkg.type }}
+                      </span>
 
-            <!-- Stats & Meta -->
-            <div class="flex items-center gap-3 sm:gap-4 text-xs text-slate-300 flex-wrap">
-              <div class="flex items-center gap-1 text-amber-400 font-bold">
-                <svg lucideStar class="w-4 h-4 fill-amber-400 text-amber-400"></svg>
-                <span>{{ pkg.score }}</span>
+                      @if (slidePkg.sources?.includes('official') || slidePkg.source === 'official' || slidePkg.source === 'mirror') {
+                        <span class="px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 backdrop-blur-md flex items-center gap-1">
+                          <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
+                          <span>ContentDB</span>
+                        </span>
+                      }
+
+                      @if (slidePkg.sources?.includes('git') || slidePkg.source === 'git') {
+                        <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1 shadow">
+                          <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
+                          <span>Git</span>
+                        </span>
+                      }
+
+                      <button
+                        type="button"
+                        (click)="$event.stopPropagation()"
+                        [appTooltip]="'carousel.infoHero' | translate"
+                        [appTooltipMultiline]="true"
+                        appTooltipPlacement="right"
+                        aria-label="How this showcase is curated"
+                        class="w-5 h-5 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                        <svg lucideInfo class="w-3 h-3"></svg>
+                      </button>
+                    </div>
+
+                    <!-- Title -->
+                    <h1 class="text-3xl sm:text-5xl font-black tracking-tight text-white drop-shadow-md">
+                      {{ slidePkg.title }}
+                    </h1>
+
+                    <!-- Description -->
+                    <p class="text-sm sm:text-base text-slate-300 line-clamp-3 leading-relaxed drop-shadow">
+                      {{ slidePkg.short_desc }}
+                    </p>
+
+                    <!-- Stats & Meta -->
+                    <div class="flex items-center gap-3 sm:gap-4 text-xs text-slate-300 flex-wrap">
+                      @if (slidePkg.score > 0) {
+                        <div class="flex items-center gap-1 text-amber-400 font-bold">
+                          <svg lucideStar class="w-4 h-4 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
+                          <span>{{ slidePkg.score }}</span>
+                        </div>
+                        <span>•</span>
+                      }
+                      <span>{{ slidePkg.downloads | number }} {{ 'hero.downloads' | translate | lowercase }}</span>
+                      @if (slidePkg.license || slidePkg.media_license) {
+                        <span>•</span>
+                        <span class="text-slate-400 font-mono">License: {{ slidePkg.license || slidePkg.media_license }}</span>
+                      }
+                    </div>
+
+                    <!-- Frosted Glass & High-Contrast CTA Buttons -->
+                    <div class="flex items-center gap-3 pt-2 flex-wrap">
+                      <!-- Primary Direct .zip Download Button with File Size -->
+                      <button
+                        type="button"
+                        (click)="onDownload(slidePkg)"
+                        [appTooltip]="('card.quickInstall' | translate) + (slidePkg.file_size ? ' (' + slidePkg.file_size + ')' : '')"
+                        class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
+                        <svg lucideDownload class="w-5 h-5 text-sky-300 flex-shrink-0"></svg>
+                        <span>{{ 'hero.downloadZip' | translate }}</span>
+                        @if (slidePkg.file_size) {
+                          <span class="text-slate-200 font-bold text-xs">({{ slidePkg.file_size }})</span>
+                        }
+                      </button>
+
+                      <!-- Secondary Frosted Glass More Info Button -->
+                      <button
+                        type="button"
+                        (click)="packageService.openPackageModal(slidePkg)"
+                        [appTooltip]="'hero.viewDetails' | translate"
+                        class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
+                        <svg lucideInfo class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
+                        <span>{{ 'hero.viewDetails' | translate }}</span>
+                      </button>
+
+                      <a
+                        [href]="getSlideGitUrl(slidePkg)"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        [appTooltip]="'hero.viewGit' | translate"
+                        class="h-11 w-11 rounded-xl glass-btn text-amber-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                        [attr.aria-label]="'hero.viewGit' | translate">
+                        <svg lucideGitBranch class="w-5 h-5"></svg>
+                      </a>
+                    </div>
+
+                  </div>
+                </div>
+
               </div>
-              <span>•</span>
-              <span>{{ pkg.downloads | number }} {{ 'hero.downloads' | translate | lowercase }}</span>
-              <span>•</span>
-              <span class="text-slate-400 font-mono">License: {{ pkg.license }}</span>
-            </div>
-
-            <!-- Netflix CTA Buttons -->
-            <div class="flex items-center gap-3 pt-2">
-              <!-- Primary White Play/Install Button -->
-              <button 
-                (click)="onDownload(pkg)"
-                [appTooltip]="'hero.playInstall' | translate"
-                class="h-11 px-6 sm:px-8 rounded-lg bg-white hover:bg-slate-200 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2.5 shadow-2xl hover:scale-105 transition-all whitespace-nowrap">
-                <svg lucidePlay class="w-5 h-5 fill-slate-950 text-slate-950"></svg>
-                <span>{{ 'hero.playInstall' | translate }}</span>
-              </button>
-
-              <!-- Secondary Translucent More Info Button -->
-              <button 
-                (click)="packageService.openPackageModal(pkg)"
-                [appTooltip]="'hero.viewDetails' | translate"
-                class="h-11 px-5 sm:px-6 rounded-lg bg-slate-600/70 hover:bg-slate-600/90 text-white font-bold text-xs sm:text-sm backdrop-blur-md border border-white/20 flex items-center gap-2.5 transition whitespace-nowrap">
-                <svg lucideInfo class="w-5 h-5 text-white"></svg>
-                <span>{{ 'hero.viewDetails' | translate }}</span>
-              </button>
-
-              @if (pkg.repo_url) {
-                <a 
-                  [href]="pkg.repo_url" 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  [appTooltip]="'hero.viewGit' | translate"
-                  class="h-11 w-11 rounded-lg bg-slate-700/60 hover:bg-slate-700/90 text-white backdrop-blur-md border border-white/20 flex items-center justify-center transition"
-                  [attr.aria-label]="'hero.viewGit' | translate">
-                  <svg lucideGitBranch class="w-5 h-5"></svg>
-                </a>
-              }
-            </div>
-
-          </div>
-        </div>
-
-        <!-- Carousel Navigation Controls & Indicators -->
-        <div class="absolute bottom-5 right-6 sm:right-8 z-40 pointer-events-auto flex items-center gap-2.5">
-          
-          <!-- Slide Number Indicator -->
-          <span class="text-xs font-mono text-slate-300 bg-slate-900/90 px-2.5 py-1 rounded-lg border border-slate-700/80 shadow">
-            {{ currentIndex() + 1 }} / {{ showcase().length }}
-          </span>
-
-          <!-- Left Prev Button -->
-          <button 
-            (click)="prev($event)"
-            [appTooltip]="'hero.prevSlide' | translate"
-            aria-label="Previous slide"
-            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
-            <svg lucideChevronLeft class="w-4 h-4"></svg>
-          </button>
-
-          <!-- Right Next Button -->
-          <button 
-            (click)="next($event)"
-            [appTooltip]="'hero.nextSlide' | translate"
-            aria-label="Next slide"
-            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
-            <svg lucideChevronRight class="w-4 h-4"></svg>
-          </button>
-
-          <!-- Auto-Play Pause / Resume Button -->
-          <button 
-            (click)="togglePause($event)"
-            [appTooltip]="isPaused() ? ('hero.resumeAutoPlay' | translate) : ('hero.pauseAutoPlay' | translate)"
-            [attr.aria-label]="isPaused() ? 'Resume carousel' : 'Pause carousel'"
-            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
-            @if (isPaused()) {
-              <svg lucidePlay class="w-4 h-4 text-emerald-400"></svg>
-            } @else {
-              <svg lucidePause class="w-4 h-4 text-sky-400"></svg>
             }
-          </button>
+          </div>
 
-        </div>
-
-        <!-- Slide Indicators / Dots -->
-        <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2">
-          @for (item of showcase(); track item.id; let idx = $index) {
-            <button 
-              (click)="goTo(idx, $event)"
-              [appTooltip]="item.title"
-              [attr.aria-label]="'Go to slide ' + (idx + 1) + ': ' + item.title"
-              class="h-2 rounded-full transition-all duration-300 overflow-hidden cursor-pointer"
-              [class.w-8]="idx === currentIndex()"
-              [class.bg-white]="idx === currentIndex()"
-              [class.w-3]="idx !== currentIndex()"
-              [class.bg-slate-600/80]="idx !== currentIndex()"
-              [class.hover:bg-slate-400]="idx !== currentIndex()">
+          <!-- Carousel Navigation Controls -->
+          <div class="absolute bottom-5 right-6 sm:right-8 z-40 pointer-events-auto flex items-center gap-2">
+            <button
+              type="button"
+              (click)="prev($event)"
+              [appTooltip]="'hero.prevSlide' | translate"
+              aria-label="Previous slide"
+              class="p-2.5 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 active:scale-95 cursor-pointer">
+              <svg lucideChevronLeft class="w-4 h-4"></svg>
             </button>
-          }
-        </div>
 
+            <button
+              type="button"
+              (click)="next($event)"
+              [appTooltip]="'hero.nextSlide' | translate"
+              aria-label="Next slide"
+              class="p-2.5 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 active:scale-95 cursor-pointer">
+              <svg lucideChevronRight class="w-4 h-4"></svg>
+            </button>
+          </div>
+
+          <!-- Slide Indicators / Frosted Pill Dock -->
+          <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-950/50 backdrop-blur-md border border-white/10 shadow-lg">
+            @for (item of showcase(); track item.id; let idx = $index) {
+              <button
+                type="button"
+                (click)="goTo(idx, $event)"
+                [appTooltip]="item.title"
+                [attr.aria-label]="'Go to slide ' + (idx + 1) + ': ' + item.title"
+                class="h-2 rounded-full transition-all duration-500 ease-out overflow-hidden cursor-pointer"
+                [class.w-8]="idx === currentIndex()"
+                [class.bg-sky-400]="idx === currentIndex()"
+                [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="idx === currentIndex()"
+                [class.w-2.5]="idx !== currentIndex()"
+                [class.bg-white/35]="idx !== currentIndex()"
+                [class.hover:bg-white/60]="idx !== currentIndex()">
+              </button>
+            }
+          </div>
+
+        </div>
       </div>
-    </div>
     } @else {
-      <!-- Dynamic Skeleton / Loading State -->
-      <div class="relative w-full h-[400px] sm:h-[480px] bg-slate-950 flex items-center justify-center p-6 border-b border-slate-900">
-        <div class="flex flex-col items-center gap-3 text-center">
-          <div class="w-10 h-10 border-3 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
-          <p class="text-xs text-slate-400 font-medium tracking-wide">
-            {{ 'common.loading' | translate }}
-          </p>
+      <!-- Professional 16:9 Hero Billboard Skeleton Preloader -->
+      <div class="relative w-full max-w-7xl mx-auto sm:px-4 lg:px-8 mt-1 sm:mt-3" aria-busy="true" aria-label="Loading featured showcase">
+        <div class="relative w-full aspect-video min-h-[360px] max-h-[720px] sm:rounded-3xl overflow-hidden glass-panel border border-white/10">
+          <div class="absolute inset-0 skeleton-shimmer opacity-40"></div>
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent"></div>
+
+          <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10">
+            <div class="max-w-2xl space-y-4">
+              <div class="flex items-center gap-2">
+                <div class="h-5 w-14 rounded-md skeleton-shimmer"></div>
+                <div class="h-5 w-24 rounded-md skeleton-shimmer"></div>
+              </div>
+              <div class="h-10 sm:h-14 w-3/4 sm:w-2/3 rounded-2xl skeleton-shimmer"></div>
+              <div class="space-y-2">
+                <div class="h-4 w-full rounded-lg skeleton-shimmer"></div>
+                <div class="h-4 w-5/6 rounded-lg skeleton-shimmer"></div>
+              </div>
+              <div class="flex items-center gap-3 pt-1">
+                <div class="h-4 w-16 rounded-md skeleton-shimmer"></div>
+                <div class="h-4 w-28 rounded-md skeleton-shimmer"></div>
+              </div>
+              <div class="flex items-center gap-3 pt-2">
+                <div class="h-11 w-44 rounded-xl skeleton-shimmer border border-white/15"></div>
+                <div class="h-11 w-36 rounded-xl skeleton-shimmer border border-white/10"></div>
+                <div class="h-11 w-11 rounded-xl skeleton-shimmer border border-white/10"></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     }
@@ -290,19 +327,21 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   }
 
   onDownload(pkg: LuantiPackage): void {
-    this.packageService.trackDownload(pkg);
-    this.packageService.openSetupModal();
+    this.packageService.downloadPackage(pkg);
+  }
+
+  getSlideGitUrl(pkg: LuantiPackage): string {
+    const normalized = this.packageService.normalizeGitRepoUrl(pkg.repo_url);
+    if (normalized && pkg.git_repo_status !== 'broken_404') {
+      return normalized;
+    }
+    return `https://content.luanti.org/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`;
   }
 
   goTo(index: number, event?: Event): void {
     if (event) event.stopPropagation();
     this.currentIndex.set(index);
     this.restartAutoSlide();
-  }
-
-  togglePause(event?: Event): void {
-    if (event) event.stopPropagation();
-    this.isPaused.update(val => !val);
   }
 
   private restartAutoSlide(): void {

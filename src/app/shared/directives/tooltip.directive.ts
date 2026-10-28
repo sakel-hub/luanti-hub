@@ -30,6 +30,7 @@ export class TooltipDirective implements OnInit, OnDestroy {
     }
   }
   @Input() appTooltipDelay: number = 180;
+  @Input() appTooltipMultiline: boolean = false;
 
   private tooltipEl: HTMLElement | null = null;
   private currentTooltipId: string | null = null;
@@ -145,10 +146,12 @@ export class TooltipDirective implements OnInit, OnDestroy {
     const tipId = `luanti-tip-${Math.random().toString(36).substring(2, 9)}`;
     this.currentTooltipId = tipId;
 
+    const isMultiline = this.appTooltipMultiline || text.length > 52;
     const tip = document.createElement('div');
     tip.id = tipId;
-    tip.className =
-      'luanti-tooltip fixed z-[9999] px-2.5 py-1 text-xs font-medium border rounded-lg shadow-2xl backdrop-blur-md pointer-events-none flex items-center gap-1.5 whitespace-nowrap transition-opacity duration-150';
+    tip.className = isMultiline
+      ? 'luanti-tooltip fixed z-[9999] max-w-xs sm:max-w-sm px-3.5 py-2.5 text-xs font-medium leading-relaxed border rounded-xl shadow-2xl backdrop-blur-xl pointer-events-none whitespace-normal text-left transition-opacity duration-150'
+      : 'luanti-tooltip fixed z-[9999] px-2.5 py-1 text-xs font-medium border rounded-lg shadow-2xl backdrop-blur-md pointer-events-none flex items-center gap-1.5 whitespace-nowrap transition-opacity duration-150';
     tip.style.opacity = '0';
     tip.setAttribute('role', 'tooltip');
 

@@ -1,8 +1,8 @@
-<div class="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-sky-500 selection:text-white">
-  
+<div class="min-h-screen w-full max-w-[100vw] overflow-x-clip flex flex-col bg-slate-950 text-slate-100 selection:bg-sky-500 selection:text-white">
+
   <!-- Skip to Content for WCAG AA Accessibility -->
-  <a 
-    href="#main-content" 
+  <a
+    href="#main-content"
     class="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[999] focus:px-4 focus:py-2 focus:bg-sky-500 focus:text-slate-950 focus:font-bold focus:rounded-xl focus:shadow-2xl focus:outline-none">
     {{ 'common.skipToContent' | translate }}
   </a>
@@ -11,36 +11,40 @@
   <app-header></app-header>
 
   <!-- Main Content Area with Routing -->
-  <main id="main-content" class="flex-1 pb-16 focus:outline-none" tabindex="-1">
+  <main id="main-content" class="flex-1 w-full max-w-[100vw] overflow-x-clip pb-16 focus:outline-none" tabindex="-1">
     <router-outlet></router-outlet>
   </main>
 
+  <!-- Global Toast Notification -->
+  @if (pwaService.statusMessage(); as msgKey) {
+    <div
+      role="status"
+      aria-live="polite"
+      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 glass-dropdown text-white rounded-xl flex items-center gap-2.5 text-xs font-semibold animate-in fade-in slide-in-from-bottom-4 duration-200">
+      <svg lucideCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+      <span>{{ msgKey | translate }}</span>
+    </div>
+  }
+
   <!-- PWA Automatic Update Banner -->
   @if (pwaService.updateAvailable()) {
-    <div 
+    <div
       role="alert"
-      class="fixed bottom-6 right-6 z-50 p-4 bg-sky-600/95 backdrop-blur-md text-white rounded-2xl shadow-2xl border border-sky-400/30 flex items-center gap-4 animate-in slide-in-from-bottom duration-300">
+      class="fixed bottom-6 right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 animate-in slide-in-from-bottom duration-300">
       <div class="text-xs font-medium">
         <p class="font-bold">{{ 'pwa.updateAvailable' | translate }}</p>
         <p class="text-sky-100">{{ 'pwa.updateDesc' | translate }}</p>
       </div>
-      <button 
+      <button
+        type="button"
         (click)="pwaService.applyUpdate()"
-        class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow">
+        class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow cursor-pointer">
         {{ 'pwa.reloadNow' | translate }}
       </button>
     </div>
   }
 
   <!-- Modals & Drawers -->
-  @if (authService.isAuthModalOpen()) {
-    <app-auth-modal></app-auth-modal>
-  }
-
-  @if (authService.isProfileDrawerOpen()) {
-    <app-profile-drawer></app-profile-drawer>
-  }
-
   @if (packageService.activePackage(); as pkg) {
     <app-package-detail-modal [package]="pkg"></app-package-detail-modal>
   }
@@ -53,36 +57,126 @@
     <app-setup-guide-modal></app-setup-guide-modal>
   }
 
-  <!-- Global Footer -->
-  <footer class="mt-auto border-t border-slate-800/80 bg-slate-950 py-12 text-slate-400 text-xs">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
-      <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div class="flex items-center gap-2.5">
-          <img src="logo.svg" alt="LuantiHub" width="28" height="28" class="w-7 h-7 rounded-lg" />
-          <span class="font-bold text-white text-sm">LuantiHub</span>
-          <span class="text-slate-500">•</span>
-          <span>{{ 'footer.about' | translate }}</span>
+  @if (authService.isAuthModalOpen()) {
+    <app-auth-modal></app-auth-modal>
+  }
+
+  @if (authService.isProfileDrawerOpen()) {
+    <app-profile-drawer></app-profile-drawer>
+  }
+
+  <!-- Official Legal, DMCA & Safe Harbor Modal (/legal) -->
+  @if (packageService.isLegalModalOpen()) {
+    <div
+      (click)="packageService.closeLegalModal()"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="legal-modal-title"
+      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+      <div
+        (click)="$event.stopPropagation()"
+        class="w-full max-w-2xl glass-modal rounded-3xl p-6 sm:p-8 space-y-5 animate-in zoom-in-95 duration-200 my-auto text-xs text-slate-300 leading-relaxed">
+        <div class="flex items-center justify-between border-b border-white/10 pb-4">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
+              <svg lucideShieldCheck class="w-5 h-5"></svg>
+            </div>
+            <div>
+              <h2 id="legal-modal-title" class="text-lg font-bold text-white">
+                {{ 'footer.legalModalTitle' | translate }}
+              </h2>
+              <p class="text-xs text-slate-400">LuantiHub Open-Source Governance &amp; Safe Harbor</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            (click)="packageService.closeLegalModal()"
+            aria-label="Close legal modal"
+            class="p-1.5 rounded-lg glass-icon-btn text-slate-400 hover:text-white transition cursor-pointer">
+            <svg lucideX class="w-5 h-5"></svg>
+          </button>
         </div>
 
-        <div class="flex flex-wrap items-center gap-6">
-          <button (click)="packageService.openSetupModal()" class="hover:text-sky-400 transition">
-            {{ 'footer.inGameSetup' | translate }}
+        <div class="space-y-4">
+          <div class="p-4 rounded-2xl glass-panel space-y-1.5">
+            <h3 class="font-bold text-white text-sm">1. Official Trademark &amp; Non-Affiliation Disclaimer</h3>
+            <p class="text-slate-300">{{ 'footer.disclaimer' | translate }}</p>
+          </div>
+
+          <div class="p-4 rounded-2xl glass-panel space-y-1.5">
+            <h3 class="font-bold text-white text-sm">2. DMCA § 512 &amp; EU Digital Services Act (DSA) Safe Harbor</h3>
+            <p class="text-slate-300">{{ 'footer.legalSafeHarbor' | translate }}</p>
+            <p class="text-slate-400 text-[11px] pt-1">
+              Designated Takedown Contact: <a href="mailto:dmca@luantihub.org" class="text-sky-400 hover:underline">dmca@luantihub.org</a> (or use the in-app Flag / Report button on any package modal for immediate review).
+            </p>
+          </div>
+
+          <div class="p-4 rounded-2xl glass-panel space-y-1.5">
+            <h3 class="font-bold text-white text-sm">3. SPDX Open-Source Licensing &amp; Privacy</h3>
+            <p class="text-slate-300">{{ 'footer.legalPrivacy' | translate }}</p>
+          </div>
+        </div>
+
+        <div class="flex justify-end pt-2">
+          <button
+            type="button"
+            (click)="packageService.closeLegalModal()"
+            class="px-5 py-2 rounded-xl glass-btn-sky text-white font-bold text-xs transition cursor-pointer">
+            {{ 'common.close' | translate }}
           </button>
-          <a href="https://contentdb.milcho.org/about_api.php" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition">
-            {{ 'footer.upstreamMirror' | translate }}
-          </a>
-          <a href="https://www.luanti.org" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition">
-            {{ 'footer.engineSite' | translate }}
-          </a>
-          <a href="mailto:dmca@luantihub.org" class="hover:text-sky-400 transition">
-            {{ 'footer.dmca' | translate }}
-          </a>
         </div>
       </div>
+    </div>
+  }
 
-      <p class="text-center sm:text-left text-[11px] text-slate-500 leading-relaxed max-w-3xl">
-        {{ 'footer.disclaimer' | translate }}
-      </p>
+  <!-- Global Footer with Official Legal & Safe Harbor Disclaimers -->
+  <footer class="mt-auto border-t border-white/10 bg-slate-950/90 backdrop-blur-md py-10 text-slate-400 text-xs">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-5">
+      <!-- Row 1: Brand Identity & Full Tagline -->
+      <div class="flex flex-wrap items-center gap-2.5">
+        <img src="logo.svg" alt="LuantiHub" width="24" height="24" class="w-6 h-6 rounded-lg flex-shrink-0" />
+        <span class="font-bold text-white text-sm tracking-tight">Luanti<span class="text-sky-400">Hub</span></span>
+        <span class="text-slate-600">•</span>
+        <span class="text-slate-400 text-xs">{{ 'footer.about' | translate }}</span>
+      </div>
+
+      <!-- Row 2: Full-Width Evenly Spaced Navigation Links Row -->
+      <nav aria-label="Footer navigation" class="w-full flex flex-wrap items-center justify-between gap-x-6 gap-y-2.5 pt-3.5 border-t border-white/10 text-xs whitespace-nowrap">
+        <button type="button" (click)="packageService.openSetupModal()" class="hover:text-sky-400 transition cursor-pointer">
+          {{ 'footer.inGameSetup' | translate }}
+        </button>
+        <button type="button" (click)="packageService.openSubmitModal()" class="hover:text-sky-400 transition cursor-pointer">
+          {{ 'header.submitRepo' | translate }}
+        </button>
+        <a href="https://content.luanti.org" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition cursor-pointer">
+          {{ 'footer.upstreamMirror' | translate }}
+        </a>
+        <a href="https://www.luanti.org" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition cursor-pointer">
+          {{ 'footer.engineSite' | translate }}
+        </a>
+        <button type="button" (click)="packageService.openLegalModal()" class="hover:text-sky-400 transition font-semibold text-slate-300 cursor-pointer">
+          {{ 'footer.termsPrivacy' | translate }}
+        </button>
+        <a href="mailto:dmca@luantihub.org" class="hover:text-rose-400 transition cursor-pointer">
+          {{ 'footer.dmca' | translate }}
+        </a>
+      </nav>
+
+      <!-- Legal & Safe Harbor Columns -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-white/5 text-[11px] text-slate-500 leading-relaxed">
+        <div>
+          <strong class="text-slate-400 block mb-1">Official Trademark &amp; Licensing</strong>
+          <p>{{ 'footer.disclaimer' | translate }}</p>
+        </div>
+        <div>
+          <strong class="text-slate-400 block mb-1">DMCA § 512 &amp; EU DSA Safe Harbor</strong>
+          <p>{{ 'footer.legalSafeHarbor' | translate }}</p>
+        </div>
+        <div>
+          <strong class="text-slate-400 block mb-1">Zero-Tracking Privacy &amp; Edge Security</strong>
+          <p>{{ 'footer.legalPrivacy' | translate }}</p>
+        </div>
+      </div>
     </div>
   </footer>
 

@@ -19,6 +19,14 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'profile',
+    component: CatalogComponent
+  },
+  {
+    path: 'legal',
+    component: CatalogComponent
+  },
+  {
     path: '**',
     redirectTo: ''
   }
