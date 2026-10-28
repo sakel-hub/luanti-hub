@@ -2,12 +2,27 @@ import { Component, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
-import { LucideTerminal, LucideX, LucideCopy, LucideCheck } from '@lucide/angular';
+import {
+  LucideTerminal,
+  LucideX,
+  LucideCopy,
+  LucideCheck,
+  LucideShieldCheck,
+  LucideChevronRight
+} from '@lucide/angular';
 
 @Component({
   selector: 'app-setup-guide-modal',
   standalone: true,
-  imports: [CommonModule, LucideTerminal, LucideX, LucideCopy, LucideCheck],
+  imports: [
+    CommonModule,
+    LucideTerminal,
+    LucideX,
+    LucideCopy,
+    LucideCheck,
+    LucideShieldCheck,
+    LucideChevronRight
+  ],
   template: `
     <div 
       (click)="packageService.closeSetupModal()"
@@ -70,7 +85,7 @@ import { LucideTerminal, LucideX, LucideCopy, LucideCheck } from '@lucide/angula
           <span class="font-semibold text-white block">Option B: In-Game Settings Menu</span>
           <ol class="list-decimal list-inside space-y-1.5 leading-relaxed text-slate-300">
             <li>Launch <strong>Luanti</strong> (or Minetest).</li>
-            <li>Click <strong>Settings</strong> ➔ <strong>All Settings</strong>.</li>
+            <li>Click <strong>Settings</strong> <svg lucideChevronRight class="w-3.5 h-3.5 inline text-slate-500 mx-0.5"></svg> <strong>All Settings</strong>.</li>
             <li>In the search box, type <code class="text-sky-300 bg-slate-950 px-1 py-0.5 rounded">contentdb_url</code>.</li>
             <li>Paste <code class="text-sky-300 bg-slate-950 px-1 py-0.5 rounded font-mono">{{ settingsService.contentDbUrl() }}</code> into the field.</li>
             <li>Click <strong>Save</strong> and navigate to the <strong>Content</strong> tab.</li>
@@ -79,9 +94,7 @@ import { LucideTerminal, LucideX, LucideCopy, LucideCheck } from '@lucide/angula
 
         <!-- High-Availability Fallback Info -->
         <div class="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-start gap-2.5 text-xs text-slate-400">
-          <svg class="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
-          </svg>
+          <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5"></svg>
           <span>
             <strong>Failover Enabled:</strong> LuantiHub automatically bridges requests to official ContentDB and the <code>contentdb.milcho.org</code> mirror, ensuring your in-game content browser never goes down.
           </span>

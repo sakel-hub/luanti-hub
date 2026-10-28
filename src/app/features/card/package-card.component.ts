@@ -7,7 +7,7 @@ import { PwaService } from '../../core/services/pwa.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
-import { LucideStar, LucideZap, LucideHeart } from '@lucide/angular';
+import { LucideStar, LucideHeart, LucideGitBranch } from '@lucide/angular';
 
 @Component({
   selector: 'app-package-card',
@@ -18,8 +18,8 @@ import { LucideStar, LucideZap, LucideHeart } from '@lucide/angular';
     TooltipDirective,
     TranslatePipe,
     LucideStar,
-    LucideZap,
-    LucideHeart
+    LucideHeart,
+    LucideGitBranch
   ],
   template: `
     <div 
@@ -57,7 +57,7 @@ import { LucideStar, LucideZap, LucideHeart } from '@lucide/angular';
             <span 
               [appTooltip]="'card.gitSourceTooltip' | translate"
               class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/90 text-slate-950 flex items-center gap-1 shadow">
-              <svg lucideZap class="w-3 h-3 text-slate-950"></svg>
+              <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
               <span>Git</span>
             </span>
           }

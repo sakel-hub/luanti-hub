@@ -22,7 +22,7 @@ import {
   LucideExternalLink,
   LucideInfo,
   LucideStar,
-  LucideZap
+  LucideGitBranch
 } from '@lucide/angular';
 
 @Component({
@@ -41,7 +41,7 @@ import {
     LucideExternalLink,
     LucideInfo,
     LucideStar,
-    LucideZap
+    LucideGitBranch
   ],
   template: `
     @if (showcase().length > 0 && currentPkg(); as pkg) {
@@ -97,8 +97,8 @@ import {
 
               @if (pkg.source === 'git') {
                 <span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-                  <svg lucideZap class="w-3 h-3 text-amber-400"></svg>
-                  <span>Git Community</span>
+                  <svg lucideGitBranch class="w-3 h-3 text-amber-400"></svg>
+                  <span>{{ 'header.filterGit' | translate }}</span>
                 </span>
               }
             </div>

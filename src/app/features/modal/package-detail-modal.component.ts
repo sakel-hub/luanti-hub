@@ -13,10 +13,11 @@ import {
   LucideX,
   LucideDownload,
   LucideShare2,
-  LucideZap,
   LucideExternalLink,
   LucideStar,
-  LucideShieldCheck
+  LucideShieldCheck,
+  LucideGitBranch,
+  LucideGlobe
 } from '@lucide/angular';
 
 @Component({
@@ -31,10 +32,11 @@ import {
     LucideX,
     LucideDownload,
     LucideShare2,
-    LucideZap,
     LucideExternalLink,
     LucideStar,
-    LucideShieldCheck
+    LucideShieldCheck,
+    LucideGitBranch,
+    LucideGlobe
   ],
   template: `
     @if (package) {
@@ -78,12 +80,13 @@ import {
                   </span>
                   @if (package.source === 'git') {
                     <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1">
-                      <svg lucideZap class="w-3 h-3 text-slate-950"></svg>
+                      <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
                       <span>Decentralized Git</span>
                     </span>
                   } @else {
-                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                      🌐 ContentDB
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                      <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
+                      <span>ContentDB</span>
                     </span>
                   }
                 </div>
@@ -276,7 +279,10 @@ import {
                           }
                         </div>
                         <div class="flex items-center gap-2">
-                          <span class="text-amber-400 text-xs font-bold">★ {{ rev.rating }}/5</span>
+                        <div class="flex items-center gap-1 text-amber-400 text-xs font-bold">
+                          <svg lucideStar class="w-3.5 h-3.5 fill-amber-400 text-amber-400"></svg>
+                          <span>{{ rev.rating }}/5</span>
+                        </div>
                           <span class="text-[11px] text-slate-500">{{ rev.created_at | date }}</span>
                         </div>
                       </div>

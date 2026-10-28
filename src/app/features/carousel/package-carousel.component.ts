@@ -4,7 +4,16 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { PackageCardComponent } from '../card/package-card.component';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
-import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
+import {
+  LucideChevronLeft,
+  LucideChevronRight,
+  LucideFlame,
+  LucideZap,
+  LucideGamepad2,
+  LucideCpu,
+  LucidePalette,
+  LucideGitBranch
+} from '@lucide/angular';
 
 @Component({
   selector: 'app-package-carousel',
@@ -15,7 +24,13 @@ import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
     TooltipDirective,
     TranslatePipe,
     LucideChevronLeft,
-    LucideChevronRight
+    LucideChevronRight,
+    LucideFlame,
+    LucideZap,
+    LucideGamepad2,
+    LucideCpu,
+    LucidePalette,
+    LucideGitBranch
   ],
   template: `
     @if (packages.length > 0) {
@@ -24,11 +39,21 @@ import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
         <!-- Section Header -->
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">
           <div class="flex items-center gap-2">
-            @if (icon) {
-              <span class="text-lg">{{ icon }}</span>
+            @if (icon === 'flame') {
+              <svg lucideFlame class="w-5 h-5 text-amber-500"></svg>
+            } @else if (icon === 'git') {
+              <svg lucideGitBranch class="w-5 h-5 text-amber-400"></svg>
+            } @else if (icon === 'zap') {
+              <svg lucideZap class="w-5 h-5 text-amber-400"></svg>
+            } @else if (icon === 'gamepad') {
+              <svg lucideGamepad2 class="w-5 h-5 text-emerald-400"></svg>
+            } @else if (icon === 'cpu') {
+              <svg lucideCpu class="w-5 h-5 text-sky-400"></svg>
+            } @else if (icon === 'palette') {
+              <svg lucidePalette class="w-5 h-5 text-purple-400"></svg>
             }
             <h2 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
-              {{ title }}
+              <span>{{ title }}</span>
               <span class="text-xs font-medium text-slate-500">({{ packages.length }})</span>
             </h2>
           </div>
@@ -72,7 +97,7 @@ import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
 })
 export class PackageCarouselComponent {
   @Input({ required: true }) title!: string;
-  @Input() icon?: string;
+  @Input() icon?: 'flame' | 'git' | 'zap' | 'gamepad' | 'cpu' | 'palette';
   @Input({ required: true }) packages: LuantiPackage[] = [];
 
   @ViewChild('carouselTrack') trackRef!: ElementRef<HTMLDivElement>;

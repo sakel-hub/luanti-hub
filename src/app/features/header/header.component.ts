@@ -23,7 +23,9 @@ import {
   LucideGamepad2,
   LucideCpu,
   LucidePalette,
-  LucideZap
+  LucideCheck,
+  LucideGitBranch,
+  LucideLanguages
 } from '@lucide/angular';
 
 @Component({
@@ -48,16 +50,18 @@ import {
     LucideGamepad2,
     LucideCpu,
     LucidePalette,
-    LucideZap
+    LucideCheck,
+    LucideGitBranch,
+    LucideLanguages
   ],
   template: `
     <header class="sticky top-0 z-40 w-full bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 transition-colors duration-200">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3 lg:gap-4">
-        
+
         <!-- Left: Logo & Category Tabs -->
         <div class="flex items-center gap-3 xl:gap-5 flex-shrink-0">
           <a href="#" class="flex items-center gap-2.5 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0">
-            <img src="logo.svg" alt="LuantiHub" width="36" height="36" class="w-9 h-9 drop-shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
+            <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-8 h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
             <div class="flex items-center gap-2">
               <span class="text-base sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
                 Luanti<span class="text-sky-400">Hub</span>
@@ -70,8 +74,8 @@ import {
 
           <!-- Category Nav Tabs (Visible on large screens) -->
           <nav class="hidden xl:flex items-center gap-1 text-xs font-semibold flex-shrink-0" aria-label="Category navigation">
-            <button 
-              (click)="setTypeFilter('all')" 
+            <button
+              (click)="setTypeFilter('all')"
               [appTooltip]="'header.filterAll' | translate"
               [class]="selectedType() === 'all' && selectedSource() === 'all' ? 'text-sky-400 bg-sky-950/60 border-sky-800/80' : 'text-slate-400 hover:text-white border-transparent'"
               class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
@@ -79,8 +83,8 @@ import {
               <span>{{ 'header.filterAll' | translate }}</span>
             </button>
 
-            <button 
-              (click)="setTypeFilter('game')" 
+            <button
+              (click)="setTypeFilter('game')"
               [appTooltip]="'header.filterGames' | translate"
               [class]="selectedType() === 'game' ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/80' : 'text-slate-400 hover:text-white border-transparent'"
               class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
@@ -88,8 +92,8 @@ import {
               <span>{{ 'header.filterGames' | translate }}</span>
             </button>
 
-            <button 
-              (click)="setTypeFilter('mod')" 
+            <button
+              (click)="setTypeFilter('mod')"
               [appTooltip]="'header.filterMods' | translate"
               [class]="selectedType() === 'mod' ? 'text-sky-400 bg-sky-950/60 border-sky-800/80' : 'text-slate-400 hover:text-white border-transparent'"
               class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
@@ -97,8 +101,8 @@ import {
               <span>{{ 'header.filterMods' | translate }}</span>
             </button>
 
-            <button 
-              (click)="setTypeFilter('txp')" 
+            <button
+              (click)="setTypeFilter('txp')"
               [appTooltip]="'header.filterTxp' | translate"
               [class]="selectedType() === 'txp' ? 'text-purple-400 bg-purple-950/60 border-purple-800/80' : 'text-slate-400 hover:text-white border-transparent'"
               class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
@@ -106,12 +110,12 @@ import {
               <span>{{ 'header.filterTxp' | translate }}</span>
             </button>
 
-            <button 
-              (click)="setSourceFilter('git')" 
+            <button
+              (click)="setSourceFilter('git')"
               [appTooltip]="'header.filterGit' | translate"
               [class]="selectedSource() === 'git' ? 'text-amber-400 bg-amber-950/60 border-amber-800/80' : 'text-slate-400 hover:text-white border-transparent'"
               class="px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 whitespace-nowrap">
-              <svg lucideZap class="w-3.5 h-3.5 text-amber-400"></svg>
+              <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
               <span>{{ 'header.filterGit' | translate }}</span>
             </button>
           </nav>
@@ -120,8 +124,8 @@ import {
         <!-- Center: Search Input -->
         <div class="flex-1 max-w-xs md:max-w-sm lg:max-w-md relative min-w-[120px]">
           <div class="relative">
-            <input 
-              type="text" 
+            <input
+              type="text"
               [value]="searchQuery()"
               (input)="onSearchInput($event)"
               [placeholder]="'header.searchPlaceholder' | translate"
@@ -135,8 +139,8 @@ import {
               <svg lucideSearch class="w-4 h-4"></svg>
             </div>
             @if (searchQuery()) {
-              <button 
-                (click)="clearSearch()" 
+              <button
+                (click)="clearSearch()"
                 class="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-white"
                 aria-label="Clear search">
                 <svg lucideX class="w-4 h-4"></svg>
@@ -147,9 +151,9 @@ import {
 
         <!-- Right: Actions, Language & Prominent Install Button -->
         <div class="flex items-center gap-2 flex-shrink-0">
-          
+
           <!-- Prominent "Install App" Button (Always Single Line) -->
-          <button 
+          <button
             (click)="pwaService.installPwa()"
             [appTooltip]="'header.installAppTooltip' | translate"
             [class]="pwaService.canInstall() ? 'bg-sky-600 hover:bg-sky-500 text-white shadow-lg shadow-sky-600/30 animate-pulse' : 'bg-slate-800/90 hover:bg-slate-700 text-sky-400 border border-slate-700/80'"
@@ -159,7 +163,7 @@ import {
           </button>
 
           <!-- In-Game Setup Button -->
-          <button 
+          <button
             (click)="packageService.openSetupModal()"
             [appTooltip]="'header.inGameSetupTooltip' | translate"
             class="hidden md:flex h-9 px-3 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
@@ -168,7 +172,7 @@ import {
           </button>
 
           <!-- Submit Mod Button -->
-          <button 
+          <button
             (click)="packageService.openSubmitModal()"
             [appTooltip]="'header.submitRepoTooltip' | translate"
             class="hidden lg:flex h-9 px-3 rounded-lg bg-slate-800/80 hover:bg-slate-700 border border-slate-700/80 text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
@@ -178,19 +182,19 @@ import {
 
           <!-- Language Selector Dropdown -->
           <div class="relative flex-shrink-0">
-            <button 
+            <button
               (click)="toggleLanguageMenu()"
               [appTooltip]="'header.languageTooltip' | translate"
               aria-label="Change language"
               class="h-9 px-2.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-medium flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
-              <span class="text-sm leading-none">{{ currentLocaleMeta().flag }}</span>
-              <span class="text-[11px] font-bold uppercase tracking-wider hidden sm:inline">{{ currentLocaleMeta().id }}</span>
+              <svg lucideLanguages class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+              <span class="text-[11px] font-bold uppercase tracking-wider font-mono">{{ currentLocaleMeta().id }}</span>
               <svg lucideChevronDown class="w-3.5 h-3.5 text-slate-400"></svg>
             </button>
 
             <!-- Language Menu Dropdown -->
             @if (isLanguageMenuOpen()) {
-              <div 
+              <div
                 (click)="$event.stopPropagation()"
                 class="absolute right-0 mt-2 w-44 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
                 @for (loc of supportedLocales; track loc.id) {
@@ -200,10 +204,10 @@ import {
                     [class.text-white]="loc.id === currentLocale()"
                     [class.text-slate-300]="loc.id !== currentLocale()"
                     class="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium hover:bg-slate-800 transition text-left">
-                    <span class="text-base">{{ loc.flag }}</span>
+                    <span class="text-xs font-mono font-bold text-sky-400 w-5 uppercase">{{ loc.id }}</span>
                     <span class="flex-1">{{ loc.nativeLabel }}</span>
                     @if (loc.id === currentLocale()) {
-                      <span class="text-[10px] font-bold">✓</span>
+                      <svg lucideCheck class="w-3.5 h-3.5 text-white"></svg>
                     }
                   </button>
                 }
@@ -213,7 +217,7 @@ import {
 
           <!-- PWA & Cache Settings Menu Toggle -->
           <div class="relative flex-shrink-0">
-            <button 
+            <button
               (click)="toggleSettingsMenu()"
               [appTooltip]="'pwa.clearCacheTitle' | translate"
               aria-label="PWA and Cache Settings"
@@ -223,21 +227,21 @@ import {
 
             <!-- Settings Menu Dropdown -->
             @if (isSettingsMenuOpen()) {
-              <div 
+              <div
                 (click)="$event.stopPropagation()"
                 class="absolute right-0 mt-2 w-56 rounded-xl bg-slate-900 border border-slate-700/90 shadow-2xl p-1.5 z-50 space-y-1 animate-in fade-in zoom-in-95 duration-150">
-                <button 
+                <button
                   (click)="onCheckUpdates()"
                   class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 transition text-left">
-                  <svg 
-                    lucideRefreshCw 
-                    class="w-4 h-4 text-sky-400" 
+                  <svg
+                    lucideRefreshCw
+                    class="w-4 h-4 text-sky-400"
                     [class.animate-spin]="pwaService.checkingForUpdate()">
                   </svg>
                   <span>{{ 'header.checkForUpdates' | translate }}</span>
                 </button>
 
-                <button 
+                <button
                   (click)="onClearCache()"
                   class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-rose-300 hover:bg-rose-950/40 hover:text-rose-200 transition text-left">
                   <svg lucideTrash class="w-4 h-4 text-rose-400"></svg>
@@ -249,7 +253,7 @@ import {
 
           <!-- User Authentication Section -->
           @if (authService.currentUser(); as user) {
-            <button 
+            <button
               (click)="authService.openProfileDrawer()"
               class="h-9 flex items-center gap-2 p-1 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 transition flex-shrink-0">
               <img [src]="user.avatar_url" [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
@@ -258,7 +262,7 @@ import {
               </span>
             </button>
           } @else {
-            <button 
+            <button
               (click)="authService.openAuthModal()"
               class="h-9 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-semibold text-xs flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0">
               <svg lucideUser class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>

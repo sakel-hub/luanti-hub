@@ -4,12 +4,28 @@ import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { GitProvider } from '../../core/models/package.model';
-import { LucideX } from '@lucide/angular';
+import {
+  LucideX,
+  LucideStar,
+  LucideCheck,
+  LucideGitBranch,
+  LucideGlobe,
+  LucidePlus
+} from '@lucide/angular';
 
 @Component({
   selector: 'app-profile-drawer',
   standalone: true,
-  imports: [CommonModule, FormsModule, LucideX],
+  imports: [
+    CommonModule,
+    FormsModule,
+    LucideX,
+    LucideStar,
+    LucideCheck,
+    LucideGitBranch,
+    LucideGlobe,
+    LucidePlus
+  ],
   template: `
     @if (authService.currentUser(); as user) {
       <div 
@@ -56,12 +72,17 @@ import { LucideX } from '@lucide/angular';
               @for (id of user.identities; track id.provider) {
                 <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between text-xs">
                   <div class="flex items-center gap-2">
-                    <span>{{ getProviderIcon(id.provider) }}</span>
+                    @if (id.provider === 'contentdb') {
+                      <svg lucideGlobe class="w-4 h-4 text-emerald-400"></svg>
+                    } @else {
+                      <svg lucideGitBranch class="w-4 h-4 text-sky-400"></svg>
+                    }
                     <span class="capitalize font-semibold text-white">{{ id.provider }}:</span>
                     <span class="text-slate-300 font-mono">&#64;{{ id.username }}</span>
                   </div>
                   <span class="text-[10px] font-bold text-emerald-400 bg-emerald-950/50 border border-emerald-800/60 px-1.5 py-0.5 rounded flex items-center gap-1">
-                    ✓ Verified
+                    <svg lucideCheck class="w-3 h-3 text-emerald-400"></svg>
+                    <span>Verified</span>
                   </span>
                 </div>
               }
@@ -70,18 +91,21 @@ import { LucideX } from '@lucide/angular';
             <!-- Connect Other Forges -->
             <div class="pt-1 flex flex-wrap gap-2">
               @if (!hasProvider('codeberg')) {
-                <button (click)="authService.loginWith('codeberg')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
-                  + Link Codeberg
+                <button (click)="authService.loginWith('codeberg')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition flex items-center gap-1">
+                  <svg lucidePlus class="w-3 h-3 text-sky-400"></svg>
+                  <span>Link Codeberg</span>
                 </button>
               }
               @if (!hasProvider('gitlab')) {
-                <button (click)="authService.loginWith('gitlab')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
-                  + Link GitLab
+                <button (click)="authService.loginWith('gitlab')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition flex items-center gap-1">
+                  <svg lucidePlus class="w-3 h-3 text-sky-400"></svg>
+                  <span>Link GitLab</span>
                 </button>
               }
               @if (!hasProvider('github')) {
-                <button (click)="authService.loginWith('github')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition">
-                  + Link GitHub
+                <button (click)="authService.loginWith('github')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition flex items-center gap-1">
+                  <svg lucidePlus class="w-3 h-3 text-sky-400"></svg>
+                  <span>Link GitHub</span>
                 </button>
               }
             </div>
@@ -90,7 +114,7 @@ import { LucideX } from '@lucide/angular';
           <!-- Section: ContentDB Importer / Sync -->
           <div class="p-4 rounded-xl bg-sky-950/30 border border-sky-800/40 space-y-3">
             <div class="flex items-center gap-2">
-              <span class="text-base">🌐</span>
+              <svg lucideGlobe class="w-4 h-4 text-sky-400"></svg>
               <h4 class="text-xs font-bold text-sky-400 uppercase tracking-wider">
                 Sync ContentDB Portfolio
               </h4>
@@ -139,7 +163,14 @@ import { LucideX } from '@lucide/angular';
                   <div class="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between text-xs">
                     <div>
                       <h4 class="font-bold text-white">{{ pkg.title }}</h4>
-                      <p class="text-[11px] text-slate-400">{{ pkg.downloads_count }} downloads • ⭐ {{ pkg.score }}</p>
+                      <div class="flex items-center gap-1.5 text-[11px] text-slate-400">
+                        <span>{{ pkg.downloads_count }} downloads</span>
+                        <span>•</span>
+                        <span class="flex items-center gap-1 text-amber-400">
+                          <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400"></svg>
+                          <span>{{ pkg.score }}</span>
+                        </span>
+                      </div>
                     </div>
                     <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-800 text-slate-300">
                       {{ pkg.type }}
@@ -176,16 +207,6 @@ export class ProfileDrawerComponent {
 
   hasProvider(provider: GitProvider): boolean {
     return this.authService.linkedIdentities().some(id => id.provider === provider);
-  }
-
-  getProviderIcon(provider: string): string {
-    switch (provider) {
-      case 'codeberg': return '🏔️';
-      case 'gitlab': return '🦊';
-      case 'github': return '🐙';
-      case 'contentdb': return '🌐';
-      default: return '🔗';
-    }
   }
 
   async onSyncContentDb(): Promise<void> {

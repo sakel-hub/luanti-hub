@@ -2,12 +2,12 @@ import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { AuthService } from '../../core/services/auth.service';
 import { GitProvider } from '../../core/models/package.model';
-import { LucideX, LucideChevronRight } from '@lucide/angular';
+import { LucideX, LucideChevronRight, LucideGitBranch, LucideGlobe } from '@lucide/angular';
 
 @Component({
   selector: 'app-auth-modal',
   standalone: true,
-  imports: [CommonModule, LucideX, LucideChevronRight],
+  imports: [CommonModule, LucideX, LucideChevronRight, LucideGitBranch, LucideGlobe],
   template: `
     <div 
       (click)="authService.closeAuthModal()"
@@ -50,7 +50,9 @@ import { LucideX, LucideChevronRight } from '@lucide/angular';
             (click)="signIn('codeberg')"
             class="w-full p-3 rounded-xl bg-teal-950/40 hover:bg-teal-900/50 border border-teal-700/60 text-white font-bold text-xs sm:text-sm flex items-center justify-between transition shadow group">
             <div class="flex items-center gap-3">
-              <span class="text-lg">🏔️</span>
+              <div class="w-8 h-8 rounded-lg bg-teal-500/20 border border-teal-500/30 flex items-center justify-center text-teal-400">
+                <svg lucideGitBranch class="w-4 h-4"></svg>
+              </div>
               <div class="text-left">
                 <span class="block text-teal-200 group-hover:text-white transition-colors">Continue with Codeberg</span>
                 <span class="block text-[10px] text-teal-400 font-normal">Forgejo / FOSS Favorite for Luanti</span>
@@ -64,7 +66,9 @@ import { LucideX, LucideChevronRight } from '@lucide/angular';
             (click)="signIn('gitlab')"
             class="w-full p-3 rounded-xl bg-amber-950/40 hover:bg-amber-900/50 border border-amber-700/60 text-white font-bold text-xs sm:text-sm flex items-center justify-between transition shadow group">
             <div class="flex items-center gap-3">
-              <span class="text-lg">🦊</span>
+              <div class="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                <svg lucideGitBranch class="w-4 h-4"></svg>
+              </div>
               <div class="text-left">
                 <span class="block text-amber-200 group-hover:text-white transition-colors">Continue with GitLab</span>
                 <span class="block text-[10px] text-amber-400 font-normal">GitLab.com or Custom Projects</span>
@@ -78,7 +82,9 @@ import { LucideX, LucideChevronRight } from '@lucide/angular';
             (click)="signIn('github')"
             class="w-full p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-white font-bold text-xs sm:text-sm flex items-center justify-between transition shadow group">
             <div class="flex items-center gap-3">
-              <span class="text-lg">🐙</span>
+              <div class="w-8 h-8 rounded-lg bg-slate-700/50 border border-slate-600 flex items-center justify-center text-slate-300">
+                <svg lucideGitBranch class="w-4 h-4"></svg>
+              </div>
               <div class="text-left">
                 <span class="block text-slate-200 group-hover:text-white transition-colors">Continue with GitHub</span>
                 <span class="block text-[10px] text-slate-400 font-normal">Standard Community Repositories</span>
@@ -92,7 +98,9 @@ import { LucideX, LucideChevronRight } from '@lucide/angular';
             (click)="signIn('contentdb')"
             class="w-full p-3 rounded-xl bg-sky-950/40 hover:bg-sky-900/50 border border-sky-700/60 text-white font-bold text-xs sm:text-sm flex items-center justify-between transition shadow group">
             <div class="flex items-center gap-3">
-              <span class="text-lg">🌐</span>
+              <div class="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                <svg lucideGlobe class="w-4 h-4"></svg>
+              </div>
               <div class="text-left">
                 <span class="block text-sky-200 group-hover:text-white transition-colors">Sign in with ContentDB</span>
                 <span class="block text-[10px] text-sky-400 font-normal">Auto-Import Your Official Packages</span>

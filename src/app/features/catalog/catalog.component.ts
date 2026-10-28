@@ -6,6 +6,7 @@ import { PackageCardComponent } from '../card/package-card.component';
 import { PackageService } from '../../core/services/package.service';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { LucideSearchX } from '@lucide/angular';
 
 @Component({
   selector: 'app-catalog',
@@ -16,7 +17,8 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
     PackageCarouselComponent,
     PackageCardComponent,
     TooltipDirective,
-    TranslatePipe
+    TranslatePipe,
+    LucideSearchX
   ],
   template: `
     @if (packageService.searchQuery()) {
@@ -43,9 +45,7 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
         @if (packageService.filteredPackages().length === 0) {
           <div class="py-16 text-center space-y-3">
             <div class="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center mx-auto text-slate-500">
-              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
+              <svg lucideSearchX class="w-6 h-6"></svg>
             </div>
             <h3 class="text-sm font-semibold text-slate-300">{{ 'common.noResults' | translate }}</h3>
             <p class="text-xs text-slate-500 max-w-sm mx-auto">
@@ -77,30 +77,35 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
         
         <!-- Swimlane 1: Trending Today -->
         <app-package-carousel 
+          icon="flame"
           [title]="'carousel.trending' | translate" 
           [packages]="packageService.trendingPackages()">
         </app-package-carousel>
 
         <!-- Swimlane 2: Decentralized Git Community Packages -->
         <app-package-carousel 
+          icon="git"
           [title]="'carousel.freshGit' | translate" 
           [packages]="packageService.decentralizedGitPackages()">
         </app-package-carousel>
 
         <!-- Swimlane 3: Standalone Voxel Games -->
         <app-package-carousel 
+          icon="gamepad"
           [title]="'carousel.standaloneGames' | translate" 
           [packages]="packageService.standaloneGames()">
         </app-package-carousel>
 
         <!-- Swimlane 4: High-Tech Automation & Machinery -->
         <app-package-carousel 
+          icon="cpu"
           [title]="'carousel.automation' | translate" 
           [packages]="packageService.automationMods()">
         </app-package-carousel>
 
         <!-- Swimlane 5: High-Definition Texture Packs -->
         <app-package-carousel 
+          icon="palette"
           [title]="'carousel.texturePacks' | translate" 
           [packages]="packageService.texturePacks()">
         </app-package-carousel>
@@ -112,4 +117,3 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
 export class CatalogComponent {
   readonly packageService = inject(PackageService);
 }
-

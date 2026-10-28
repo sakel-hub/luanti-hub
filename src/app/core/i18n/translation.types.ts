@@ -4,16 +4,15 @@ export interface LocaleMeta {
   id: LocaleId;
   label: string;
   nativeLabel: string;
-  flag: string;
 }
 
 export const SUPPORTED_LOCALES: LocaleMeta[] = [
-  { id: 'en', label: 'English', nativeLabel: 'English', flag: '🇬🇧' },
-  { id: 'sk', label: 'Slovak', nativeLabel: 'Slovenčina', flag: '🇸🇰' },
-  { id: 'de', label: 'German', nativeLabel: 'Deutsch', flag: '🇩🇪' },
-  { id: 'fr', label: 'French', nativeLabel: 'Français', flag: '🇫🇷' },
-  { id: 'es', label: 'Spanish', nativeLabel: 'Español', flag: '🇪🇸' },
-  { id: 'ru', label: 'Russian', nativeLabel: 'Русский', flag: '🇷🇺' }
+  { id: 'en', label: 'English', nativeLabel: 'English' },
+  { id: 'sk', label: 'Slovak', nativeLabel: 'Slovenčina' },
+  { id: 'de', label: 'German', nativeLabel: 'Deutsch' },
+  { id: 'fr', label: 'French', nativeLabel: 'Français' },
+  { id: 'es', label: 'Spanish', nativeLabel: 'Español' },
+  { id: 'ru', label: 'Russian', nativeLabel: 'Русский' }
 ];
 
 export interface TranslationDictionary {
