@@ -21,13 +21,29 @@ yarn-error.log
 *.sublime-workspace
 
 # Visual Studio Code
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/mcp.json
-.history/*
+.vscode/
+.history/
+
+# AI Assistants, Temporary Scripts, and Agent Workspaces
+.agents/
+.agent/
+.gemini/
+.claude/
+.cursor/
+.cursorrules
+.cline/
+.roo/
+.continue/
+.copilot/
+.aider*
+*.system_generated
+.system_generated/
+*.py
+__pycache__/
+*.pyc
+
+# Cloudflare / Wrangler local state
+.wrangler/
 
 # Miscellaneous
 /.angular/cache
@@ -38,7 +54,15 @@ yarn-error.log
 testem.log
 /typings
 __screenshots__/
+build.log
+*.log
 
 # System files
 .DS_Store
 Thumbs.db
+/Library/
+
+# Local environment / cache
+.npm/
+.angular-config.json
+node_modules
