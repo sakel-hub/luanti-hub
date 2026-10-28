@@ -1,55 +1,343 @@
-import { verifySessionToken, parseCookies } from './lib/session';
+import {
+  createSessionToken,
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  isProtectedAdminHandle,
+  verifyProviderToken
+} from './lib/session';
+import { syncAuthorContentDbPackages } from '../lib/upstream';
 
 interface Env {
   DB?: any;
   SESSION_SECRET?: string;
+  ADMIN_USERS?: string;
+  ADMIN_SECRET?: string;
 }
 
+// GET /api/auth/me: Fetch current authenticated user profile, linked identities, packages, favorites & admin status
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
 
   if (!sessionToken) {
-    return Response.json({ user: null });
+    return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
   if (!userId || !context.env.DB) {
-    return Response.json({ user: null });
+    return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
-  // 1. Fetch User Record
-  const user = await context.env.DB.prepare(
-    `SELECT * FROM users WHERE id = ?`
-  ).bind(userId).first();
+  try {
+    // 1. Fetch User Record
+    const user = await context.env.DB.prepare(
+      `SELECT * FROM users WHERE id = ?`
+    ).bind(userId).first();
 
-  if (!user) {
-    return Response.json({ user: null });
-  }
-
-  // 2. Fetch Linked Identities (Codeberg, GitLab, GitHub, ContentDB)
-  const identities = await context.env.DB.prepare(
-    `SELECT provider, provider_username as username, profile_url, avatar_url, verified, created_at 
-     FROM user_identities WHERE user_id = ?`
-  ).bind(userId).all();
-
-  // 3. Fetch User's Packages (both ContentDB claimed & Git)
-  const packages = await context.env.DB.prepare(
-    `SELECT id, author_name, name, title, type, short_desc, thumbnail_url, score, downloads_count, repo_url, status 
-     FROM packages WHERE author_id = ? ORDER BY downloads_count DESC`
-  ).bind(userId).all();
-
-  return Response.json({
-    user: {
-      id: user.id,
-      username: user.username,
-      display_name: user.display_name || user.username,
-      avatar_url: user.avatar_url,
-      bio: user.bio,
-      identities: identities.results || [],
-      packages: packages.results || []
+    if (!user) {
+      return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
     }
-  }, {
-    headers: { 'Cache-Control': 'no-store' }
-  });
+
+    // 2. Fetch Linked Identities (Codeberg, GitLab, GitHub, ContentDB)
+    const identitiesRes = await context.env.DB.prepare(
+      `SELECT provider, provider_username as username, profile_url, avatar_url, verified, created_at
+       FROM user_identities WHERE user_id = ?`
+    ).bind(userId).all();
+    const identities = (identitiesRes.results || []).map((id: any) => ({
+      ...id,
+      verified: Boolean(id.verified)
+    }));
+
+    // 3. Evaluate Admin Role (strictly requires verified identity + D1 role or ADMIN_USERS env variable)
+    const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
+    if (isAdmin && user.role !== 'admin') {
+      try {
+        await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
+        user.role = 'admin';
+      } catch {
+        // Ignore if role column migration not yet run
+      }
+    }
+
+    // 4. Fetch User's Published / Claimed Packages
+    const packagesRes = await context.env.DB.prepare(
+      `SELECT id, author_name, name, title, type, short_desc, thumbnail_url, score, downloads_count, license, media_license, repo_url, provider, status, status_reason
+       FROM packages WHERE author_id = ? OR LOWER(author_name) = LOWER(?)
+       ORDER BY downloads_count DESC`
+    ).bind(userId, user.username).all();
+
+    // 5. Fetch User's Synced Favorites
+    const favoritesRes = await context.env.DB.prepare(
+      `SELECT package_id FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC`
+    ).bind(userId).all();
+    const favorites = (favoritesRes.results || []).map((r: any) => r.package_id);
+
+    // 6. If Admin, count open moderation reports
+    let openReportsCount = 0;
+    if (isAdmin) {
+      try {
+        const repCount = await context.env.DB.prepare(
+          `SELECT COUNT(*) as cnt FROM moderation_reports WHERE status = 'open'`
+        ).first();
+        openReportsCount = repCount?.cnt || 0;
+      } catch {
+        openReportsCount = 0;
+      }
+    }
+
+    return Response.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name || user.username,
+        avatar_url: user.avatar_url || `https://github.com/${user.username}.png`,
+        bio: user.bio || '',
+        role: isAdmin ? 'admin' : 'user',
+        is_admin: isAdmin,
+        open_reports_count: openReportsCount,
+        created_at: user.created_at,
+        identities,
+        packages: packagesRes.results || [],
+        favorites
+      }
+    }, {
+      headers: { 'Cache-Control': 'no-store' }
+    });
+  } catch (err: any) {
+    return Response.json({ user: null, error: err.message }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+  }
+}
+
+// POST /api/auth/me: Direct Handle Sign-In / PAT Verification
+export async function onRequestPost(context: { request: Request; env: Env }) {
+  try {
+    const body = await context.request.json() as {
+      provider?: string;
+      username?: string;
+      token?: string;
+    };
+
+    const allowedProviders = ['contentdb', 'codeberg', 'gitlab', 'github'];
+    const rawProvider = (body.provider || 'contentdb').toLowerCase();
+    const provider = allowedProviders.includes(rawProvider) ? rawProvider : 'contentdb';
+    const rawUsername = (body.username || '').trim();
+    const rawToken = (body.token || '').trim();
+
+    if (!rawUsername || !/^[a-zA-Z0-9_.-]{2,39}$/.test(rawUsername)) {
+      return Response.json({ error: 'Please enter a valid username (2–39 alphanumeric characters).' }, { status: 400 });
+    }
+
+    let verifiedUsername = rawUsername;
+    let displayName = rawUsername;
+    let avatarUrl = `https://github.com/${rawUsername}.png`;
+    let profileUrl = `https://github.com/${rawUsername}`;
+    let isCryptographicallyVerified = false;
+
+    // 1. If a Personal Access Token or Admin Secret was provided, verify it live against the provider API
+    if (rawToken) {
+      const tokenCheck = await verifyProviderToken(provider, rawToken, rawUsername, context.env.ADMIN_SECRET);
+      if (!tokenCheck.verified) {
+        return Response.json(
+          { error: 'Invalid Personal Access Token or Admin Secret for the selected provider.' },
+          { status: 401 }
+        );
+      }
+      isCryptographicallyVerified = true;
+      verifiedUsername = tokenCheck.username || rawUsername;
+      displayName = tokenCheck.displayName || verifiedUsername;
+      if (tokenCheck.avatarUrl) avatarUrl = tokenCheck.avatarUrl;
+      if (tokenCheck.profileUrl) profileUrl = tokenCheck.profileUrl;
+    } else {
+      // 2. Unauthenticated Handle Sign-In: block impersonation of protected Admin handles
+      if (isProtectedAdminHandle(rawUsername, provider, context.env.ADMIN_USERS)) {
+        return Response.json(
+          {
+            error: 'This administrator handle is protected. Please sign in via OAuth or provide a Personal Access Token.'
+          },
+          { status: 403 }
+        );
+      }
+
+      if (provider === 'contentdb') {
+        avatarUrl = `https://content.luanti.org/users/${rawUsername}/avatar/`;
+        profileUrl = `https://content.luanti.org/users/${rawUsername}/`;
+      } else if (provider === 'codeberg') {
+        avatarUrl = `https://codeberg.org/${rawUsername}.png`;
+        profileUrl = `https://codeberg.org/${rawUsername}`;
+      } else if (provider === 'gitlab') {
+        profileUrl = `https://gitlab.com/${rawUsername}`;
+      } else if (provider === 'github') {
+        try {
+          const ghRes = await fetch(`https://api.github.com/users/${encodeURIComponent(rawUsername)}`, {
+            headers: { 'User-Agent': 'LuantiHub' }
+          });
+          if (ghRes.ok) {
+            const ghUser = await ghRes.json() as any;
+            verifiedUsername = ghUser.login || rawUsername;
+            displayName = ghUser.name || verifiedUsername;
+            avatarUrl = ghUser.avatar_url || avatarUrl;
+            profileUrl = ghUser.html_url || profileUrl;
+          }
+        } catch {
+          // Keep defaults
+        }
+      }
+    }
+
+    const verifiedFlag = isCryptographicallyVerified ? 1 : 0;
+    const isAdmin = checkIsAdmin(
+      { username: verifiedUsername },
+      [{ provider, username: verifiedUsername, verified: verifiedFlag }],
+      context.env.ADMIN_USERS
+    );
+    const role = isAdmin ? 'admin' : 'user';
+    let userId = `usr_${verifiedUsername.toLowerCase()}`;
+
+    if (context.env.DB) {
+      const existingUser = await context.env.DB.prepare(
+        `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
+      ).bind(verifiedUsername).first() as { id: string; role: string } | null;
+
+      if (existingUser) {
+        // Check if existing user has any cryptographically verified identity or admin role
+        const verifiedIdentity = await context.env.DB.prepare(
+          `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+        ).bind(existingUser.id).first();
+
+        if (!isCryptographicallyVerified && (verifiedIdentity || existingUser.role === 'admin' || existingUser.role === 'moderator')) {
+          return Response.json(
+            {
+              error: 'This creator account is verified and protected. Please sign in via OAuth or provide a Personal Access Token.'
+            },
+            { status: 403 }
+          );
+        }
+
+        userId = existingUser.id;
+        if (isAdmin) {
+          await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
+        }
+      } else {
+        userId = crypto.randomUUID();
+        await context.env.DB.prepare(`
+          INSERT INTO users (id, username, display_name, avatar_url, role)
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(userId, verifiedUsername, displayName, avatarUrl, role).run();
+      }
+
+      await context.env.DB.prepare(`
+        INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+          user_id = CASE WHEN user_identities.verified = 1 AND excluded.verified = 0 THEN user_identities.user_id ELSE excluded.user_id END,
+          provider_username = excluded.provider_username,
+          avatar_url = excluded.avatar_url,
+          verified = MAX(user_identities.verified, excluded.verified)
+      `).bind(
+        userId,
+        provider,
+        verifiedUsername.toLowerCase(),
+        verifiedUsername,
+        profileUrl,
+        avatarUrl,
+        verifiedFlag
+      ).run();
+
+      // Auto-sync ContentDB packages for this author only when verified or creating initial portfolio view
+      await syncAuthorContentDbPackages(context.env.DB, userId, verifiedUsername);
+    }
+
+    const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET);
+    const url = new URL(context.request.url);
+    const isHttps = url.protocol === 'https:';
+
+    return new Response(JSON.stringify({ success: true, userId, verified: isCryptographicallyVerified }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
+      }
+    });
+  } catch (err: any) {
+    return Response.json({ error: err.message || 'Sign in failed.' }, { status: 500 });
+  }
+}
+
+// PUT /api/auth/me: Update User Account Information (display_name, bio, avatar_url)
+export async function onRequestPut(context: { request: Request; env: Env }) {
+  const cookies = parseCookies(context.request);
+  const sessionToken = cookies['lh_session'];
+  if (!sessionToken) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
+  if (!userId || !context.env.DB) {
+    return Response.json({ error: 'Invalid session' }, { status: 401 });
+  }
+
+  try {
+    const body = await context.request.json() as {
+      display_name?: string;
+      bio?: string;
+      avatar_url?: string;
+    };
+
+    const displayName = (body.display_name || '').trim().slice(0, 60);
+    const bio = (body.bio || '').trim().slice(0, 500);
+    const rawAvatarUrl = (body.avatar_url || '').trim().slice(0, 500);
+    const avatarUrl = /^https:\/\//i.test(rawAvatarUrl) ? rawAvatarUrl : '';
+
+    await context.env.DB.prepare(`
+      UPDATE users
+      SET display_name = COALESCE(NULLIF(?, ''), display_name),
+          bio = ?,
+          avatar_url = COALESCE(NULLIF(?, ''), avatar_url),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(displayName, bio, avatarUrl, userId).run();
+
+    return Response.json({ success: true });
+  } catch (err: any) {
+    return Response.json({ error: err.message || 'Failed to update profile.' }, { status: 500 });
+  }
+}
+
+// DELETE /api/auth/me?provider=github: Unlink an identity provider
+export async function onRequestDelete(context: { request: Request; env: Env }) {
+  const cookies = parseCookies(context.request);
+  const sessionToken = cookies['lh_session'];
+  if (!sessionToken) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
+  if (!userId || !context.env.DB) {
+    return Response.json({ error: 'Invalid session' }, { status: 401 });
+  }
+
+  const url = new URL(context.request.url);
+  const provider = url.searchParams.get('provider');
+
+  if (!provider) {
+    return Response.json({ error: 'Provider parameter is required.' }, { status: 400 });
+  }
+
+  try {
+    const countRes = await context.env.DB.prepare(
+      `SELECT COUNT(*) as cnt FROM user_identities WHERE user_id = ?`
+    ).bind(userId).first();
+
+    if ((countRes?.cnt || 0) <= 1) {
+      return Response.json({ error: 'Cannot unlink your only connected identity.' }, { status: 400 });
+    }
+
+    await context.env.DB.prepare(
+      `DELETE FROM user_identities WHERE user_id = ? AND provider = ?`
+    ).bind(userId, provider).run();
+
+    return Response.json({ success: true });
+  } catch (err: any) {
+    return Response.json({ error: err.message || 'Failed to unlink account.' }, { status: 500 });
+  }
 }

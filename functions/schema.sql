@@ -1,5 +1,6 @@
 -- LuantiHub Multi-Provider D1 Database Schema
--- Run with: npx wrangler d1 execute luanti-registry-db --remote --file=./functions/schema.sql
+-- Run locally:  npx wrangler d1 execute luanti-registry-db --local --file=./functions/schema.sql
+-- Run remotely: npx wrangler d1 execute luanti-registry-db --remote --file=./functions/schema.sql
 
 -- 1. Core Users Table
 CREATE TABLE IF NOT EXISTS users (
@@ -8,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT,
     avatar_url TEXT,
     bio TEXT,
+    role TEXT DEFAULT 'user' CHECK(role IN ('user', 'moderator', 'admin')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -44,9 +46,15 @@ CREATE TABLE IF NOT EXISTS packages (
     banner_url TEXT,
     license TEXT NOT NULL,
     media_license TEXT NOT NULL,
+    tags TEXT,                           -- JSON array of tag strings
+    dependencies TEXT,                   -- JSON array of required dependency names
+    optional_dependencies TEXT,          -- JSON array of optional dependency names
+    min_minetest_version TEXT DEFAULT '5.0.0',
     status TEXT DEFAULT 'active' CHECK(status IN ('active', 'flagged', 'delisted')),
+    status_reason TEXT,                  -- Reason for flag/delist (e.g. DMCA, Malware)
+    flagged_at DATETIME,
     downloads_count INTEGER DEFAULT 0,
-    score REAL DEFAULT 5.0,
+    score REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (author_id) REFERENCES users(id)
@@ -98,7 +106,20 @@ CREATE TABLE IF NOT EXISTS user_favorites (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Indices for rapid querying by Luanti game engine, web search, and Top 10 rollups
+-- 8. Moderation & Abuse Reports Queue (Supports Instant Kill Switch & DMCA Safe Harbor)
+CREATE TABLE IF NOT EXISTS moderation_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id TEXT NOT NULL,
+    reporter_user_id TEXT,
+    reason TEXT CHECK(reason IN ('dmca', 'malware', 'license', 'broken', 'inappropriate', 'other')) NOT NULL,
+    details TEXT NOT NULL,
+    status TEXT DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'dismissed')),
+    resolved_by TEXT,
+    resolved_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indices for rapid querying by Luanti game engine, web search, moderation, and Top 10 rollups
 CREATE INDEX IF NOT EXISTS idx_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_identities_provider ON user_identities(provider, provider_username);
 CREATE INDEX IF NOT EXISTS idx_packages_type ON packages(type);
@@ -107,3 +128,5 @@ CREATE INDEX IF NOT EXISTS idx_packages_author ON packages(author_name);
 CREATE INDEX IF NOT EXISTS idx_reviews_pkg ON reviews(package_id);
 CREATE INDEX IF NOT EXISTS idx_pkg_downloads_date_count ON package_daily_downloads (download_date, downloads_count DESC);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);

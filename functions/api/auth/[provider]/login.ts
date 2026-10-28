@@ -1,41 +1,75 @@
 interface Env {
   CODEBERG_CLIENT_ID?: string;
+  CODEBERG_REDIRECT_URI?: string;
   GITLAB_CLIENT_ID?: string;
+  GITLAB_REDIRECT_URI?: string;
   GITHUB_CLIENT_ID?: string;
+  GITHUB_REDIRECT_URI?: string;
   CONTENTDB_CLIENT_ID?: string;
+  CONTENTDB_REDIRECT_URI?: string;
 }
 
 export async function onRequestGet(context: { params: { provider: string }; request: Request; env: Env }) {
   const { provider } = context.params;
   const url = new URL(context.request.url);
-  const redirectUri = `${url.origin}/api/auth/${provider}/callback`;
+  const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
+  const state = `${provider}_${crypto.randomUUID().slice(0, 12)}`;
 
   let authUrl = '';
+  let clientId = '';
+  let redirectUri = defaultRedirectUri;
 
   switch (provider) {
     case 'codeberg': {
-      const clientId = context.env.CODEBERG_CLIENT_ID || 'demo_codeberg_id';
-      authUrl = `https://codeberg.org/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${provider}`;
+      clientId = context.env.CODEBERG_CLIENT_ID || '';
+      redirectUri = context.env.CODEBERG_REDIRECT_URI || defaultRedirectUri;
+      if (clientId) {
+        authUrl = `https://codeberg.org/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${encodeURIComponent(state)}`;
+      }
       break;
     }
     case 'gitlab': {
-      const clientId = context.env.GITLAB_CLIENT_ID || 'demo_gitlab_id';
-      authUrl = `https://gitlab.com/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=read_user&state=${provider}`;
+      clientId = context.env.GITLAB_CLIENT_ID || '';
+      redirectUri = context.env.GITLAB_REDIRECT_URI || defaultRedirectUri;
+      if (clientId) {
+        authUrl = `https://gitlab.com/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=read_user&state=${encodeURIComponent(state)}`;
+      }
       break;
     }
     case 'github': {
-      const clientId = context.env.GITHUB_CLIENT_ID || 'demo_github_id';
-      authUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user&state=${provider}`;
+      clientId = context.env.GITHUB_CLIENT_ID || '';
+      redirectUri = context.env.GITHUB_REDIRECT_URI || defaultRedirectUri;
+      if (clientId) {
+        authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user&state=${encodeURIComponent(state)}`;
+      }
       break;
     }
     case 'contentdb': {
-      const clientId = context.env.CONTENTDB_CLIENT_ID || 'demo_contentdb_id';
-      authUrl = `https://content.luanti.org/oauth/authorize/?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${provider}`;
+      clientId = context.env.CONTENTDB_CLIENT_ID || '';
+      redirectUri = context.env.CONTENTDB_REDIRECT_URI || defaultRedirectUri;
+      if (clientId) {
+        authUrl = `https://content.luanti.org/oauth/authorize/?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${encodeURIComponent(state)}`;
+      }
       break;
     }
     default:
-      return new Response(`Unsupported auth provider: ${provider}`, { status: 400 });
+      return Response.redirect(`${url.origin}/?auth_error=Unsupported+provider`, 302);
   }
 
-  return Response.redirect(authUrl, 302);
+  // If OAuth Client ID is not configured in Cloudflare environment, redirect back to app with clear code
+  if (!clientId || !authUrl) {
+    return Response.redirect(
+      `${url.origin}/?auth_error=oauth_not_configured&provider=${encodeURIComponent(provider)}`,
+      302
+    );
+  }
+
+  const isHttps = url.protocol === 'https:';
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: authUrl,
+      'Set-Cookie': `lh_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${isHttps ? '; Secure' : ''}`
+    }
+  });
 }
