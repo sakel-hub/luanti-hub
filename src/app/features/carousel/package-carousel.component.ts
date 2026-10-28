@@ -4,11 +4,19 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { PackageCardComponent } from '../card/package-card.component';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
 
 @Component({
   selector: 'app-package-carousel',
   standalone: true,
-  imports: [CommonModule, PackageCardComponent, TooltipDirective, TranslatePipe],
+  imports: [
+    CommonModule,
+    PackageCardComponent,
+    TooltipDirective,
+    TranslatePipe,
+    LucideChevronLeft,
+    LucideChevronRight
+  ],
   template: `
     @if (packages.length > 0) {
       <section class="py-4 space-y-3 select-none">
@@ -25,25 +33,21 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
             </h2>
           </div>
 
-          <!-- Scroll Arrows -->
+          <!-- Scroll Arrows with Lucide Icons -->
           <div class="hidden sm:flex items-center gap-1.5">
             <button 
               (click)="scrollLeft()"
               [attr.aria-label]="'carousel.scrollLeft' | translate"
               [appTooltip]="'carousel.scrollLeft' | translate"
               class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
-              </svg>
+              <svg lucideChevronLeft class="w-4 h-4"></svg>
             </button>
             <button 
               (click)="scrollRight()"
               [attr.aria-label]="'carousel.scrollRight' | translate"
               [appTooltip]="'carousel.scrollRight' | translate"
               class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-              </svg>
+              <svg lucideChevronRight class="w-4 h-4"></svg>
             </button>
           </div>
         </div>
@@ -74,14 +78,12 @@ export class PackageCarouselComponent {
   @ViewChild('carouselTrack') trackRef!: ElementRef<HTMLDivElement>;
 
   scrollLeft(): void {
-    if (this.trackRef) {
-      this.trackRef.nativeElement.scrollBy({ left: -400, behavior: 'smooth' });
-    }
+    if (!this.trackRef?.nativeElement) return;
+    this.trackRef.nativeElement.scrollBy({ left: -640, behavior: 'smooth' });
   }
 
   scrollRight(): void {
-    if (this.trackRef) {
-      this.trackRef.nativeElement.scrollBy({ left: 400, behavior: 'smooth' });
-    }
+    if (!this.trackRef?.nativeElement) return;
+    this.trackRef.nativeElement.scrollBy({ left: 640, behavior: 'smooth' });
   }
 }

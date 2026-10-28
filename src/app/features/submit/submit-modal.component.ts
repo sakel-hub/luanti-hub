@@ -2,11 +2,12 @@ import { Component, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
+import { LucidePlus, LucideX } from '@lucide/angular';
 
 @Component({
   selector: 'app-submit-modal',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, LucidePlus, LucideX],
   template: `
     <div 
       (click)="packageService.closeSubmitModal()"
@@ -23,9 +24,7 @@ import { PackageService } from '../../core/services/package.service';
         <div class="flex items-center justify-between border-b border-slate-800 pb-4">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-              </svg>
+              <svg lucidePlus class="w-5 h-5"></svg>
             </div>
             <div>
               <h2 id="submit-modal-title" class="text-lg font-bold text-white">
@@ -39,10 +38,9 @@ import { PackageService } from '../../core/services/package.service';
 
           <button 
             (click)="packageService.closeSubmitModal()"
+            aria-label="Close submit dialog"
             class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
+            <svg lucideX class="w-5 h-5"></svg>
           </button>
         </div>
 

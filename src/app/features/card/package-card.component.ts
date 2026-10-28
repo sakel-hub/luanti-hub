@@ -1,6 +1,5 @@
 import { Component, Input, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router } from '@angular/router';
 import { LuantiPackage } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
@@ -8,11 +7,20 @@ import { PwaService } from '../../core/services/pwa.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { LucideStar, LucideZap, LucideHeart } from '@lucide/angular';
 
 @Component({
   selector: 'app-package-card',
   standalone: true,
-  imports: [CommonModule, ImgFallbackDirective, TooltipDirective, TranslatePipe],
+  imports: [
+    CommonModule,
+    ImgFallbackDirective,
+    TooltipDirective,
+    TranslatePipe,
+    LucideStar,
+    LucideZap,
+    LucideHeart
+  ],
   template: `
     <div 
       (click)="openDetails()"
@@ -22,9 +30,9 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
       (keydown.space)="openDetails()"
       [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + package.author"
       [appTooltip]="'card.clickToOpen' | translate"
-      class="group relative flex-shrink-0 w-64 sm:w-72 rounded-xl bg-slate-900/90 border border-slate-800/80 hover:border-sky-500/50 shadow-lg hover:shadow-sky-500/10 overflow-hidden cursor-pointer transition-all duration-300 hover:-translate-y-1.5 focus:outline-none focus:ring-2 focus:ring-sky-500">
+      class="group relative flex-shrink-0 w-64 sm:w-72 rounded-xl bg-slate-900/90 border border-slate-800/80 hover:border-sky-500/50 shadow-lg hover:shadow-sky-500/10 overflow-hidden cursor-pointer transition-all duration-200 hover:-translate-y-1 focus:outline-none focus:ring-2 focus:ring-sky-500">
       
-      <!-- Thumbnail with 16:9 Aspect Ratio & High-Res Auto-Upgrade -->
+      <!-- Thumbnail with 16:9 Aspect Ratio & Lazy Loading -->
       <div class="relative w-full h-36 sm:h-40 bg-slate-950 overflow-hidden">
         <img 
           [src]="package.banner || package.thumbnail" 
@@ -32,7 +40,8 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
           appImgFallback
           [alt]="package.title"
           loading="lazy"
-          class="w-full h-full object-cover group-hover:scale-108 transition-transform duration-500"
+          decoding="async"
+          class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
         />
         <div class="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent"></div>
 
@@ -47,8 +56,9 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
           @if (package.source === 'git') {
             <span 
               [appTooltip]="'card.gitSourceTooltip' | translate"
-              class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/90 text-slate-950 flex items-center gap-0.5 shadow">
-              <span>⚡ Git</span>
+              class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/90 text-slate-950 flex items-center gap-1 shadow">
+              <svg lucideZap class="w-3 h-3 text-slate-950"></svg>
+              <span>Git</span>
             </span>
           }
         </div>
@@ -60,13 +70,10 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
           [appTooltip]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
           class="absolute top-2.5 right-2.5 p-1.5 rounded-full bg-slate-950/70 hover:bg-slate-950 text-slate-300 hover:text-rose-400 transition">
           <svg 
-            class="w-3.5 h-3.5" 
+            lucideHeart 
+            class="w-3.5 h-3.5 transition-colors"
             [class.fill-rose-500]="settingsService.isFavorite(package.id)"
-            [class.text-rose-500]="settingsService.isFavorite(package.id)"
-            fill="none" 
-            stroke="currentColor" 
-            viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
+            [class.text-rose-500]="settingsService.isFavorite(package.id)">
           </svg>
         </button>
       </div>
@@ -78,11 +85,9 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
             {{ package.title }}
           </h3>
           
-          <!-- Star Rating -->
+          <!-- Star Rating with Lucide Icon -->
           <div class="flex items-center gap-1 text-[11px] font-bold text-amber-400 flex-shrink-0">
-            <svg class="w-3 h-3 fill-current" viewBox="0 0 20 20">
-              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/>
-            </svg>
+            <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400"></svg>
             <span>{{ package.score }}</span>
           </div>
         </div>
@@ -109,14 +114,9 @@ export class PackageCardComponent {
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
-  private readonly router = inject(Router, { optional: true });
 
   openDetails(): void {
-    if (this.router) {
-      this.router.navigate(['/package', this.package.author, this.package.name]);
-    } else {
-      this.packageService.openPackageModal(this.package);
-    }
+    this.packageService.openPackageModal(this.package);
   }
 
   onFavoriteClick(event: MouseEvent): void {

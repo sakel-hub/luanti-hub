@@ -33,13 +33,27 @@
       "name": "packages-api",
       "urls": [
         "/api/packages/**",
-        "/api/reviews/**"
+        "/api/reviews/**",
+        "https://contentdb.milcho.org/api/packages/**"
       ],
       "cacheConfig": {
         "maxSize": 500,
         "maxAge": "6h",
         "strategy": "freshness",
         "timeout": "2s"
+      }
+    },
+    {
+      "name": "package-screenshots",
+      "urls": [
+        "https://contentdb.milcho.org/storage/**",
+        "https://raw.githubusercontent.com/**",
+        "https://gitlab.com/**/raw/**"
+      ],
+      "cacheConfig": {
+        "maxSize": 400,
+        "maxAge": "7d",
+        "strategy": "performance"
       }
     }
   ],

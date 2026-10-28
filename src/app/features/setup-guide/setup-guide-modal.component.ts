@@ -2,11 +2,12 @@ import { Component, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
+import { LucideTerminal, LucideX, LucideCopy, LucideCheck } from '@lucide/angular';
 
 @Component({
   selector: 'app-setup-guide-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, LucideTerminal, LucideX, LucideCopy, LucideCheck],
   template: `
     <div 
       (click)="packageService.closeSetupModal()"
@@ -23,9 +24,7 @@ import { SettingsService } from '../../core/services/settings.service';
         <div class="flex items-center justify-between border-b border-slate-800 pb-4">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
-              </svg>
+              <svg lucideTerminal class="w-5 h-5"></svg>
             </div>
             <div>
               <h2 id="setup-modal-title" class="text-lg font-bold text-white">
@@ -39,10 +38,9 @@ import { SettingsService } from '../../core/services/settings.service';
 
           <button 
             (click)="packageService.closeSetupModal()"
+            aria-label="Close setup dialog"
             class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
+            <svg lucideX class="w-5 h-5"></svg>
           </button>
         </div>
 
@@ -55,8 +53,14 @@ import { SettingsService } from '../../core/services/settings.service';
             <pre class="w-full p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-sky-400 font-mono text-xs overflow-x-auto select-all">contentdb_url = {{ settingsService.contentDbUrl() }}</pre>
             <button 
               (click)="copyConfig()"
-              class="absolute right-2 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow transition">
-              {{ copied() ? 'Copied!' : 'Copy' }}
+              class="absolute right-2 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow transition flex items-center gap-1.5">
+              @if (copied()) {
+                <svg lucideCheck class="w-3.5 h-3.5"></svg>
+                <span>Copied!</span>
+              } @else {
+                <svg lucideCopy class="w-3.5 h-3.5"></svg>
+                <span>Copy</span>
+              }
             </button>
           </div>
         </div>

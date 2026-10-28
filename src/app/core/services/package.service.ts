@@ -1,12 +1,12 @@
 import { Injectable, computed, signal, inject } from '@angular/core';
-import { Router } from '@angular/router';
+import { Location } from '@angular/common';
 import { LuantiPackage, CommunityReview } from '../models/package.model';
 
 @Injectable({
   providedIn: 'root'
 })
 export class PackageService {
-  private readonly router = inject(Router, { optional: true });
+  private readonly location = inject(Location, { optional: true });
 
   private readonly _packages = signal<LuantiPackage[]>([]);
   private readonly _searchQuery = signal<string>('');
@@ -161,6 +161,47 @@ export class PackageService {
 
   constructor() {
     this.initCatalog();
+    this.initHistorySync();
+  }
+
+  private initHistorySync(): void {
+    if (this.location) {
+      this.location.subscribe((popState) => {
+        const url = popState.url || '/';
+        if (url.startsWith('/package/')) {
+          const parts = url.replace('/package/', '').split('/');
+          if (parts[0] && parts[1]) {
+            this.openPackageModalById(parts[0], parts[1], false);
+            return;
+          }
+        } else if (url === '/submit') {
+          this._activePackage.set(null);
+          this._isSetupModalOpen.set(false);
+          this._isSubmitModalOpen.set(true);
+          return;
+        } else if (url === '/setup') {
+          this._activePackage.set(null);
+          this._isSubmitModalOpen.set(false);
+          this._isSetupModalOpen.set(true);
+          return;
+        }
+        this.closeAllModals(false);
+      });
+    }
+
+    if (typeof window !== 'undefined' && window.location?.pathname) {
+      const path = window.location.pathname;
+      if (path.startsWith('/package/')) {
+        const parts = path.replace('/package/', '').split('/');
+        if (parts[0] && parts[1]) {
+          this.openPackageModalById(parts[0], parts[1], false);
+        }
+      } else if (path === '/submit') {
+        this._isSubmitModalOpen.set(true);
+      } else if (path === '/setup') {
+        this._isSetupModalOpen.set(true);
+      }
+    }
   }
 
   // Fetch Live Packages from Backend API (Cloudflare D1 + ContentDB + Milcho failover)
@@ -256,8 +297,8 @@ export class PackageService {
 
   openPackageModal(pkg: LuantiPackage, updateUrl = true): void {
     this._activePackage.set(pkg);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/package', pkg.author, pkg.name]);
+    if (updateUrl && this.location) {
+      this.location.go(`/package/${pkg.author}/${pkg.name}`);
     }
   }
 
@@ -307,36 +348,36 @@ export class PackageService {
 
   closePackageModal(updateUrl = true): void {
     this._activePackage.set(null);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/']);
+    if (updateUrl && this.location) {
+      this.location.go('/');
     }
   }
 
   openSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(true);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/submit']);
+    if (updateUrl && this.location) {
+      this.location.go('/submit');
     }
   }
 
   closeSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(false);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/']);
+    if (updateUrl && this.location) {
+      this.location.go('/');
     }
   }
 
   openSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(true);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/setup']);
+    if (updateUrl && this.location) {
+      this.location.go('/setup');
     }
   }
 
   closeSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(false);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/']);
+    if (updateUrl && this.location) {
+      this.location.go('/');
     }
   }
 
@@ -344,8 +385,8 @@ export class PackageService {
     this._activePackage.set(null);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/']);
+    if (updateUrl && this.location) {
+      this.location.go('/');
     }
   }
 

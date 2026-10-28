@@ -1,9 +1,10 @@
 import {
   Directive,
   ElementRef,
-  HostListener,
   Input,
   OnDestroy,
+  OnInit,
+  NgZone,
   inject
 } from '@angular/core';
 import { TranslationService } from '../../core/i18n/translation.service';
@@ -13,9 +14,10 @@ import { TranslationKey } from '../../core/i18n/translation.types';
   selector: '[appTooltip]',
   standalone: true
 })
-export class TooltipDirective implements OnDestroy {
-  private el: ElementRef | null = null;
-  private translationService: TranslationService | null = null;
+export class TooltipDirective implements OnInit, OnDestroy {
+  private readonly el = inject(ElementRef, { optional: true });
+  private readonly translationService = inject(TranslationService, { optional: true });
+  private readonly ngZone = inject(NgZone);
 
   @Input() appTooltip: string = '';
   @Input() appTooltipKey?: TranslationKey;
@@ -27,67 +29,72 @@ export class TooltipDirective implements OnDestroy {
       this.appTooltipPlacement = pos;
     }
   }
-  @Input() appTooltipDelay: number = 150;
+  @Input() appTooltipDelay: number = 180;
 
   private tooltipEl: HTMLElement | null = null;
   private currentTooltipId: string | null = null;
   private showTimeout: any = null;
   private lastTouchTime = 0;
+  private cleanups: (() => void)[] = [];
+  private escapeCleanup: (() => void) | null = null;
 
-  constructor() {
-    try {
-      this.el = inject(ElementRef);
-    } catch {
-      this.el = null;
-    }
+  ngOnInit(): void {
+    if (typeof window === 'undefined' || !this.el?.nativeElement) return;
+    const native = this.el.nativeElement as HTMLElement;
 
-    try {
-      this.translationService = inject(TranslationService);
-    } catch {
-      this.translationService = null;
-    }
-  }
+    // Attach listeners OUTSIDE Angular zone to avoid triggering change detection on hover
+    this.ngZone.runOutsideAngular(() => {
+      const onMouseEnter = () => {
+        if (Date.now() - this.lastTouchTime < 800) return;
+        this.scheduleShow();
+      };
 
-  @HostListener('touchstart')
-  onTouchStart(): void {
-    this.lastTouchTime = Date.now();
-    this.hide();
-  }
+      const onMouseLeave = () => {
+        this.hide();
+      };
 
-  @HostListener('mouseenter')
-  onMouseEnter(): void {
-    if (Date.now() - this.lastTouchTime < 800) return;
-    this.scheduleShow();
-  }
+      const onTouchStart = () => {
+        this.lastTouchTime = Date.now();
+        this.hide();
+      };
 
-  @HostListener('mouseleave')
-  onMouseLeave(): void {
-    this.hide();
-  }
+      const onFocusIn = () => {
+        if (Date.now() - this.lastTouchTime < 800) return;
+        this.scheduleShow();
+      };
 
-  @HostListener('focusin')
-  onFocusIn(): void {
-    if (Date.now() - this.lastTouchTime < 800) return;
-    this.scheduleShow();
-  }
+      const onFocusOut = () => {
+        this.hide();
+      };
 
-  @HostListener('focusout')
-  onFocusOut(): void {
-    this.hide();
-  }
+      const onClick = () => {
+        this.hide();
+      };
 
-  @HostListener('click')
-  onClick(): void {
-    this.hide();
-  }
+      native.addEventListener('mouseenter', onMouseEnter, { passive: true });
+      native.addEventListener('mouseleave', onMouseLeave, { passive: true });
+      native.addEventListener('touchstart', onTouchStart, { passive: true });
+      native.addEventListener('focusin', onFocusIn, { passive: true });
+      native.addEventListener('focusout', onFocusOut, { passive: true });
+      native.addEventListener('click', onClick, { passive: true });
 
-  @HostListener('window:keydown.escape')
-  onEscape(): void {
-    this.hide();
+      this.cleanups.push(
+        () => native.removeEventListener('mouseenter', onMouseEnter),
+        () => native.removeEventListener('mouseleave', onMouseLeave),
+        () => native.removeEventListener('touchstart', onTouchStart),
+        () => native.removeEventListener('focusin', onFocusIn),
+        () => native.removeEventListener('focusout', onFocusOut),
+        () => native.removeEventListener('click', onClick)
+      );
+    });
   }
 
   ngOnDestroy(): void {
     this.hide();
+    for (const cleanup of this.cleanups) {
+      cleanup();
+    }
+    this.cleanups = [];
   }
 
   private scheduleShow(): void {
@@ -126,8 +133,9 @@ export class TooltipDirective implements OnDestroy {
     if (this.tooltipEl || typeof document === 'undefined' || !this.el) return;
 
     let text = this.resolveTooltipText();
-    let shortcut = this.appTooltipShortcut;
+    if (!text) return;
 
+    let shortcut = this.appTooltipShortcut;
     if (!shortcut && text.includes('|')) {
       const parts = text.split('|');
       text = parts[0].trim();
@@ -164,6 +172,15 @@ export class TooltipDirective implements OnDestroy {
 
     this.positionTooltip();
     tip.style.opacity = '1';
+
+    // Single escape handler only while tooltip is active
+    const onDocKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        this.hide();
+      }
+    };
+    document.addEventListener('keydown', onDocKey, { once: true });
+    this.escapeCleanup = () => document.removeEventListener('keydown', onDocKey);
   }
 
   private positionTooltip(): void {
@@ -224,6 +241,10 @@ export class TooltipDirective implements OnDestroy {
 
   public hide(): void {
     this.clearTimeout();
+    if (this.escapeCleanup) {
+      this.escapeCleanup();
+      this.escapeCleanup = null;
+    }
     if (this.tooltipEl) {
       this.tooltipEl.remove();
       this.tooltipEl = null;

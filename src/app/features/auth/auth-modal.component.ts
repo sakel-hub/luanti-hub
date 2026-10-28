@@ -2,11 +2,12 @@ import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { AuthService } from '../../core/services/auth.service';
 import { GitProvider } from '../../core/models/package.model';
+import { LucideX, LucideChevronRight } from '@lucide/angular';
 
 @Component({
   selector: 'app-auth-modal',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, LucideX, LucideChevronRight],
   template: `
     <div 
       (click)="authService.closeAuthModal()"
@@ -35,10 +36,9 @@ import { GitProvider } from '../../core/models/package.model';
 
           <button 
             (click)="authService.closeAuthModal()"
+            aria-label="Close sign in dialog"
             class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
+            <svg lucideX class="w-5 h-5"></svg>
           </button>
         </div>
 
@@ -56,9 +56,7 @@ import { GitProvider } from '../../core/models/package.model';
                 <span class="block text-[10px] text-teal-400 font-normal">Forgejo / FOSS Favorite for Luanti</span>
               </div>
             </div>
-            <svg class="w-4 h-4 text-teal-400 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
+            <svg lucideChevronRight class="w-4 h-4 text-teal-400 group-hover:translate-x-0.5 transition-transform"></svg>
           </button>
 
           <!-- GitLab -->
@@ -72,9 +70,7 @@ import { GitProvider } from '../../core/models/package.model';
                 <span class="block text-[10px] text-amber-400 font-normal">GitLab.com or Custom Projects</span>
               </div>
             </div>
-            <svg class="w-4 h-4 text-amber-400 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
+            <svg lucideChevronRight class="w-4 h-4 text-amber-400 group-hover:translate-x-0.5 transition-transform"></svg>
           </button>
 
           <!-- GitHub -->
@@ -88,9 +84,7 @@ import { GitProvider } from '../../core/models/package.model';
                 <span class="block text-[10px] text-slate-400 font-normal">Standard Community Repositories</span>
               </div>
             </div>
-            <svg class="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
+            <svg lucideChevronRight class="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform"></svg>
           </button>
 
           <!-- ContentDB Official -->
@@ -104,9 +98,7 @@ import { GitProvider } from '../../core/models/package.model';
                 <span class="block text-[10px] text-sky-400 font-normal">Auto-Import Your Official Packages</span>
               </div>
             </div>
-            <svg class="w-4 h-4 text-sky-400 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-            </svg>
+            <svg lucideChevronRight class="w-4 h-4 text-sky-400 group-hover:translate-x-0.5 transition-transform"></svg>
           </button>
 
         </div>

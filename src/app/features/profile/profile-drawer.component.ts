@@ -4,11 +4,12 @@ import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { GitProvider } from '../../core/models/package.model';
+import { LucideX } from '@lucide/angular';
 
 @Component({
   selector: 'app-profile-drawer',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, LucideX],
   template: `
     @if (authService.currentUser(); as user) {
       <div 
@@ -36,10 +37,9 @@ import { GitProvider } from '../../core/models/package.model';
 
             <button 
               (click)="authService.closeProfileDrawer()"
+              aria-label="Close profile drawer"
               class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-              </svg>
+              <svg lucideX class="w-5 h-5"></svg>
             </button>
           </div>
 

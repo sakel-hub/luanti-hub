@@ -24,60 +24,30 @@ html, body {
   scrollbar-width: none;
 }
 
-/* Sleek Themed Custom Scrollbars */
-.custom-scrollbar,
-body,
-aside *,
-main *,
-nav *,
-dialog *,
-div[role="dialog"] * {
+/* Sleek Themed Custom Scrollbars (High Performance) */
+* {
   scrollbar-width: thin;
-  scrollbar-color: rgba(56, 189, 248, 0.35) rgba(15, 23, 42, 0.65);
+  scrollbar-color: rgba(56, 189, 248, 0.4) rgba(15, 23, 42, 0.6);
 }
 
-.custom-scrollbar::-webkit-scrollbar,
-body::-webkit-scrollbar,
-aside *::-webkit-scrollbar,
-main *::-webkit-scrollbar,
-nav *::-webkit-scrollbar,
-dialog *::-webkit-scrollbar,
-div[role="dialog"] *::-webkit-scrollbar {
+::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-track,
-body::-webkit-scrollbar-track,
-aside *::-webkit-scrollbar-track,
-main *::-webkit-scrollbar-track,
-nav *::-webkit-scrollbar-track,
-dialog *::-webkit-scrollbar-track,
-div[role="dialog"] *::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.65);
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
   border-radius: 9999px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb,
-body::-webkit-scrollbar-thumb,
-aside *::-webkit-scrollbar-thumb,
-main *::-webkit-scrollbar-thumb,
-nav *::-webkit-scrollbar-thumb,
-dialog *::-webkit-scrollbar-thumb,
-div[role="dialog"] *::-webkit-scrollbar-thumb {
-  background: rgba(71, 85, 105, 0.75);
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.7);
   border-radius: 9999px;
   border: 1px solid rgba(15, 23, 42, 0.5);
   transition: background-color 0.15s ease;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb:hover,
-body::-webkit-scrollbar-thumb:hover,
-aside *::-webkit-scrollbar-thumb:hover,
-main *::-webkit-scrollbar-thumb:hover,
-nav *::-webkit-scrollbar-thumb:hover,
-dialog *::-webkit-scrollbar-thumb:hover,
-div[role="dialog"] *::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: rgba(56, 189, 248, 0.75);
 }
 

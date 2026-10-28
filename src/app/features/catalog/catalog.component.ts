@@ -1,7 +1,5 @@
-import { Component, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, Router } from '@angular/router';
-import { Subscription } from 'rxjs';
 import { HeroBillboardComponent } from '../hero/hero-billboard.component';
 import { PackageCarouselComponent } from '../carousel/package-carousel.component';
 import { PackageCardComponent } from '../card/package-card.component';
@@ -111,38 +109,7 @@ import { TranslatePipe } from '../../core/i18n/translate.pipe';
     }
   `
 })
-export class CatalogComponent implements OnInit, OnDestroy {
+export class CatalogComponent {
   readonly packageService = inject(PackageService);
-  private readonly route = inject(ActivatedRoute);
-  private readonly router = inject(Router);
-
-  private sub?: Subscription;
-
-  ngOnInit(): void {
-    // Synchronize browser history and deep links with PackageService
-    this.sub = this.route.paramMap.subscribe(params => {
-      const author = params.get('author');
-      const name = params.get('name');
-      if (author && name) {
-        this.packageService.openPackageModalById(author, name, false);
-      }
-    });
-
-    const urlSub = this.route.url.subscribe(segments => {
-      const path = segments[0]?.path;
-      if (path === 'submit') {
-        this.packageService.openSubmitModal(false);
-      } else if (path === 'setup') {
-        this.packageService.openSetupModal(false);
-      } else if (!path && !this.route.snapshot.paramMap.get('author')) {
-        this.packageService.closeAllModals(false);
-      }
-    });
-
-    this.sub.add(urlSub);
-  }
-
-  ngOnDestroy(): void {
-    this.sub?.unsubscribe();
-  }
 }
+
