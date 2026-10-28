@@ -33,15 +33,21 @@ export interface TranslationDictionary {
     submitRepo: string;
     submitRepoTooltip: string;
     favorites: string;
+    favoritesFilter: string;
     favoritesTooltip: string;
     language: string;
     languageTooltip: string;
     checkForUpdates: string;
     clearCache: string;
+    signIn: string;
+    adminBadge: string;
+    reload: string;
+    clearCacheConfirm: string;
   };
   hero: {
     featuredBadge: string;
     playInstall: string;
+    downloadZip: string;
     viewGit: string;
     viewDetails: string;
     rating: string;
@@ -67,6 +73,34 @@ export interface TranslationDictionary {
     top10Badge: string;
     scrollLeft: string;
     scrollRight: string;
+    viewAll: string;
+    infoHero: string;
+    infoTags: string;
+    infoTrending: string;
+    infoTop10Today: string;
+    infoGames: string;
+    infoGit: string;
+    infoAutomation: string;
+    infoTop10Week: string;
+    infoTextures: string;
+  };
+  catalog: {
+    resultsFor: string;
+    filteredCatalog: string;
+    filteredTitle: string;
+    showingPackages: string;
+    resultsSubtitle: string;
+    clearFilters: string;
+    resetFilters: string;
+    sortBy: string;
+    sortDownloads: string;
+    sortRating: string;
+    sortScore: string;
+    sortTitle: string;
+    loadMore: string;
+    showingCount: string;
+    filterByTag: string;
+    allTags: string;
   };
   card: {
     downloads: string;
@@ -74,7 +108,9 @@ export interface TranslationDictionary {
     byAuthor: string;
     license: string;
     matchScore: string;
+    match: string;
     quickInstall: string;
+    downloadZip: string;
     moreInfo: string;
     favoriteTooltip: string;
     unfavoriteTooltip: string;
@@ -84,26 +120,158 @@ export interface TranslationDictionary {
   modal: {
     close: string;
     installInGame: string;
+    setupGuide: string;
+    setupGuideTooltip: string;
+    directZipDownload: string;
+    downloadZip: string;
     viewGitRepo: string;
+    viewOnContentDb: string;
     sharePackage: string;
     shareTooltip: string;
     top10Rank: string;
     tabOverview: string;
+    tabReadme: string;
     tabReviews: string;
+    tabReleases: string;
     tabCompliance: string;
     author: string;
+    technicalId: string;
+    genresTags: string;
+    tags: string;
     category: string;
     source: string;
+    license: string;
     licenseCode: string;
+    codeLicense: string;
     licenseMedia: string;
+    mediaLicense: string;
     engineVersion: string;
     downloads: string;
     rating: string;
+    dependenciesTitle: string;
+    dependencies: string;
+    requiredDeps: string;
+    optionalDeps: string;
+    noDependencies: string;
+    screenshots: string;
+    readmeTitle: string;
+    linksTitle: string;
+    website: string;
+    issueTracker: string;
+    forums: string;
+    releasesTitle: string;
+    inGameConfigTitle: string;
+    registryConfig: string;
+    copyConfig: string;
+    copied: string;
+    inGameConfigHint: string;
+    registryConfigDesc: string;
     noReviews: string;
     leaveReview: string;
+    writeReviewTitle: string;
+    rateAndReviewTitle: string;
+    signInToReviewPrompt: string;
+    signInToReviewBtn: string;
+    reviewTitlePlaceholder: string;
+    reviewCommentPlaceholder: string;
+    reviewBodyPlaceholder: string;
+    postReviewBtn: string;
+    postReview: string;
     stars: string;
     spdxNotice: string;
     safeHarborNotice: string;
+    reportPackageTitle: string;
+    reportPackage: string;
+    reportReasonLabel: string;
+    reportReason: string;
+    reportDetails: string;
+    reportReasonDmca: string;
+    reportReasonMalware: string;
+    reportReasonLicense: string;
+    reportReasonBroken: string;
+    reportDetailsPlaceholder: string;
+    submitReportBtn: string;
+    reportSubmit: string;
+    adminModerationTitle: string;
+    adminModeration: string;
+    killSwitchDelist: string;
+    killSwitchFlag: string;
+    killSwitchRestore: string;
+  };
+  auth: {
+    title: string;
+    subtitle: string;
+    codebergTitle: string;
+    codebergSub: string;
+    codebergDesc: string;
+    gitlabTitle: string;
+    gitlabSub: string;
+    gitlabDesc: string;
+    githubTitle: string;
+    githubSub: string;
+    githubDesc: string;
+    contentdbTitle: string;
+    contentdbSub: string;
+    contentdbDesc: string;
+    quickClaimTitle: string;
+    directLoginTitle: string;
+    quickClaimDesc: string;
+    directLoginDesc: string;
+    usernamePlaceholder: string;
+    claimSignInBtn: string;
+    directLoginBtn: string;
+    footerNote: string;
+    oauthNotConfiguredNotice: string;
+  };
+  profile: {
+    tabPackages: string;
+    tabFavorites: string;
+    tabAccount: string;
+    tabModeration: string;
+    connectedAccounts: string;
+    linkedCount: string;
+    verified: string;
+    linkCodeberg: string;
+    linkGitlab: string;
+    linkGithub: string;
+    syncCdbTitle: string;
+    syncTitle: string;
+    syncCdbDesc: string;
+    syncDesc: string;
+    syncCdbPlaceholder: string;
+    syncPlaceholder: string;
+    syncBtn: string;
+    syncingBtn: string;
+    syncing: string;
+    myPackagesTitle: string;
+    myPackages: string;
+    noPackagesYet: string;
+    noPackages: string;
+    submitGitBtn: string;
+    noFavoritesYet: string;
+    noFavorites: string;
+    browseCatalogBtn: string;
+    accountInfoTitle: string;
+    displayNameLabel: string;
+    bioLabel: string;
+    avatarUrlLabel: string;
+    preferredEngine: string;
+    highContrast: string;
+    saveProfileBtn: string;
+    saveChanges: string;
+    savingBtn: string;
+    profileSaved: string;
+    savedSuccess: string;
+    unlinkBtn: string;
+    signOut: string;
+    openReportsTitle: string;
+    moderationQueueTitle: string;
+    noOpenReports: string;
+    noReports: string;
+    moderatedPackagesTitle: string;
+    delistBtn: string;
+    flagBtn: string;
+    restoreBtn: string;
   };
   setup: {
     title: string;
@@ -114,30 +282,66 @@ export interface TranslationDictionary {
     step2Desc: string;
     step3Title: string;
     step3Desc: string;
+    step1: string;
+    step2: string;
+    step3: string;
+    step4: string;
+    step5: string;
     configKey: string;
+    copy: string;
     copyTooltip: string;
     copied: string;
     close: string;
+    optionATitle: string;
+    optionA: string;
+    optionBTitle: string;
+    optionB: string;
+    failoverNotice: string;
+    failoverNote: string;
+    gotItBtn: string;
+    doneBtn: string;
   };
   submit: {
     title: string;
     subtitle: string;
     repoUrlLabel: string;
     repoUrlPlaceholder: string;
+    repoUrlHint: string;
     providerLabel: string;
     branchLabel: string;
     validateBtn: string;
     submittingBtn: string;
+    submitting: string;
+    runAuditBtn: string;
+    auditingBtn: string;
+    runningAudit: string;
+    auditPassed: string;
+    auditFailed: string;
+    publishBtn: string;
+    submitBtn: string;
+    warrantiesTitle: string;
+    warranty1: string;
+    warrantyOwnership: string;
+    warranty2: string;
+    warrantyLicense: string;
+    warranty3: string;
+    warrantyTakedown: string;
+    howToFixTitle: string;
+    howToFix: string;
+    copySnippetBtn: string;
+    copySnippet: string;
     guidelinesTitle: string;
     guideline1: string;
     guideline2: string;
     guideline3: string;
     close: string;
+    cancel: string;
   };
   pwa: {
     updateAvailable: string;
     updateDesc: string;
     reloadNow: string;
+    updateReload: string;
     dismiss: string;
     upToDate: string;
     checking: string;
@@ -145,6 +349,7 @@ export interface TranslationDictionary {
     installSuccess: string;
     clearCacheTitle: string;
     clearCacheDesc: string;
+    downloadingZipToast: string;
   };
   common: {
     loading: string;
@@ -153,6 +358,8 @@ export interface TranslationDictionary {
     copiedToClipboard: string;
     resultsCount: string;
     skipToContent: string;
+    close: string;
+    downloadStarted: string;
   };
   footer: {
     about: string;
@@ -160,7 +367,14 @@ export interface TranslationDictionary {
     upstreamMirror: string;
     engineSite: string;
     dmca: string;
+    legalTerms: string;
+    termsPrivacy: string;
+    legalModalTitle: string;
     disclaimer: string;
+    trademarkNotice: string;
+    safeHarborDetail: string;
+    legalSafeHarbor: string;
+    legalPrivacy: string;
   };
 }
 
@@ -168,8 +382,11 @@ export type TranslationKey =
   | `header.${keyof TranslationDictionary['header']}`
   | `hero.${keyof TranslationDictionary['hero']}`
   | `carousel.${keyof TranslationDictionary['carousel']}`
+  | `catalog.${keyof TranslationDictionary['catalog']}`
   | `card.${keyof TranslationDictionary['card']}`
   | `modal.${keyof TranslationDictionary['modal']}`
+  | `auth.${keyof TranslationDictionary['auth']}`
+  | `profile.${keyof TranslationDictionary['profile']}`
   | `setup.${keyof TranslationDictionary['setup']}`
   | `submit.${keyof TranslationDictionary['submit']}`
   | `pwa.${keyof TranslationDictionary['pwa']}`

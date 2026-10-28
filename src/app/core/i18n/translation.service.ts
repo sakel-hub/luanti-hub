@@ -38,20 +38,17 @@ export class TranslationService {
     if (typeof window === 'undefined') return 'en';
 
     try {
-      // 1. URL search param (?lang=sk)
       const urlParams = new URLSearchParams(window.location.search);
       const queryLang = urlParams.get('lang') as LocaleId;
       if (queryLang && DICTIONARIES[queryLang]) {
         return queryLang;
       }
 
-      // 2. Local storage
       const saved = localStorage.getItem(STORAGE_KEY) as LocaleId;
       if (saved && DICTIONARIES[saved]) {
         return saved;
       }
 
-      // 3. Browser language
       const browserLang = (navigator.language || '').slice(0, 2).toLowerCase() as LocaleId;
       if (browserLang && DICTIONARIES[browserLang]) {
         return browserLang;
@@ -83,6 +80,10 @@ export class TranslationService {
     }
   }
 
+  translate(key: TranslationKey | string, params?: Record<string, string | number>): string {
+    return this.t(key, params);
+  }
+
   t(key: TranslationKey | string, params?: Record<string, string | number>): string {
     const dict = this.currentDictionary();
     let text = this.resolveKey(dict, key);
@@ -96,7 +97,14 @@ export class TranslationService {
     }
 
     if (params) {
-      for (const [paramKey, paramVal] of Object.entries(params)) {
+      const normalizedParams: Record<string, string | number> = { ...params };
+      if ('shown' in normalizedParams && !('visible' in normalizedParams)) {
+        normalizedParams['visible'] = normalizedParams['shown'];
+      }
+      if ('visible' in normalizedParams && !('shown' in normalizedParams)) {
+        normalizedParams['shown'] = normalizedParams['visible'];
+      }
+      for (const [paramKey, paramVal] of Object.entries(normalizedParams)) {
         text = text.replace(new RegExp(`\\{${paramKey}\\}`, 'g'), String(paramVal));
       }
     }

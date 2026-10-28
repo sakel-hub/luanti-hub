@@ -1,4 +1,4 @@
-# LuantiHub 🎮⚡
+# LuantiHub
 
 **The Decentralized Package Registry & Content Hub for Luanti**
 
@@ -8,25 +8,24 @@
 [![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1-f38020?style=flat-square&logo=cloudflare)](https://pages.cloudflare.com)
 [![PWA Ready](https://img.shields.io/badge/PWA-Offline%20First-emerald-500?style=flat-square)](https://web.dev/progressive-web-apps/)
 
-LuantiHub is a next-generation package discovery platform and decentralized content repository for the [Luanti](https://www.luanti.org) voxel game engine (formerly Minetest). It provides a modern, Netflix-style cinematic web browsing experience while serving as a direct drop-in replacement for the in-game Luanti **Content** tab.
+LuantiHub is a package discovery platform and decentralized content repository for the [Luanti](https://www.luanti.org) voxel game engine (formerly Minetest). It provides a modern, cinematic frosted-glass browsing experience while serving as a direct drop-in replacement for the in-game Luanti **Content** tab.
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 * **Direct In-Game Luanti Compatibility:** Drop-in compatible with the Luanti engine client. Configure `contentdb_url = https://luanti-hub.pages.dev` in your `luanti.conf` (or legacy `minetest.conf`) to search, download, and update decentralized mods directly inside the game.
-* **Decentralized Git Ingestion:** Creators can submit and index their mods directly from **Codeberg**, **GitLab**, or **GitHub** without centralized gatekeeping.
-* **High-Availability Fallback Mirror:** Automatically fails over between the official ContentDB API (`content.luanti.org`) and the community mirror (`contentdb.milcho.org`), ensuring uninterrupted uptime for players and server operators.
-* **1080p High-Resolution Screenshots:** Automatically resolves and upgrades package screenshots to uncompressed full-HD captures (`shot-0.png`) with resilient multi-tier fallback.
-* **Mixed Community Reviews:** Aggregates official ContentDB reviews with native LuantiHub 5-star ratings and discussions into a unified thread.
-* **SPDX License & Legal Safeguards:** Automated validation checks code and media licenses against recognized Open Source and Free Culture standards (MIT, LGPL, GPL, CC-BY-SA) under DMCA §512 and EU DSA safe harbor provisions.
-* **Multi-Language Support (i18n):** Fully localized in 6 languages: English, German, French, Spanish, Russian, and Slovak.
-* **Offline-First PWA:** Installable across desktop and mobile, with background update toasts, offline caching of package manifests, and Web Share API integration.
-* **Privacy-First Design:** Zero advertising or tracking cookies. Strictly necessary storage only.
+* **Decentralized Git Ingestion & Static Analysis:** Creators can submit and index their mods directly from **Codeberg**, **GitLab**, or **GitHub** with automated `mod.conf` / `game.conf` / `texture_pack.conf` parsing, SPDX license verification, and Luacheck static code analysis.
+* **High-Availability Fallback Mirror:** Automatically fails over between the official ContentDB API (`content.luanti.org`) and the community mirror (`contentdb.milcho.org`), with background sync to Cloudflare D1 so package listings and tags remain available at all times.
+* **Full-HD 16:9 Media & README Rendering:** Resolves uncompressed full-HD screenshots (`shot-0.png`) with resilient multi-tier fallback and renders live repository `README.md` documentation inside the package details modal.
+* **Genuine Community Star Ratings & Reviews:** Aggregates genuine 1–5 star ratings and verified reviews stored in Cloudflare D1 alongside upstream ContentDB discussions. Unrated packages cleanly hide star badges until rated.
+* **Hardened Multi-Provider Auth & Role-Based Moderation:** Supports OAuth 2.0 and Personal Access Token (PAT) verification across GitHub, Codeberg, GitLab, and ContentDB, with cryptographic HMAC-SHA256 sessions (`lh_session`), CSRF state verification, and strict verified-identity checks for admin and moderator roles.
+* **Multi-Language Support (i18n):** Fully localized in 6 languages: English (`en`), German (`de`), French (`fr`), Spanish (`es`), Russian (`ru`), and Slovak (`sk`).
+* **Offline-First PWA & Edge SSR SEO:** Installable across desktop and mobile with Angular Service Worker (`@angular/pwa`), dynamic OpenGraph/JSON-LD injection at the Cloudflare Edge (`/package/:author/:name`), and dynamic XML sitemaps (`/sitemap.xml`).
 
 ---
 
-## 🎮 In-Game Luanti Configuration
+## In-Game Luanti Configuration
 
 To browse and install mods from LuantiHub directly inside your Luanti client:
 
@@ -45,63 +44,106 @@ contentdb_url = https://luanti-hub.pages.dev
 
 ### Method 2: In-Game Settings Menu
 
-1. Launch **Luanti** ➔ Click **Settings** ➔ **All Settings**.
+1. Launch **Luanti** -> Click **Settings** -> **All Settings**.
 2. Search for `contentdb_url`.
 3. Set the value to `https://luanti-hub.pages.dev` and click **Save**.
-4. Open the **Content** tab in the main menu to browse packages!
+4. Open the **Content** tab in the main menu to browse packages.
 
 ---
 
-## 🚀 Getting Started (Local Development)
+## Getting Started (Local Development)
 
 ### Prerequisites
 
 * **Node.js** `>= 22.0.0` (recommended: `v24.x`)
 * **npm** `>= 10.0.0`
 
-### Installation & Run
+### 1. Frontend-Only Development (`ng serve`)
+
+When running `npm start`, Angular serves the frontend on `http://localhost:4200`. Any `/api/*` endpoints (Cloudflare Pages Functions) are not running in this mode, so `PackageService`, `AuthService`, and `SettingsService` automatically detect `localhost` and fall back to direct upstream ContentDB/Mirror queries and `localStorage` without spamming network retries.
 
 ```bash
-# Clone the repository
-git clone https://github.com/sakel-hub/luanti-hub.git
-cd luanti-hub
-
-# Install dependencies
 npm install
-
-# Start the local development server
 npm start
 ```
 
-Open your browser and navigate to `http://localhost:4200`.
+### 2. Full-Stack Local Development (Cloudflare Pages Functions + Local D1 SQLite)
+
+To test the `/api/*` Cloudflare Pages Functions and local D1 database on `http://localhost:8788`:
+
+```bash
+# 1. Initialize the local D1 database schema
+npm run db:init:local
+
+# 2. Build the Angular app and start Cloudflare Wrangler Pages Dev
+npm run dev:cloudflare
+```
 
 ---
 
-## 🛠️ Tech Stack & Architecture
+## Tech Stack & Architecture
 
 | Layer | Technology |
 | :--- | :--- |
-| **Frontend Framework** | [Angular 22](https://angular.dev) (Signals, Standalone Components, zoneless-ready) |
-| **Styling** | [Tailwind CSS v4](https://tailwindcss.com) with `@tailwindcss/postcss` |
-| **Icons & Imagery** | Lucide Icons + Hand-crafted 2:1 isometric Luanti voxel vector branding |
+| **Frontend Framework** | [Angular 22](https://angular.dev) (Signals, Standalone Components, `OnPush` Change Detection) |
+| **Styling** | [Tailwind CSS v4](https://tailwindcss.com) with `@tailwindcss/postcss` & frosted-glass design system |
+| **Icons & Imagery** | `@lucide/angular` (Lucide Icons) + 2:1 isometric Luanti voxel SVG branding |
 | **Hosting & Edge** | [Cloudflare Pages](https://pages.cloudflare.com) |
 | **Database** | [Cloudflare D1](https://developers.cloudflare.com/d1/) (Serverless distributed SQLite) |
-| **Edge Functions** | Cloudflare Pages Functions (`/functions/api/...`) |
-| **PWA & Caching** | Angular Service Worker (`@angular/pwa`) with offline manifest fallback |
+| **Edge Functions** | Cloudflare Pages Functions (`/functions/api/...` & `/functions/package/...`) |
+| **PWA & Caching** | Angular Service Worker (`@angular/pwa`) + in-memory signal state caching |
 
 ---
 
-## ☁️ Deployment
+## Cloudflare Production Deployment Setup
 
-LuantiHub is designed to run serverless on Cloudflare Pages:
+LuantiHub is ready to deploy to **Cloudflare Pages** with **Cloudflare D1**:
 
-1. **Build Command:** `npm run build`
-2. **Build Output Directory:** `dist/luanti-hub/browser`
-3. **Functions & Database:** The backend API endpoints in `/functions` connect to Cloudflare D1 via the `DB` binding (schema defined in `functions/schema.sql`).
+### 1. Create & Initialize the Production D1 Database
+
+```bash
+# Create the D1 database in your Cloudflare account (if not already created)
+npx wrangler d1 create luanti-hub-db
+
+# Copy the returned `database_id` into `wrangler.toml` under `[[d1_databases]]`
+
+# Apply the production database schema
+npm run db:init:remote
+```
+
+### 2. Configure Cloudflare Pages Build Settings
+
+In the **Cloudflare Dashboard** -> **Workers & Pages** -> **Create application** -> **Pages**:
+
+* **Framework preset:** Angular (or None)
+* **Build command:** `npm run build`
+* **Build output directory:** `dist/luanti-hub/browser`
+* **Node.js version:** `22` (set `NODE_VERSION = 22` in build environment variables)
+
+### 3. Bind D1 Database to Pages Project
+
+In your Cloudflare Pages project -> **Settings** -> **Bindings**:
+
+* Add a **D1 database** binding with variable name **`DB`** pointing to `luanti-hub-db`.
+
+### 4. Configure Production Environment Variables & Secrets
+
+In your Cloudflare Pages project -> **Settings** -> **Variables and secrets**, you can click **Import .env** and select your [`.env`](file:///Users/juraj/Documents/gits/luanti-hub/.env) file (or see [`.env.example`](file:///Users/juraj/Documents/gits/luanti-hub/.env.example)):
+
+| Variable Name | Required | Description |
+| :--- | :--- | :--- |
+| `SESSION_SECRET` | **Yes (Required in Prod)** | Random 32+ byte secret string used to sign HMAC-SHA256 `lh_session` cookies (e.g. `openssl rand -hex 32`). |
+| `KILL_SWITCH_SECRET` | Recommended | Bearer secret for emergency CLI/webhook package takedowns (`POST /api/packages/:author/:name/moderate`). |
+| `ADMIN_USERS` | Recommended | Comma-separated list of verified admin handles (e.g. `sakel,sakel-hub,juraj`). |
+| `ADMIN_SECRET` | Optional | Secret token that allows an admin to verify their handle directly via the login modal if OAuth is not configured. |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URI` | Optional | GitHub 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/github/callback`). |
+| `CODEBERG_CLIENT_ID` / `CODEBERG_CLIENT_SECRET` / `CODEBERG_REDIRECT_URI` | Optional | Codeberg 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/codeberg/callback`). |
+| `GITLAB_CLIENT_ID` / `GITLAB_CLIENT_SECRET` / `GITLAB_REDIRECT_URI` | Optional | GitLab 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/gitlab/callback`). |
+| `CONTENTDB_CLIENT_ID` / `CONTENTDB_CLIENT_SECRET` / `CONTENTDB_REDIRECT_URI` | Optional | ContentDB 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/contentdb/callback`). |
 
 ---
 
-## ⚖️ License & Legal
+## License & Legal
 
 * **LuantiHub Source Code:** Licensed under the [MIT License](LICENSE).
 * **Game Packages & Mods:** All indexed packages remain the property of their respective creators under their declared open-source licenses (SPDX).
