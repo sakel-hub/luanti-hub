@@ -1,16 +1,15 @@
 import { Injectable, computed, signal } from '@angular/core';
-import { LuantiPackage, PackageType, PackageSource, CommunityReview } from '../models/package.model';
-import { MOCK_PACKAGES } from './mock-packages';
+import { LuantiPackage, CommunityReview } from '../models/package.model';
 
 @Injectable({
   providedIn: 'root'
 })
 export class PackageService {
-  private readonly _packages = signal<LuantiPackage[]>(MOCK_PACKAGES);
+  private readonly _packages = signal<LuantiPackage[]>([]);
   private readonly _searchQuery = signal<string>('');
   private readonly _selectedType = signal<string>('all');
   private readonly _selectedSource = signal<string>('all');
-  private readonly _isLoading = signal<boolean>(false);
+  private readonly _isLoading = signal<boolean>(true);
   private readonly _activePackage = signal<LuantiPackage | null>(null);
   private readonly _isSubmitModalOpen = signal<boolean>(false);
   private readonly _isSetupModalOpen = signal<boolean>(false);
@@ -25,9 +24,10 @@ export class PackageService {
   readonly isSubmitModalOpen = this._isSubmitModalOpen.asReadonly();
   readonly isSetupModalOpen = this._isSetupModalOpen.asReadonly();
 
-  // Featured Billboard Item
+  // Featured Billboard Item (Top scored or most downloaded package)
   readonly featuredPackage = computed(() => {
     const list = this._packages();
+    if (list.length === 0) return null;
     return list.find(p => p.featured) || list[0];
   });
 
@@ -39,11 +39,11 @@ export class PackageService {
 
     return this._packages().filter(pkg => {
       const matchesQuery = !q ||
-        pkg.title.toLowerCase().includes(q) ||
-        pkg.name.toLowerCase().includes(q) ||
-        pkg.author.toLowerCase().includes(q) ||
-        pkg.short_desc.toLowerCase().includes(q) ||
-        pkg.tags.some(t => t.toLowerCase().includes(q));
+        pkg.title?.toLowerCase().includes(q) ||
+        pkg.name?.toLowerCase().includes(q) ||
+        pkg.author?.toLowerCase().includes(q) ||
+        pkg.short_desc?.toLowerCase().includes(q) ||
+        (pkg.tags && pkg.tags.some(t => t.toLowerCase().includes(q)));
 
       const matchesType = type === 'all' || pkg.type === type;
       const matchesSource = source === 'all' || pkg.source === source;
@@ -52,9 +52,9 @@ export class PackageService {
     });
   });
 
-  // Netflix Swimlanes
+  // Netflix Swimlanes (All Computed Dynamically from Live Data)
   readonly trendingPackages = computed(() => {
-    return [...this._packages()].sort((a, b) => b.downloads - a.downloads);
+    return [...this._packages()].sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
   });
 
   readonly standaloneGames = computed(() => {
@@ -67,9 +67,9 @@ export class PackageService {
 
   readonly automationMods = computed(() => {
     return this._packages().filter(p => 
-      p.tags.includes('automation') || 
-      p.tags.includes('circuits') || 
-      p.tags.includes('technology')
+      p.tags?.some(t => ['automation', 'circuits', 'technology', 'mesecons'].includes(t.toLowerCase())) ||
+      p.name?.toLowerCase().includes('mesecon') ||
+      p.name?.toLowerCase().includes('pipe')
     );
   });
 
@@ -81,20 +81,42 @@ export class PackageService {
     this.initCatalog();
   }
 
+  // Fetch Live Packages from Backend API (Cloudflare D1 + ContentDB + Milcho failover)
   async initCatalog(): Promise<void> {
     try {
       this._isLoading.set(true);
-      // Attempt to load from local API / Cloudflare edge
-      const res = await fetch('/api/packages/?limit=50');
+      const res = await fetch('/api/packages/');
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          // Blend with mock/decentralized seed items
-          this._packages.set(data);
+        if (Array.isArray(data)) {
+          // Normalize incoming API items
+          const normalized: LuantiPackage[] = data.map((item: any) => ({
+            id: item.id || `${item.author}/${item.name}`,
+            author: item.author,
+            name: item.name,
+            title: item.title || item.name,
+            type: item.type || 'mod',
+            short_desc: item.short_desc || '',
+            desc: item.desc || item.short_desc || '',
+            thumbnail: item.thumbnail || (item.author && item.name ? `https://content.luanti.org/packages/${item.author}/${item.name}/thumbnail/` : 'logo.svg'),
+            banner: item.banner || item.thumbnail,
+            score: typeof item.score === 'number' ? Math.round(item.score * 100) / 100 : 5.0,
+            downloads: item.downloads || item.downloads_count || 0,
+            license: item.license || 'MIT',
+            media_license: item.media_license,
+            repo_url: item.repo_url,
+            provider: item.provider,
+            source: item.source || (item.repo_url ? 'git' : 'official'),
+            tags: Array.isArray(item.tags) ? item.tags : [],
+            min_minetest_version: item.min_minetest_version || '5.0.0',
+            featured: item.featured || false
+          }));
+
+          this._packages.set(normalized);
         }
       }
     } catch {
-      // Offline fallback: keep MOCK_PACKAGES
+      this._packages.set([]);
     } finally {
       this._isLoading.set(false);
     }
@@ -109,6 +131,11 @@ export class PackageService {
   }
 
   setSourceFilter(source: string): void {
+    const current = this.selectedSource();
+    this.packageServiceSetSourceFilter(current === source ? 'all' : source);
+  }
+
+  private packageServiceSetSourceFilter(source: string): void {
     this._selectedSource.set(source);
   }
 
@@ -136,47 +163,20 @@ export class PackageService {
     this._isSetupModalOpen.set(false);
   }
 
-  // Fetch Mixed Reviews (ContentDB + Native LuantiHub)
+  // Fetch Live Reviews from Backend API (Mixed ContentDB + D1)
   async fetchReviews(pkg: LuantiPackage): Promise<CommunityReview[]> {
     try {
       const res = await fetch(`/api/packages/${pkg.author}/${pkg.name}/reviews`);
       if (res.ok) {
-        return await res.json();
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          return data;
+        }
       }
     } catch {
-      // Fallback sample mixed reviews
+      // Return empty if fetch fails
     }
-
-    return [
-      {
-        id: 'cdb_1',
-        package_id: pkg.id,
-        source: 'contentdb',
-        rating: 5,
-        title: 'Essential for any serious world',
-        comment: 'Brilliant performance and rock-solid Lua code. Tested extensively on Minetest 5.8+ multiplayer.',
-        created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
-        author: {
-          username: 'rubenwardy',
-          display_name: 'Rubenwardy',
-          avatar_url: 'https://github.com/rubenwardy.png'
-        }
-      },
-      {
-        id: 'lh_1',
-        package_id: pkg.id,
-        source: 'luantihub',
-        rating: 5,
-        title: 'Git release fixed collision bugs!',
-        comment: 'Pulled the latest commit straight from GitHub into my server mods directory. Works seamlessly with NodeCore and default MTG.',
-        created_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-        author: {
-          username: 'voxel_architect',
-          display_name: 'Voxel Architect',
-          avatar_url: 'https://github.com/octocat.png'
-        }
-      }
-    ];
+    return [];
   }
 
   // Submit Interactive Review to D1
@@ -218,33 +218,13 @@ export class PackageService {
         return { success: false, message: result.error || 'Failed to submit Git repository.' };
       }
 
-      // Add to local state dynamically
+      // Add newly registered package to the live catalog
       if (result.package) {
         this._packages.update(list => [result.package, ...list]);
       }
       return { success: true };
-    } catch (err) {
-      // For local development simulation:
-      const name = payload.repoUrl.split('/').pop()?.replace('.git', '') || 'custom_mod';
-      const mockNewPkg: LuantiPackage = {
-        id: `creator/${name}`,
-        author: 'community_creator',
-        name,
-        title: name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-        type: 'mod',
-        short_desc: 'Community decentralized mod directly imported from Git.',
-        thumbnail: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60',
-        score: 5.0,
-        downloads: 1,
-        license: 'MIT',
-        media_license: 'CC-BY-SA-4.0',
-        repo_url: payload.repoUrl,
-        source: 'git',
-        tags: ['git', 'community', 'decentralized']
-      };
-
-      this._packages.update(list => [mockNewPkg, ...list]);
-      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error connecting to API.' };
     }
   }
 }

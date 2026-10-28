@@ -179,8 +179,12 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       }
     }
 
+    if (!userId) {
+      return Response.redirect(`${url.origin}/?auth_error=User+creation+failed`, 302);
+    }
+
     // 4. Issue Secure HTTP-Only Session Cookie
-    const sessionToken = await createSessionToken(userId || 'demo_user', context.env.SESSION_SECRET);
+    const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET);
     const isHttps = url.protocol === 'https:';
 
     return new Response(null, {

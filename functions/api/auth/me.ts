@@ -14,25 +14,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
-  if (!userId) {
+  if (!userId || !context.env.DB) {
     return Response.json({ user: null });
-  }
-
-  if (!context.env.DB) {
-    // Development fallback
-    return Response.json({
-      user: {
-        id: userId,
-        username: 'dev_modder',
-        display_name: 'Developer Modder',
-        avatar_url: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=80',
-        identities: [
-          { provider: 'codeberg', username: 'dev_modder', profile_url: 'https://codeberg.org/dev_modder' },
-          { provider: 'github', username: 'dev_modder', profile_url: 'https://github.com/dev_modder' }
-        ],
-        packages: []
-      }
-    });
   }
 
   // 1. Fetch User Record
@@ -44,7 +27,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     return Response.json({ user: null });
   }
 
-  // 2. Fetch Linked Identities
+  // 2. Fetch Linked Identities (Codeberg, GitLab, GitHub, ContentDB)
   const identities = await context.env.DB.prepare(
     `SELECT provider, provider_username as username, profile_url, avatar_url, verified, created_at 
      FROM user_identities WHERE user_id = ?`

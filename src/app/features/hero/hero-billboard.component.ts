@@ -16,7 +16,6 @@ import { SettingsService } from '../../core/services/settings.service';
           <img 
             [src]="pkg.banner || pkg.thumbnail" 
             [alt]="pkg.title"
-            (error)="onImgError($event)"
             class="w-full h-full object-cover object-center filter brightness-60 scale-105 transition-transform duration-1000"
           />
           <!-- Multi-Directional Gradient Mask for Netflix Look -->
@@ -110,15 +109,20 @@ import { SettingsService } from '../../core/services/settings.service';
         </div>
 
       </div>
+    } @else {
+      <!-- Dynamic Skeleton / Loading State while live packages are fetching -->
+      <div class="relative w-full h-[400px] sm:h-[480px] bg-slate-950 flex items-center justify-center p-6 border-b border-slate-900">
+        <div class="flex flex-col items-center gap-3 text-center">
+          <div class="w-10 h-10 border-3 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
+          <p class="text-xs text-slate-400 font-medium tracking-wide">
+            Connecting to LuantiHub &amp; ContentDB Mirror...
+          </p>
+        </div>
+      </div>
     }
   `
 })
 export class HeroBillboardComponent {
   readonly packageService = inject(PackageService);
   readonly featured = this.packageService.featuredPackage;
-
-  onImgError(event: Event): void {
-    const target = event.target as HTMLImageElement;
-    target.src = 'logo.svg';
-  }
 }
