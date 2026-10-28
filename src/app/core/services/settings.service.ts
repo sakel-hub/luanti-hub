@@ -4,10 +4,17 @@ import { Injectable, signal, effect } from '@angular/core';
   providedIn: 'root'
 })
 export class SettingsService {
-  readonly contentDbUrl = signal<string>('https://luanti-hub.pages.dev');
-  readonly preferredEngine = signal<string>('5.8.0');
+  readonly contentDbUrl = signal<string>(
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'https://luanti-hub.pages.dev'
+  );
+  readonly preferredEngine = signal<string>('5.9.0');
   readonly favorites = signal<string[]>([]);
   readonly highContrast = signal<boolean>(false);
+  readonly isAuthenticatedSession = signal<boolean>(false);
+  readonly edgeApiAvailable = signal<boolean>(false);
+  readonly clientId = signal<string>('anon_default');
 
   constructor() {
     this.loadSettings();
@@ -18,6 +25,12 @@ export class SettingsService {
         localStorage.setItem('lh_contentdb_url', this.contentDbUrl());
         localStorage.setItem('lh_preferred_engine', this.preferredEngine());
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
+        localStorage.setItem('lh_high_contrast', JSON.stringify(this.highContrast()));
+        localStorage.setItem('lh_client_id', this.clientId());
+
+        if (typeof document !== 'undefined') {
+          document.documentElement.classList.toggle('high-contrast', this.highContrast());
+        }
       } catch {
         // LocalStorage disabled or quota exceeded
       }
@@ -26,6 +39,15 @@ export class SettingsService {
 
   private loadSettings(): void {
     try {
+      let savedClient = localStorage.getItem('lh_client_id');
+      if (!savedClient || savedClient.length < 8) {
+        const rand = typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID().replace(/-/g, '')
+          : `${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+        savedClient = `anon_${rand}`;
+      }
+      this.clientId.set(savedClient);
+
       const savedUrl = localStorage.getItem('lh_contentdb_url');
       if (savedUrl) this.contentDbUrl.set(savedUrl);
 
@@ -33,22 +55,112 @@ export class SettingsService {
       if (savedEngine) this.preferredEngine.set(savedEngine);
 
       const savedFavs = localStorage.getItem('lh_favorites');
-      if (savedFavs) this.favorites.set(JSON.parse(savedFavs));
+      if (savedFavs) {
+        const parsed = JSON.parse(savedFavs);
+        if (Array.isArray(parsed)) {
+          // Keep only valid 'author/name' package IDs (filter out any legacy mock IDs like '1' or 'pkg-1')
+          const validFavs = Array.from(
+            new Set(
+              parsed.filter((id: any) => typeof id === 'string' && id.includes('/') && id.trim().length > 2)
+            )
+          );
+          this.favorites.set(validFavs);
+        }
+      }
+
+      const savedContrast = localStorage.getItem('lh_high_contrast');
+      if (savedContrast) {
+        this.highContrast.set(Boolean(JSON.parse(savedContrast)));
+      }
     } catch {
       // Defaults kept
     }
   }
 
-  toggleFavorite(packageId: string): void {
+  toggleFavorite(packageId: string): boolean {
+    let added = false;
+    const lowerTarget = packageId.toLowerCase();
     this.favorites.update(favs => {
-      if (favs.includes(packageId)) {
-        return favs.filter(id => id !== packageId);
+      if (favs.some(id => id.toLowerCase() === lowerTarget)) {
+        added = false;
+        return favs.filter(id => id.toLowerCase() !== lowerTarget);
       }
+      added = true;
       return [...favs, packageId];
     });
+
+    // Track favorite toggle on the server (supports both authenticated and anonymous client IDs)
+    this.syncFavoriteAction(added ? 'add' : 'remove', packageId);
+    return added;
+  }
+
+  removeFavorite(packageId: string): void {
+    const lowerTarget = packageId.toLowerCase();
+    this.favorites.update(favs => favs.filter(id => id.toLowerCase() !== lowerTarget));
+    this.syncFavoriteAction('remove', packageId);
   }
 
   isFavorite(packageId: string): boolean {
-    return this.favorites().includes(packageId);
+    if (!packageId) return false;
+    const lowerTarget = packageId.toLowerCase();
+    return this.favorites().some(id => id.toLowerCase() === lowerTarget);
+  }
+
+  async mergeServerFavorites(serverFavs?: string[]): Promise<void> {
+    const localFavs = this.favorites();
+    const validServerFavs = (serverFavs || []).filter(id => typeof id === 'string' && id.includes('/'));
+    const seen = new Set<string>();
+    const combined: string[] = [];
+    for (const id of [...localFavs, ...validServerFavs]) {
+      const lower = id.toLowerCase();
+      if (!seen.has(lower)) {
+        seen.add(lower);
+        combined.push(id);
+      }
+    }
+    this.favorites.set(combined);
+
+    if (combined.length > 0 && this.edgeApiAvailable()) {
+      try {
+        const res = await fetch('/api/auth/favorites', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Client-Id': this.clientId()
+          },
+          body: JSON.stringify({
+            action: 'sync',
+            packageIds: combined,
+            clientId: this.clientId()
+          })
+        });
+        if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          const data = await res.json();
+          if (Array.isArray(data.favorites) && data.favorites.length > 0) {
+            this.favorites.set(data.favorites.filter((id: any) => typeof id === 'string' && id.includes('/')));
+          }
+        }
+      } catch {
+        // Offline or unauthenticated - localStorage keeps state
+      }
+    }
+  }
+
+  private syncFavoriteAction(action: 'add' | 'remove', packageId: string): void {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined' || !this.edgeApiAvailable()) return;
+    fetch('/api/auth/favorites', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Id': this.clientId()
+      },
+      body: JSON.stringify({
+        action,
+        packageId,
+        clientId: this.clientId()
+      })
+    }).catch(() => {
+      // Offline - localStorage keeps state
+    });
   }
 }

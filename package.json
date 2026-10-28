@@ -6,7 +6,12 @@
     "start": "ng serve",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "pages:dev": "wrangler pages dev dist/luanti-hub/browser --remote",
+    "dev:cloudflare": "wrangler pages dev --proxy 4200 --remote",
+    "deploy": "ng build && wrangler pages deploy dist/luanti-hub/browser --project-name=luanti-hub",
+    "db:schema:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql"
   },
   "private": true,
   "packageManager": "npm@11.13.0",

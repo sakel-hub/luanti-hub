@@ -74,20 +74,19 @@ export class PwaService {
         this.deferredPrompt = null;
         this.canInstall.set(false);
         this.isInstalled.set(true);
-        this.setStatusMessage('pwa.installSuccess');
+        this.showToast('pwa.installSuccess');
       });
     }
   }
 
   async installPwa(): Promise<void> {
     if (!this.deferredPrompt) {
-      // If prompt not natively available (e.g., iOS Safari or already installed), alert instructions
       if (typeof window !== 'undefined') {
         const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
         if (isIos) {
-          alert('To install LuantiHub on iOS:\n1. Tap the Share button (square with arrow)\n2. Select "Add to Home Screen"');
+          this.showToast('To install LuantiHub on iOS: tap Share, then "Add to Home Screen"', 5000);
         } else {
-          alert('LuantiHub is ready for offline use. You can add it to your apps via your browser menu (⋮ or ⊞).');
+          this.showToast('LuantiHub is ready for offline use. Add it via your browser menu.', 5000);
         }
       }
       return;
@@ -106,13 +105,10 @@ export class PwaService {
     }
   }
 
-  /**
-   * Manually check the server for a newer version
-   */
   async checkForUpdate(interactive = true): Promise<boolean> {
     if (!this.swUpdate?.isEnabled) {
       if (interactive) {
-        this.setStatusMessage('pwa.upToDate');
+        this.showToast('pwa.upToDate');
       }
       return false;
     }
@@ -127,13 +123,13 @@ export class PwaService {
         this.updateAvailable.set(true);
         this.statusMessage.set(null);
       } else if (interactive) {
-        this.setStatusMessage('pwa.upToDate');
+        this.showToast('pwa.upToDate');
       }
       return hasUpdate;
     } catch (err) {
       console.warn('PWA update check failed:', err);
       if (interactive) {
-        this.setStatusMessage('pwa.upToDate');
+        this.showToast('pwa.upToDate');
       }
       return false;
     } finally {
@@ -143,9 +139,6 @@ export class PwaService {
     }
   }
 
-  /**
-   * Activates the downloaded version and reloads the browser
-   */
   async activateUpdate(): Promise<void> {
     if (!this.swUpdate?.isEnabled) {
       if (typeof window !== 'undefined') {
@@ -165,12 +158,8 @@ export class PwaService {
     }
   }
 
-  /**
-   * Complete hard-reset: Unregisters all service workers, clears CacheStorage, clears localStorage cache, and reloads
-   */
   async forceClearCacheAndReload(): Promise<void> {
     try {
-      // 1. Unregister all service workers
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const reg of registrations) {
@@ -178,7 +167,6 @@ export class PwaService {
         }
       }
 
-      // 2. Clear all CacheStorage caches
       if (typeof window !== 'undefined' && 'caches' in window) {
         const cacheKeys = await caches.keys();
         for (const key of cacheKeys) {
@@ -186,7 +174,6 @@ export class PwaService {
         }
       }
 
-      // 3. Clean temporary session storage
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.clear();
       }
@@ -207,7 +194,7 @@ export class PwaService {
     this.activateUpdate();
   }
 
-  private setStatusMessage(msg: string): void {
+  showToast(msg: string, durationMs = 4000): void {
     this.statusMessage.set(msg);
     if (this.messageClearTimer) {
       clearTimeout(this.messageClearTimer);
@@ -215,7 +202,7 @@ export class PwaService {
     this.messageClearTimer = setTimeout(() => {
       this.statusMessage.set(null);
       this.messageClearTimer = null;
-    }, 4000);
+    }, durationMs);
   }
 
   async sharePackage(title: string, text: string, url: string): Promise<void> {
@@ -227,7 +214,7 @@ export class PwaService {
       }
     } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
       await navigator.clipboard.writeText(url);
-      this.setStatusMessage('common.copiedToClipboard');
+      this.showToast('common.copiedToClipboard');
     }
   }
 }

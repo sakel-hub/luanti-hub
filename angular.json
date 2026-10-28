@@ -4,6 +4,9 @@
   "cli": {
     "packageManager": "npm",
     "analytics": false,
+    "cache": {
+      "enabled": false
+    },
     "completion": {
       "prompted": true
     }
@@ -42,7 +45,7 @@
               "budgets": [
                 {
                   "type": "initial",
-                  "maximumWarning": "1MB",
+                  "maximumWarning": "1.2MB",
                   "maximumError": "2MB"
                 },
                 {

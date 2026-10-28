@@ -32,22 +32,28 @@
     {
       "name": "packages-api",
       "urls": [
-        "/api/packages/**",
-        "/api/reviews/**",
+        "/api/packages",
+        "/api/packages/",
+        "/api/packages/top10*",
+        "/api/tags",
+        "https://content.luanti.org/api/packages/**",
         "https://contentdb.milcho.org/api/packages/**"
       ],
       "cacheConfig": {
         "maxSize": 500,
         "maxAge": "6h",
         "strategy": "freshness",
-        "timeout": "2s"
+        "timeout": "3s"
       }
     },
     {
       "name": "package-screenshots",
       "urls": [
+        "https://content.luanti.org/uploads/**",
+        "https://content.luanti.org/thumbnails/**",
         "https://contentdb.milcho.org/storage/**",
         "https://raw.githubusercontent.com/**",
+        "https://codeberg.org/**/raw/**",
         "https://gitlab.com/**/raw/**"
       ],
       "cacheConfig": {
@@ -60,6 +66,7 @@
   "navigationUrls": [
     "/**",
     "!/**/*.*",
-    "!/**/*__*"
+    "!/**/*__*",
+    "!/api/**"
   ]
 }

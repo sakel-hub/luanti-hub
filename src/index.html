@@ -5,16 +5,30 @@
     <title>LuantiHub – Package Registry &amp; Content Hub for Luanti (Minetest)</title>
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="description" content="Discover, search, and install Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB with automatic high-availability failover." />
-    <meta name="keywords" content="luanti, minetest, contentdb, mods, games, texture packs, package registry, git mods, lua, minetest mods, nodecore, mesecons, mineclone2" />
+    <meta name="description" content="Discover, search, audit, and install Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB with automatic high-availability failover." />
+    <meta name="keywords" content="luanti, minetest, contentdb, luanti mods, minetest mods, luanti games, texture packs, voxel engine, git mods, lua mods, nodecore, mesecons, voxelibre, mineclonia" />
+    <meta name="author" content="LuantiHub Community" />
     <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
     <meta name="theme-color" content="#020617" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="application-name" content="LuantiHub" />
 
-    <!-- Canonical -->
-    <link rel="canonical" href="https://luanti-hub.pages.dev/" />
+    <!-- Canonical & Internationalization (hreflang) -->
+    <link rel="canonical" id="canonical-link" href="https://luanti-hub.pages.dev/" />
+    <link rel="alternate" hreflang="x-default" href="https://luanti-hub.pages.dev/" />
+    <link rel="alternate" hreflang="en" href="https://luanti-hub.pages.dev/?lang=en" />
+    <link rel="alternate" hreflang="sk" href="https://luanti-hub.pages.dev/?lang=sk" />
+    <link rel="alternate" hreflang="de" href="https://luanti-hub.pages.dev/?lang=de" />
+    <link rel="alternate" hreflang="fr" href="https://luanti-hub.pages.dev/?lang=fr" />
+    <link rel="alternate" hreflang="es" href="https://luanti-hub.pages.dev/?lang=es" />
+    <link rel="alternate" hreflang="ru" href="https://luanti-hub.pages.dev/?lang=ru" />
+    <link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml" />
+
+    <!-- Preconnect for High-Speed Asset & API Loading (Core Web Vitals LCP Improvement) -->
+    <link rel="preconnect" href="https://content.luanti.org" crossorigin />
+    <link rel="dns-prefetch" href="https://content.luanti.org" />
+    <link rel="dns-prefetch" href="https://contentdb.milcho.org" />
 
     <!-- Icons & Manifest -->
     <link rel="icon" type="image/svg+xml" href="logo.svg" />
@@ -22,29 +36,51 @@
     <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
     <link rel="manifest" href="manifest.webmanifest" />
 
-    <!-- OpenGraph / Facebook -->
+    <!-- OpenGraph / Facebook / Discord -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="LuantiHub" />
-    <meta property="og:title" content="LuantiHub – Package Registry &amp; Content Hub" />
-    <meta property="og:description" content="Browse, search, and install Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB." />
+    <meta property="og:title" content="LuantiHub – Package Registry &amp; Content Hub for Luanti (Minetest)" />
+    <meta property="og:description" content="Browse, search, audit, and download Luanti (Minetest) mods, games, and texture packs directly as ready-to-drop .zip archives or via in-game contentdb_url." />
     <meta property="og:url" content="https://luanti-hub.pages.dev/" />
-    <meta property="og:image" content="https://luanti-hub.pages.dev/logo.svg" />
-    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image" content="https://luanti-hub.pages.dev/icons/icon-512x512.png" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="512" />
     <meta property="og:image:height" content="512" />
     <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="sk_SK" />
+    <meta property="og:locale:alternate" content="de_DE" />
+    <meta property="og:locale:alternate" content="fr_FR" />
+    <meta property="og:locale:alternate" content="es_ES" />
+    <meta property="og:locale:alternate" content="ru_RU" />
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="LuantiHub – Package Registry" />
-    <meta name="twitter:description" content="Discover and install Luanti (Minetest) mods directly from Git repositories and ContentDB." />
-    <meta name="twitter:image" content="https://luanti-hub.pages.dev/logo.svg" />
+    <meta name="twitter:title" content="LuantiHub – Package Registry &amp; Content Hub for Luanti" />
+    <meta name="twitter:description" content="Discover, audit, and download Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB." />
+    <meta name="twitter:image" content="https://luanti-hub.pages.dev/icons/icon-512x512.png" />
 
-    <!-- Schema.org JSON-LD Structured Data -->
-    <script type="application/ld+json">
+    <!-- Schema.org JSON-LD Structured Data (WebSite + SearchAction + WebApplication + DataCatalog) -->
+    <script type="application/ld+json" id="base-jsonld">
       {
         "@context": "https://schema.org",
         "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://luanti-hub.pages.dev/#website",
+            "url": "https://luanti-hub.pages.dev/",
+            "name": "LuantiHub",
+            "alternateName": ["Luanti Hub", "Minetest Package Hub"],
+            "description": "Decentralized Package Registry and Content Hub for the Luanti (Minetest) Voxel Engine.",
+            "inLanguage": ["en", "sk", "de", "fr", "es", "ru"],
+            "potentialAction": {
+              "@type": "SearchAction",
+              "target": {
+                "@type": "EntryPoint",
+                "urlTemplate": "https://luanti-hub.pages.dev/?q={search_term_string}"
+              },
+              "query-input": "required name=search_term_string"
+            }
+          },
           {
             "@type": "WebApplication",
             "@id": "https://luanti-hub.pages.dev/#webapp",
@@ -52,16 +88,15 @@
             "url": "https://luanti-hub.pages.dev/",
             "applicationCategory": "GameApplication",
             "operatingSystem": "Windows, Linux, macOS, Android, iOS",
-            "softwareVersion": "1.0.0",
+            "softwareVersion": "1.2.0",
             "description": "Package repository, mod manager, and community hub for Luanti (Minetest) mods, games, and texture packs.",
             "featureList": [
+              "Direct Ready-to-Drop .zip Package Downloads",
               "Direct In-Game Luanti Compatibility via contentdb_url",
-              "Community Git Repository Ingestion (GitHub, Codeberg, GitLab)",
+              "Community Git Repository Ingestion with Automated .conf & Luacheck Static Analysis",
               "Automatic High-Availability Failover to contentdb.milcho.org mirror",
-              "Aggregated Mixed Reviews & Community Comments",
-              "Open Source License Enforcement & Safe Harbor Protection",
-              "Netflix-Style Visual Catalog & Carousels",
-              "Offline-First Progressive Web App (PWA) with Background Sync"
+              "Aggregated Mixed Reviews & Community Star Ratings",
+              "Open Source SPDX License Enforcement & DMCA Safe Harbor Protection"
             ],
             "offers": {
               "@type": "Offer",
@@ -82,71 +117,83 @@
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased min-h-screen">
     <app-root>
-      <!-- Semantic Static Pre-Render Fallback & Loading Screen for Crawlers & Users -->
-      <div class="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-slate-100 p-6">
-        <header class="text-center max-w-2xl mb-8">
-          <div class="flex items-center justify-center gap-3 mb-4">
-            <img src="logo.svg" alt="LuantiHub Logo" width="56" height="56" class="w-14 h-14 drop-shadow-xl" />
-            <h1 class="text-3xl font-extrabold tracking-tight text-white">
-              LuantiHub
-            </h1>
+      <!-- Semantic Static Pre-Render Skeleton & SEO Content for Crawlers & Users -->
+      <div class="min-h-screen flex flex-col bg-slate-950 text-slate-100">
+        <!-- Static Skeleton Top Navbar -->
+        <header class="w-full border-b border-white/10 bg-slate-950/80 h-16 flex items-center justify-between px-4 sm:px-6 lg:px-8">
+          <div class="flex items-center gap-3">
+            <img src="logo.svg" alt="LuantiHub Logo" width="36" height="36" class="w-9 h-9" />
+            <h1 class="text-lg font-extrabold tracking-tight text-white">LuantiHub</h1>
           </div>
-          <p class="text-sm sm:text-base text-slate-300 leading-relaxed">
-            The next-generation package registry and content discovery platform for
-            <strong>Luanti</strong> (formerly Minetest) players, server operators, and mod developers.
-          </p>
+          <div class="hidden md:flex items-center gap-2">
+            <div class="h-8 w-20 rounded-xl bg-slate-900 border border-white/5 animate-pulse"></div>
+            <div class="h-8 w-20 rounded-xl bg-slate-900 border border-white/5 animate-pulse"></div>
+            <div class="h-8 w-24 rounded-xl bg-slate-900 border border-white/5 animate-pulse"></div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="h-9 w-40 sm:w-56 rounded-xl bg-slate-900 border border-white/5 animate-pulse"></div>
+          </div>
         </header>
 
-        <!-- Loading spinner for human visitors -->
-        <div class="flex flex-col items-center gap-3 my-4">
-          <div class="w-9 h-9 border-3 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
-          <span class="text-xs text-slate-400 font-medium tracking-wide">Connecting to LuantiHub &amp; ContentDB Mirror...</span>
+        <!-- Static Skeleton Hero & Tiles -->
+        <div class="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-8 flex-1">
+          <div class="w-full h-72 sm:h-96 rounded-3xl bg-slate-900/60 border border-white/10 p-6 sm:p-10 flex flex-col justify-end gap-4 animate-pulse">
+            <div class="h-5 w-28 rounded-full bg-slate-800/90"></div>
+            <div class="h-10 sm:h-12 w-3/4 max-w-md rounded-xl bg-slate-800/90"></div>
+            <div class="h-4 w-full max-w-xl rounded-lg bg-slate-800/70"></div>
+            <div class="flex items-center gap-3 pt-2">
+              <div class="h-11 w-40 rounded-xl bg-slate-800"></div>
+              <div class="h-11 w-36 rounded-xl bg-slate-800/60"></div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            <div class="h-52 rounded-2xl bg-slate-900/60 border border-white/10 animate-pulse"></div>
+            <div class="h-52 rounded-2xl bg-slate-900/60 border border-white/10 animate-pulse hidden sm:block"></div>
+            <div class="h-52 rounded-2xl bg-slate-900/60 border border-white/10 animate-pulse hidden lg:block"></div>
+            <div class="h-52 rounded-2xl bg-slate-900/60 border border-white/10 animate-pulse hidden lg:block"></div>
+          </div>
         </div>
 
         <!-- Semantic Feature Overview for Search Engine Crawlers -->
-        <main class="max-w-4xl w-full grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-slate-400 mt-6">
-          <section class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-            <h2 class="text-sm font-semibold text-sky-400 mb-1">Git-Backed Community Packages</h2>
+        <main class="sr-only">
+          <p>
+            The next-generation package registry and content discovery platform for
+            <strong>Luanti</strong> (formerly Minetest) players, server operators, and mod developers.
+          </p>
+          <section>
+            <h2>Git-Backed Community Packages</h2>
             <p>
-              Directly submit and install mods hosted on GitHub, GitLab, and Codeberg without gatekeeping.
-              Full open-source license enforcement ensures legal compliance and safety.
+              Directly submit and install mods hosted on GitHub, GitLab, and Codeberg with automated
+              <code>mod.conf</code> and Luacheck static verification.
             </p>
           </section>
-
-          <section class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-            <h2 class="text-sm font-semibold text-emerald-400 mb-1">In-Game Content Tab Compatibility</h2>
+          <section>
+            <h2>In-Game Content Tab &amp; Direct .zip Downloads</h2>
             <p>
-              Point your Luanti client directly to LuantiHub via <code>contentdb_url</code> in <code>luanti.conf</code> (or <code>minetest.conf</code>)
-              to search, download, and update mods directly inside the game.
+              Download ready-to-drop <code>.zip</code> archives or point your Luanti client directly to LuantiHub via
+              <code>contentdb_url</code> in <code>luanti.conf</code>.
             </p>
           </section>
-
-          <section class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-            <h2 class="text-sm font-semibold text-indigo-400 mb-1">High-Availability Failover Mirror</h2>
+          <section>
+            <h2>High-Availability Failover Mirror</h2>
             <p>
               Integrated with the <code>contentdb.milcho.org</code> fallback mirror. If official ContentDB undergoes
               maintenance, LuantiHub stays 100% online without interruption.
             </p>
           </section>
-
-          <section class="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-            <h2 class="text-sm font-semibold text-amber-400 mb-1">Aggregated Community Reviews</h2>
+          <section>
+            <h2>Aggregated Community Reviews &amp; Tags</h2>
             <p>
-              Read community reviews combining official ContentDB feedback with native LuantiHub comments,
-              giving creators and players a unified voice.
+              Explore packages by official ContentDB tags, inspect dependencies and README documentation, and share
+              community star ratings.
             </p>
           </section>
+          <footer>
+            <a href="https://github.com/sakel-hub/luanti-hub">GitHub Repository</a>
+            <a href="https://www.luanti.org">Luanti Official Website</a>
+          </footer>
         </main>
-
-        <footer class="mt-8 text-center text-xs text-slate-500 flex flex-wrap items-center justify-center gap-4">
-          <a href="https://github.com/sakel-hub/luanti-hub" target="_blank" rel="noopener noreferrer" class="text-slate-400 hover:text-sky-400 underline transition">
-            GitHub Repository
-          </a>
-          <span>•</span>
-          <a href="https://www.luanti.org" target="_blank" rel="noopener noreferrer" class="text-slate-400 hover:text-sky-400 underline transition">
-            Luanti Official Website
-          </a>
-        </footer>
       </div>
     </app-root>
 
