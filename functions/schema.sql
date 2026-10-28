@@ -81,10 +81,29 @@ CREATE TABLE IF NOT EXISTS reviews (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Indices for rapid querying by Luanti game engine and web search
+-- 6. Daily Download Metrics (Top 10 Today & Week Rollups)
+CREATE TABLE IF NOT EXISTS package_daily_downloads (
+    package_id TEXT NOT NULL,                         -- "author/name"
+    download_date DATE NOT NULL DEFAULT (DATE('now')), -- YYYY-MM-DD
+    downloads_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (package_id, download_date)
+);
+
+-- 7. User Favorites (Synced across devices when logged in)
+CREATE TABLE IF NOT EXISTS user_favorites (
+    user_id TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, package_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Indices for rapid querying by Luanti game engine, web search, and Top 10 rollups
 CREATE INDEX IF NOT EXISTS idx_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_identities_provider ON user_identities(provider, provider_username);
 CREATE INDEX IF NOT EXISTS idx_packages_type ON packages(type);
 CREATE INDEX IF NOT EXISTS idx_packages_status ON packages(status);
 CREATE INDEX IF NOT EXISTS idx_packages_author ON packages(author_name);
 CREATE INDEX IF NOT EXISTS idx_reviews_pkg ON reviews(package_id);
+CREATE INDEX IF NOT EXISTS idx_pkg_downloads_date_count ON package_daily_downloads (download_date, downloads_count DESC);
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);

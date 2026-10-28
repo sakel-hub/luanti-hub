@@ -28,7 +28,7 @@ import { LucidePlus, LucideX } from '@lucide/angular';
             </div>
             <div>
               <h2 id="submit-modal-title" class="text-lg font-bold text-white">
-                Submit Decentralized Git Package
+                Submit Git Package
               </h2>
               <p class="text-xs text-slate-400">
                 Index your mod, game, or texture pack directly from GitHub, Codeberg, or GitLab.

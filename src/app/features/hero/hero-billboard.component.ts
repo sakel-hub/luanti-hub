@@ -53,7 +53,7 @@ import {
           role="region"
           aria-roledescription="carousel"
           [attr.aria-label]="pkg.title"
-          class="relative w-full h-[500px] sm:h-[580px] lg:h-[640px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+          class="relative w-full h-[540px] sm:h-[620px] lg:h-[680px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-slate-800/80 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
           
           <!-- Hardware-Accelerated Single Active Slide Background (Clear & Vivid) -->
           <div class="absolute inset-0">
@@ -64,15 +64,16 @@ import {
               [alt]="pkg.title"
               fetchpriority="high"
               decoding="async"
-              class="w-full h-full object-cover object-center filter brightness-90 transition-opacity duration-300"
+              class="w-full h-full object-cover object-center filter brightness-100 transition-opacity duration-300"
             />
-            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/40 to-transparent"></div>
-            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-transparent"></div>
+            <!-- High-Visibility Directional Gradients for Netflix Look -->
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/30 to-transparent w-full md:w-3/5"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/20 to-transparent"></div>
           </div>
 
         <!-- Foreground Content -->
-        <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-14 sm:pb-16 z-10">
-          <div class="max-w-2xl space-y-4">
+        <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10 pointer-events-none">
+          <div class="max-w-2xl space-y-4 pointer-events-auto">
             
             <!-- Category & Source Badges -->
             <div class="flex items-center gap-2 flex-wrap">
@@ -122,7 +123,7 @@ import {
             <div class="flex items-center gap-3 pt-2">
               <!-- Primary White Play/Install Button -->
               <button 
-                (click)="packageService.openSetupModal()"
+                (click)="onDownload(pkg)"
                 [appTooltip]="'hero.playInstall' | translate"
                 class="h-11 px-6 sm:px-8 rounded-lg bg-white hover:bg-slate-200 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2.5 shadow-2xl hover:scale-105 transition-all whitespace-nowrap">
                 <svg lucidePlay class="w-5 h-5 fill-slate-950 text-slate-950"></svg>
@@ -155,37 +156,37 @@ import {
         </div>
 
         <!-- Carousel Navigation Controls & Indicators -->
-        <div class="absolute bottom-5 right-6 sm:right-8 z-30 pointer-events-auto flex items-center gap-2.5">
+        <div class="absolute bottom-5 right-6 sm:right-8 z-40 pointer-events-auto flex items-center gap-2.5">
           
           <!-- Slide Number Indicator -->
-          <span class="text-xs font-mono text-slate-400 bg-slate-900/80 px-2 py-1 rounded-md border border-slate-800">
+          <span class="text-xs font-mono text-slate-300 bg-slate-900/90 px-2.5 py-1 rounded-lg border border-slate-700/80 shadow">
             {{ currentIndex() + 1 }} / {{ showcase().length }}
           </span>
 
           <!-- Left Prev Button -->
           <button 
-            (click)="prev()"
+            (click)="prev($event)"
             [appTooltip]="'hero.prevSlide' | translate"
             aria-label="Previous slide"
-            class="p-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow">
+            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
             <svg lucideChevronLeft class="w-4 h-4"></svg>
           </button>
 
           <!-- Right Next Button -->
           <button 
-            (click)="next()"
+            (click)="next($event)"
             [appTooltip]="'hero.nextSlide' | translate"
             aria-label="Next slide"
-            class="p-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow">
+            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
             <svg lucideChevronRight class="w-4 h-4"></svg>
           </button>
 
           <!-- Auto-Play Pause / Resume Button -->
           <button 
-            (click)="togglePause()"
+            (click)="togglePause($event)"
             [appTooltip]="isPaused() ? ('hero.resumeAutoPlay' | translate) : ('hero.pauseAutoPlay' | translate)"
             [attr.aria-label]="isPaused() ? 'Resume carousel' : 'Pause carousel'"
-            class="p-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow">
+            class="p-2.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 transition shadow hover:scale-105 active:scale-95">
             @if (isPaused()) {
               <svg lucidePlay class="w-4 h-4 text-emerald-400"></svg>
             } @else {
@@ -196,17 +197,17 @@ import {
         </div>
 
         <!-- Slide Indicators / Dots -->
-        <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 pointer-events-auto hidden md:flex items-center gap-2">
+        <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2">
           @for (item of showcase(); track item.id; let idx = $index) {
             <button 
-              (click)="goTo(idx)"
+              (click)="goTo(idx, $event)"
               [appTooltip]="item.title"
               [attr.aria-label]="'Go to slide ' + (idx + 1) + ': ' + item.title"
-              class="h-1.5 rounded-full transition-all duration-300 overflow-hidden"
+              class="h-2 rounded-full transition-all duration-300 overflow-hidden cursor-pointer"
               [class.w-8]="idx === currentIndex()"
               [class.bg-white]="idx === currentIndex()"
-              [class.w-2.5]="idx !== currentIndex()"
-              [class.bg-slate-600]="idx !== currentIndex()"
+              [class.w-3]="idx !== currentIndex()"
+              [class.bg-slate-600/80]="idx !== currentIndex()"
               [class.hover:bg-slate-400]="idx !== currentIndex()">
             </button>
           }
@@ -272,24 +273,42 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
     }
   }
 
-  next(): void {
+  next(event?: Event): void {
+    if (event) event.stopPropagation();
     const total = this.showcase().length;
     if (total <= 1) return;
     this.currentIndex.update(idx => (idx + 1) % total);
+    this.restartAutoSlide();
   }
 
-  prev(): void {
+  prev(event?: Event): void {
+    if (event) event.stopPropagation();
     const total = this.showcase().length;
     if (total <= 1) return;
     this.currentIndex.update(idx => (idx - 1 + total) % total);
+    this.restartAutoSlide();
   }
 
-  goTo(index: number): void {
+  onDownload(pkg: LuantiPackage): void {
+    this.packageService.trackDownload(pkg);
+    this.packageService.openSetupModal();
+  }
+
+  goTo(index: number, event?: Event): void {
+    if (event) event.stopPropagation();
     this.currentIndex.set(index);
+    this.restartAutoSlide();
   }
 
-  togglePause(): void {
+  togglePause(event?: Event): void {
+    if (event) event.stopPropagation();
     this.isPaused.update(val => !val);
+  }
+
+  private restartAutoSlide(): void {
+    if (!this.isPaused()) {
+      this.startAutoSlide();
+    }
   }
 
   onMouseEnter(): void {

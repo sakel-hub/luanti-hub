@@ -1,6 +1,6 @@
 # LuantiHub 🎮⚡
 
-**The Package Registry & Content Hub for Luanti**
+**The Decentralized Package Registry & Content Hub for Luanti**
 
 [![Luanti Engine](https://img.shields.io/badge/Luanti-5.0+-38bdf8?style=flat-square&logo=cube)](https://www.luanti.org)
 [![Angular 22](https://img.shields.io/badge/Angular-22.2-dd0031?style=flat-square&logo=angular)](https://angular.dev)

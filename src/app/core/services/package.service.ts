@@ -129,17 +129,21 @@ export class PackageService {
     });
   });
 
-  // Netflix Swimlanes (All Computed Dynamically from Live Data)
+  // Netflix Swimlanes (All Computed Dynamically from Cloudflare D1 + Live Data)
   readonly top10Timeframe = signal<'today' | 'week'>('week');
-
-  setTop10Timeframe(timeframe: 'today' | 'week'): void {
-    this.top10Timeframe.set(timeframe);
-  }
+  private readonly _serverTop10Today = signal<LuantiPackage[]>([]);
+  private readonly _serverTop10Week = signal<LuantiPackage[]>([]);
 
   readonly top10Packages = computed<LuantiPackage[]>(() => {
+    const timeframe = this.top10Timeframe();
+    const serverList = timeframe === 'today' ? this._serverTop10Today() : this._serverTop10Week();
+    if (serverList.length > 0) {
+      return serverList;
+    }
+
+    // Graceful offline/local fallback when D1 server endpoint is unreachable
     const list = [...this._packages()];
     if (list.length === 0) return [];
-    const timeframe = this.top10Timeframe();
 
     if (timeframe === 'today') {
       // Top 10 Today: weighted towards trending velocity, featured items, and community ratings
@@ -161,6 +165,44 @@ export class PackageService {
         .slice(0, 10);
     }
   });
+
+  setTop10Timeframe(timeframe: 'today' | 'week'): void {
+    this.top10Timeframe.set(timeframe);
+    this.fetchTop10(timeframe);
+  }
+
+  async fetchTop10(timeframe?: 'today' | 'week'): Promise<void> {
+    const tf = timeframe || this.top10Timeframe();
+    try {
+      const res = await fetch(`/api/packages/top10?timeframe=${tf}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          if (tf === 'today') {
+            this._serverTop10Today.set(data);
+          } else {
+            this._serverTop10Week.set(data);
+          }
+        }
+      }
+    } catch {
+      // Fallback to computed local metrics
+    }
+  }
+
+  trackDownload(pkg: LuantiPackage): void {
+    if (!pkg || !pkg.author || !pkg.name) return;
+    const url = `/api/packages/${pkg.author}/${pkg.name}/download`;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+        navigator.sendBeacon(url);
+      } else {
+        fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    } catch {
+      // Best-effort non-blocking download tracking
+    }
+  }
 
   readonly trendingPackages = computed(() => {
     return [...this._packages()].sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
@@ -320,6 +362,8 @@ export class PackageService {
           });
 
           this._packages.set(normalized);
+          this.fetchTop10('week');
+          this.fetchTop10('today');
         }
       }
     } catch {
@@ -479,7 +523,7 @@ export class PackageService {
     }
   }
 
-  // Register New Decentralized Git Package
+  // Register New Community Git Package
   async submitGitPackage(payload: {
     repoUrl: string;
     warrantiesAccepted: boolean;

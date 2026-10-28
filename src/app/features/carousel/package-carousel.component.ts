@@ -4,6 +4,7 @@ import {
   ViewChild,
   ElementRef,
   AfterViewInit,
+  OnChanges,
   signal,
   NgZone,
   inject
@@ -70,40 +71,38 @@ import {
           <!-- Scroll Arrows (Only Rendered if Content is Scrollable) -->
           @if (isScrollable()) {
             <div class="hidden sm:flex items-center gap-1.5">
-              <button 
-                (click)="scrollLeft()"
-                [disabled]="!canScrollLeft()"
-                [class.opacity-30]="!canScrollLeft()"
-                [class.pointer-events-none]="!canScrollLeft()"
-                [attr.aria-label]="'carousel.scrollLeft' | translate"
-                [appTooltip]="'carousel.scrollLeft' | translate"
-                class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
-                <svg lucideChevronLeft class="w-4 h-4"></svg>
-              </button>
-              <button 
-                (click)="scrollRight()"
-                [disabled]="!canScrollRight()"
-                [class.opacity-30]="!canScrollRight()"
-                [class.pointer-events-none]="!canScrollRight()"
-                [attr.aria-label]="'carousel.scrollRight' | translate"
-                [appTooltip]="'carousel.scrollRight' | translate"
-                class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition">
-                <svg lucideChevronRight class="w-4 h-4"></svg>
-              </button>
+              @if (canScrollLeft()) {
+                <button 
+                  (click)="scrollLeft()"
+                  [attr.aria-label]="'carousel.scrollLeft' | translate"
+                  [appTooltip]="'carousel.scrollLeft' | translate"
+                  class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-700 transition shadow hover:scale-105 active:scale-95">
+                  <svg lucideChevronLeft class="w-4 h-4"></svg>
+                </button>
+              }
+              @if (canScrollRight()) {
+                <button 
+                  (click)="scrollRight()"
+                  [attr.aria-label]="'carousel.scrollRight' | translate"
+                  [appTooltip]="'carousel.scrollRight' | translate"
+                  class="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-700 transition shadow hover:scale-105 active:scale-95">
+                  <svg lucideChevronRight class="w-4 h-4"></svg>
+                </button>
+              }
             </div>
           }
         </div>
 
-        <!-- Scrollable Track with Hover Expansion Breathing Room -->
+        <!-- Scrollable Track with Hover Expansion Breathing Room (Zero Snap Lock Jank) -->
         <div 
           #carouselTrack
           (scroll)="onTrackScroll()"
           tabindex="0"
           role="region"
           [attr.aria-label]="title + ' carousel'"
-          class="flex items-center gap-4 overflow-x-auto snap-x snap-mandatory px-4 sm:px-8 lg:px-12 py-6 -my-4 no-scrollbar scroll-smooth">
+          class="flex items-center gap-4 sm:gap-5 overflow-x-auto px-6 sm:px-10 lg:px-14 py-8 -my-6 no-scrollbar scroll-smooth">
           @for (pkg of packages; track pkg.id; let first = $first; let last = $last) {
-            <div class="snap-start">
+            <div class="flex-shrink-0">
               <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last"></app-package-card>
             </div>
           }
@@ -113,7 +112,7 @@ import {
     }
   `
 })
-export class PackageCarouselComponent implements AfterViewInit {
+export class PackageCarouselComponent implements AfterViewInit, OnChanges {
   @Input({ required: true }) title!: string;
   @Input() icon?: 'flame' | 'git' | 'zap' | 'gamepad' | 'cpu' | 'palette';
   @Input({ required: true }) packages: LuantiPackage[] = [];
@@ -127,7 +126,6 @@ export class PackageCarouselComponent implements AfterViewInit {
   readonly canScrollRight = signal<boolean>(false);
 
   ngAfterViewInit(): void {
-    // Initial check of scroll boundaries
     setTimeout(() => this.updateScrollState(), 100);
 
     if (typeof window !== 'undefined') {
@@ -137,6 +135,10 @@ export class PackageCarouselComponent implements AfterViewInit {
     }
   }
 
+  ngOnChanges(): void {
+    setTimeout(() => this.updateScrollState(), 100);
+  }
+
   onTrackScroll(): void {
     this.updateScrollState();
   }
@@ -144,23 +146,25 @@ export class PackageCarouselComponent implements AfterViewInit {
   private updateScrollState(): void {
     if (!this.trackRef?.nativeElement) return;
     const el = this.trackRef.nativeElement;
-    const scrollable = el.scrollWidth > el.clientWidth + 5;
+    const scrollable = el.scrollWidth > el.clientWidth + 10;
     this.isScrollable.set(scrollable);
-    this.canScrollLeft.set(el.scrollLeft > 10);
-    this.canScrollRight.set(el.scrollLeft < (el.scrollWidth - el.clientWidth - 10));
+    this.canScrollLeft.set(el.scrollLeft > 15);
+    this.canScrollRight.set(el.scrollLeft < (el.scrollWidth - el.clientWidth - 15));
   }
 
   scrollLeft(): void {
     if (!this.trackRef?.nativeElement) return;
     const el = this.trackRef.nativeElement;
-    const distance = Math.max(300, el.clientWidth * 0.75);
+    const distance = Math.max(320, el.clientWidth * 0.7);
     el.scrollBy({ left: -distance, behavior: 'smooth' });
+    setTimeout(() => this.updateScrollState(), 350);
   }
 
   scrollRight(): void {
     if (!this.trackRef?.nativeElement) return;
     const el = this.trackRef.nativeElement;
-    const distance = Math.max(300, el.clientWidth * 0.75);
+    const distance = Math.max(320, el.clientWidth * 0.7);
     el.scrollBy({ left: distance, behavior: 'smooth' });
+    setTimeout(() => this.updateScrollState(), 350);
   }
 }

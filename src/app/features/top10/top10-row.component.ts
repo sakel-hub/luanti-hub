@@ -106,7 +106,7 @@ import {
           tabindex="0"
           role="region"
           aria-label="Top 10 packages list"
-          class="flex items-end gap-2 sm:gap-4 overflow-x-auto snap-x snap-mandatory px-4 sm:px-6 lg:px-8 py-4 no-scrollbar scroll-smooth">
+          class="flex items-end gap-2 sm:gap-4 overflow-x-auto px-6 sm:px-10 lg:px-14 py-6 no-scrollbar scroll-smooth">
           @for (pkg of packageService.top10Packages(); track pkg.id; let idx = $index) {
             <div
               (click)="openDetails(pkg)"
@@ -115,27 +115,22 @@ import {
               (keydown.enter)="openDetails(pkg)"
               (keydown.space)="openDetails(pkg)"
               [attr.aria-label]="'#' + (idx + 1) + ' ' + pkg.title"
-              class="relative flex items-end flex-shrink-0 group cursor-pointer snap-start transition-transform duration-300 hover:-translate-y-2 focus:outline-none">
+              class="relative flex items-end flex-shrink-0 group cursor-pointer transition-transform duration-300 hover:-translate-y-2 focus:outline-none">
 
               <!-- Iconic Netflix Style SVG Stroked Rank Numeral (Height matches tile, transparent fill, zero broken lines) -->
               <svg
-                [attr.viewBox]="idx === 9 ? '0 0 170 160' : '0 0 100 160'"
-                class="h-48 sm:h-60 md:h-64 w-auto -mr-4 sm:-mr-6 md:-mr-8 z-0 pointer-events-none select-none overflow-visible flex-shrink-0">
-                <text
-                  x="50%"
-                  y="86%"
-                  text-anchor="middle"
-                  font-family="Impact, Haettenschweiler, 'Arial Black', sans-serif"
-                  font-weight="900"
-                  font-size="150"
+                [attr.viewBox]="rankPaths[idx]?.vb || '0 0 105 200'"
+                class="h-48 sm:h-60 md:h-64 w-auto -mr-4 sm:-mr-6 md:-mr-8 z-0 pointer-events-none select-none flex-shrink-0 overflow-visible">
+                <path
+                  fill-rule="evenodd"
+                  [attr.d]="rankPaths[idx]?.d"
                   fill="transparent"
                   stroke="#52525b"
                   stroke-width="5"
                   stroke-linejoin="round"
                   stroke-linecap="round"
-                  class="group-hover:stroke-slate-300 transition-colors">
-                  {{ idx + 1 }}
-                </text>
+                  class="group-hover:stroke-slate-200 transition-colors duration-300">
+                </path>
               </svg>
 
               <!-- Portrait Poster Card -->
@@ -143,7 +138,7 @@ import {
 
                 <!-- High-Resolution Poster Image -->
                 <img
-                  [src]="pkg.banner || pkg.thumbnail"
+                  [src]="getHighResImage(pkg)"
                   [fallbackThumbnail]="pkg.thumbnail"
                   appImgFallback
                   [alt]="pkg.title"
@@ -208,6 +203,39 @@ export class Top10RowComponent implements AfterViewInit {
   readonly isScrollable = signal<boolean>(false);
   readonly canScrollLeft = signal<boolean>(false);
   readonly canScrollRight = signal<boolean>(false);
+
+  readonly rankPaths: Array<{ vb: string; d: string }> = [
+    // 1
+    { vb: '0 0 75 200', d: 'M 70 8 L 70 192 L 34 192 L 34 56 L 10 74 L 6 50 L 42 8 Z' },
+    // 2
+    { vb: '0 0 105 200', d: 'M 10 192 L 98 192 L 98 158 L 48 158 L 96 90 C 102 80, 100 35, 75 14 C 52 -3, 22 8, 12 40 L 40 50 C 46 32, 60 26, 70 34 C 78 40, 80 60, 74 72 L 10 162 Z' },
+    // 3
+    { vb: '0 0 105 200', d: 'M 15 10 L 95 10 L 95 38 L 56 82 C 78 82, 98 96, 98 134 C 98 172, 76 192, 48 192 C 22 192, 10 176, 8 150 L 38 144 C 40 156, 46 166, 54 166 C 66 166, 72 154, 72 134 C 72 114, 64 102, 50 102 L 36 102 L 36 74 L 62 38 L 15 38 Z' },
+    // 4
+    { vb: '0 0 105 200', d: 'M 62 8 L 94 8 L 94 116 L 102 116 L 102 146 L 94 146 L 94 192 L 62 192 L 62 146 L 6 146 L 6 116 L 62 8 Z M 62 52 L 32 116 L 62 116 Z' },
+    // 5
+    { vb: '0 0 105 200', d: 'M 18 10 L 94 10 L 94 38 L 48 38 L 42 80 C 52 74, 68 74, 78 78 C 92 84, 98 102, 98 132 C 98 168, 78 192, 48 192 C 22 192, 10 174, 8 148 L 38 142 C 40 156, 46 166, 54 166 C 66 166, 72 154, 72 132 C 72 112, 64 102, 50 102 C 40 102, 32 108, 24 116 L 12 108 L 18 10 Z' },
+    // 6
+    { vb: '0 0 105 200', d: 'M 84 10 L 58 10 C 26 28, 10 74, 10 134 C 10 172, 30 192, 58 192 C 84 192, 98 170, 98 132 C 98 94, 82 74, 56 74 C 42 74, 30 82, 22 94 C 26 56, 42 38, 64 36 L 84 36 Z M 56 102 C 68 102, 74 114, 74 133 C 74 152, 68 164, 56 164 C 44 164, 38 152, 38 133 C 38 114, 44 102, 56 102 Z' },
+    // 7
+    { vb: '0 0 105 200', d: 'M 10 10 L 98 10 L 98 38 L 56 192 L 24 192 L 66 38 L 10 38 Z' },
+    // 8
+    { vb: '0 0 105 200', d: 'M 54 8 C 76 8, 92 24, 92 50 C 92 70, 80 84, 68 94 C 84 104, 96 122, 96 148 C 96 176, 78 192, 54 192 C 30 192, 12 176, 12 148 C 12 122, 24 104, 40 94 C 28 84, 16 70, 16 50 C 16 24, 32 8, 54 8 Z M 54 34 C 44 34, 38 42, 38 52 C 38 64, 44 72, 54 72 C 64 72, 70 64, 70 52 C 70 42, 64 34, 54 34 Z M 54 116 C 42 116, 36 128, 36 148 C 36 164, 42 170, 54 170 C 66 170, 72 164, 72 148 C 72 128, 66 116, 54 116 Z' },
+    // 9
+    { vb: '0 0 105 200', d: 'M 22 190 L 48 190 C 80 172, 96 126, 96 66 C 96 28, 76 8, 48 8 C 22 8, 8 30, 8 68 C 8 106, 24 126, 50 126 C 64 126, 76 118, 84 106 C 80 144, 64 162, 42 164 L 22 164 Z M 50 98 C 38 98, 32 86, 32 67 C 32 48, 38 36, 50 36 C 62 36, 68 48, 68 67 C 68 86, 62 98, 50 98 Z' },
+    // 10
+    { vb: '0 0 175 200', d: 'M 60 8 L 60 192 L 28 192 L 28 56 L 8 74 L 4 50 L 36 8 Z M 122 8 C 150 8, 170 32, 170 100 C 170 168, 150 192, 122 192 C 94 192, 74 168, 74 100 C 74 32, 94 8, 122 8 Z M 122 38 C 138 38, 144 58, 144 100 C 144 142, 138 162, 122 162 C 106 162, 100 142, 100 100 C 100 58, 106 38, 122 38 Z' }
+  ];
+
+  getHighResImage(pkg: LuantiPackage): string {
+    if (pkg.banner && !pkg.banner.includes('thumbnail.png')) {
+      return pkg.banner;
+    }
+    if (pkg.thumbnail && pkg.thumbnail.includes('thumbnail.png')) {
+      return pkg.thumbnail.replace('thumbnail.png', 'shot-0.png');
+    }
+    return pkg.banner || pkg.thumbnail || 'logo.svg';
+  }
 
   ngAfterViewInit(): void {
     setTimeout(() => this.updateScrollState(), 100);

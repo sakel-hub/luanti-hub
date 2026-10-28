@@ -38,10 +38,10 @@ import {
       (keydown.space)="openDetails()"
       [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + package.author"
       [appTooltip]="'card.clickToOpen' | translate"
-      [class.lg:hover:origin-left]="isFirst"
-      [class.lg:hover:origin-right]="isLast"
-      [class.lg:hover:origin-center]="!isFirst && !isLast"
-      class="group relative flex-shrink-0 w-64 sm:w-72 rounded-xl bg-slate-900 border border-slate-800/80 hover:border-slate-700/90 shadow-xl hover:shadow-2xl hover:shadow-black/95 cursor-pointer transition-all duration-300 ease-out lg:hover:scale-115 lg:hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
+      [class.hover:origin-left]="isFirst"
+      [class.hover:origin-right]="isLast"
+      [class.hover:origin-center]="!isFirst && !isLast"
+      class="group relative flex-shrink-0 w-60 sm:w-68 rounded-xl bg-slate-900 border border-slate-800/80 hover:border-slate-700 shadow-xl hover:shadow-2xl hover:shadow-black/95 cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.07] hover:-translate-y-2 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
       
       <!-- Thumbnail with 16:9 Aspect Ratio & Lazy Loading -->
       <div class="relative w-full h-36 sm:h-40 bg-slate-950 overflow-hidden">
@@ -183,6 +183,7 @@ export class PackageCardComponent {
 
   openSetup(event: MouseEvent): void {
     event.stopPropagation();
+    this.packageService.trackDownload(this.package);
     this.packageService.openSetupModal();
   }
 

@@ -75,7 +75,7 @@ import { LucideSearchX } from '@lucide/angular';
       <!-- Netflix Home Experience (Billboard + Horizontal Swimlanes) -->
       <app-hero-billboard></app-hero-billboard>
 
-      <div class="relative z-10 mt-6 sm:mt-8 space-y-8 pb-16">
+      <div class="relative z-10 mt-8 sm:mt-12 space-y-8 sm:space-y-10 pb-16">
         
         <!-- Swimlane 1: Trending Today -->
         <app-package-carousel 
@@ -87,7 +87,7 @@ import { LucideSearchX } from '@lucide/angular';
         <!-- Netflix Featured: Top 10 Packages Row (Today / This Week Toggle) -->
         <app-top10-row></app-top10-row>
 
-        <!-- Swimlane 2: Decentralized Git Community Packages -->
+        <!-- Swimlane 2: Community Git Packages -->
         <app-package-carousel 
           icon="git"
           [title]="'carousel.freshGit' | translate" 

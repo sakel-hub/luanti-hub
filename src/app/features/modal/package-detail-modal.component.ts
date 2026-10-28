@@ -58,13 +58,13 @@ import {
           <!-- Top Banner Hero (Clear & High Visibility) -->
           <div class="relative w-full h-64 sm:h-80 md:h-96 bg-slate-950 flex-shrink-0 overflow-hidden">
             <img 
-              [src]="package.banner || package.thumbnail" 
+              [src]="bannerImage" 
               [fallbackThumbnail]="package.thumbnail"
               appImgFallback
               [alt]="package.title"
-              class="w-full h-full object-cover object-center filter brightness-90"
+              class="w-full h-full object-cover object-center filter brightness-100"
             />
-            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/40 to-transparent"></div>
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/85 via-slate-950/25 to-transparent w-full sm:w-2/3"></div>
             <div class="absolute inset-0 bg-gradient-to-t from-slate-900/95 via-transparent to-transparent"></div>
 
             <!-- Floating Round Close Button (Top Right) -->
@@ -465,6 +465,16 @@ export class PackageDetailModalComponent implements OnInit {
     return typeof window !== 'undefined' ? `${window.location.origin}/#${this.package.id}` : '';
   }
 
+  get bannerImage(): string {
+    if (this.package.banner && !this.package.banner.includes('thumbnail.png')) {
+      return this.package.banner;
+    }
+    if (this.package.thumbnail && this.package.thumbnail.includes('thumbnail.png')) {
+      return this.package.thumbnail.replace('thumbnail.png', 'shot-0.png');
+    }
+    return this.package.banner || this.package.thumbnail || 'logo.svg';
+  }
+
   ngOnInit(): void {
     this.packageService.fetchReviews(this.package).then(res => this.reviews.set(res));
   }
@@ -474,6 +484,7 @@ export class PackageDetailModalComponent implements OnInit {
   }
 
   openSetupModal(): void {
+    this.packageService.trackDownload(this.package);
     this.packageService.openSetupModal();
   }
 

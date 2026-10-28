@@ -46,7 +46,7 @@ import {
                 Use LuantiHub Inside Your Game
               </h2>
               <p class="text-xs text-slate-400">
-                Browse and install decentralized mods directly in the Luanti "Content" tab.
+                Browse and install community mods directly in the Luanti "Content" tab.
               </p>
             </div>
           </div>

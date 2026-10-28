@@ -29,7 +29,7 @@ import { LucideX, LucideChevronRight, LucideGitBranch, LucideGlobe } from '@luci
                 Sign in to LuantiHub
               </h2>
               <p class="text-xs text-slate-400">
-                Publish decentralized mods, sync releases, and review packages.
+                Publish Git mods, sync releases, and review packages.
               </p>
             </div>
           </div>
