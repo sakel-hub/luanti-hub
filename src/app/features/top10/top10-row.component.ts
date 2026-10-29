@@ -173,9 +173,9 @@ import {
                   class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
 
-                <!-- Top Red Netflix Badge -->
+                <!-- Top Rose Frosted Glass Badge -->
                 <div class="absolute top-2 left-2 z-20">
-                  <span class="px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-rose-600/90 backdrop-blur-md text-white shadow-md">
+                  <span class="glass-badge glass-badge-rose font-black uppercase tracking-wider text-[9px] px-1.5 py-0.5">
                     {{ 'carousel.top10Badge' | translate }}
                   </span>
                 </div>

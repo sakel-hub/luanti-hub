@@ -16,12 +16,11 @@ import { SettingsService } from '../../core/services/settings.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideStar,
   LucideHeart,
-  LucideGitBranch,
-  LucideGlobe,
   LucideChevronDown,
   LucideDownload
 } from '@lucide/angular';
@@ -36,11 +35,10 @@ import {
     ImgFallbackDirective,
     TooltipDirective,
     CompactNumberPipe,
+    PackageBadgesComponent,
     TranslatePipe,
     LucideStar,
     LucideHeart,
-    LucideGitBranch,
-    LucideGlobe,
     LucideChevronDown,
     LucideDownload
   ],
@@ -54,7 +52,6 @@ import {
       (keydown.enter)="openDetails()"
       (keydown.space)="openDetails()"
       [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + package.author"
-      [appTooltip]="'card.clickToOpen' | translate"
       [class.origin-left]="isFirst"
       [class.origin-right]="isLast"
       [class.origin-center]="!isFirst && !isLast"
@@ -133,7 +130,7 @@ import {
       <!-- Content Details with Equalized Flex Layout -->
       <div class="p-3.5 flex flex-col flex-1 justify-between min-h-0">
 
-        <div class="space-y-2">
+        <div class="space-y-2.5">
           <!-- Action Buttons Row (Direct .zip Download, Favorite, Details) -->
           <div class="flex items-center gap-2">
             <button
@@ -176,30 +173,10 @@ import {
           </div>
 
           <!-- Category & Source Badges Row in Content Section -->
-          <div class="flex items-center gap-1.5 flex-wrap">
-            <span
-              [class]="package.type === 'game' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30' : package.type === 'txp' ? 'bg-purple-500/20 text-purple-300 border-purple-400/30' : 'bg-sky-500/20 text-sky-300 border-sky-400/30'"
-              class="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider border">
-              {{ package.type }}
-            </span>
-
-            @if (package.sources?.includes('official') || package.source === 'official' || package.source === 'mirror') {
-              <span
-                class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-400/30 flex items-center gap-1">
-                <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
-                <span>ContentDB</span>
-              </span>
-            }
-
-            @if (package.sources?.includes('git') || package.source === 'git') {
-              <span
-                [appTooltip]="'card.gitSourceTooltip' | translate"
-                class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-400/40 flex items-center gap-1">
-                <svg lucideGitBranch class="w-3 h-3 text-amber-400"></svg>
-                <span>Git</span>
-              </span>
-            }
-          </div>
+          <app-package-badges
+            [package]="package"
+            [showGitTooltip]="true">
+          </app-package-badges>
 
           <!-- Key Metrics: Match %, Real Engine Compatibility & License -->
           <div class="flex items-center gap-2 text-xs overflow-hidden whitespace-nowrap">

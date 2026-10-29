@@ -39,9 +39,37 @@ export class TooltipDirective implements OnInit, OnDestroy {
   private cleanups: (() => void)[] = [];
   private escapeCleanup: (() => void) | null = null;
 
+  private static activeInstance: TooltipDirective | null = null;
+  private static globalListenersInitialized = false;
+
+  private static initGlobalListeners(ngZone: NgZone): void {
+    if (this.globalListenersInitialized || typeof window === 'undefined') return;
+    this.globalListenersInitialized = true;
+
+    ngZone.runOutsideAngular(() => {
+      const dismissActive = () => {
+        if (TooltipDirective.activeInstance) {
+          TooltipDirective.activeInstance.hide();
+        }
+      };
+
+      // Immediately dismiss any active tooltip when scrolling occurs on window, carousels, or containers
+      window.addEventListener('scroll', dismissActive, { capture: true, passive: true });
+      window.addEventListener('wheel', dismissActive, { passive: true });
+      window.addEventListener('touchmove', dismissActive, { passive: true });
+      window.addEventListener('visibilitychange', () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          dismissActive();
+        }
+      });
+    });
+  }
+
   ngOnInit(): void {
     if (typeof window === 'undefined' || !this.el?.nativeElement) return;
     const native = this.el.nativeElement as HTMLElement;
+
+    TooltipDirective.initGlobalListeners(this.ngZone);
 
     // Attach listeners OUTSIDE Angular zone to avoid triggering change detection on hover
     this.ngZone.runOutsideAngular(() => {
@@ -102,6 +130,10 @@ export class TooltipDirective implements OnInit, OnDestroy {
     this.clearTimeout();
     if (!this.appTooltip && !this.appTooltipKey) return;
 
+    if (TooltipDirective.activeInstance && TooltipDirective.activeInstance !== this) {
+      TooltipDirective.activeInstance.hide();
+    }
+
     this.showTimeout = setTimeout(() => {
       this.show();
     }, this.appTooltipDelay);
@@ -131,7 +163,22 @@ export class TooltipDirective implements OnInit, OnDestroy {
   }
 
   private show(): void {
-    if (this.tooltipEl || typeof document === 'undefined' || !this.el) return;
+    if (this.tooltipEl || typeof document === 'undefined' || !this.el?.nativeElement) return;
+    const native = this.el.nativeElement as HTMLElement;
+
+    // Element must still be connected to DOM and actively hovered/focused
+    if (!native.isConnected) return;
+    if (typeof native.matches === 'function' && !native.matches(':hover, :focus-visible, :focus-within')) {
+      return;
+    }
+
+    // Dismiss any previously active tooltip instance
+    if (TooltipDirective.activeInstance && TooltipDirective.activeInstance !== this) {
+      TooltipDirective.activeInstance.hide();
+    }
+
+    // Clean up any orphaned tooltip elements in the DOM
+    document.querySelectorAll('.luanti-tooltip').forEach(node => node.remove());
 
     let text = this.resolveTooltipText();
     if (!text) return;
@@ -168,6 +215,7 @@ export class TooltipDirective implements OnInit, OnDestroy {
 
     document.body.appendChild(tip);
     this.tooltipEl = tip;
+    TooltipDirective.activeInstance = this;
 
     if (this.el.nativeElement && typeof this.el.nativeElement.setAttribute === 'function') {
       this.el.nativeElement.setAttribute('aria-describedby', tipId);
@@ -244,6 +292,9 @@ export class TooltipDirective implements OnInit, OnDestroy {
 
   public hide(): void {
     this.clearTimeout();
+    if (TooltipDirective.activeInstance === this) {
+      TooltipDirective.activeInstance = null;
+    }
     if (this.escapeCleanup) {
       this.escapeCleanup();
       this.escapeCleanup = null;

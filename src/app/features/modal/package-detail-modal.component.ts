@@ -22,6 +22,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
@@ -59,6 +60,7 @@ import {
     ImgFallbackDirective,
     TooltipDirective,
     CompactNumberPipe,
+    PackageBadgesComponent,
     TranslatePipe,
     LucideX,
     LucideShare2,
@@ -156,33 +158,10 @@ import {
             <div class="absolute bottom-5 left-5 sm:left-8 right-5 sm:right-8 flex flex-col justify-end gap-3 z-20">
 
               <!-- Badges -->
-              <div class="flex items-center gap-2 flex-wrap">
-                <span
-                  [class]="package.type === 'game' ? 'bg-emerald-500/90 text-white' : package.type === 'txp' ? 'bg-purple-500/90 text-white' : 'bg-sky-500/90 text-white'"
-                  class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider backdrop-blur-md shadow">
-                  {{ package.type }}
-                </span>
-
-                @if (package.sources?.includes('official') || package.source === 'official' || package.source === 'mirror') {
-                  <span class="px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 backdrop-blur-md flex items-center gap-1">
-                    <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
-                    <span>ContentDB</span>
-                  </span>
-                }
-
-                @if (package.sources?.includes('git') || package.source === 'git') {
-                  <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1 shadow">
-                    <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
-                    <span>Git</span>
-                  </span>
-                }
-
-                @if (package.featured) {
-                  <span class="px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-400/40 backdrop-blur-md">
-                    Featured
-                  </span>
-                }
-              </div>
+              <app-package-badges
+                [package]="package"
+                [showFeatured]="true">
+              </app-package-badges>
 
               <!-- Title -->
               <h2 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
@@ -995,7 +974,7 @@ import {
                         </span>
                         <div class="flex flex-wrap gap-1 mt-1">
                           @for (w of package.content_warnings; track w) {
-                            <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[10px] font-medium">
+                            <span class="glass-badge glass-badge-amber font-medium">
                               {{ w }}
                             </span>
                           }
@@ -1009,7 +988,7 @@ import {
                         </span>
                         <div class="flex flex-wrap gap-1 mt-1">
                           @for (ai of package.ai_disclosures; track ai) {
-                            <span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-400/30 text-[10px] font-medium">
+                            <span class="glass-badge glass-badge-purple font-medium">
                               {{ ai }}
                             </span>
                           }

@@ -14,6 +14,7 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideChevronLeft,
@@ -21,7 +22,6 @@ import {
   LucideInfo,
   LucideStar,
   LucideGitBranch,
-  LucideGlobe,
   LucideDownload
 } from '@lucide/angular';
 
@@ -34,13 +34,13 @@ import {
     ImgFallbackDirective,
     TooltipDirective,
     CompactNumberPipe,
+    PackageBadgesComponent,
     TranslatePipe,
     LucideChevronLeft,
     LucideChevronRight,
     LucideInfo,
     LucideStar,
     LucideGitBranch,
-    LucideGlobe,
     LucideDownload
   ],
   template: `
@@ -107,27 +107,7 @@ import {
                     [class]="idx === currentIndex() ? 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
 
                     <!-- Category & Source Badges (Consistent with Package Tiles & Detail Modal) -->
-                    <div class="flex items-center gap-2 flex-wrap">
-                      <span
-                        [class]="slidePkg.type === 'game' ? 'bg-emerald-500/90 text-white' : slidePkg.type === 'txp' ? 'bg-purple-500/90 text-white' : 'bg-sky-500/90 text-white'"
-                        class="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider backdrop-blur-md shadow">
-                        {{ slidePkg.type }}
-                      </span>
-
-                      @if (slidePkg.sources?.includes('official') || slidePkg.source === 'official' || slidePkg.source === 'mirror') {
-                        <span class="px-2.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 backdrop-blur-md flex items-center gap-1">
-                          <svg lucideGlobe class="w-3 h-3 text-emerald-300"></svg>
-                          <span>ContentDB</span>
-                        </span>
-                      }
-
-                      @if (slidePkg.sources?.includes('git') || slidePkg.source === 'git') {
-                        <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500 text-slate-950 flex items-center gap-1 shadow">
-                          <svg lucideGitBranch class="w-3 h-3 text-slate-950"></svg>
-                          <span>Git</span>
-                        </span>
-                      }
-
+                    <app-package-badges [package]="slidePkg">
                       <button
                         type="button"
                         (click)="$event.stopPropagation()"
@@ -138,7 +118,7 @@ import {
                         class="w-5 h-5 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
                         <svg lucideInfo class="w-3 h-3"></svg>
                       </button>
-                    </div>
+                    </app-package-badges>
 
                     <!-- Title -->
                     <h2 class="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white drop-shadow-md">

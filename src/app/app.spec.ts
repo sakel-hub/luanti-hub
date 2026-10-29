@@ -15,6 +15,7 @@ import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
+import { TooltipDirective } from './shared/directives/tooltip.directive';
 import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
 import { createAuditProofToken, verifyAuditProofToken } from '../../functions/api/auth/lib/session';
 
@@ -543,6 +544,12 @@ description = Mob animation and spawning framework.
     expect(contentSection.textContent).toContain('mod');
     expect(contentSection.textContent).toContain('ContentDB');
     expect(contentSection.textContent).toContain('Git');
+
+    const badges = contentSection.querySelectorAll('app-package-badges .glass-badge');
+    expect(badges.length).toBe(3);
+    expect(badges[0].classList.contains('glass-badge-sky')).toBe(true);
+    expect(badges[1].classList.contains('glass-badge-emerald')).toBe(true);
+    expect(badges[2].classList.contains('glass-badge-amber')).toBe(true);
   });
 
   it('should prioritize 1-Click OAuth sign-in (including Mesehub) with Direct Sign-In collapsed by default and no trailing colon after favorites', () => {
@@ -622,5 +629,39 @@ description = Mob animation and spawning framework.
     expect(pipe.transform(139553)).toBe('139.6k');
     expect(pipe.transform(783360)).toBe('783.4k');
     expect(pipe.transform(1500000)).toBe('1.5M');
+  });
+
+  it('should prevent stuck tooltips by dismissing on scroll/wheel and omitting tooltip from outer package card', () => {
+    const fixture = TestBed.createComponent(PackageCardComponent);
+    const service = TestBed.inject(PackageService);
+    fixture.componentInstance.package = (service as any).normalizePackage({
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod'
+    });
+    fixture.detectChanges();
+
+    const rootEl = (fixture.nativeElement as HTMLElement).querySelector('.glass-card') as HTMLElement;
+    expect(rootEl).toBeTruthy();
+    expect(rootEl.getAttribute('apptooltip')).toBeNull();
+    expect(rootEl.getAttribute('aria-describedby')).toBeNull();
+
+    // Verify TooltipDirective auto-dismisses on scroll
+    const testBtn = document.createElement('button');
+    (testBtn as any).matches = (selector: string) => selector.includes(':hover');
+    document.body.appendChild(testBtn);
+    const directive = TestBed.runInInjectionContext(() => new TooltipDirective());
+    (directive as any).el = { nativeElement: testBtn };
+    directive.appTooltip = 'Test tooltip';
+    directive.ngOnInit();
+    (directive as any).show();
+
+    expect(document.querySelector('.luanti-tooltip')).toBeTruthy();
+
+    window.dispatchEvent(new Event('scroll'));
+    expect(document.querySelector('.luanti-tooltip')).toBeNull();
+    testBtn.remove();
   });
 });

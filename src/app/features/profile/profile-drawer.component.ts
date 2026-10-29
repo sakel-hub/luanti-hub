@@ -220,10 +220,14 @@ import {
                           <img [src]="pkg.thumbnail || 'logo.svg'" [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
                           <div class="min-w-0 flex-1">
                             <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
-                            <div class="flex items-center gap-1.5 text-[11px] text-slate-400">
+                            <div class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5">
                               <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
                               <span>•</span>
-                              <span class="uppercase font-mono text-[10px] text-sky-400">{{ pkg.type }}</span>
+                              <span
+                                [class]="pkg.type === 'game' ? 'glass-badge-emerald' : pkg.type === 'txp' ? 'glass-badge-purple' : 'glass-badge-sky'"
+                                class="glass-badge font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
+                                {{ pkg.type }}
+                              </span>
                             </div>
                           </div>
                         </button>
