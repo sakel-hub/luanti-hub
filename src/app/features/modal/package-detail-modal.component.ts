@@ -39,7 +39,8 @@ import {
   LucideMessageSquare,
   LucideAlertCircle,
   LucideImage,
-  LucideUser
+  LucideUser,
+  LucideChevronDown
 } from '@lucide/angular';
 
 @Component({
@@ -70,7 +71,8 @@ import {
     LucideMessageSquare,
     LucideAlertCircle,
     LucideImage,
-    LucideUser
+    LucideUser,
+    LucideChevronDown
   ],
   template: `
     @if (package) {
@@ -459,30 +461,103 @@ import {
                 }
 
                 <!-- 1-Click In-Game Setup Snippet Box -->
-                <div class="p-4 rounded-2xl glass-panel space-y-2">
-                  <div class="flex items-center justify-between">
+                <div class="p-4 rounded-2xl glass-panel space-y-3">
+                  <div class="flex items-center justify-between gap-2 flex-wrap">
                     <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
                       {{ 'modal.registryConfig' | translate }}
                     </span>
+                    <div class="flex items-center gap-3">
+                      <button
+                        type="button"
+                        (click)="copyRegistryUrl()"
+                        class="text-[11px] font-semibold text-emerald-400 hover:text-white flex items-center gap-1 transition cursor-pointer">
+                        @if (copiedUrl()) {
+                          <svg lucideCheck class="w-3.5 h-3.5 text-emerald-400"></svg>
+                          <span class="text-emerald-400">{{ 'common.copiedToClipboard' | translate }}</span>
+                        } @else {
+                          <svg lucideCopy class="w-3.5 h-3.5"></svg>
+                          <span>{{ 'setup.copyUrl' | translate }}</span>
+                        }
+                      </button>
+                      <button
+                        type="button"
+                        (click)="copyRegistryConfig()"
+                        class="text-[11px] font-semibold text-sky-400 hover:text-white flex items-center gap-1 transition cursor-pointer">
+                        @if (copied()) {
+                          <svg lucideCheck class="w-3.5 h-3.5 text-emerald-400"></svg>
+                          <span class="text-emerald-400">{{ 'common.copiedToClipboard' | translate }}</span>
+                        } @else {
+                          <svg lucideCopy class="w-3.5 h-3.5"></svg>
+                          <span>{{ 'modal.copyConfig' | translate }}</span>
+                        }
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Option A (Preferred): In-Game Settings UI -->
+                  <div class="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5">
+                    <p class="text-[11px] text-emerald-200 font-medium leading-relaxed">
+                      {{ 'modal.optionASettingsHint' | translate }}
+                    </p>
+                    <code class="block text-xs font-mono text-emerald-300 bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-emerald-500/20 break-all select-all">
+                      {{ settingsService.contentDbUrl() }}
+                    </code>
+                  </div>
+
+                  <!-- Option B: Direct luanti.conf / .zip -->
+                  <div class="space-y-1.5">
+                    <p class="text-[11px] text-slate-400 leading-relaxed">
+                      {{ 'modal.registryConfigDesc' | translate }}
+                    </p>
+                    <code class="block text-xs font-mono text-slate-200 bg-slate-950/80 p-2.5 rounded-xl border border-white/10 break-all select-all">
+                      contentdb_url = {{ settingsService.contentDbUrl() }}
+                    </code>
+                  </div>
+
+                  <!-- Expandable (collapsed by default) luanti.conf / minetest.conf locations -->
+                  <div class="pt-1 border-t border-white/10">
                     <button
                       type="button"
-                      (click)="copyRegistryConfig()"
-                      class="text-[11px] font-semibold text-sky-400 hover:text-white flex items-center gap-1 transition cursor-pointer">
-                      @if (copied()) {
-                        <svg lucideCheck class="w-3.5 h-3.5 text-emerald-400"></svg>
-                        <span class="text-emerald-400">{{ 'common.copiedToClipboard' | translate }}</span>
-                      } @else {
-                        <svg lucideCopy class="w-3.5 h-3.5"></svg>
-                        <span>{{ 'modal.copyConfig' | translate }}</span>
-                      }
+                      (click)="toggleConfLocations()"
+                      [attr.aria-expanded]="showConfLocations()"
+                      class="w-full flex items-center justify-between text-left text-[11px] font-semibold text-sky-400 hover:text-sky-300 py-1 transition cursor-pointer">
+                      <span>{{ 'setup.whereToFindConf' | translate }}</span>
+                      <svg
+                        lucideChevronDown
+                        class="w-4 h-4 flex-shrink-0 transition-transform duration-200"
+                        [class.rotate-180]="showConfLocations()"></svg>
                     </button>
+
+                    @if (showConfLocations()) {
+                      <div class="mt-2 p-3 rounded-xl bg-slate-950/80 border border-white/10 space-y-2 text-[11px] text-slate-300">
+                        <p class="text-sky-300 font-medium leading-relaxed">
+                          💡 {{ 'setup.confShortcutTip' | translate }}
+                        </p>
+                        <div class="space-y-1.5">
+                          <div>
+                            <span class="font-bold text-white">{{ 'setup.confWindowsLabel' | translate }}:</span>
+                            <code class="block text-[10px] font-mono text-slate-300 bg-slate-900/90 px-2 py-1 rounded border border-white/5 mt-0.5 break-all select-all">{{ 'setup.confWindowsPath' | translate }}</code>
+                          </div>
+                          <div>
+                            <span class="font-bold text-white">{{ 'setup.confLinuxLabel' | translate }}:</span>
+                            <code class="block text-[10px] font-mono text-slate-300 bg-slate-900/90 px-2 py-1 rounded border border-white/5 mt-0.5 break-all select-all">{{ 'setup.confLinuxPath' | translate }}</code>
+                          </div>
+                          <div>
+                            <span class="font-bold text-white">{{ 'setup.confMacLabel' | translate }}:</span>
+                            <code class="block text-[10px] font-mono text-slate-300 bg-slate-900/90 px-2 py-1 rounded border border-white/5 mt-0.5 break-all select-all">{{ 'setup.confMacPath' | translate }}</code>
+                          </div>
+                          <div>
+                            <span class="font-bold text-white">{{ 'setup.confAndroidLabel' | translate }}:</span>
+                            <code class="block text-[10px] font-mono text-slate-300 bg-slate-900/90 px-2 py-1 rounded border border-white/5 mt-0.5 break-all select-all">{{ 'setup.confAndroidPath' | translate }}</code>
+                          </div>
+                          <div>
+                            <span class="font-bold text-white">{{ 'setup.confIosLabel' | translate }}:</span>
+                            <code class="block text-[10px] font-mono text-slate-300 bg-slate-900/90 px-2 py-1 rounded border border-white/5 mt-0.5 break-all select-all">{{ 'setup.confIosPath' | translate }}</code>
+                          </div>
+                        </div>
+                      </div>
+                    }
                   </div>
-                  <code class="block text-xs font-mono text-slate-200 bg-slate-950/80 p-2.5 rounded-xl border border-white/10 break-all select-all">
-                    contentdb_url = {{ settingsService.contentDbUrl() }}
-                  </code>
-                  <p class="text-[11px] text-slate-400">
-                    {{ 'modal.registryConfigDesc' | translate }}
-                  </p>
                 </div>
 
               </div>
@@ -882,6 +957,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   readonly reviews = signal<CommunityReview[]>([]);
   readonly releases = signal<PackageRelease[]>([]);
   readonly copied = signal(false);
+  readonly copiedUrl = signal(false);
+  readonly showConfLocations = signal(false);
   readonly activeBannerUrl = signal<string | null>(null);
 
   // Review Form state
@@ -1051,6 +1128,18 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
   filterByTag(tag: string): void {
     this.packageService.filterByTagFromModal(tag);
+  }
+
+  copyRegistryUrl(): void {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(this.settingsService.contentDbUrl());
+      this.copiedUrl.set(true);
+      setTimeout(() => this.copiedUrl.set(false), 2000);
+    }
+  }
+
+  toggleConfLocations(): void {
+    this.showConfLocations.update(v => !v);
   }
 
   copyRegistryConfig(): void {

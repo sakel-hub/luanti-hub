@@ -121,6 +121,9 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       });
       if (!tokenRes.ok) throw new Error('GitHub token exchange failed');
       const tokenData = await tokenRes.json() as any;
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'GitHub OAuth token missing');
+      }
       const userRes = await fetch('https://api.github.com/user', {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
@@ -165,7 +168,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       return Response.redirect(`${url.origin}/?auth_error=Authentication+failed`, 302);
     }
 
-    // 2. Identify or Create User in Cloudflare D1
+    // 2. Identify or Create User in Cloudflare D1 (with full orphan & duplicate self-healing)
     let userId: string | null = null;
     const existingSessionUserId = cookies['lh_session']
       ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
@@ -179,71 +182,49 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     const role = isAdmin ? 'admin' : 'user';
 
     if (context.env.DB) {
+      // Verify whether existingSessionUserId actually resolves to a live row in `users`
+      let activeSessionUser: any = null;
       if (existingSessionUserId) {
-        // User is ALREADY logged in -> LINK IDENTITY to existing user (and merge if this identity belonged to another user row)
-        userId = existingSessionUserId;
-        const existingProviderRow = await context.env.DB.prepare(`
-          SELECT id, user_id FROM user_identities
-          WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
-          ORDER BY verified DESC LIMIT 1
-        `).bind(provider, providerUserId, providerUsername).first() as { id: number; user_id: string } | null;
+        activeSessionUser = await reconcileAndMergeUserAccount(context.env.DB, existingSessionUserId);
+      }
 
-        if (existingProviderRow && existingProviderRow.user_id !== userId) {
-          await mergeSecondaryUserIntoPrimary(context.env.DB, userId, existingProviderRow.user_id);
-        }
+      // Fetch all existing identity rows matching either canonical provider_user_id or provider_username
+      const matchingIdentitiesRes = await context.env.DB.prepare(`
+        SELECT id, user_id, provider_user_id, provider_username, verified
+        FROM user_identities
+        WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+        ORDER BY verified DESC, id ASC
+      `).bind(provider, providerUserId, providerUsername).all();
+      const matchingIdentities = (matchingIdentitiesRes.results || []) as Array<{
+        id: number;
+        user_id: string;
+        provider_user_id: string;
+        provider_username: string;
+        verified: number;
+      }>;
 
-        const targetIdentityRow = await context.env.DB.prepare(`
-          SELECT id FROM user_identities
-          WHERE provider = ? AND (provider_user_id = ? OR (user_id = ? AND LOWER(provider_username) = LOWER(?)))
-          LIMIT 1
-        `).bind(provider, providerUserId, userId, providerUsername).first() as { id: number } | null;
-
-        if (targetIdentityRow) {
-          await context.env.DB.prepare(`
-            UPDATE user_identities
-            SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = 1
-            WHERE id = ?
-          `).bind(userId, providerUserId, providerUsername, profileUrl, avatarUrl, targetIdentityRow.id).run();
-        } else {
-          await context.env.DB.prepare(`
-            INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(provider, provider_user_id) DO UPDATE SET
-              user_id = excluded.user_id,
-              provider_username = excluded.provider_username,
-              avatar_url = excluded.avatar_url,
-              verified = 1
-          `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
-        }
-
-        if (isAdmin) {
-          await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
-        }
+      if (activeSessionUser?.id) {
+        userId = String(activeSessionUser.id);
       } else {
-        // Find existing linked identity by either canonical provider_user_id OR matching provider_username on the same provider
-        const existingIdentity = await context.env.DB.prepare(`
-          SELECT id, user_id FROM user_identities
-          WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
-          ORDER BY verified DESC LIMIT 1
-        `).bind(provider, providerUserId, providerUsername).first() as { id: number; user_id: string } | null;
-
-        if (existingIdentity) {
-          userId = existingIdentity.user_id;
-          await context.env.DB.prepare(`
-            UPDATE user_identities
-            SET verified = 1, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?
-            WHERE id = ?
-          `).bind(providerUserId, providerUsername, profileUrl, avatarUrl, existingIdentity.id).run();
-          if (isAdmin) {
-            await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
+        // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
+        for (const ident of matchingIdentities) {
+          const u = await context.env.DB.prepare(
+            `SELECT id, username FROM users WHERE id = ?`
+          ).bind(ident.user_id).first() as { id: string; username: string } | null;
+          if (u) {
+            userId = u.id;
+            if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
+              break;
+            }
           }
-        } else {
-          // Check if a user with this username already exists
+        }
+
+        // If no matching identity points to a live user row, check if a user with this username already exists
+        if (!userId) {
           const existingUserByUsername = await context.env.DB.prepare(
             `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
           ).bind(providerUsername).first() as { id: string } | null;
 
-          // Check if that existing user has a conflicting identity on the SAME provider with a different username
           const conflictingSameProvider = existingUserByUsername
             ? await context.env.DB.prepare(
                 `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
@@ -252,47 +233,79 @@ export async function onRequestGet(context: { params: { provider: string }; requ
 
           if (existingUserByUsername && !conflictingSameProvider) {
             userId = existingUserByUsername.id;
-            if (isAdmin) {
-              await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
-            }
-            await context.env.DB.prepare(`
-              INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-              VALUES (?, ?, ?, ?, ?, ?, 1)
-              ON CONFLICT(provider, provider_user_id) DO UPDATE SET
-                user_id = excluded.user_id,
-                provider_username = excluded.provider_username,
-                avatar_url = excluded.avatar_url,
-                verified = 1
-            `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
           } else {
             const candidateUsername = existingUserByUsername
               ? `${providerUsername}_${provider.slice(0, 2)}`
               : providerUsername;
 
-            userId = crypto.randomUUID();
-            await context.env.DB.prepare(`
-              INSERT INTO users (id, username, display_name, avatar_url, role)
-              VALUES (?, ?, ?, ?, ?)
-            `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
+            // Reuse orphaned identity's user_id if present so existing packages/favorites/downloads stay linked
+            userId = matchingIdentities.length > 0 && matchingIdentities[0].user_id
+              ? String(matchingIdentities[0].user_id)
+              : crypto.randomUUID();
 
             await context.env.DB.prepare(`
-              INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-              VALUES (?, ?, ?, ?, ?, ?, 1)
-            `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+              INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
+              VALUES (?, ?, ?, ?, ?)
+            `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
           }
         }
       }
 
-      // Reconcile & merge any duplicate suffixed accounts
+      // Merge any secondary or orphaned user_ids referenced by matchingIdentities into the resolved primary userId
       if (userId) {
+        const mergedSecondaryIds = new Set<string>();
+        for (const ident of matchingIdentities) {
+          if (ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
+            mergedSecondaryIds.add(ident.user_id);
+            await mergeSecondaryUserIntoPrimary(context.env.DB, userId, ident.user_id);
+          }
+        }
+
+        // Clean up duplicate identity rows for this provider/user before upserting canonical OAuth identity
+        const currentIdentitiesRes = await context.env.DB.prepare(`
+          SELECT id FROM user_identities
+          WHERE provider = ?
+            AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?) OR user_id = ?)
+          ORDER BY verified DESC, id ASC
+        `).bind(provider, providerUserId, providerUsername, userId).all();
+        const currentIds = (currentIdentitiesRes.results || []) as Array<{ id: number }>;
+
+        if (currentIds.length > 0) {
+          const keepId = currentIds[0].id;
+          for (const extra of currentIds.slice(1)) {
+            await context.env.DB.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(extra.id).run();
+          }
+          await context.env.DB.prepare(`
+            UPDATE user_identities
+            SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = 1
+            WHERE id = ?
+          `).bind(userId, providerUserId, providerUsername, profileUrl, avatarUrl, keepId).run();
+        } else {
+          await context.env.DB.prepare(`
+            INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+              user_id = excluded.user_id,
+              provider_username = excluded.provider_username,
+              profile_url = excluded.profile_url,
+              avatar_url = excluded.avatar_url,
+              verified = 1
+          `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+        }
+
+        // Reconcile & merge any duplicate suffixed accounts
         const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId);
         if (reconciledUser?.id) {
           userId = String(reconciledUser.id);
         }
+
+        if (isAdmin && userId) {
+          await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
+        }
       }
 
       // 3. Automatic ContentDB & Git Package Matching (Zero-Click Claiming!)
-      if (provider !== 'contentdb') {
+      if (provider !== 'contentdb' && userId) {
         await context.env.DB.prepare(`
           UPDATE packages SET author_id = ?
           WHERE (author_id IS NULL OR author_id LIKE 'ext_%')
@@ -301,7 +314,9 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       }
 
       // Sync upstream ContentDB packages authored by this verified username
-      await syncAuthorContentDbPackages(context.env.DB, userId, providerUsername);
+      if (userId) {
+        await syncAuthorContentDbPackages(context.env.DB, userId, providerUsername);
+      }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
       userId = `usr_${provider}_${providerUsername}`;

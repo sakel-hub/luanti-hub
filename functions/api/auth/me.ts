@@ -50,7 +50,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const user = await reconcileAndMergeUserAccount(context.env.DB, userId);
 
     if (!user) {
-      return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
+      const isHttps = new URL(context.request.url).protocol === 'https:';
+      return Response.json(
+        { user: null, oauthProviders },
+        {
+          headers: {
+            'Cache-Control': 'no-store',
+            'Set-Cookie': `lh_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+          }
+        }
+      );
     }
 
     const resolvedUserId = String(user.id);
@@ -259,13 +268,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         provider_user_id: string;
       } | null;
 
-      const existingUser = activeSessionUser
-        ? activeSessionUser
-        : (matchedIdentity
-            ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(matchedIdentity.user_id).first() as { id: string; role: string } | null
-            : await context.env.DB.prepare(
-                `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
-              ).bind(verifiedUsername).first() as { id: string; role: string } | null);
+      const identityUser = matchedIdentity
+        ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(matchedIdentity.user_id).first() as { id: string; role: string } | null
+        : null;
+
+      const usernameUser = (!activeSessionUser && !identityUser)
+        ? await context.env.DB.prepare(
+            `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
+          ).bind(verifiedUsername).first() as { id: string; role: string } | null
+        : null;
+
+      const existingUser = activeSessionUser || identityUser || usernameUser;
 
       if (existingUser) {
         // Check if existing user has any cryptographically verified identity or admin role
@@ -283,16 +296,16 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         }
 
         userId = existingUser.id;
-        if (activeSessionUser && matchedIdentity && matchedIdentity.user_id !== userId && isCryptographicallyVerified) {
+        if (matchedIdentity && matchedIdentity.user_id !== userId && isCryptographicallyVerified) {
           await mergeSecondaryUserIntoPrimary(context.env.DB, userId, matchedIdentity.user_id);
         }
         if (isAdmin) {
           await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
         }
       } else {
-        userId = crypto.randomUUID();
+        userId = matchedIdentity?.user_id ? String(matchedIdentity.user_id) : crypto.randomUUID();
         await context.env.DB.prepare(`
-          INSERT INTO users (id, username, display_name, avatar_url, role)
+          INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
           VALUES (?, ?, ?, ?, ?)
         `).bind(userId, verifiedUsername, displayName, avatarUrl, role).run();
       }
@@ -303,6 +316,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           isCryptographicallyVerified && providerUserId !== verifiedUsername.toLowerCase()
             ? providerUserId
             : matchedIdentity.provider_user_id;
+        await context.env.DB.prepare(
+          `DELETE FROM user_identities WHERE provider = ? AND provider_user_id = ? AND id != ?`
+        ).bind(provider, nextProviderUserId, matchedIdentity.id).run();
         await context.env.DB.prepare(`
           UPDATE user_identities
           SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = ?

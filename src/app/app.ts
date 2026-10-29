@@ -99,7 +99,7 @@ export class App {
         this.packageService.isSetupModalOpen() ||
         this.packageService.isLegalModalOpen() ||
         this.authService.isAuthModalOpen() ||
-        this.authService.isProfileDrawerOpen()
+        (this.authService.isProfileDrawerOpen() && this.authService.currentUser())
       );
       if (anyModalOpen && !this.wasModalOpen) {
         this.savedScrollY = window.scrollY || document.documentElement.scrollTop || 0;

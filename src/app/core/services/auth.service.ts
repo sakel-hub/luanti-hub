@@ -22,6 +22,7 @@ export class AuthService {
   private readonly _moderationReports = signal<ModerationReport[]>([]);
   private readonly _delistedPackages = signal<LuantiPackage[]>([]);
   private lastModerationFetchAt = 0;
+  private lastAuthFetchAt = 0;
 
   readonly currentUser = this._currentUser.asReadonly();
   readonly isAuthModalOpen = this._isAuthModalOpen.asReadonly();
@@ -83,93 +84,97 @@ export class AuthService {
   }
 
   clearAuthCache(): void {
+    this.lastAuthFetchAt = 0;
     try {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.removeItem('lh_auth_cache_v1');
         sessionStorage.removeItem('lh_auth_cache_v2');
+      }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('lh_local_user');
       }
     } catch {
       // Ignore storage error
     }
   }
 
+  /**
+   * Checks whether the currently authenticated user has a cryptographically verified
+   * identity on the target Git forge (or is an admin) matching the repository owner.
+   */
+  hasVerifiedProviderOwnership(provider: GitProvider, repoOwner?: string): boolean {
+    const user = this._currentUser();
+    if (!user) return false;
+    if (this.isAdmin()) return true;
+
+    const verifiedOnProvider = (user.identities || []).filter(
+      id => id.provider === provider && Boolean(id.verified)
+    );
+    if (verifiedOnProvider.length === 0) return false;
+    if (!repoOwner) return true;
+
+    const targetOwner = repoOwner.trim().toLowerCase();
+    return verifiedOnProvider.some(id => id.username.trim().toLowerCase() === targetOwner);
+  }
+
   async initAuth(forceRefresh = false): Promise<void> {
     try {
       this._isLoading.set(true);
+      this.clearLegacyBrowserAuthStorage();
 
-      if (!forceRefresh && typeof sessionStorage !== 'undefined') {
-        try {
-          const cachedRaw = sessionStorage.getItem('lh_auth_cache_v2');
-          if (cachedRaw) {
-            const parsed = JSON.parse(cachedRaw) as { ts: number; data: any };
-            const cachedUsername = String(parsed?.data?.user?.username || '');
-            const hasLegacySuffix = /_(gi|gl|co|cd)$/i.test(cachedUsername);
-            if (parsed && parsed.data && !hasLegacySuffix && Date.now() - parsed.ts < 120_000) {
-              this.settingsService.edgeApiAvailable.set(true);
-              if (parsed.data.oauthProviders && typeof parsed.data.oauthProviders === 'object') {
-                this._oauthProviders.set(parsed.data.oauthProviders);
-              }
-              if (parsed.data.user) {
-                this._currentUser.set(parsed.data.user);
-                this.settingsService.isAuthenticatedSession.set(true);
-                this.settingsService.mergeServerDownloads(parsed.data.user.downloads);
-                await this.settingsService.mergeServerFavorites(parsed.data.user.favorites);
-                return;
-              } else {
-                this.settingsService.isAuthenticatedSession.set(false);
-                return;
-              }
-            }
-          }
-        } catch {
-          // Proceed to network fetch
-        }
+      // Use in-memory cache only (never persist user profiles or identities in browser storage)
+      if (!forceRefresh && this.lastAuthFetchAt > 0 && Date.now() - this.lastAuthFetchAt < 120_000) {
+        return;
       }
 
-      const res = await fetch('/api/auth/me');
-      if (res.ok) {
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          this.settingsService.edgeApiAvailable.set(true);
-          const data = await res.json();
-          try {
-            if (typeof sessionStorage !== 'undefined') {
-              sessionStorage.setItem('lh_auth_cache_v2', JSON.stringify({ ts: Date.now(), data }));
-            }
-          } catch {
-            // Ignore storage quota error
-          }
-          if (data.oauthProviders && typeof data.oauthProviders === 'object') {
-            this._oauthProviders.set(data.oauthProviders);
-          }
+      const res = await fetch('/api/auth/me', {
+        cache: 'no-store',
+        credentials: 'same-origin'
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        this.settingsService.edgeApiAvailable.set(true);
+        const data = await res.json();
+        if (data?.oauthProviders && typeof data.oauthProviders === 'object') {
+          this._oauthProviders.set(data.oauthProviders);
+        }
+        if (res.ok) {
+          this.lastAuthFetchAt = Date.now();
           if (data.user) {
             this._currentUser.set(data.user);
             this.settingsService.isAuthenticatedSession.set(true);
             this.settingsService.mergeServerDownloads(data.user.downloads);
             await this.settingsService.mergeServerFavorites(data.user.favorites);
+            if (this._isProfileDrawerOpen() && this.isAdmin()) {
+              this.fetchModerationQueue();
+            }
             return;
           }
         }
       }
 
       this.settingsService.isAuthenticatedSession.set(false);
-      // Check local fallback user if running in static/dev mode without D1
-      const savedLocalUser = typeof localStorage !== 'undefined' ? localStorage.getItem('lh_local_user') : null;
-      if (savedLocalUser) {
-        this._currentUser.set(JSON.parse(savedLocalUser));
+      if (this._isProfileDrawerOpen()) {
+        this._isProfileDrawerOpen.set(false);
       }
     } catch {
       // Offline / unauthenticated
-      try {
-        const savedLocalUser = typeof localStorage !== 'undefined' ? localStorage.getItem('lh_local_user') : null;
-        if (savedLocalUser) {
-          this._currentUser.set(JSON.parse(savedLocalUser));
-        }
-      } catch {
-        // Ignore
-      }
     } finally {
       this._isLoading.set(false);
+    }
+  }
+
+  private clearLegacyBrowserAuthStorage(): void {
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.removeItem('lh_auth_cache_v1');
+        sessionStorage.removeItem('lh_auth_cache_v2');
+      }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('lh_local_user');
+      }
+    } catch {
+      // Ignore storage access errors
     }
   }
 
@@ -256,7 +261,7 @@ export class AuthService {
         return { success: true };
       }
 
-      // Fallback when running `ng serve` locally without Cloudflare Pages Worker
+      // Fallback when running `ng serve` locally without Cloudflare Pages Worker (in-memory only)
       const localUser: AuthUser = {
         id: `local-${cleanHandle.toLowerCase()}`,
         username: cleanHandle,
@@ -277,15 +282,66 @@ export class AuthService {
         ],
         packages: []
       };
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('lh_local_user', JSON.stringify(localUser));
-      }
       this._currentUser.set(localUser);
       this.closeAuthModal();
       this.openProfileDrawer();
       return { success: true };
     } catch (err: any) {
       return { success: false, message: err.message || 'Connection error during sign-in.' };
+    } finally {
+      this._isLoading.set(false);
+    }
+  }
+
+  /**
+   * Inline verification used inside the Submit Modal to verify ownership of a Git provider account
+   * via a read-only Personal Access Token over HTTPS without storing credentials in the browser
+   * and without closing the Submit Modal.
+   */
+  async verifyProviderOwnershipInline(
+    provider: GitProvider,
+    username: string,
+    token: string
+  ): Promise<{ success: boolean; message?: string }> {
+    const cleanHandle = username.trim();
+    const cleanToken = token.trim();
+    if (!cleanHandle || !cleanToken) {
+      return {
+        success: false,
+        message: 'Both your Git provider username and a read-only Personal Access Token are required to verify ownership.'
+      };
+    }
+
+    try {
+      this._isLoading.set(true);
+      const res = await fetch('/api/auth/me', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          provider,
+          username: cleanHandle,
+          token: cleanToken
+        })
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            success: false,
+            message: data.error || 'Could not verify token against the Git provider API.'
+          };
+        }
+        this.clearAuthCache();
+        await this.initAuth(true);
+        return { success: true };
+      }
+
+      return { success: false, message: 'Verification endpoint unavailable.' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error while verifying repository ownership.' };
     } finally {
       this._isLoading.set(false);
     }
@@ -311,19 +367,15 @@ export class AuthService {
         return { success: true };
       }
 
-      // Local fallback update
+      // Local in-memory fallback update
       this._currentUser.update(u => {
         if (!u) return null;
-        const updated = {
+        return {
           ...u,
           display_name: payload.display_name ?? u.display_name,
           bio: payload.bio ?? u.bio,
           avatar_url: payload.avatar_url ?? u.avatar_url
         };
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('lh_local_user', JSON.stringify(updated));
-        }
-        return updated;
       });
       this.pwaService.showToast('profile.savedSuccess');
       return { success: true };

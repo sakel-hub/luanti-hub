@@ -6,9 +6,11 @@ import { routes } from './app.routes';
 import { PackageService } from './core/services/package.service';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
+import { AuthService } from './core/services/auth.service';
 import { TranslationService } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
+import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
 
 describe('App & Core Services', () => {
   beforeEach(async () => {
@@ -79,10 +81,23 @@ describe('App & Core Services', () => {
       'modal.tabReleases',
       'modal.signInToReviewBtn',
       'setup.optionA',
+      'setup.optionADesc',
+      'setup.optionAStep1',
+      'setup.optionAStep2',
+      'setup.optionAStep3',
       'setup.optionB',
       'setup.copy',
+      'setup.copyUrl',
       'setup.step1',
+      'setup.whereToFindConf',
+      'setup.confShortcutTip',
+      'setup.confWindowsPath',
+      'setup.confLinuxPath',
+      'setup.confMacPath',
+      'setup.confAndroidPath',
+      'setup.confIosPath',
       'setup.failoverNote',
+      'modal.optionASettingsHint',
       'catalog.showingCount',
       'catalog.filterByTag'
     ];
@@ -315,5 +330,27 @@ describe('App & Core Services', () => {
     settings.recordLocalDownload('authorA/small_mod');
     expect(settings.getDownloadCount('authorA/small_mod')).toBeGreaterThanOrEqual(2);
     expect(pkgService.getMatchScore(lowScoreMod)).toBeGreaterThan(baselineLow);
+  });
+
+  it('should reject fake init.lua files without Luanti engine APIs and pass real Luanti scripts', () => {
+    const fakeDiags = runLuacheckStaticAudit('local x = 42\nprint("unrelated repo")', 'fake_mod');
+    expect(fakeDiags.some(d => d.code === 'LUA_NO_ENGINE_API' && d.severity === 'error')).toBe(true);
+
+    const validDiags = runLuacheckStaticAudit(
+      'local modname = core.get_current_modname()\ncore.register_node("my_mod:stone", { description = "Stone" })',
+      'my_mod'
+    );
+    expect(validDiags.some(d => d.code === 'LUA_NO_ENGINE_API')).toBe(false);
+    expect(validDiags.some(d => d.code === 'LUA_ENGINE_API_OK' && d.severity === 'pass')).toBe(true);
+  });
+
+  it('should not store personal user profiles or credentials in browser storage and should verify provider ownership', async () => {
+    const authService = TestBed.inject(AuthService);
+    await authService.loginWithHandle('codeberg', 'test_creator');
+
+    expect(localStorage.getItem('lh_local_user')).toBeNull();
+    expect(sessionStorage.getItem('lh_auth_cache_v2')).toBeNull();
+    // Unverified handle sign-in must not grant verified repository ownership
+    expect(authService.hasVerifiedProviderOwnership('codeberg', 'test_creator')).toBe(false);
   });
 });

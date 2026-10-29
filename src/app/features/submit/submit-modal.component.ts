@@ -1,8 +1,9 @@
-import { Component, ChangeDetectionStrategy, inject, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
-import { GitAuditReport } from '../../core/models/package.model';
+import { AuthService } from '../../core/services/auth.service';
+import { GitAuditReport, GitProvider } from '../../core/models/package.model';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucidePlus,
@@ -13,7 +14,8 @@ import {
   LucideShieldAlert,
   LucideTerminal,
   LucideLoader2,
-  LucideTag
+  LucideTag,
+  LucideKeyRound
 } from '@lucide/angular';
 
 @Component({
@@ -32,7 +34,8 @@ import {
     LucideShieldAlert,
     LucideTerminal,
     LucideLoader2,
-    LucideTag
+    LucideTag,
+    LucideKeyRound
   ],
   template: `
     <div
@@ -140,6 +143,11 @@ import {
                     class="px-2 py-0.5 rounded border">
                     Luacheck
                   </span>
+                  <span
+                    [class]="isOwnershipVerified() ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
+                    class="px-2 py-0.5 rounded border">
+                    {{ isOwnershipVerified() ? 'Owner Verified' : 'Verify Owner' }}
+                  </span>
                 </div>
               </div>
 
@@ -217,6 +225,82 @@ import {
                   </div>
                 }
               </div>
+            </div>
+          }
+
+          <!-- Repository Ownership Verification (Required to Publish) -->
+          @if (parsedRepoTarget(); as target) {
+            <div
+              [class]="isOwnershipVerified() ? 'bg-emerald-950/25 border-emerald-500/30' : 'bg-amber-950/25 border-amber-500/35'"
+              class="p-4 rounded-2xl border space-y-3 text-xs">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <div class="flex items-center gap-2">
+                  @if (isOwnershipVerified()) {
+                    <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+                    <span class="font-bold text-emerald-300">
+                      Repository Ownership Verified ({{ target.provider | uppercase }}: {{ target.owner }})
+                    </span>
+                  } @else {
+                    <svg lucideKeyRound class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
+                    <span class="font-bold text-amber-300">
+                      Verify {{ target.provider | uppercase }} Ownership for "{{ target.owner }}/{{ target.repo }}"
+                    </span>
+                  }
+                </div>
+              </div>
+
+              @if (!isOwnershipVerified()) {
+                <p class="text-[11px] text-slate-300 leading-relaxed">
+                  Only the verified repository owner or organization member on <strong class="text-white uppercase">{{ target.provider }}</strong> can publish this repository. Your token is verified once on the server and is <strong class="text-emerald-300">never stored in the browser</strong>.
+                </p>
+
+                @if (authService.isOAuthConfigured(target.provider)) {
+                  <button
+                    type="button"
+                    (click)="authService.loginWith(target.provider)"
+                    class="w-full py-2 px-3 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
+                    <span>Connect {{ target.provider | uppercase }} via 1-Click OAuth</span>
+                  </button>
+                }
+
+                <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                  <input
+                    type="text"
+                    [(ngModel)]="verifyUsername"
+                    name="verifyUsername"
+                    [placeholder]="target.provider + ' username (e.g. ' + target.owner + ')'"
+                    autocomplete="username"
+                    class="sm:col-span-4 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                  />
+                  <input
+                    type="password"
+                    [(ngModel)]="verifyToken"
+                    name="verifyToken"
+                    [placeholder]="'Read-only ' + (target.provider | uppercase) + ' Personal Access Token'"
+                    autocomplete="off"
+                    class="sm:col-span-5 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                  />
+                  <button
+                    type="button"
+                    (click)="onVerifyOwnershipInline()"
+                    [disabled]="isVerifyingOwner() || !verifyToken.trim()"
+                    class="sm:col-span-3 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+                    @if (isVerifyingOwner()) {
+                      <svg lucideLoader2 class="w-3.5 h-3.5 animate-spin"></svg>
+                      <span>Verifying...</span>
+                    } @else {
+                      <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                      <span>Verify Owner</span>
+                    }
+                  </button>
+                </div>
+
+                @if (verifyOwnerMessage()) {
+                  <p [class]="verifyOwnerSuccess() ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] font-medium">
+                    {{ verifyOwnerMessage() }}
+                  </p>
+                }
+              }
             </div>
           }
 
@@ -332,11 +416,18 @@ import {
 })
 export class SubmitModalComponent {
   readonly packageService = inject(PackageService);
+  readonly authService = inject(AuthService);
 
   repoUrl = '';
   warrantyOwnership = false;
   warrantyAssets = false;
   warrantyTakedown = false;
+
+  verifyUsername = '';
+  verifyToken = '';
+  readonly isVerifyingOwner = signal(false);
+  readonly verifyOwnerMessage = signal<string | null>(null);
+  readonly verifyOwnerSuccess = signal(false);
 
   readonly isAuditing = signal(false);
   readonly isSubmitting = signal(false);
@@ -345,6 +436,39 @@ export class SubmitModalComponent {
   readonly statusSuccess = signal(false);
   readonly copiedCode = signal<string | null>(null);
   readonly selectedTags = signal<string[]>([]);
+  private readonly repoUrlSignal = signal('');
+
+  readonly parsedRepoTarget = computed<{ provider: GitProvider; owner: string; repo: string } | null>(() => {
+    const raw = this.repoUrlSignal().trim();
+    if (!raw) return null;
+    try {
+      const u = new URL(raw);
+      const host = u.hostname.toLowerCase();
+      const parts = u.pathname.replace(/^\/|\/$/g, '').split('/');
+      if (parts.length < 2) return null;
+      const owner = parts[0];
+      const repo = parts[1].replace(/\.git$/i, '');
+      if (!owner || !repo) return null;
+      let provider: GitProvider = 'github';
+      if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+        provider = 'codeberg';
+      } else if (host.includes('gitlab')) {
+        provider = 'gitlab';
+      }
+      return { provider, owner, repo };
+    } catch {
+      return null;
+    }
+  });
+
+  isOwnershipVerified(): boolean {
+    if (this.auditReport()?.ownershipVerified) {
+      return true;
+    }
+    const target = this.parsedRepoTarget();
+    if (!target) return false;
+    return this.authService.hasVerifiedProviderOwnership(target.provider, target.owner);
+  }
 
   isTagSelected(tagName: string): boolean {
     return this.selectedTags().includes(tagName.toLowerCase());
@@ -361,8 +485,44 @@ export class SubmitModalComponent {
   }
 
   onUrlChange(): void {
+    this.repoUrlSignal.set(this.repoUrl);
     this.auditReport.set(null);
     this.statusMessage.set(null);
+    this.verifyOwnerMessage.set(null);
+    const target = this.parsedRepoTarget();
+    if (target && !this.verifyUsername.trim()) {
+      this.verifyUsername = target.owner;
+    }
+  }
+
+  async onVerifyOwnershipInline(): Promise<void> {
+    const target = this.parsedRepoTarget();
+    if (!target || !this.verifyToken.trim()) return;
+
+    const handleToVerify = (this.verifyUsername || target.owner).trim();
+    const oneTimeToken = this.verifyToken.trim();
+    // Immediately wipe token from component memory so it never lingers
+    this.verifyToken = '';
+
+    this.isVerifyingOwner.set(true);
+    this.verifyOwnerMessage.set(null);
+
+    const res = await this.authService.verifyProviderOwnershipInline(
+      target.provider,
+      handleToVerify,
+      oneTimeToken
+    );
+
+    this.isVerifyingOwner.set(false);
+    if (res.success) {
+      this.verifyOwnerSuccess.set(true);
+      this.verifyOwnerMessage.set(`Verified ${target.provider} account '${handleToVerify}'.`);
+      // Refresh pre-flight audit so server-side ownership check updates too
+      await this.onRunAudit();
+    } else {
+      this.verifyOwnerSuccess.set(false);
+      this.verifyOwnerMessage.set(res.message || 'Could not verify token.');
+    }
   }
 
   canPublish(): boolean {
@@ -371,6 +531,7 @@ export class SubmitModalComponent {
       this.warrantyOwnership &&
       this.warrantyAssets &&
       this.warrantyTakedown &&
+      this.isOwnershipVerified() &&
       (!this.auditReport() || this.auditReport()?.valid)
     );
   }

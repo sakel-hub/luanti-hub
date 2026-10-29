@@ -1,10 +1,150 @@
 // Ingestion & Static Audit Endpoint for Decentralized Git Repositories (Codeberg, GitLab, GitHub, Gitea)
-import { verifySessionToken, parseCookies } from '../auth/lib/session';
+import {
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  reconcileAndMergeUserAccount
+} from '../auth/lib/session';
 import { fetchUpstreamJsonCached, normalizeRepoKey, parseJsonArray, invalidateEdgeCacheKeys } from '../lib/upstream';
 
 interface Env {
   DB?: any;
   SESSION_SECRET?: string;
+  ADMIN_USERS?: string;
+}
+
+interface RepoEntry {
+  name: string;
+  type: 'file' | 'dir';
+}
+
+async function fetchRepoRootEntries(
+  provider: 'codeberg' | 'gitlab' | 'github',
+  host: string,
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<RepoEntry[] | null> {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+  };
+  try {
+    if (provider === 'github') {
+      const res = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
+        { headers }
+      );
+      if (!res.ok) return null;
+      const items = await res.json();
+      if (!Array.isArray(items)) return null;
+      return items.map((it: any) => ({
+        name: String(it.name || ''),
+        type: it.type === 'dir' ? 'dir' : 'file'
+      }));
+    }
+    if (provider === 'codeberg') {
+      const res = await fetch(
+        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
+        { headers }
+      );
+      if (!res.ok) return null;
+      const items = await res.json();
+      if (!Array.isArray(items)) return null;
+      return items.map((it: any) => ({
+        name: String(it.name || ''),
+        type: it.type === 'dir' || it.type === 'submodule' ? 'dir' : 'file'
+      }));
+    }
+    if (provider === 'gitlab') {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const res = await fetch(
+        `https://${host}/api/v4/projects/${projectPath}/repository/tree?ref=${encodeURIComponent(branch)}&per_page=100`,
+        { headers }
+      );
+      if (!res.ok) return null;
+      const items = await res.json();
+      if (!Array.isArray(items)) return null;
+      return items.map((it: any) => ({
+        name: String(it.name || ''),
+        type: it.type === 'tree' || it.type === 'commit' ? 'dir' : 'file'
+      }));
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function verifyOrgOrRepoMembership(
+  provider: 'codeberg' | 'gitlab' | 'github',
+  host: string,
+  owner: string,
+  repo: string,
+  verifiedHandle: string
+): Promise<boolean> {
+  const lowerHandle = verifiedHandle.trim().toLowerCase();
+  if (!lowerHandle) return false;
+  if (lowerHandle === owner.trim().toLowerCase()) return true;
+
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+  };
+
+  try {
+    if (provider === 'github') {
+      const orgRes = await fetch(
+        `https://api.github.com/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
+        { headers }
+      );
+      if (orgRes.status === 204 || orgRes.status === 200) return true;
+
+      const contribRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=30`,
+        { headers }
+      );
+      if (contribRes.ok) {
+        const list = await contribRes.json();
+        if (Array.isArray(list) && list.some((c: any) => String(c?.login || '').toLowerCase() === lowerHandle)) {
+          return true;
+        }
+      }
+    } else if (provider === 'codeberg') {
+      const orgRes = await fetch(
+        `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
+        { headers }
+      );
+      if (orgRes.status === 204 || orgRes.status === 200) return true;
+
+      const repoRes = await fetch(
+        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        { headers }
+      );
+      if (repoRes.ok) {
+        const repoData: any = await repoRes.json();
+        if (String(repoData?.owner?.login || '').toLowerCase() === lowerHandle) {
+          return true;
+        }
+      }
+    } else if (provider === 'gitlab') {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const membersRes = await fetch(
+        `https://${host}/api/v4/projects/${projectPath}/members/all?query=${encodeURIComponent(verifiedHandle)}`,
+        { headers }
+      );
+      if (membersRes.ok) {
+        const list = await membersRes.json();
+        if (Array.isArray(list) && list.some((m: any) => String(m?.username || '').toLowerCase() === lowerHandle)) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 export interface GitAuditDiagnostic {
@@ -45,6 +185,7 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
 
   let openBlocks = 0;
   let lastOpenLine = 1;
+  let hasLuantiEngineApi = false;
   const undeclaredGlobals: Array<{ name: string; line: number }> = [];
   const deprecatedCalls: Array<{ call: string; replacement: string; line: number }> = [];
   const sandboxViolations: Array<{ call: string; line: number }> = [];
@@ -93,7 +234,16 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
 
     if (!codeOnly.trim()) continue;
 
-    // 1. Count block openers vs `end` / `until`
+    // 1. Detect positive Luanti Engine API usage (core.*, minetest.*, vector.*, ItemStack, VoxelArea, etc.)
+    if (
+      /\b(core|minetest|vector|VoxelArea|VoxelManip|PerlinNoise|PerlinNoiseMap|PseudoRandom|PcgRandom|SecureRandom|ItemStack|Settings|AreaStore|Raycast)\b/.test(
+        codeOnly
+      )
+    ) {
+      hasLuantiEngineApi = true;
+    }
+
+    // 2. Count block openers vs `end` / `until`
     const openers = codeOnly.match(/\b(function|if|do|repeat)\b/g);
     // Avoid double-counting `while ... do` or `for ... do` (where `do` is the opener)
     if (openers) {
@@ -129,6 +279,27 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
   }
 
   // Emit diagnostics
+  if (!hasLuantiEngineApi) {
+    diagnostics.push({
+      code: 'LUA_NO_ENGINE_API',
+      severity: 'error',
+      file: 'init.lua',
+      line: 1,
+      title: 'No Luanti Engine API Usage Detected in init.lua',
+      message: 'init.lua does not reference any Luanti engine APIs (e.g. core.*, minetest.*, vector.*, ItemStack, VoxelArea). Unrelated repositories or placeholder Lua scripts cannot be indexed.',
+      howToFix: 'Ensure init.lua registers nodes, items, callbacks, or loads mod scripts using Luanti engine APIs (such as core.register_node or core.get_modpath):',
+      snippet: `local modname = core.get_current_modname()\nlocal modpath = core.get_modpath(modname)\ncore.log("action", "[" .. modname .. "] Loaded")`
+    });
+  } else {
+    diagnostics.push({
+      code: 'LUA_ENGINE_API_OK',
+      severity: 'pass',
+      file: 'init.lua',
+      title: 'Luanti Engine API Signatures Verified',
+      message: 'Detected valid Luanti (core.* / minetest.*) engine API references in init.lua.'
+    });
+  }
+
   if (openBlocks !== 0) {
     diagnostics.push({
       code: 'LUA_SYNTAX_UNBALANCED (E011)',
@@ -264,7 +435,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return `https://raw.githubusercontent.com/${owner}/${repo}/${branchName}/${filePath}`;
     };
 
-    let rawConfig = customConf || '';
+    // Only allow customConf / customLua overrides during dryRun preview;
+    // when publishing (dryRun: false), always fetch committed files from the live Git repository.
+    let rawConfig = dryRun ? (customConf || '') : '';
     let confFileName = 'mod.conf';
     let packageType: 'mod' | 'game' | 'txp' | 'modpack' = 'mod';
     let branch = 'main';
@@ -443,8 +616,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       });
     }
 
-    // Check 4: Fetch & Audit `init.lua` (for mods)
-    let luaSource = customLua || '';
+    // Check 4: Fetch & Audit `init.lua` (for mods) or Directory Structure (for games / modpacks / texture packs)
+    let luaSource = dryRun ? (customLua || '') : '';
     if (!luaSource && packageType === 'mod') {
       try {
         const luaRes = await fetch(buildRawUrl(branch, 'init.lua'));
@@ -474,6 +647,93 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         const luaDiags = runLuacheckStaticAudit(luaSource, technicalName);
         diagnostics.push(...luaDiags);
       }
+    } else {
+      // Verify repository directory structure for game.conf, modpack.conf, or texture_pack.conf
+      const rootEntries = await fetchRepoRootEntries(provider, host, owner, repo, branch);
+      if (rootEntries && rootEntries.length > 0) {
+        const hasGitmodules = rootEntries.some(e => e.name.toLowerCase() === '.gitmodules');
+        if (packageType === 'game') {
+          const hasModsDir = rootEntries.some(e => e.type === 'dir' && e.name.toLowerCase() === 'mods');
+          if (!hasModsDir && !hasGitmodules) {
+            diagnostics.push({
+              code: 'GAME_STRUCTURE_INVALID',
+              severity: 'error',
+              file: 'mods/',
+              title: 'Missing mods/ Directory for Luanti Game',
+              message: `Repository declares game.conf, but no 'mods/' directory was found in the root of ${owner}/${repo}.`,
+              howToFix: `Create a 'mods/' directory in the root of your game repository containing the game's base mods.`
+            });
+          } else {
+            diagnostics.push({
+              code: 'GAME_STRUCTURE_OK',
+              severity: 'pass',
+              file: 'mods/',
+              title: 'Luanti Game Directory Structure Verified',
+              message: `Found required 'mods/' directory structure for game package.`
+            });
+          }
+        } else if (packageType === 'modpack') {
+          const subDirs = rootEntries.filter(e => e.type === 'dir' && !e.name.startsWith('.'));
+          if (subDirs.length === 0 && !hasGitmodules) {
+            diagnostics.push({
+              code: 'MODPACK_STRUCTURE_INVALID',
+              severity: 'error',
+              file: confFileName,
+              title: 'No Sub-Mod Directories Found in Modpack',
+              message: `Repository declares modpack.conf, but contains no mod subdirectories in the root of ${owner}/${repo}.`,
+              howToFix: `Place at least one mod subfolder (each with its own mod.conf and init.lua) inside the modpack repository.`
+            });
+          } else {
+            diagnostics.push({
+              code: 'MODPACK_STRUCTURE_OK',
+              severity: 'pass',
+              file: confFileName,
+              title: 'Modpack Directory Structure Verified',
+              message: `Found ${subDirs.length || 1} sub-directory entry(s) in modpack root.`
+            });
+          }
+        } else if (packageType === 'txp') {
+          const hasPngFiles = rootEntries.some(
+            e => e.type === 'file' && /\.(png|jpg|tga)$/i.test(e.name) && e.name.toLowerCase() !== 'screenshot.png'
+          );
+          const hasAssetSubdirs = rootEntries.some(e => e.type === 'dir' && !e.name.startsWith('.'));
+          if (!hasPngFiles && !hasAssetSubdirs) {
+            diagnostics.push({
+              code: 'TXP_STRUCTURE_INVALID',
+              severity: 'error',
+              file: confFileName,
+              title: 'No Texture Files Found in Texture Pack',
+              message: `Repository declares texture_pack.conf, but no .png texture files or texture subdirectories were found in ${owner}/${repo}.`,
+              howToFix: `Add your .png node/item texture files to the repository root or texture subdirectories.`
+            });
+          } else {
+            diagnostics.push({
+              code: 'TXP_STRUCTURE_OK',
+              severity: 'pass',
+              file: confFileName,
+              title: 'Texture Pack Assets Verified',
+              message: 'Detected texture files/directories in repository.'
+            });
+          }
+        }
+      }
+    }
+
+    // Optional Dependency Syntax Check (only if depends / optional_depends are specified; empty is 100% valid)
+    const rawDepList = [
+      ...(rawDepends ? rawDepends.split(',').map(s => s.trim()).filter(Boolean) : []),
+      ...(rawOptDepends ? rawOptDepends.split(',').map(s => s.trim()).filter(Boolean) : [])
+    ];
+    const invalidDeps = rawDepList.filter(d => !/^[a-z0-9_]+$/.test(d));
+    if (invalidDeps.length > 0) {
+      diagnostics.push({
+        code: 'CONF_INVALID_DEPENDS',
+        severity: 'error',
+        file: confFileName,
+        title: `Invalid Dependency Identifier: '${invalidDeps[0]}'`,
+        message: `Luanti dependency names in 'depends' / 'optional_depends' must use only lowercase letters, numbers, and underscores (found '${invalidDeps.join(', ')}').`,
+        howToFix: `Ensure all comma-separated mod names in 'depends' and 'optional_depends' are valid snake_case technical mod names.`
+      });
     }
 
     // Check 5: Probe README.md & screenshot.png
@@ -522,6 +782,79 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const errorsCount = diagnostics.filter(d => d.severity === 'error').length;
     const warningsCount = diagnostics.filter(d => d.severity === 'warning').length;
     const canPublish = errorsCount === 0;
+
+    // Check 6: Verify Cryptographic Repository Ownership (prevents posting someone else's Git repository)
+    let ownershipVerified = false;
+    let verifiedProviderUsername: string | null = null;
+    let resolvedUserId: string | null = loggedInUserId;
+
+    if (context.env.DB && loggedInUserId) {
+      try {
+        const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, loggedInUserId);
+        if (reconciledUser?.id) {
+          resolvedUserId = String(reconciledUser.id);
+        }
+        const identitiesRes = await context.env.DB.prepare(
+          `SELECT provider, provider_username as username, verified
+           FROM user_identities WHERE user_id = ?`
+        ).bind(resolvedUserId).all();
+        const identities: Array<{ provider: string; username: string; verified: boolean }> = (identitiesRes.results || []).map((id: any) => ({
+          provider: String(id.provider || '').toLowerCase(),
+          username: String(id.username || ''),
+          verified: Boolean(id.verified)
+        }));
+
+        if (checkIsAdmin(reconciledUser, identities, context.env.ADMIN_USERS)) {
+          ownershipVerified = true;
+          verifiedProviderUsername = reconciledUser?.username || owner;
+        } else {
+          const verifiedForProvider = identities.filter(id => id.provider === provider && id.verified);
+          for (const id of verifiedForProvider) {
+            if (id.username.trim().toLowerCase() === owner.trim().toLowerCase()) {
+              ownershipVerified = true;
+              verifiedProviderUsername = id.username;
+              break;
+            }
+            const isOrgOrRepoMember = await verifyOrgOrRepoMembership(provider, host, owner, repo, id.username);
+            if (isOrgOrRepoMember) {
+              ownershipVerified = true;
+              verifiedProviderUsername = id.username;
+              break;
+            }
+          }
+        }
+      } catch {
+        ownershipVerified = false;
+      }
+    }
+
+    if (ownershipVerified) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_VERIFIED',
+        severity: 'pass',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Repository Ownership Verified (${verifiedProviderUsername || owner})`,
+        message: `Verified that your ${provider} account owns or maintains ${owner}/${repo}.`
+      });
+    } else if (!dryRun) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_REQUIRED',
+        severity: 'error',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Repository Ownership Verification Required (${provider})`,
+        message: `To prevent unauthorized third-party submissions, only the verified owner or maintainer of '${owner}/${repo}' on ${provider} can publish this repository.`,
+        howToFix: `Verify your '${owner}' account on ${provider} below using 1-Click OAuth or a read-only Personal Access Token.`
+      });
+    } else {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_REQUIRED',
+        severity: 'warning',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Verify '${owner}' on ${provider} Before Publishing`,
+        message: `Pre-flight checks passed, but publishing requires verifying that you own or maintain '${owner}/${repo}' on ${provider}.`,
+        howToFix: `Use the inline ${provider} verification box below (OAuth or read-only Personal Access Token) to unlock publishing.`
+      });
+    }
 
     const dependencies = rawDepends
       ? rawDepends.split(',').map(s => s.trim()).filter(Boolean)
@@ -653,6 +986,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const auditReport = {
       valid: canPublish,
       passed: canPublish,
+      ownershipVerified,
+      requiredProvider: provider,
+      repoOwner: owner,
       configFound: confFileName,
       confFile: confFileName,
       licenseValid,
@@ -666,11 +1002,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       packageMeta: packagePayload
     };
 
-    // If blocking errors exist, return 422 with the full guided audit report
+    // If blocking technical errors exist, return 422 with the full guided audit report
     if (!canPublish) {
       return Response.json({
         success: false,
         canPublish: false,
+        ownershipVerified,
+        requiredProvider: provider,
+        repoOwner: owner,
         error: `Found ${errorsCount} blocking issue(s) that must be fixed before publishing.`,
         audit: auditReport,
         auditReport
@@ -682,11 +1021,29 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return Response.json({
         success: true,
         canPublish: true,
+        ownershipVerified,
+        requiredProvider: provider,
+        repoOwner: owner,
         dryRun: true,
         audit: auditReport,
         auditReport,
         package: packagePayload
       });
+    }
+
+    // Enforce verified repository ownership on actual publish (dryRun: false)
+    if (!ownershipVerified) {
+      return Response.json({
+        success: false,
+        canPublish: false,
+        ownershipVerified: false,
+        requiresOwnershipVerification: true,
+        requiredProvider: provider,
+        repoOwner: owner,
+        error: `Ownership verification required: Only the verified owner or maintainer of '${owner}/${repo}' on ${provider} can publish this repository.`,
+        audit: auditReport,
+        auditReport
+      }, { status: 403 });
     }
 
     if (!warrantiesAccepted) {
@@ -701,7 +1058,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)
     if (context.env.DB) {
-      const authorId = loggedInUserId || existingD1Pkg?.author_id || `ext_${canonicalAuthor}`;
+      const authorId = resolvedUserId || existingD1Pkg?.author_id || `ext_${canonicalAuthor}`;
 
       await context.env.DB.prepare(`
         INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)

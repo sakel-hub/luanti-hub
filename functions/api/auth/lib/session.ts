@@ -123,12 +123,44 @@ export function isProtectedAdminHandle(username: string, provider?: string, admi
 /**
  * Deduplicates `user_identities` rows for the same (user_id, provider, LOWER(provider_username))
  * and automatically merges duplicate suffixed accounts (e.g. `username_gi` -> `username`)
- * caused by signing in via both Handle/PAT and 1-Click OAuth.
+ * or orphaned `user_identities` rows whose parent `users` row was deleted.
  */
 export async function reconcileAndMergeUserAccount(db: any, currentUserId: string): Promise<any | null> {
   if (!db || !currentUserId) return null;
 
   let user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(currentUserId).first();
+
+  // Self-heal if currentUserId was deleted from `users` while `lh_session` or `user_identities` still references it
+  if (!user) {
+    try {
+      const orphanedIdentity = await db.prepare(
+        `SELECT * FROM user_identities WHERE user_id = ? ORDER BY verified DESC, id ASC LIMIT 1`
+      ).bind(currentUserId).first();
+
+      if (orphanedIdentity && orphanedIdentity.provider_username) {
+        const orphanedUsername = String(orphanedIdentity.provider_username).trim();
+        const orphanedBase = orphanedUsername.replace(/_(gi|gl|co|cd)$/i, '');
+
+        const existingCanonical = await db.prepare(
+          `SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) LIMIT 1`
+        ).bind(orphanedBase, orphanedUsername).first();
+
+        if (existingCanonical) {
+          await mergeSecondaryUserIntoPrimary(db, existingCanonical.id, currentUserId);
+          user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(existingCanonical.id).first();
+        } else {
+          const avatarUrl = orphanedIdentity.avatar_url || `https://github.com/${orphanedBase}.png`;
+          await db.prepare(
+            `INSERT INTO users (id, username, display_name, avatar_url, role) VALUES (?, ?, ?, ?, 'user')`
+          ).bind(currentUserId, orphanedBase, orphanedBase, avatarUrl).run();
+          user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(currentUserId).first();
+        }
+      }
+    } catch {
+      // Non-fatal if self-heal fails
+    }
+  }
+
   if (!user) return null;
 
   const rawUsername = String(user.username || '').trim();
@@ -175,8 +207,28 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
       }
     }
 
+    // Reattach any orphaned user_identities rows matching this user's base handle whose user_id no longer exists in `users`
+    if (user?.id && baseUsername) {
+      const orphanedIdentities = await db.prepare(
+        `SELECT DISTINCT ui.user_id
+         FROM user_identities ui
+         LEFT JOIN users u ON u.id = ui.user_id
+         WHERE ui.user_id != ?
+           AND LOWER(ui.provider_username) = LOWER(?)
+           AND u.id IS NULL`
+      ).bind(user.id, baseUsername).all();
+
+      for (const row of orphanedIdentities.results || []) {
+        if (row?.user_id) {
+          await mergeSecondaryUserIntoPrimary(db, user.id, String(row.user_id));
+        }
+      }
+    }
+
     // Deduplicate any multiple user_identities rows for the same provider on the resolved user
-    await deduplicateUserIdentities(db, user.id);
+    if (user?.id) {
+      await deduplicateUserIdentities(db, user.id);
+    }
   } catch {
     // Non-fatal if a table is missing in local dev
   }
@@ -185,44 +237,65 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
 }
 
 export async function mergeSecondaryUserIntoPrimary(db: any, primaryId: string, secondaryId: string): Promise<void> {
-  if (!primaryId || !secondaryId || primaryId === secondaryId) return;
+  if (!db || !primaryId || !secondaryId || primaryId === secondaryId) return;
 
-  const secondaryIdentities = await db.prepare(
-    `SELECT * FROM user_identities WHERE user_id = ?`
-  ).bind(secondaryId).all();
+  // Never merge into a primaryId that does not exist in the `users` table
+  const primaryUser = await db.prepare(`SELECT id FROM users WHERE id = ?`).bind(primaryId).first();
+  if (!primaryUser) return;
 
-  for (const secId of secondaryIdentities.results || []) {
-    const existingPrimaryId = await db.prepare(
-      `SELECT * FROM user_identities
-       WHERE user_id = ? AND provider = ? AND LOWER(provider_username) = LOWER(?)
-       LIMIT 1`
-    ).bind(primaryId, secId.provider, secId.provider_username).first();
+  try {
+    const secondaryIdentities = await db.prepare(
+      `SELECT * FROM user_identities WHERE user_id = ?`
+    ).bind(secondaryId).all();
 
-    if (existingPrimaryId) {
-      const mergedVerified = Math.max(Number(existingPrimaryId.verified) || 0, Number(secId.verified) || 0);
-      // Prefer OAuth numeric/canonical provider_user_id over lowercase username string
-      const preferredProviderUserId =
-        secId.verified && secId.provider_user_id !== String(secId.provider_username || '').toLowerCase()
-          ? secId.provider_user_id
-          : existingPrimaryId.provider_user_id;
+    for (const secId of secondaryIdentities.results || []) {
+      const existingPrimaryId = await db.prepare(
+        `SELECT * FROM user_identities
+         WHERE user_id = ? AND provider = ? AND LOWER(provider_username) = LOWER(?)
+         LIMIT 1`
+      ).bind(primaryId, secId.provider, secId.provider_username).first();
 
-      await db.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(secId.id).run();
-      await db.prepare(
-        `UPDATE user_identities
-         SET verified = ?, provider_user_id = ?, avatar_url = COALESCE(NULLIF(?, ''), avatar_url)
-         WHERE id = ?`
-      ).bind(mergedVerified, preferredProviderUserId, secId.avatar_url || '', existingPrimaryId.id).run();
-    } else {
-      await db.prepare(
-        `UPDATE OR IGNORE user_identities SET user_id = ? WHERE id = ?`
-      ).bind(primaryId, secId.id).run();
-      await db.prepare(`DELETE FROM user_identities WHERE id = ? AND user_id = ?`).bind(secId.id, secondaryId).run();
+      if (existingPrimaryId) {
+        const mergedVerified = Math.max(Number(existingPrimaryId.verified) || 0, Number(secId.verified) || 0);
+        // Prefer OAuth numeric/canonical provider_user_id over lowercase username string
+        const preferredProviderUserId =
+          secId.verified && secId.provider_user_id !== String(secId.provider_username || '').toLowerCase()
+            ? secId.provider_user_id
+            : existingPrimaryId.provider_user_id;
+
+        await db.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(secId.id).run();
+        await db.prepare(
+          `DELETE FROM user_identities WHERE provider = ? AND provider_user_id = ? AND id != ?`
+        ).bind(secId.provider, preferredProviderUserId, existingPrimaryId.id).run();
+        await db.prepare(
+          `UPDATE user_identities
+           SET verified = ?, provider_user_id = ?, avatar_url = COALESCE(NULLIF(?, ''), avatar_url)
+           WHERE id = ?`
+        ).bind(mergedVerified, preferredProviderUserId, secId.avatar_url || '', existingPrimaryId.id).run();
+      } else {
+        await db.prepare(
+          `UPDATE OR IGNORE user_identities SET user_id = ? WHERE id = ?`
+        ).bind(primaryId, secId.id).run();
+        await db.prepare(`DELETE FROM user_identities WHERE id = ? AND user_id = ?`).bind(secId.id, secondaryId).run();
+      }
     }
+  } catch {
+    // Ignore identity merge error
   }
 
-  await db.prepare(`UPDATE packages SET author_id = ? WHERE author_id = ?`).bind(primaryId, secondaryId).run();
-  await db.prepare(`UPDATE OR IGNORE user_favorites SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
-  await db.prepare(`DELETE FROM user_favorites WHERE user_id = ?`).bind(secondaryId).run();
+  try {
+    await db.prepare(`UPDATE packages SET author_id = ? WHERE author_id = ?`).bind(primaryId, secondaryId).run();
+  } catch {
+    // Ignore if packages table missing
+  }
+
+  try {
+    await db.prepare(`UPDATE OR IGNORE user_favorites SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
+    await db.prepare(`DELETE FROM user_favorites WHERE user_id = ?`).bind(secondaryId).run();
+  } catch {
+    // Ignore if user_favorites table missing
+  }
+
   try {
     await db.prepare(`
       INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
@@ -236,15 +309,23 @@ export async function mergeSecondaryUserIntoPrimary(db: any, primaryId: string, 
   } catch {
     // Ignore if user_downloads table not yet initialized
   }
-  await db.prepare(`UPDATE OR IGNORE package_reviews SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
-  await db.prepare(`DELETE FROM package_reviews WHERE user_id = ?`).bind(secondaryId).run();
 
-  const secUser = await db.prepare(`SELECT role FROM users WHERE id = ?`).bind(secondaryId).first();
-  if (secUser?.role === 'admin') {
-    await db.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(primaryId).run();
+  try {
+    await db.prepare(`UPDATE OR IGNORE reviews SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
+    await db.prepare(`DELETE FROM reviews WHERE user_id = ?`).bind(secondaryId).run();
+  } catch {
+    // Ignore if reviews table missing
   }
 
-  await db.prepare(`DELETE FROM users WHERE id = ?`).bind(secondaryId).run();
+  try {
+    const secUser = await db.prepare(`SELECT role FROM users WHERE id = ?`).bind(secondaryId).first();
+    if (secUser?.role === 'admin') {
+      await db.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(primaryId).run();
+    }
+    await db.prepare(`DELETE FROM users WHERE id = ?`).bind(secondaryId).run();
+  } catch {
+    // Ignore if secondary user row already deleted
+  }
 }
 
 async function deduplicateUserIdentities(db: any, userId: string): Promise<void> {

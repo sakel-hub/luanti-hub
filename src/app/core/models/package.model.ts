@@ -116,6 +116,9 @@ export interface GitAuditDiagnostic {
 
 export interface GitAuditReport {
   valid: boolean;
+  ownershipVerified?: boolean;
+  requiredProvider?: GitProvider;
+  repoOwner?: string;
   configFound: string | null;
   luacheckPassed: boolean;
   licenseValid: boolean;
