@@ -87,11 +87,32 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     // 4. Fetch User's Published / Claimed Packages
-    const packagesRes = await context.env.DB.prepare(
-      `SELECT id, author_name, name, title, type, short_desc, thumbnail_url, score, downloads_count, license, media_license, repo_url, provider, status, status_reason
-       FROM packages WHERE author_id = ? OR LOWER(author_name) = LOWER(?)
-       ORDER BY downloads_count DESC`
-    ).bind(resolvedUserId, user.username).all();
+    const identityHandles = Array.from(
+      new Set([
+        String(user.username || '').toLowerCase(),
+        ...identities.map((i: any) => String(i.username || '').toLowerCase())
+      ].filter(Boolean))
+    );
+    const handlePlaceholders = identityHandles.map(() => 'LOWER(author_name) = ?').join(' OR ');
+    const pkgQuery = handlePlaceholders
+      ? `SELECT *,
+                author_name AS author,
+                COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r WHERE LOWER(r.package_id) = LOWER(packages.id)), 0) AS review_score
+         FROM packages WHERE author_id = ? OR ${handlePlaceholders}
+         ORDER BY downloads_count DESC`
+      : `SELECT *,
+                author_name AS author,
+                COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r WHERE LOWER(r.package_id) = LOWER(packages.id)), 0) AS review_score
+         FROM packages WHERE author_id = ?
+         ORDER BY downloads_count DESC`;
+    const packagesRes = await context.env.DB.prepare(pkgQuery)
+      .bind(resolvedUserId, ...identityHandles)
+      .all();
+    const userPackages = (packagesRes.results || []).map((p: any) => ({
+      ...p,
+      author: p.author || p.author_name || user.username,
+      score: Number(p.review_score) || 0
+    }));
 
     // 5. Fetch User's Synced Favorites & Per-Package Download Counts
     const favoritesRes = await context.env.DB.prepare(
@@ -146,7 +167,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         open_reports_count: openReportsCount,
         created_at: user.created_at,
         identities,
-        packages: packagesRes.results || [],
+        packages: userPackages,
         favorites,
         downloads
       },

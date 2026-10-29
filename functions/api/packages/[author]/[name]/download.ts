@@ -1,4 +1,8 @@
-import { fetchUpstreamJsonCached } from '../../../lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  fetchGitRepoReleasesAndTags,
+  buildGitBranchArchiveUrl
+} from '../../../lib/upstream';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
 interface Env {
@@ -11,12 +15,26 @@ export async function onRequest(context: { params: { author: string; name: strin
   const packageId = `${author}/${name}`;
   const { env, request } = context;
 
-  // 1. Instant Kill Switch Check in Cloudflare D1
+  let pkgRecord: any = null;
+
+  // 1. Instant Kill Switch Check & Package Metadata Lookup in Cloudflare D1
   if (env.DB) {
     try {
-      const pkgRecord = await env.DB.prepare(
-        `SELECT status, status_reason FROM packages WHERE LOWER(id) = LOWER(?)`
-      ).bind(packageId).first();
+      pkgRecord = await env.DB.prepare(
+        `SELECT id, author_name, name, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+         FROM packages
+         WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
+         LIMIT 1`
+      ).bind(packageId, author, name).first();
+
+      if (!pkgRecord && (!author || author === 'undefined')) {
+        pkgRecord = await env.DB.prepare(
+          `SELECT id, author_name, name, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+           FROM packages
+           WHERE LOWER(name) = LOWER(?)
+           LIMIT 1`
+        ).bind(name).first();
+      }
 
       if (pkgRecord && (pkgRecord.status === 'flagged' || pkgRecord.status === 'delisted')) {
         return new Response(JSON.stringify({
@@ -35,6 +53,8 @@ export async function onRequest(context: { params: { author: string; name: strin
       // Proceed if table not migrated yet
     }
 
+    const effectivePkgId = pkgRecord?.id || packageId;
+
     // 2. Atomically record download in Cloudflare D1 (global daily rollup + per-user download count)
     try {
       await env.DB.prepare(`
@@ -42,13 +62,13 @@ export async function onRequest(context: { params: { author: string; name: strin
         VALUES (?, DATE('now'), 1)
         ON CONFLICT(package_id, download_date)
         DO UPDATE SET downloads_count = downloads_count + 1
-      `).bind(packageId).run();
+      `).bind(effectivePkgId).run();
 
       await env.DB.prepare(`
         UPDATE packages
         SET downloads_count = downloads_count + 1, updated_at = CURRENT_TIMESTAMP
         WHERE LOWER(id) = LOWER(?)
-      `).bind(packageId).run();
+      `).bind(effectivePkgId).run();
 
       // Track per-user download count if authenticated via session cookie
       const cookies = parseCookies(request);
@@ -75,18 +95,22 @@ export async function onRequest(context: { params: { author: string; name: strin
           DO UPDATE SET
             download_count = download_count + 1,
             last_downloaded_at = CURRENT_TIMESTAMP
-        `).bind(userId, packageId).run();
+        `).bind(userId, effectivePkgId).run();
       }
     } catch (err) {
       console.warn('D1 download tracking error:', err);
     }
   }
 
+  const effectivePkgId = pkgRecord?.id || packageId;
+  const effectiveAuthor = pkgRecord?.author_name || author;
+  const effectiveName = pkgRecord?.name || name;
+
   // 3. If it is a background telemetry POST ping
   if (request.method === 'POST') {
     return new Response(JSON.stringify({
       success: true,
-      package_id: packageId,
+      package_id: effectivePkgId,
       timestamp: new Date().toISOString()
     }), {
       headers: {
@@ -99,29 +123,84 @@ export async function onRequest(context: { params: { author: string; name: strin
   }
 
   // 4. Resolve Out-of-the-Box Ready-to-Drop .zip Release Archive URL
-  // Default ContentDB direct .zip endpoint (automatically redirects to the latest <name>.zip archive)
-  let targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download/`;
-
-  // Check D1 releases first (for decentralized Git packages)
+  // Prefer Git Tags / Releases first, then fallback to default branch for Git packages
+  let d1Releases: any[] = [];
   if (env.DB) {
     try {
-      const latestRelease = await env.DB.prepare(
-        `SELECT download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC LIMIT 1`
-      ).bind(packageId).first();
+      const relRes = await env.DB.prepare(
+        `SELECT version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id ASC`
+      ).bind(effectivePkgId).all();
+      d1Releases = relRes.results || [];
 
-      if (latestRelease && latestRelease.download_url) {
-        targetZipUrl = latestRelease.download_url;
-        return Response.redirect(targetZipUrl, 302);
+      const taggedRelease = d1Releases.find(
+        (r: any) => r && r.download_url && r.commit_sha !== 'HEAD' && r.version !== 'latest'
+      );
+      if (taggedRelease?.download_url) {
+        return Response.redirect(taggedRelease.download_url, 302);
       }
     } catch {
-      // Fallback to ContentDB release lookup
+      // Fallback below
     }
   }
 
-  // Resolve exact latest release .zip URL from ContentDB API if available
+  // If this is a Git-submitted package (or has a repo_url in D1), discover Git tags/releases first before falling back to main branch
+  if (pkgRecord && (pkgRecord.provider !== 'contentdb' || pkgRecord.repo_url)) {
+    try {
+      const gitReleases = await fetchGitRepoReleasesAndTags(
+        pkgRecord.repo_url,
+        effectiveAuthor,
+        effectiveName,
+        pkgRecord.min_minetest_version || '5.0.0'
+      );
+      if (gitReleases.length > 0 && gitReleases[0].download_url) {
+        if (env.DB && pkgRecord.id) {
+          try {
+            await env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(pkgRecord.id).run();
+            for (const rel of gitReleases) {
+              await env.DB.prepare(`
+                INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+              `).bind(
+                pkgRecord.id,
+                rel.version,
+                rel.tag_name,
+                rel.commit_sha || '',
+                rel.download_url,
+                rel.min_minetest_version || '5.0.0',
+                rel.changelog || null,
+                rel.released_at || ''
+              ).run();
+            }
+          } catch {
+            // Non-blocking D1 sync
+          }
+        }
+        return Response.redirect(gitReleases[0].download_url, 302);
+      }
+    } catch {
+      // Fallback to branch archive below
+    }
+
+    if (d1Releases.length > 0 && d1Releases[0].download_url) {
+      return Response.redirect(d1Releases[0].download_url, 302);
+    }
+
+    if (pkgRecord.repo_url) {
+      const branchZipUrl = buildGitBranchArchiveUrl(
+        pkgRecord.repo_url,
+        effectiveAuthor,
+        effectiveName,
+        pkgRecord.default_branch || 'main'
+      );
+      return Response.redirect(branchZipUrl, 302);
+    }
+  }
+
+  // 5. Resolve exact latest release .zip URL from ContentDB API if available
+  let targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/download/`;
   try {
     const releases = await fetchUpstreamJsonCached<any[]>(
-      `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/`,
+      `/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/releases/`,
       300
     );
     if (Array.isArray(releases) && releases.length > 0 && releases[0]) {
@@ -131,7 +210,7 @@ export async function onRequest(context: { params: { author: string; name: strin
           ? first.url
           : `https://content.luanti.org${first.url}`;
       } else if (first.id) {
-        targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/${first.id}/download/`;
+        targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/releases/${first.id}/download/`;
       }
     }
   } catch {

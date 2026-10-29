@@ -39,3 +39,7 @@ CREATE TABLE IF NOT EXISTS user_downloads (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
+
+-- 5. Recalculate package scores strictly from actual community reviews (clears legacy DEFAULT 5.0 scores)
+UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r WHERE LOWER(r.package_id) = LOWER(packages.id)), 0);
+

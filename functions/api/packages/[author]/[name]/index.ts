@@ -2,12 +2,23 @@ import {
   fetchUpstreamJsonCached,
   parseJsonArray,
   detectSpdxFromText,
-  readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  invalidateEdgeCacheKeys,
+  fetchGitRepoReleasesAndTags,
+  buildGitBranchArchiveUrl,
+  rewriteRelativeMarkdownUrls
 } from '../../../lib/upstream';
+import {
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  reconcileAndMergeUserAccount
+} from '../../../auth/lib/session';
 
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
+  ADMIN_USERS?: string;
 }
 
 function formatByteSize(bytes: number): string | undefined {
@@ -18,7 +29,7 @@ function formatByteSize(bytes: number): string | undefined {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function computeStarRating(upstreamData: any, d1Score?: number, d1ReviewAvg?: number): number {
+function computeStarRating(upstreamData: any, _d1Score?: number, d1ReviewAvg?: number): number {
   if (d1ReviewAvg && d1ReviewAvg >= 1 && d1ReviewAvg <= 5) {
     return Number(d1ReviewAvg.toFixed(1));
   }
@@ -33,7 +44,7 @@ function computeStarRating(upstreamData: any, d1Score?: number, d1ReviewAvg?: nu
       return Number(Math.min(5.0, Math.max(1.0, stars)).toFixed(1));
     }
   }
-  const rawScore = Number(upstreamData?.score) || Number(d1Score) || 0;
+  const rawScore = Number(upstreamData?.score) || 0;
   if (rawScore >= 1.0 && rawScore <= 5.0) {
     return Number(rawScore.toFixed(1));
   }
@@ -169,18 +180,6 @@ async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | 
     clearTimeout(timeoutId);
     return undefined;
   }
-}
-
-function rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: string): string {
-  if (!markdown || !rawAssetBase) return markdown;
-  const base = rawAssetBase.replace(/\/+$/, '');
-  return markdown.replace(
-    /!\[([^\]]*)\]\((?!https?:\/\/|data:|\/)([^)\s]+)(\s+"[^"]*")?\)/g,
-    (_match, alt, relPath, titlePart) => {
-      const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
-      return `![${alt}](${base}/${cleanPath}${titlePart || ''})`;
-    }
-  );
 }
 
 async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | undefined> {
@@ -533,17 +532,17 @@ function buildNormalizedReleases(
   if (Array.isArray(d1Releases) && d1Releases.length > 0) {
     return d1Releases.map((r: any) => ({
       id: r.id,
-      version: r.version,
-      title: r.tag_name || r.version,
+      version: r.tag_name || r.version,
+      title: r.title || r.tag_name || r.version,
       tag_name: r.tag_name || r.version,
       commit_sha: r.commit_sha,
-      url: r.download_url,
-      download_url: r.download_url,
+      url: r.download_url || r.url,
+      download_url: r.download_url || r.url,
       min_minetest_version: r.min_minetest_version,
       max_minetest_version: r.max_minetest_version,
       changelog: r.changelog,
-      release_date: r.released_at,
-      released_at: r.released_at
+      release_date: r.released_at || r.release_date,
+      released_at: r.released_at || r.release_date
     }));
   }
 
@@ -614,23 +613,6 @@ function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null)
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
-  const reqUrl = context.request ? new URL(context.request.url) : null;
-  const bypassCache = reqUrl?.searchParams.get('nocache') === '1';
-  const edgeCacheKey = `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`;
-
-  if (!bypassCache) {
-    const cachedDetail = await readEdgeCacheJson<any>(edgeCacheKey);
-    if (cachedDetail) {
-      return new Response(JSON.stringify(cachedDetail), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=300',
-          'X-LuantiHub-Cache': 'HIT'
-        }
-      });
-    }
-  }
 
   // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews & releases)
   let d1Pkg: any = null;
@@ -639,8 +621,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1Reviews: any[] = [];
   if (context.env.DB) {
     d1Pkg = await context.env.DB.prepare(
-      `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)`
-    ).bind(author, name).first();
+      `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+    ).bind(pkgId, author, name).first();
 
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({
@@ -653,11 +635,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       });
     }
 
+    const effectivePkgId = d1Pkg?.id || pkgId;
+
     try {
       const [revAvgRow, revRowsRes, relRowsRes] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(pkgId).first(),
+        ).bind(effectivePkgId).first(),
         context.env.DB.prepare(`
           SELECT r.id, r.rating, r.title, r.comment, r.created_at,
                  u.username, u.display_name, u.avatar_url
@@ -665,14 +649,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           LEFT JOIN users u ON r.user_id = u.id
           WHERE LOWER(r.package_id) = LOWER(?)
           ORDER BY r.created_at DESC
-        `).bind(pkgId).all().catch(() => ({ results: [] })),
+        `).bind(effectivePkgId).all().catch(() => ({ results: [] })),
         context.env.DB.prepare(
           `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
-        ).bind(pkgId).all().catch(() => ({ results: [] }))
+        ).bind(effectivePkgId).all().catch(() => ({ results: [] }))
       ]);
 
       if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
         d1ReviewAvg = Number(revAvgRow.avg_rating);
+      } else if (d1Pkg && Number(d1Pkg.score) > 0) {
+        // Heal legacy DEFAULT 5.0 score in D1 when no reviews exist
+        d1Pkg.score = 0;
+        context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
       }
       d1Reviews = revRowsRes?.results || [];
       d1Releases = relRowsRes?.results || [];
@@ -690,6 +678,65 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
     fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
   ]);
+
+  // Ensure Git tags/releases are discovered before falling back to a default branch ('HEAD') row
+  const hasRealTaggedD1Releases = d1Releases.some(
+    (r: any) => r.commit_sha !== 'HEAD' && r.version !== 'latest'
+  );
+  if (!hasRealTaggedD1Releases && (!Array.isArray(releasesPayload) || releasesPayload.length === 0)) {
+    const discoveredGitReleases = await fetchGitRepoReleasesAndTags(
+      d1Pkg?.repo_url,
+      d1Pkg?.author_name || author,
+      d1Pkg?.name || name,
+      d1Pkg?.min_minetest_version || '5.0.0'
+    );
+    if (discoveredGitReleases.length > 0) {
+      d1Releases = discoveredGitReleases;
+      if (context.env.DB && d1Pkg) {
+        try {
+          await context.env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(d1Pkg.id).run();
+          for (const rel of discoveredGitReleases.slice(0, 25)) {
+            await context.env.DB.prepare(`
+              INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).bind(
+              d1Pkg.id,
+              rel.version,
+              rel.tag_name,
+              rel.commit_sha,
+              rel.download_url,
+              rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
+              rel.changelog || `Git Tag / Release (${rel.tag_name})`,
+              rel.released_at || new Date().toISOString()
+            ).run();
+          }
+        } catch {
+          // Non-fatal D1 sync error
+        }
+      }
+    } else if (d1Releases.length === 0 && d1Pkg?.repo_url) {
+      const branch = d1Pkg.default_branch || 'main';
+      const fallbackUrl = buildGitBranchArchiveUrl(
+        d1Pkg.repo_url,
+        d1Pkg.author_name || author,
+        d1Pkg.name || name,
+        branch,
+        d1Pkg.provider
+      );
+      d1Releases = [{
+        id: 'git-branch-fallback',
+        version: branch,
+        title: `${branch} branch`,
+        tag_name: branch,
+        commit_sha: 'HEAD',
+        url: fallbackUrl,
+        download_url: fallbackUrl,
+        min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
+        changelog: `Direct source archive from ${branch} branch`,
+        released_at: d1Pkg.updated_at || d1Pkg.created_at || new Date().toISOString()
+      }];
+    }
+  }
 
   const bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
   const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload);
@@ -721,6 +768,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       if (sources.length === 0) sources.push('git');
 
       const readme = isGitPkg ? await fetchRepoReadmeCached(d1Pkg.repo_url) : undefined;
+      const fallbackRawBase = d1Pkg.repo_url
+        ? `${String(d1Pkg.repo_url).replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${d1Pkg.default_branch || 'main'}`
+        : undefined;
+      const fallbackReadme = d1Pkg.long_desc && d1Pkg.long_desc !== d1Pkg.short_desc
+        ? rewriteRelativeMarkdownUrls(d1Pkg.long_desc, fallbackRawBase)
+        : undefined;
+
       const pureGitPayload = {
         id: `${d1Pkg.author_name}/${d1Pkg.name}`,
         author: d1Pkg.author_name,
@@ -728,9 +782,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         title: d1Pkg.title,
         type: d1Pkg.type,
         short_desc: d1Pkg.short_desc,
-        long_description: d1Pkg.long_desc || d1Pkg.short_desc,
-        desc: d1Pkg.long_desc || d1Pkg.short_desc,
-        readme: readme || d1Pkg.long_desc || undefined,
+        long_description: d1Pkg.short_desc,
+        desc: d1Pkg.short_desc,
+        readme: readme || fallbackReadme || undefined,
         thumbnail: d1Pkg.thumbnail_url,
         banner: d1Pkg.banner_url || d1Pkg.thumbnail_url,
         license: d1Pkg.license,
@@ -740,6 +794,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         repo: d1Pkg.repo_url,
         repo_url: d1Pkg.repo_url,
         provider: d1Pkg.provider,
+        default_branch: d1Pkg.default_branch || 'main',
         min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
         tags: d1Tags.length > 0 ? d1Tags : [d1Pkg.type || 'mod'],
         dependencies: parseJsonArray(d1Pkg.dependencies),
@@ -752,13 +807,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         reviews_list: bundledReviews
       };
 
-      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, 300);
-
       return new Response(JSON.stringify(pureGitPayload), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=300'
+          'Cache-Control': 'no-cache'
         }
       });
     }
@@ -882,7 +935,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     media_license: resolvedMediaLicense,
     min_minetest_version: minVersion,
     short_desc: upstreamData.short_desc || upstreamData.short_description || d1Pkg?.short_desc || '',
-    desc: upstreamData.long_description || upstreamData.desc || d1Pkg?.long_desc || upstreamData.short_desc || '',
+    desc: upstreamData.long_description || upstreamData.desc || (!readmeText ? d1Pkg?.long_desc : undefined) || upstreamData.short_desc || d1Pkg?.short_desc || '',
     readme: readmeText || undefined,
     repo_url: repoUrl,
     git_repo_status: gitRepoStatus,
@@ -907,14 +960,121 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     reviews_list: bundledReviews
   };
 
-  await writeEdgeCacheJson(edgeCacheKey, enriched, 300);
-
   return new Response(JSON.stringify(enriched), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=120, s-maxage=300',
-      'X-LuantiHub-Cache': 'MISS'
+      'Cache-Control': 'no-cache'
     }
+  });
+}
+
+// PATCH /api/packages/:author/:name — Allow package author or admin to edit package tags
+export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const { author, name } = context.params;
+  const pkgId = `${author}/${name}`;
+
+  if (!context.env.DB) {
+    return Response.json({ error: 'Database unavailable.' }, { status: 503 });
+  }
+
+  const cookies = parseCookies(context.request);
+  const sessionToken = cookies['lh_session'];
+  if (!sessionToken) {
+    return Response.json({ error: 'Authentication required to edit package.' }, { status: 401 });
+  }
+
+  const rawUserId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
+  if (!rawUserId) {
+    return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
+  }
+
+  const user = await reconcileAndMergeUserAccount(context.env.DB, rawUserId);
+  if (!user) {
+    return Response.json({ error: 'User account not found.' }, { status: 401 });
+  }
+  const resolvedUserId = String(user.id);
+
+  const [identitiesRes, pkgRow] = await Promise.all([
+    context.env.DB.prepare(
+      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
+    ).bind(resolvedUserId).all().catch(() => ({ results: [] })),
+    context.env.DB.prepare(
+      `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+    ).bind(pkgId, author, name).first<any>()
+  ]);
+
+  if (!pkgRow) {
+    return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
+  }
+
+  const identities = (identitiesRes.results || []).map((id: any) => ({
+    provider: String(id.provider || '').toLowerCase(),
+    username: String(id.username || ''),
+    verified: Boolean(id.verified)
+  }));
+
+  const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
+  const userHandles = new Set<string>([
+    String(user.username || '').toLowerCase(),
+    ...identities.map((i: any) => String(i.username || '').toLowerCase())
+  ].filter(Boolean));
+
+  let repoOwner = '';
+  if (pkgRow.repo_url) {
+    try {
+      const parts = new URL(pkgRow.repo_url).pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) repoOwner = parts[0].toLowerCase();
+    } catch {
+      // ignore
+    }
+  }
+
+  const isOwner =
+    isAdmin ||
+    (pkgRow.author_id && String(pkgRow.author_id) === resolvedUserId) ||
+    userHandles.has(String(pkgRow.author_name || author).toLowerCase()) ||
+    (repoOwner && userHandles.has(repoOwner));
+
+  if (!isOwner) {
+    return Response.json({ error: 'Only the package author or an administrator can edit this package.' }, { status: 403 });
+  }
+
+  const body = await context.request.json().catch(() => ({})) as { tags?: string[] };
+  const rawInputTags = Array.isArray(body.tags) ? body.tags : [];
+
+  const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+  const cleanedCustomTags = rawInputTags
+    .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
+    .filter(t => Boolean(t) && !systemTagSet.has(t))
+    .slice(0, 8);
+
+  const existingTags = parseJsonArray(pkgRow.tags);
+  const preservedSystemTags = existingTags.filter((t: string) => systemTagSet.has(String(t).toLowerCase()));
+  if (pkgRow.provider && pkgRow.provider !== 'contentdb' && !preservedSystemTags.includes('git')) {
+    preservedSystemTags.push('git');
+  }
+  if (pkgRow.provider && !preservedSystemTags.includes(pkgRow.provider)) {
+    preservedSystemTags.push(pkgRow.provider);
+  }
+  if (pkgRow.type && !preservedSystemTags.includes(pkgRow.type)) {
+    preservedSystemTags.push(pkgRow.type);
+  }
+
+  const finalTags = Array.from(new Set([...cleanedCustomTags, ...preservedSystemTags]));
+
+  await context.env.DB.prepare(
+    `UPDATE packages SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).bind(JSON.stringify(finalTags), pkgRow.id).run();
+
+  await invalidateEdgeCacheKeys([
+    '/__api_packages_v2',
+    '/__api_packages_v2?boot=1',
+    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+  ]);
+
+  return Response.json({
+    success: true,
+    tags: finalTags
   });
 }

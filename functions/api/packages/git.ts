@@ -7,7 +7,15 @@ import {
   createAuditProofToken,
   verifyAuditProofToken
 } from '../auth/lib/session';
-import { fetchUpstreamJsonCached, normalizeRepoKey, parseJsonArray, invalidateEdgeCacheKeys } from '../lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  normalizeRepoKey,
+  parseJsonArray,
+  invalidateEdgeCacheKeys,
+  fetchGitRepoReleasesAndTags,
+  buildGitBranchArchiveUrl,
+  rewriteRelativeMarkdownUrls
+} from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -781,18 +789,20 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     // Check 5: Probe README.md & screenshot.png
-    let longDesc = rawDesc || 'Decentralized Luanti community package.';
+    const rawAssetBase = buildRawUrl(branch, '').replace(/\/+$/, '');
+    let readmeMarkdown = '';
     try {
       const readmeRes = await fetch(buildRawUrl(branch, 'README.md'));
       if (readmeRes.ok) {
         const md = await readmeRes.text();
         if (md && !md.trim().startsWith('<!DOCTYPE')) {
-          longDesc = md.slice(0, 12000);
+          readmeMarkdown = rewriteRelativeMarkdownUrls(md.slice(0, 64000), rawAssetBase);
         }
       }
     } catch {
       // Keep shortDesc
     }
+    const longDesc = readmeMarkdown ? readmeMarkdown.slice(0, 12000) : (rawDesc || 'Decentralized Luanti community package.');
 
     let screenshotUrl = buildRawUrl(branch, 'screenshot.png');
     let hasScreenshot = false;
@@ -965,7 +975,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     const upstreamTags = Array.isArray(matchedContentDbPkg?.tags)
       ? matchedContentDbPkg.tags.map((t: any) => String(typeof t === 'string' ? t : t?.name || '').toLowerCase()).filter(Boolean)
-      : parseJsonArray(existingD1Pkg?.tags);
+      : (customTags.length > 0 ? [] : parseJsonArray(existingD1Pkg?.tags));
 
     const mergedTags = Array.from(
       new Set([
@@ -979,13 +989,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ])
     ).slice(0, 14);
 
-    // Direct Archive .zip URL resolution
-    let downloadArchiveUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
-    if (provider === 'codeberg') {
-      downloadArchiveUrl = `https://${host}/${owner}/${repo}/archive/${branch}.zip`;
-    } else if (provider === 'gitlab') {
-      downloadArchiveUrl = `https://${host}/${owner}/${repo}/-/archive/${branch}/${repo}-${branch}.zip`;
-    }
+    // Discover Git Tags & Releases first, falling back to default branch only when no tags/releases exist
+    const discoveredReleases = await fetchGitRepoReleasesAndTags(
+      repoUrl.trim(),
+      owner,
+      repo,
+      rawMinVersion
+    );
+    const branchArchiveUrl = buildGitBranchArchiveUrl(repoUrl.trim(), owner, repo, branch);
+    const downloadArchiveUrl = discoveredReleases.length > 0
+      ? discoveredReleases[0].download_url
+      : branchArchiveUrl;
 
     const resolvedThumbnail = hasScreenshot
       ? screenshotUrl
@@ -1006,7 +1020,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       title: matchedContentDbPkg?.title || title,
       type: packageType,
       short_desc: shortDesc,
-      desc: longDesc,
+      desc: matchedContentDbPkg?.long_description || shortDesc,
+      readme: readmeMarkdown || undefined,
       thumbnail: resolvedThumbnail,
       banner: resolvedBanner,
       score: Number(existingD1Pkg?.score) || 0,
@@ -1021,7 +1036,20 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       optional_dependencies: optionalDependencies,
       source: 'git' as const,
       sources,
-      tags: mergedTags
+      tags: mergedTags,
+      releases_list: discoveredReleases.length > 0 ? discoveredReleases : [
+        {
+          id: 1,
+          version: branch,
+          title: branch,
+          tag_name: branch,
+          commit_sha: 'HEAD',
+          url: branchArchiveUrl,
+          download_url: branchArchiveUrl,
+          min_minetest_version: rawMinVersion,
+          released_at: new Date().toISOString()
+        }
+      ]
     };
 
     const licenseValid = !diagnostics.some(d => d.code === 'LICENSE_INVALID');
@@ -1131,14 +1159,22 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         VALUES (?, ?, ?, ?)
       `).bind(authorId, canonicalAuthor, canonicalAuthor, `https://github.com/${owner}.png`).run();
 
+      const existingReviewAvgRow = await context.env.DB.prepare(
+        `SELECT ROUND(AVG(rating), 1) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(packageId).first().catch(() => null);
+      const actualReviewScore = (existingReviewAvgRow && Number(existingReviewAvgRow.cnt) > 0 && existingReviewAvgRow.avg_rating != null)
+        ? Number(existingReviewAvgRow.avg_rating)
+        : 0;
+      packagePayload.score = actualReviewScore;
+
       await context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
-          downloads_count, license, media_license, tags, dependencies, optional_dependencies,
+          downloads_count, score, license, media_license, tags, dependencies, optional_dependencies,
           min_minetest_version, status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           short_desc = excluded.short_desc,
@@ -1149,6 +1185,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           thumbnail_url = excluded.thumbnail_url,
           banner_url = excluded.banner_url,
           downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+          score = excluded.score,
           license = excluded.license,
           media_license = excluded.media_license,
           tags = excluded.tags,
@@ -1171,6 +1208,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         resolvedThumbnail,
         resolvedBanner,
         resolvedDownloads,
+        actualReviewScore,
         effectiveLicense,
         effectiveMediaLicense,
         JSON.stringify(mergedTags),
@@ -1179,10 +1217,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         rawMinVersion
       ).run();
 
-      await context.env.DB.prepare(`
-        INSERT OR REPLACE INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version)
-        VALUES (?, 'latest', ?, 'HEAD', ?, ?)
-      `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
+      await context.env.DB.prepare(
+        `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(packageId).run();
+
+      if (discoveredReleases.length > 0) {
+        for (const rel of discoveredReleases) {
+          await context.env.DB.prepare(`
+            INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+          `).bind(
+            packageId,
+            rel.version,
+            rel.tag_name,
+            rel.commit_sha || '',
+            rel.download_url,
+            rawMinVersion,
+            rel.changelog || null,
+            rel.released_at || ''
+          ).run();
+        }
+      } else {
+        await context.env.DB.prepare(`
+          INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version)
+          VALUES (?, 'latest', ?, 'HEAD', ?, ?)
+        `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
+      }
     }
 
     await invalidateEdgeCacheKeys([

@@ -91,22 +91,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const type = (url.searchParams.get('type') || '').trim();
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
-  const bypassCache = url.searchParams.get('nocache') === '1';
-
-  const edgeCacheKey = `/__api_packages_v2${url.search || ''}`;
-  if (!bypassCache) {
-    const cachedPayload = await readEdgeCacheJson<any>(edgeCacheKey);
-    if (cachedPayload) {
-      return new Response(JSON.stringify(cachedPayload), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-          'X-LuantiHub-Cache': 'HIT'
-        }
-      });
-    }
-  }
 
   const upstreamParams = new URLSearchParams(url.searchParams);
   upstreamParams.delete('boot');
@@ -348,14 +332,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     };
   }
 
-  await writeEdgeCacheJson(edgeCacheKey, responsePayload, 300);
-
   return new Response(JSON.stringify(responsePayload), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-      'X-LuantiHub-Cache': 'MISS'
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
     }
   });
 }

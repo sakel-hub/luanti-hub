@@ -1,4 +1,4 @@
-import { Injectable, computed, signal, inject } from '@angular/core';
+import { Injectable, computed, signal, inject, effect } from '@angular/core';
 import { Router, NavigationEnd } from '@angular/router';
 import { Title, Meta } from '@angular/platform-browser';
 import { filter } from 'rxjs/operators';
@@ -360,6 +360,25 @@ export class PackageService {
   constructor() {
     this.initCatalog();
     this.initRouterSync();
+
+    // Ensure the logged-in user's own D1 packages (e.g. newly submitted Git packages)
+    // are always merged into the catalog and search index even across refreshes or mirror fallbacks
+    effect(() => {
+      const user = this.authService.currentUser();
+      const userPkgs = user?.packages;
+      if (!Array.isArray(userPkgs) || userPkgs.length === 0) return;
+
+      const activeUserPkgs = userPkgs
+        .filter((item: any) => item && (item.author || item.author_name || item.id) && item.name && item.status !== 'delisted' && item.status !== 'flagged')
+        .map((item: any) => this.normalizePackage(item));
+
+      if (activeUserPkgs.length > 0) {
+        this._packages.update(current => {
+          if (current.length === 0) return activeUserPkgs;
+          return this.deduplicateCatalog([...current, ...activeUserPkgs]);
+        });
+      }
+    }, { allowSignalWrites: true });
   }
 
   private buildSearchBlob(pkg: Partial<LuantiPackage>): string {
@@ -410,7 +429,21 @@ export class PackageService {
     return kb >= 900 ? `${(kb / 1024 + 0.4).toFixed(1)} MB` : `${kb} KB`;
   }
 
+  private parseArrayField(val: any): any[] {
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string' && val.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        // ignore
+      }
+    }
+    return [];
+  }
+
   private normalizePackage(item: any): LuantiPackage {
+    const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
     const shortDesc = item.short_desc || item.short_description || '';
     const downloads = Math.max(0, Number(item?.downloads ?? item?.downloads_count ?? 0) || 0);
     const score = this.computeStarRatingFromData(item, 0);
@@ -432,20 +465,24 @@ export class PackageService {
               : `${Math.max(1, Math.round(sizeBytes / 1024))} KB`)
           : undefined);
 
-    const deps = Array.isArray(item.dependencies)
-      ? item.dependencies
-      : (Array.isArray(item.hard_dependencies) ? item.hard_dependencies : []);
+    const rawDeps = this.parseArrayField(item.dependencies);
+    const deps = rawDeps.length > 0
+      ? rawDeps
+      : this.parseArrayField(item.hard_dependencies);
 
-    const optDeps = Array.isArray(item.optional_dependencies)
-      ? item.optional_dependencies
-      : (Array.isArray(item.soft_dependencies) ? item.soft_dependencies : []);
+    const rawOptDeps = this.parseArrayField(item.optional_dependencies);
+    const optDeps = rawOptDeps.length > 0
+      ? rawOptDeps
+      : this.parseArrayField(item.soft_dependencies);
 
     const repoUrl = this.normalizeGitRepoUrl(item.repo_url || item.repo || undefined);
-    const source: PackageSource = item.source === 'git' ? 'git' : (item.source === 'mirror' ? 'mirror' : 'official');
+    const isGitProvider = Boolean(item.provider && item.provider !== 'contentdb');
+    const source: PackageSource = (item.source === 'git' || isGitProvider) ? 'git' : (item.source === 'mirror' ? 'mirror' : 'official');
 
-    const rawTags = Array.isArray(item.tags)
-      ? item.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
-      : [];
+    const parsedTagList = this.parseArrayField(item.tags);
+    const rawTags = parsedTagList
+      .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
+      .filter(Boolean);
 
     const lowerTags = rawTags.map((t: string) => t.toLowerCase());
     const explicitSources: PackageSource[] = Array.isArray(item.sources)
@@ -454,12 +491,13 @@ export class PackageService {
 
     const hasOfficial =
       explicitSources.includes('official') ||
-      source === 'official' ||
+      (source === 'official' && !isGitProvider) ||
       source === 'mirror' ||
       lowerTags.includes('contentdb');
     const hasGit =
       explicitSources.includes('git') ||
       source === 'git' ||
+      isGitProvider ||
       lowerTags.includes('git');
 
     const sources: PackageSource[] = [];
@@ -472,8 +510,8 @@ export class PackageService {
       : undefined;
 
     const pkg: LuantiPackage = {
-      id: item.id || `${item.author}/${item.name}`,
-      author: item.author,
+      id: item.id || `${resolvedAuthor}/${item.name}`,
+      author: resolvedAuthor,
       name: item.name,
       title: item.title || item.name,
       type: item.type || 'mod',
@@ -504,7 +542,7 @@ export class PackageService {
       min_minetest_version: item.min_minetest_version,
       max_minetest_version: item.max_minetest_version,
       featured: Boolean(item.featured),
-      file_size: sizeFormatted || this.estimateFallbackFileSize({ author: item.author, name: item.name, type: item.type }),
+      file_size: sizeFormatted || this.estimateFallbackFileSize({ author: resolvedAuthor, name: item.name, type: item.type }),
       dependencies: deps,
       optional_dependencies: optDeps,
       release_id: item.release || item.release_id,
@@ -823,9 +861,11 @@ export class PackageService {
     top10Today?: any[];
   }): void {
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
+    const userPkgs = this.authService.currentUser()?.packages || [];
+    const combinedRaw = [...rawPackages, ...userPkgs];
     const normalized = this.deduplicateCatalog(
-      rawPackages
-        .filter((item: any) => item && item.author && item.name && item.status !== 'delisted' && item.status !== 'flagged')
+      combinedRaw
+        .filter((item: any) => item && (item.author || item.author_name || item.id) && item.name && item.status !== 'delisted' && item.status !== 'flagged')
         .map((item: any) => this.normalizePackage(item))
     );
 
@@ -880,7 +920,10 @@ export class PackageService {
 
       let response: Response | null = null;
       try {
-        response = await fetch(apiUrl, { headers: { 'Accept': 'application/json' } });
+        response = await fetch(apiUrl, {
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store'
+        });
       } catch {
         response = null;
       }
@@ -1463,23 +1506,48 @@ export class PackageService {
   downloadPackage(pkg: LuantiPackage, customDownloadUrl?: string): void {
     if (typeof window === 'undefined' || !pkg) return;
 
-    let targetUrl = customDownloadUrl || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`;
+    const resolvedAuthor =
+      pkg.author ||
+      (pkg as any).author_name ||
+      (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+    const cacheKey = (pkg.id || `${resolvedAuthor}/${pkg.name}`).toLowerCase();
+    const cachedReleases = this.releasesCache.get(cacheKey) || [];
+    const preferredRelease =
+      cachedReleases.find(r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && Boolean(r.download_url)) ||
+      cachedReleases.find(r => Boolean(r.download_url));
 
-    // In local dev without Cloudflare Pages Functions running, resolve directly to ContentDB or Git .zip archive
-    if (!customDownloadUrl && (window.location.hostname.includes('localhost') || window.location.hostname === '127.0.0.1')) {
-      if (pkg.source === 'git' && pkg.repo_url) {
-        const cleanRepo = pkg.repo_url.replace(/\/$/, '').replace(/\.git$/, '');
-        const branch = pkg.default_branch || 'main';
-        if (pkg.provider === 'gitlab' || cleanRepo.includes('gitlab.com')) {
-          const repoName = cleanRepo.split('/').pop() || pkg.name;
-          targetUrl = `${cleanRepo}/-/archive/${branch}/${repoName}-${branch}.zip`;
-        } else if (pkg.provider === 'codeberg' || cleanRepo.includes('codeberg.org')) {
-          targetUrl = `${cleanRepo}/archive/${branch}.zip`;
-        } else {
-          targetUrl = `${cleanRepo}/archive/refs/heads/${branch}.zip`;
+    const isGitPkg =
+      pkg.source === 'git' ||
+      pkg.sources?.includes('git') ||
+      Boolean(pkg.provider && pkg.provider !== 'contentdb');
+
+    let targetUrl =
+      customDownloadUrl ||
+      (isGitPkg && preferredRelease?.download_url ? preferredRelease.download_url : '') ||
+      `/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download`;
+
+    // When running without Edge API (e.g. static mirror fallback or local ng serve without wrangler),
+    // resolve directly to the preferred Git tag/release/branch archive or ContentDB download URL
+    if (!customDownloadUrl && (!this.edgeApiAvailable || window.location.hostname.includes('localhost') || window.location.hostname === '127.0.0.1')) {
+      if (isGitPkg) {
+        if (preferredRelease?.download_url && preferredRelease.download_url.startsWith('http')) {
+          targetUrl = preferredRelease.download_url;
+        } else if (pkg.repo_url || resolvedAuthor) {
+          const cleanRepo = (pkg.repo_url || `https://github.com/${resolvedAuthor}/${pkg.name}`)
+            .replace(/\/$/, '')
+            .replace(/\.git$/, '');
+          const branch = pkg.default_branch || 'main';
+          if (pkg.provider === 'gitlab' || cleanRepo.includes('gitlab.com')) {
+            const repoName = cleanRepo.split('/').pop() || pkg.name;
+            targetUrl = `${cleanRepo}/-/archive/${branch}/${repoName}-${branch}.zip`;
+          } else if (pkg.provider === 'codeberg' || cleanRepo.includes('codeberg.org')) {
+            targetUrl = `${cleanRepo}/archive/${branch}.zip`;
+          } else {
+            targetUrl = `${cleanRepo}/archive/refs/heads/${branch}.zip`;
+          }
         }
-      } else {
-        targetUrl = `https://content.luanti.org/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download/`;
+      } else if (!this.edgeApiAvailable) {
+        targetUrl = `https://content.luanti.org/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download/`;
       }
     }
 
@@ -1495,15 +1563,23 @@ export class PackageService {
     this.trackDownload(pkg);
   }
 
-  private rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: string): string {
+  public rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: string): string {
     if (!markdown || !rawAssetBase) return markdown;
     const base = rawAssetBase.replace(/\/+$/, '');
     // Rewrite relative Markdown image paths: ![alt](relative/path.png)
-    return markdown.replace(
+    const withMdImages = markdown.replace(
       /!\[([^\]]*)\]\((?!https?:\/\/|data:|\/)([^)\s]+)(\s+"[^"]*")?\)/g,
       (_match, alt, relPath, titlePart) => {
         const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
         return `![${alt}](${base}/${cleanPath}${titlePart || ''})`;
+      }
+    );
+    // Also rewrite relative HTML <img src="relative/path.png"> attributes
+    return withMdImages.replace(
+      /(<img\b[^>]*?\bsrc\s*=\s*["'])(?!https?:\/\/|data:|\/)([^"']+)(["'])/gi,
+      (_match, prefix, relPath, suffix) => {
+        const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
+        return `${prefix}${base}/${cleanPath}${suffix}`;
       }
     );
   }
@@ -1994,8 +2070,8 @@ export class PackageService {
                   : pkg.file_size);
             return {
               id: rel.id,
-              version: rel.title || rel.version || `Release #${rel.id}`,
-              tag_name: rel.commit || rel.tag_name || '',
+              version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
+              tag_name: rel.tag_name || rel.commit || '',
               commit_sha: rel.commit || rel.commit_sha || '',
               download_url: rel.url
                 ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
@@ -2006,7 +2082,13 @@ export class PackageService {
               released_at: rel.release_date || rel.released_at || ''
             };
           });
-          this.releasesCache.set(cacheKey, mappedReleases);
+          // Only lock releasesCache from bundled detail if it contains real tagged releases (not just a 'HEAD' branch fallback)
+          const hasTaggedRelease = mappedReleases.some(
+            r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+          );
+          if (hasTaggedRelease) {
+            this.releasesCache.set(cacheKey, mappedReleases);
+          }
         }
 
         if (!hasBundledEdgeResponse && this.edgeApiAvailable && deepFetch && deps.length === 0 && optDeps.length === 0) {
@@ -2088,7 +2170,9 @@ export class PackageService {
         const resolvedDownloads = hasAuthoritativeDownloads
           ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
           : Math.max(0, Number(pkg.downloads || 0));
-        const resolvedScore = this.computeStarRatingFromData(data, pkg.score || 0);
+        const resolvedScore = (typeof data.score === 'number' && data.score === 0)
+          ? 0
+          : this.computeStarRatingFromData(data, pkg.score || 0);
 
         const rawTags = Array.isArray(data.tags)
           ? data.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
@@ -2140,8 +2224,17 @@ export class PackageService {
           sources: mergedSources
         };
 
+        const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+        const targetAuthorLower = (pkg.author || '').toLowerCase();
+        const targetNameLower = (pkg.name || '').toLowerCase();
+
         this._activePackage.update(current => {
-          if (current && (current.id === pkg.id || (current.author === pkg.author && current.name === pkg.name))) {
+          if (
+            current &&
+            ((current.id || '').toLowerCase() === targetIdLower ||
+              ((current.author || '').toLowerCase() === targetAuthorLower &&
+                (current.name || '').toLowerCase() === targetNameLower))
+          ) {
             const merged = { ...current, ...updatedFields };
             this.updateSeoMeta(merged);
             return merged;
@@ -2150,7 +2243,11 @@ export class PackageService {
         });
 
         this._packages.update(list => list.map(item => {
-          if (item.id === pkg.id || (item.author === pkg.author && item.name === pkg.name)) {
+          if (
+            (item.id || '').toLowerCase() === targetIdLower ||
+            ((item.author || '').toLowerCase() === targetAuthorLower &&
+              (item.name || '').toLowerCase() === targetNameLower)
+          ) {
             const merged = { ...item, ...updatedFields };
             merged._searchBlob = this.buildSearchBlob(merged);
             return merged;
@@ -2188,6 +2285,7 @@ export class PackageService {
     }
 
     const promise = (async (): Promise<PackageRelease[]> => {
+      let edgeFallbackBranchReleases: PackageRelease[] = [];
       if (this.edgeApiAvailable) {
         try {
           const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases`);
@@ -2205,8 +2303,8 @@ export class PackageService {
                       : pkg.file_size);
                 return {
                   id: rel.id,
-                  version: rel.title || rel.version || `Release #${rel.id}`,
-                  tag_name: rel.commit || rel.tag_name || '',
+                  version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
+                  tag_name: rel.tag_name || rel.commit || '',
                   commit_sha: rel.commit || rel.commit_sha || '',
                   download_url: rel.url
                     ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
@@ -2217,8 +2315,14 @@ export class PackageService {
                   released_at: rel.release_date || rel.released_at || ''
                 };
               });
-              this.releasesCache.set(cacheKey, mapped);
-              return mapped;
+              const hasRealTaggedRelease = mapped.some(
+                r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+              );
+              if (hasRealTaggedRelease) {
+                this.releasesCache.set(cacheKey, mapped);
+                return mapped;
+              }
+              edgeFallbackBranchReleases = mapped;
             }
           }
         } catch {
@@ -2226,58 +2330,94 @@ export class PackageService {
         }
       }
 
-      // Fallback: Auto-detect GitHub / Codeberg Releases & Tags only on confirmed repositories (avoids 404s)
+      // Fallback: Auto-detect GitHub / Codeberg Releases & Tags (merging both so tags are preferred before main branch)
       const confirmedRepos = await this.discoverConfirmedRepos(pkg, pkg.repo_url);
       for (const repo of confirmedRepos) {
         try {
           const relApi = repo.forge === 'codeberg'
-            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=8`
-            : `https://api.github.com/repos/${repo.fullName}/releases?per_page=8`;
-          const relRes = await fetch(relApi);
-          if (relRes.ok) {
-            const rels = await relRes.json();
-            if (Array.isArray(rels) && rels.length > 0) {
-              const mapped = rels.map((r: any, idx: number) => ({
-                id: r.id || idx + 1,
-                version: r.name || r.tag_name || `Release #${idx + 1}`,
-                tag_name: r.tag_name || '',
-                commit_sha: r.target_commitish || '',
-                download_url: repo.forge === 'codeberg'
-                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(r.tag_name)}.zip`
-                  : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(r.tag_name)}.zip`,
-                file_size: pkg.file_size,
-                released_at: r.published_at || r.created_at || ''
-              }));
-              this.releasesCache.set(cacheKey, mapped);
-              return mapped;
+            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=15`
+            : `https://api.github.com/repos/${repo.fullName}/releases?per_page=15`;
+          const tagsApi = repo.forge === 'codeberg'
+            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=15`
+            : `https://api.github.com/repos/${repo.fullName}/tags?per_page=15`;
+
+          const [relRes, tagsRes] = await Promise.all([
+            fetch(relApi).catch(() => null),
+            fetch(tagsApi).catch(() => null)
+          ]);
+
+          const combined: PackageRelease[] = [];
+          const seenTags = new Set<string>();
+
+          if (relRes && relRes.ok) {
+            const rels = await relRes.json().catch(() => []);
+            if (Array.isArray(rels)) {
+              for (const [idx, r] of rels.entries()) {
+                if (!r || r.draft) continue;
+                const tagName = String(r.tag_name || r.name || '').trim();
+                if (!tagName) continue;
+                const lower = tagName.toLowerCase();
+                if (seenTags.has(lower)) continue;
+                seenTags.add(lower);
+
+                combined.push({
+                  id: r.id || `rel-${idx + 1}`,
+                  version: r.name || tagName,
+                  tag_name: tagName,
+                  commit_sha: r.target_commitish || '',
+                  download_url: repo.forge === 'codeberg'
+                    ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                    : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`,
+                  file_size: pkg.file_size,
+                  released_at: r.published_at || r.created_at || ''
+                });
+              }
             }
           }
 
-          const tagsApi = repo.forge === 'codeberg'
-            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=8`
-            : `https://api.github.com/repos/${repo.fullName}/tags?per_page=8`;
-          const tagsRes = await fetch(tagsApi);
-          if (tagsRes.ok) {
-            const tags = await tagsRes.json();
-            if (Array.isArray(tags) && tags.length > 0) {
-              const mapped = tags.map((t: any, idx: number) => ({
-                id: idx + 1,
-                version: t.name,
-                tag_name: t.name,
-                commit_sha: t.commit?.sha || t.id || '',
-                download_url: repo.forge === 'codeberg'
-                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(t.name)}.zip`
-                  : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(t.name)}.zip`,
-                file_size: pkg.file_size,
-                released_at: ''
-              }));
-              this.releasesCache.set(cacheKey, mapped);
-              return mapped;
+          if (tagsRes && tagsRes.ok) {
+            const tags = await tagsRes.json().catch(() => []);
+            if (Array.isArray(tags)) {
+              for (const [idx, t] of tags.entries()) {
+                const tagName = String(t?.name || '').trim();
+                if (!tagName) continue;
+                const lower = tagName.toLowerCase();
+                if (seenTags.has(lower)) {
+                  const existing = combined.find(c => c.tag_name.toLowerCase() === lower);
+                  if (existing && (t?.commit?.sha || t?.id) && (!existing.commit_sha || existing.commit_sha.length < 7)) {
+                    existing.commit_sha = String(t.commit?.sha || t.id);
+                  }
+                  continue;
+                }
+                seenTags.add(lower);
+
+                combined.push({
+                  id: `tag-${idx + 1}`,
+                  version: tagName,
+                  tag_name: tagName,
+                  commit_sha: t.commit?.sha || t.id || '',
+                  download_url: repo.forge === 'codeberg'
+                    ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                    : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`,
+                  file_size: pkg.file_size,
+                  released_at: t.commit?.created || ''
+                });
+              }
             }
+          }
+
+          if (combined.length > 0) {
+            this.releasesCache.set(cacheKey, combined);
+            return combined;
           }
         } catch {
           // Ignore discovery error and try next confirmed repo
         }
+      }
+
+      if (edgeFallbackBranchReleases.length > 0) {
+        this.releasesCache.set(cacheKey, edgeFallbackBranchReleases);
+        return edgeFallbackBranchReleases;
       }
 
       this.releasesCache.set(cacheKey, []);
@@ -2302,13 +2442,76 @@ export class PackageService {
     });
   }
 
-  openPackageModal(pkg: LuantiPackage, updateUrl = true): void {
-    this._activePackage.set(pkg);
-    this.updateSeoMeta(pkg);
-    if (updateUrl) {
-      this.navigatePreservingScroll(['/package', pkg.author, pkg.name]);
+  readonly startInEditTagsMode = signal(false);
+
+  openPackageModal(pkg: LuantiPackage, updateUrl = true, editTags = false): void {
+    const resolvedAuthor =
+      pkg.author ||
+      (pkg as any).author_name ||
+      (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+    const targetId = (pkg.id || `${resolvedAuthor}/${pkg.name}`).toLowerCase();
+    const catalogMatch = this._packages().find(
+      p => p.id.toLowerCase() === targetId ||
+      (p.author.toLowerCase() === resolvedAuthor.toLowerCase() && p.name.toLowerCase() === pkg.name.toLowerCase())
+    );
+    const hydratedPkg: LuantiPackage = catalogMatch
+      ? this.mergeDualSourcePackage(catalogMatch, { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` })
+      : { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` };
+
+    this.startInEditTagsMode.set(editTags);
+    this._activePackage.set(hydratedPkg);
+    this.updateSeoMeta(hydratedPkg);
+    if (updateUrl && hydratedPkg.author && hydratedPkg.name) {
+      this.navigatePreservingScroll(['/package', hydratedPkg.author, hydratedPkg.name]);
     }
-    this.loadPackageDetails(pkg, true);
+    this.loadPackageDetails(hydratedPkg, true);
+  }
+
+  async updatePackageTags(pkg: LuantiPackage, customTags: string[]): Promise<{ success: boolean; tags?: string[]; message?: string }> {
+    const resolvedAuthor =
+      pkg.author ||
+      (pkg as any).author_name ||
+      (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+    const cacheKey = (pkg.id || `${resolvedAuthor}/${pkg.name}`).toLowerCase();
+
+    try {
+      const res = await fetch(`/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: customTags })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, message: data.error || 'Could not update package tags.' };
+      }
+
+      const updatedTags: string[] = Array.isArray(data.tags) ? data.tags : customTags;
+      this.deepHydratedIds.delete(cacheKey);
+      this.clearBootCache();
+
+      this._activePackage.update(current => {
+        if (current && current.id.toLowerCase() === cacheKey) {
+          return { ...current, tags: updatedTags };
+        }
+        return current;
+      });
+
+      this._packages.update(list => list.map(item => {
+        if (item.id.toLowerCase() === cacheKey) {
+          const merged = { ...item, tags: updatedTags };
+          merged._searchBlob = this.buildSearchBlob(merged);
+          return merged;
+        }
+        return item;
+      }));
+
+      this.authService.clearAuthCache();
+      this.authService.initAuth(true);
+
+      return { success: true, tags: updatedTags };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error updating package tags.' };
+    }
   }
 
   async openPackageModalById(author: string, name: string, updateUrl = false): Promise<void> {
@@ -2496,6 +2699,18 @@ export class PackageService {
     title?: string;
     comment: string;
   }): Promise<{ success: boolean; review?: CommunityReview; message?: string }> {
+    const user = this.authService.currentUser();
+    if (user && pkg) {
+      const handles = new Set<string>([
+        (user.username || '').toLowerCase(),
+        ...(user.identities || []).map(i => (i.username || '').toLowerCase())
+      ].filter(Boolean));
+      const pkgAuthor = (pkg.author || (pkg as any).author_name || '').toLowerCase();
+      if (pkgAuthor && handles.has(pkgAuthor)) {
+        return { success: false, message: 'Authors cannot rate or review their own packages.' };
+      }
+    }
+
     const cacheKey = pkg.id.toLowerCase();
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
@@ -2574,6 +2789,8 @@ export class PackageService {
           this.clearBootCache();
           const normalized = this.normalizePackage(result.package);
           this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
+          this.authService.clearAuthCache();
+          this.authService.initAuth(true);
         }
 
         return {

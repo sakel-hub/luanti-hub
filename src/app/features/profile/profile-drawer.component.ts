@@ -17,7 +17,8 @@ import {
   LucideTrash,
   LucideUser,
   LucideShieldAlert,
-  LucideLayers
+  LucideLayers,
+  LucideTag
 } from '@lucide/angular';
 
 @Component({
@@ -38,7 +39,8 @@ import {
     LucideTrash,
     LucideUser,
     LucideShieldAlert,
-    LucideLayers
+    LucideLayers,
+    LucideTag
   ],
   template: `
     @if (authService.currentUser(); as user) {
@@ -225,6 +227,14 @@ import {
                         </button>
 
                         <div class="flex items-center gap-1.5 flex-shrink-0">
+                          <button
+                            type="button"
+                            (click)="openPackageAndEditTags(pkg)"
+                            class="p-2 rounded-xl glass-icon-btn text-sky-400 hover:text-white transition cursor-pointer"
+                            title="Edit Tags"
+                            aria-label="Edit package tags">
+                            <svg lucideTag class="w-3.5 h-3.5"></svg>
+                          </button>
                           <button
                             type="button"
                             (click)="packageService.downloadPackage(pkg)"
@@ -539,31 +549,61 @@ export class ProfileDrawerComponent implements OnInit {
     ]);
 
     const fromCatalog = this.packageService.packages().filter(p => handles.has(p.author.toLowerCase()));
-    const fromD1: LuantiPackage[] = (user.packages || []).map((p: any) => ({
-      id: p.id || `${p.author}/${p.name}`,
-      author: p.author,
-      name: p.name,
-      title: p.title || p.name,
-      type: p.type || 'mod',
-      short_desc: p.short_desc || '',
-      thumbnail: p.thumbnail_url || p.thumbnail || 'logo.svg',
-      score: (typeof p.score === 'number' && p.score >= 1 && p.score <= 5) ? p.score : 0,
-      downloads: p.downloads_count ?? p.downloads ?? 0,
-      license: p.license || '',
-      source: p.source || (p.provider && p.provider !== 'contentdb' ? 'git' : 'official'),
-      tags: p.tags || [p.type || 'mod']
-    }));
+    const parseTagsOrDeps = (raw: any, fallback: string[] = []): string[] => {
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        } catch {
+          // ignore
+        }
+      }
+      return fallback;
+    };
 
-    const seen = new Set<string>();
-    const combined: LuantiPackage[] = [];
-    for (const pkg of [...fromD1, ...fromCatalog]) {
+    const fromD1: LuantiPackage[] = (user.packages || []).map((p: any) => {
+      const resolvedAuthor = p.author || p.author_name || (typeof p.id === 'string' && p.id.includes('/') ? p.id.split('/')[0] : user.username);
+      const isGitSource = p.source === 'git' || (p.provider && p.provider !== 'contentdb');
+      return {
+        id: p.id || `${resolvedAuthor}/${p.name}`,
+        author: resolvedAuthor,
+        name: p.name,
+        title: p.title || p.name,
+        type: p.type || 'mod',
+        short_desc: p.short_desc || '',
+        thumbnail: p.thumbnail_url || p.thumbnail || 'logo.svg',
+        banner: p.banner_url || p.banner || p.thumbnail_url || p.thumbnail || 'logo.svg',
+        score: (typeof p.score === 'number' && p.score >= 1 && p.score <= 5) ? p.score : 0,
+        downloads: p.downloads_count ?? p.downloads ?? 0,
+        license: p.license || '',
+        media_license: p.media_license || p.license || '',
+        repo_url: p.repo_url || p.repo || undefined,
+        provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
+        default_branch: p.default_branch || 'main',
+        min_minetest_version: p.min_minetest_version || '5.0.0',
+        source: isGitSource ? 'git' : 'official',
+        sources: isGitSource ? ['git'] : ['official'],
+        tags: parseTagsOrDeps(p.tags, [p.type || 'mod']),
+        dependencies: parseTagsOrDeps(p.dependencies),
+        optional_dependencies: parseTagsOrDeps(p.optional_dependencies)
+      };
+    });
+
+    const byKey = new Map<string, LuantiPackage>();
+    for (const pkg of fromCatalog) {
+      byKey.set(pkg.id.toLowerCase(), pkg);
+    }
+    for (const pkg of fromD1) {
       const key = pkg.id.toLowerCase();
-      if (!seen.has(key)) {
-        seen.add(key);
-        combined.push(pkg);
+      const existing = byKey.get(key);
+      if (existing) {
+        byKey.set(key, this.packageService.mergeDualSourcePackage(existing, pkg));
+      } else {
+        byKey.set(key, pkg);
       }
     }
-    return combined;
+    return Array.from(byKey.values());
   });
 
   // Resolve favorite package IDs to full LuantiPackage items
@@ -592,6 +632,11 @@ export class ProfileDrawerComponent implements OnInit {
   openPackage(pkg: LuantiPackage): void {
     this.authService.closeProfileDrawer(false);
     this.packageService.openPackageModal(pkg);
+  }
+
+  openPackageAndEditTags(pkg: LuantiPackage): void {
+    this.authService.closeProfileDrawer(false);
+    this.packageService.openPackageModal(pkg, true, true);
   }
 
   async onSyncContentDb(): Promise<void> {

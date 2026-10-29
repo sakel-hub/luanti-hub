@@ -319,3 +319,260 @@ export async function syncAuthorContentDbPackages(
     return [];
   }
 }
+
+export interface DiscoveredGitRelease {
+  id: number | string;
+  version: string;
+  title: string;
+  tag_name: string;
+  commit_sha: string;
+  url: string;
+  download_url: string;
+  min_minetest_version?: string;
+  changelog?: string;
+  release_date?: string;
+  released_at: string;
+}
+
+export function parseGitRepoTarget(
+  repoUrl?: string | null,
+  fallbackOwner?: string,
+  fallbackRepo?: string
+): { provider: 'github' | 'codeberg' | 'gitlab'; host: string; owner: string; repo: string } | null {
+  if (repoUrl && typeof repoUrl === 'string' && repoUrl.trim()) {
+    try {
+      const u = new URL(repoUrl.trim());
+      const host = u.hostname.toLowerCase();
+      const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        const owner = parts[0];
+        const repo = parts[1].replace(/\.git$/i, '');
+        if (owner && repo) {
+          let provider: 'github' | 'codeberg' | 'gitlab' = 'github';
+          if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+            provider = 'codeberg';
+          } else if (host.includes('gitlab')) {
+            provider = 'gitlab';
+          }
+          return { provider, host, owner, repo };
+        }
+      }
+    } catch {
+      // Fallback below
+    }
+  }
+  if (fallbackOwner && fallbackRepo) {
+    return {
+      provider: 'github',
+      host: 'github.com',
+      owner: fallbackOwner,
+      repo: fallbackRepo.replace(/\.git$/i, '')
+    };
+  }
+  return null;
+}
+
+export function buildGitBranchArchiveUrl(
+  repoUrl?: string | null,
+  fallbackOwner?: string,
+  fallbackRepo?: string,
+  branch = 'main'
+): string {
+  const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
+  const safeBranch = encodeURIComponent(branch || 'main');
+  if (!target) {
+    return `https://github.com/${encodeURIComponent(fallbackOwner || '')}/${encodeURIComponent(fallbackRepo || '')}/archive/refs/heads/${safeBranch}.zip`;
+  }
+  const { provider, host, owner, repo } = target;
+  if (provider === 'codeberg') {
+    return `https://${host}/${owner}/${repo}/archive/${safeBranch}.zip`;
+  }
+  if (provider === 'gitlab') {
+    return `https://${host}/${owner}/${repo}/-/archive/${safeBranch}/${repo}-${safeBranch}.zip`;
+  }
+  return `https://github.com/${owner}/${repo}/archive/refs/heads/${safeBranch}.zip`;
+}
+
+export function buildGitTagArchiveUrl(
+  provider: 'github' | 'codeberg' | 'gitlab',
+  host: string,
+  owner: string,
+  repo: string,
+  tagName: string
+): string {
+  const encTag = encodeURIComponent(tagName);
+  if (provider === 'codeberg') {
+    return `https://${host}/${owner}/${repo}/archive/${encTag}.zip`;
+  }
+  if (provider === 'gitlab') {
+    return `https://${host}/${owner}/${repo}/-/archive/${encTag}/${repo}-${encTag}.zip`;
+  }
+  return `https://github.com/${owner}/${repo}/archive/refs/tags/${encTag}.zip`;
+}
+
+/**
+ * Discovers both formal Releases and Git Tags from GitHub, Codeberg/Gitea/Forgejo, or GitLab.
+ * Prefers tags and releases so repositories that tag versions (e.g. via `/tags` without formal GitHub Releases)
+ * expose all tagged versions for download before falling back to the default branch.
+ */
+export async function fetchGitRepoReleasesAndTags(
+  repoUrl?: string | null,
+  fallbackOwner?: string,
+  fallbackRepo?: string,
+  minMinetestVersion = '5.0.0'
+): Promise<DiscoveredGitRelease[]> {
+  const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
+  if (!target) return [];
+
+  const { provider, host, owner, repo } = target;
+  const headers: Record<string, string> = {
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)',
+    'Accept': provider === 'github' ? 'application/vnd.github+json' : 'application/json'
+  };
+
+  const fetchJsonWithTimeout = async (url: string): Promise<any[] | null> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    try {
+      const res = await fetch(url, { headers, signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return Array.isArray(data) ? data : null;
+    } catch {
+      clearTimeout(timer);
+      return null;
+    }
+  };
+
+  let releasesUrl = '';
+  let tagsUrl = '';
+  if (provider === 'github') {
+    releasesUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=15`;
+    tagsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags?per_page=15`;
+  } else if (provider === 'codeberg') {
+    releasesUrl = `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?limit=15`;
+    tagsUrl = `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags?limit=15`;
+  } else if (provider === 'gitlab') {
+    const projectPath = encodeURIComponent(`${owner}/${repo}`);
+    releasesUrl = `https://${host}/api/v4/projects/${projectPath}/releases?per_page=15`;
+    tagsUrl = `https://${host}/api/v4/projects/${projectPath}/repository/tags?per_page=15`;
+  }
+
+  const [rawReleases, rawTags] = await Promise.all([
+    releasesUrl ? fetchJsonWithTimeout(releasesUrl) : Promise.resolve(null),
+    tagsUrl ? fetchJsonWithTimeout(tagsUrl) : Promise.resolve(null)
+  ]);
+
+  const tagShaMap = new Map<string, string>();
+  if (Array.isArray(rawTags)) {
+    for (const t of rawTags) {
+      const tagName = String(t?.name || '').trim();
+      const sha = String(t?.commit?.sha || t?.commit?.id || t?.id || '').trim();
+      if (tagName && sha) {
+        tagShaMap.set(tagName, sha);
+      }
+    }
+  }
+
+  const releaseByTag = new Map<string, any>();
+  if (Array.isArray(rawReleases)) {
+    for (const r of rawReleases) {
+      if (r && !r.draft) {
+        const tagName = String(r.tag_name || r.name || '').trim();
+        if (tagName && !releaseByTag.has(tagName)) {
+          releaseByTag.set(tagName, r);
+        }
+      }
+    }
+  }
+
+  const results: DiscoveredGitRelease[] = [];
+  const seenTags = new Set<string>();
+
+  // 1. Add tags in repository tag order, enriched with formal Release metadata if present
+  if (Array.isArray(rawTags)) {
+    for (const t of rawTags) {
+      const tagName = String(t?.name || '').trim();
+      if (!tagName || seenTags.has(tagName)) continue;
+      seenTags.add(tagName);
+
+      const rel = releaseByTag.get(tagName);
+      const rawCommit = String(t?.commit?.sha || t?.commit?.id || t?.id || rel?.target_commitish || '').trim();
+      const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
+      const archiveUrl = buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const relDate = String(rel?.published_at || rel?.released_at || rel?.created_at || t?.commit?.created_at || '');
+      const title = String(rel?.name || tagName).trim() || tagName;
+
+      results.push({
+        id: rel?.id || results.length + 1,
+        version: title,
+        title,
+        tag_name: tagName,
+        commit_sha: isHexSha ? rawCommit : (tagShaMap.get(tagName) || ''),
+        url: archiveUrl,
+        download_url: archiveUrl,
+        min_minetest_version: minMinetestVersion,
+        changelog: rel?.body || rel?.description || t?.message || undefined,
+        release_date: relDate,
+        released_at: relDate
+      });
+    }
+  }
+
+  // 2. Append any formal Releases whose tag was not in the first page of /tags
+  if (Array.isArray(rawReleases)) {
+    for (const r of rawReleases) {
+      if (!r || r.draft) continue;
+      const tagName = String(r.tag_name || r.name || '').trim();
+      if (!tagName || seenTags.has(tagName)) continue;
+      seenTags.add(tagName);
+
+      const rawCommit = String(tagShaMap.get(tagName) || r.target_commitish || '').trim();
+      const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
+      const archiveUrl = buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const relDate = String(r.published_at || r.released_at || r.created_at || '');
+      const title = String(r.name || tagName).trim() || tagName;
+
+      results.push({
+        id: r.id || results.length + 1,
+        version: title,
+        title,
+        tag_name: tagName,
+        commit_sha: isHexSha ? rawCommit : '',
+        url: archiveUrl,
+        download_url: archiveUrl,
+        min_minetest_version: minMinetestVersion,
+        changelog: r.body || r.description || undefined,
+        release_date: relDate,
+        released_at: relDate
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Rewrites relative image paths in Markdown (`![alt](rel/path.png)`) and HTML (`<img src="rel/path.png">`)
+ * to absolute raw repository asset URLs.
+ */
+export function rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: string): string {
+  if (!markdown || !rawAssetBase) return markdown;
+  const base = rawAssetBase.replace(/\/+$/, '');
+  return markdown
+    .replace(
+      /!\[([^\]]*)\]\((?!https?:\/\/|data:|\/)([^)\s]+)(\s+"[^"]*")?\)/g,
+      (_match, alt, relPath, titlePart) => {
+        const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
+        return `![${alt}](${base}/${cleanPath}${titlePart || ''})`;
+      }
+    )
+    .replace(
+      /(<img\b[^>]*?\bsrc\s*=\s*["'])(?!https?:\/\/|data:|\/)([^"']+)(["'][^>]*>)/gi,
+      (_match, prefix, relPath, suffix) => {
+        const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
+        return `${prefix}${base}/${cleanPath}${suffix}`;
+      }
+    );
+}

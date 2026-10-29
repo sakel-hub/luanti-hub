@@ -98,6 +98,42 @@ export async function onRequestPost(context: { request: Request; params: { autho
   }
 
   if (context.env.DB) {
+    // 1b. Prevent package authors from rating or commenting on their own packages
+    const [userRow, identitiesRes, pkgRow] = await Promise.all([
+      context.env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(userId).first<any>(),
+      context.env.DB.prepare(`SELECT provider_username FROM user_identities WHERE user_id = ?`).bind(userId).all<any>().catch(() => ({ results: [] })),
+      context.env.DB.prepare(`SELECT author_id, author_name, repo_url FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`).bind(packageId, author, name).first<any>()
+    ]);
+
+    const userHandles = new Set<string>();
+    if (userRow?.username) userHandles.add(String(userRow.username).toLowerCase());
+    for (const ident of identitiesRes?.results || []) {
+      if (ident?.provider_username) userHandles.add(String(ident.provider_username).toLowerCase());
+    }
+
+    let repoOwner = '';
+    if (pkgRow?.repo_url) {
+      try {
+        const parts = new URL(pkgRow.repo_url).pathname.split('/').filter(Boolean);
+        if (parts.length >= 2) repoOwner = parts[0].toLowerCase();
+      } catch {
+        // Ignore invalid URL
+      }
+    }
+
+    const isPackageAuthor =
+      (pkgRow?.author_id && String(pkgRow.author_id) === String(userId)) ||
+      userHandles.has(author.toLowerCase()) ||
+      (pkgRow?.author_name && userHandles.has(String(pkgRow.author_name).toLowerCase())) ||
+      (repoOwner && userHandles.has(repoOwner));
+
+    if (isPackageAuthor) {
+      return Response.json(
+        { error: 'Authors cannot rate or review their own packages.' },
+        { status: 403 }
+      );
+    }
+
     // 2. Insert or Update User's Review in D1
     await context.env.DB.prepare(`
       INSERT INTO reviews (package_id, user_id, rating, title, comment)

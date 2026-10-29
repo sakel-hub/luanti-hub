@@ -32,10 +32,6 @@
     {
       "name": "packages-api",
       "urls": [
-        "/api/packages",
-        "/api/packages/",
-        "/api/packages/top10*",
-        "/api/tags",
         "https://content.luanti.org/api/packages/**",
         "https://contentdb.milcho.org/api/packages/**"
       ],

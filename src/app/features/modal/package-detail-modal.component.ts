@@ -40,7 +40,8 @@ import {
   LucideAlertCircle,
   LucideImage,
   LucideUser,
-  LucideChevronDown
+  LucideChevronDown,
+  LucideTag
 } from '@lucide/angular';
 
 @Component({
@@ -72,7 +73,8 @@ import {
     LucideAlertCircle,
     LucideImage,
     LucideUser,
-    LucideChevronDown
+    LucideChevronDown,
+    LucideTag
   ],
   template: `
     @if (package) {
@@ -348,10 +350,12 @@ import {
                 </div>
 
                 <!-- Markdown Description / Synopsis -->
-                <div
-                  class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
-                  [innerHTML]="renderedDescription()">
-                </div>
+                @if (renderedDescription(); as descHtml) {
+                  <div
+                    class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
+                    [innerHTML]="descHtml">
+                  </div>
+                }
 
                 <!-- Screenshots Gallery (When multiple screenshots exist) -->
                 @if (package.screenshots && package.screenshots.length > 1) {
@@ -704,22 +708,76 @@ import {
                   </div>
                 </div>
 
-                <!-- Tags Pills (Clickable to filter by ContentDB Tag) -->
-                @if (package.tags && package.tags.length > 0) {
-                  <div>
-                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px] mb-1.5">
-                      {{ 'modal.tags' | translate }}
-                    </span>
-                    <div class="flex flex-wrap gap-1.5">
-                      @for (tag of package.tags; track tag) {
+                <!-- Tags Pills (Clickable to filter by ContentDB Tag, with inline Tag Editor for Author/Admin) -->
+                @if ((package.tags && package.tags.length > 0) || isPackageAuthor() || canModerate()) {
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                        {{ 'modal.tags' | translate }}
+                      </span>
+                      @if ((isPackageAuthor() || canModerate()) && !isEditingTags()) {
                         <button
                           type="button"
-                          (click)="filterByTag(tag)"
-                          class="px-2.5 py-0.5 rounded-full glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-medium transition cursor-pointer">
-                          #{{ tag }}
+                          (click)="openEditTags()"
+                          class="text-[11px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
+                          <svg lucideTag class="w-3 h-3"></svg>
+                          <span>Edit Tags</span>
                         </button>
                       }
                     </div>
+
+                    @if (isEditingTags()) {
+                      <div class="p-3 rounded-xl bg-slate-950/85 border border-sky-500/30 space-y-2.5 text-xs">
+                        <div class="flex items-center justify-between">
+                          <span class="text-[11px] font-semibold text-sky-300">
+                            Select Tags ({{ editableTags().length }}/5)
+                          </span>
+                          <button
+                            type="button"
+                            (click)="editableTags.set([])"
+                            class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
+                            Clear
+                          </button>
+                        </div>
+                        <div class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
+                          @for (t of packageService.availableTags(); track t.name) {
+                            <button
+                              type="button"
+                              (click)="toggleEditableTag(t.name)"
+                              [class]="isEditableTagSelected(t.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/60' : 'glass-pill text-slate-300 hover:text-white'"
+                              class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
+                              #{{ t.title }}
+                            </button>
+                          }
+                        </div>
+                        <div class="flex items-center justify-end gap-2 pt-1 border-t border-white/10">
+                          <button
+                            type="button"
+                            (click)="cancelEditTags()"
+                            class="px-2.5 py-1 rounded-lg text-[11px] font-semibold text-slate-400 hover:text-white transition cursor-pointer">
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            [disabled]="isSavingTags()"
+                            (click)="onSaveTags()"
+                            class="px-3 py-1 rounded-lg glass-btn-sky text-white font-bold text-[11px] disabled:opacity-50 transition cursor-pointer">
+                            {{ isSavingTags() ? 'Saving...' : 'Save Tags' }}
+                          </button>
+                        </div>
+                      </div>
+                    } @else if (package.tags && package.tags.length > 0) {
+                      <div class="flex flex-wrap gap-1.5">
+                        @for (tag of package.tags; track tag) {
+                          <button
+                            type="button"
+                            (click)="filterByTag(tag)"
+                            class="px-2.5 py-0.5 rounded-full glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-medium transition cursor-pointer">
+                            #{{ tag }}
+                          </button>
+                        }
+                      </div>
+                    }
                   </div>
                 }
 
@@ -762,7 +820,7 @@ import {
                         <span class="text-xs font-bold text-white block">{{ 'modal.rateAndReviewTitle' | translate }}</span>
                         <span class="text-[11px] text-slate-400">{{ 'modal.leaveReview' | translate }}</span>
                       </div>
-                      @if (authService.currentUser()) {
+                      @if (authService.currentUser() && !isPackageAuthor()) {
                         <div class="flex items-center gap-1 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-white/10">
                           @for (star of [1, 2, 3, 4, 5]; track star) {
                             <button
@@ -782,7 +840,7 @@ import {
                         </div>
                       } @else if (package.score > 0) {
                         <div
-                          [appTooltip]="'modal.signInToReviewPrompt' | translate"
+                          [appTooltip]="(isPackageAuthor() ? 'Authors cannot rate their own packages' : ('modal.signInToReviewPrompt' | translate))"
                           aria-disabled="true"
                           class="flex items-center gap-1 bg-slate-950/50 px-3 py-1.5 rounded-xl border border-white/10 opacity-55 cursor-not-allowed select-none">
                           @for (star of [1, 2, 3, 4, 5]; track star) {
@@ -800,7 +858,12 @@ import {
                       }
                     </div>
 
-                    @if (authService.currentUser()) {
+                    @if (isPackageAuthor()) {
+                      <div class="pt-2 border-t border-white/10 flex items-center gap-2 text-xs text-amber-300/90">
+                        <svg lucideAlertCircle class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
+                        <span>Authors cannot star-rate or comment on their own packages.</span>
+                      </div>
+                    } @else if (authService.currentUser()) {
                       <form (ngSubmit)="onSubmitReview()" class="space-y-3 pt-1">
                         <input
                           type="text"
@@ -974,14 +1037,57 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   readonly isReporting = signal(false);
   readonly isModerating = signal(false);
 
+  // Author Tag Editing state
+  readonly isEditingTags = signal(false);
+  readonly editableTags = signal<string[]>([]);
+  readonly isSavingTags = signal(false);
+
   readonly canModerate = computed(() => {
     const user = this.authService.currentUser();
     if (!user || !this.package) return false;
     if (this.authService.isAdmin()) return true;
-    const lowerAuthor = this.package.author.toLowerCase();
+    const lowerAuthor = (this.package.author || (this.package as any).author_name || '').toLowerCase();
+    if (!lowerAuthor) return false;
     return user.identities.some(
       id => Boolean(id.verified) && id.username.toLowerCase() === lowerAuthor
     );
+  });
+
+  readonly isPackageAuthor = computed(() => {
+    const user = this.authService.currentUser();
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!user || !pkg) return false;
+
+    const handles = new Set<string>();
+    if (user.username) handles.add(user.username.toLowerCase());
+    for (const id of user.identities || []) {
+      if (id?.username) handles.add(id.username.toLowerCase());
+    }
+
+    const pkgAuthor = (pkg.author || (pkg as any).author_name || '').toLowerCase();
+    if (pkgAuthor && handles.has(pkgAuthor)) return true;
+
+    const pkgId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    if ((user.packages || []).some((up: any) => {
+      const upAuthor = up.author || up.author_name || user.username;
+      const upId = String(up.id || `${upAuthor}/${up.name}`).toLowerCase();
+      return upId === pkgId;
+    })) {
+      return true;
+    }
+
+    if (pkg.repo_url) {
+      try {
+        const parts = new URL(pkg.repo_url).pathname.split('/').filter(Boolean);
+        if (parts.length >= 2 && handles.has(parts[0].toLowerCase())) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return false;
   });
 
   readonly isPackageDelisted = computed(() => {
@@ -1012,25 +1118,82 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
     }
   }
 
-  readonly renderedDescription = computed<SafeHtml>(() => {
-    const pkg = this.packageService.activePackage() || this.package;
-    const rawDesc = (pkg?.desc || '').trim();
-    const rawReadme = (pkg?.readme || '').trim();
-    const shortDesc = (pkg?.short_desc || '').trim();
+  private normalizeTextForDedup(text: string): string {
+    return (text || '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/<img[^>]*>/gi, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/[#*_`~>-]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
 
-    // If readme is present and identical to desc, show short_desc as the top synopsis
-    // and let the dedicated README panel display the full Markdown documentation
-    const raw = (rawReadme && rawDesc === rawReadme && shortDesc)
-      ? shortDesc
-      : (rawDesc || shortDesc);
-    return this.parseSafeMarkdown(raw);
+  private getRawAssetBase(pkg: LuantiPackage): string | undefined {
+    const repoUrl = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
+    if (!repoUrl) return undefined;
+    const branch = pkg.default_branch || 'main';
+    try {
+      const u = new URL(repoUrl);
+      const parts = u.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        const owner = parts[0];
+        const repo = parts[1].replace(/\.git$/i, '');
+        if (u.hostname === 'github.com') {
+          return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}`;
+        }
+        if (u.hostname === 'codeberg.org') {
+          return `https://codeberg.org/${owner}/${repo}/raw/branch/${branch}`;
+        }
+        if (u.hostname === 'gitlab.com') {
+          return `https://gitlab.com/${owner}/${repo}/-/raw/${branch}`;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return `${repoUrl.replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${branch}`;
+  }
+
+  readonly renderedDescription = computed<SafeHtml | null>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return null;
+    const rawDesc = (pkg.desc || '').trim();
+    const rawReadme = (pkg.readme || '').trim();
+    const shortDesc = (pkg.short_desc || '').trim();
+    const isPureGit = pkg.source === 'git' && (!pkg.sources || !pkg.sources.includes('official'));
+
+    if (rawReadme) {
+      const normDesc = this.normalizeTextForDedup(rawDesc);
+      const normReadme = this.normalizeTextForDedup(rawReadme);
+      const isDescDuplicateOfReadme =
+        isPureGit ||
+        !normDesc ||
+        normDesc === normReadme ||
+        (normDesc.length > 40 && (normReadme.includes(normDesc) || normDesc.includes(normReadme)));
+
+      if (isDescDuplicateOfReadme) {
+        const normShort = this.normalizeTextForDedup(shortDesc);
+        if (!shortDesc || normShort === normReadme) {
+          return null;
+        }
+        const rewrittenShort = this.packageService.rewriteRelativeMarkdownUrls(shortDesc, this.getRawAssetBase(pkg));
+        return this.parseSafeMarkdown(rewrittenShort);
+      }
+    }
+
+    const raw = rawDesc || shortDesc;
+    if (!raw) return null;
+    const rewritten = this.packageService.rewriteRelativeMarkdownUrls(raw, this.getRawAssetBase(pkg));
+    return this.parseSafeMarkdown(rewritten);
   });
 
   readonly renderedReadme = computed<SafeHtml | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     const rawReadme = (pkg?.readme || '').trim();
     if (!rawReadme) return null;
-    return this.parseSafeMarkdown(rawReadme);
+    const rewritten = this.packageService.rewriteRelativeMarkdownUrls(rawReadme, this.getRawAssetBase(pkg));
+    return this.parseSafeMarkdown(rewritten);
   });
 
   get shareUrl(): string {
@@ -1076,7 +1239,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
   private async ensureExtraDataLoaded(): Promise<void> {
     if (!this.package) return;
-    const key = (this.package.id || `${this.package.author}/${this.package.name}`).toLowerCase();
+    if (this.packageService.startInEditTagsMode()) {
+      this.packageService.startInEditTagsMode.set(false);
+      this.openEditTags();
+    }
+    const resolvedAuthor = this.package.author || (this.package as any).author_name || '';
+    const key = (this.package.id || `${resolvedAuthor}/${this.package.name}`).toLowerCase();
     if (this.loadedPackageKey === key) return;
     this.loadedPackageKey = key;
     this.activeBannerUrl.set(null);
@@ -1087,6 +1255,51 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
     this.packageService.fetchReviews(this.package).then(res => this.reviews.set(res));
     this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
+  }
+
+  openEditTags(): void {
+    const pkg = this.packageService.activePackage() || this.package;
+    const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const currentCustom = (Array.isArray(pkg?.tags) ? pkg.tags : [])
+      .map(t => String(t).toLowerCase())
+      .filter(t => Boolean(t) && !systemTagSet.has(t));
+    this.editableTags.set(currentCustom.slice(0, 5));
+    this.isEditingTags.set(true);
+  }
+
+  cancelEditTags(): void {
+    this.isEditingTags.set(false);
+  }
+
+  isEditableTagSelected(tagName: string): boolean {
+    return this.editableTags().includes(tagName.toLowerCase());
+  }
+
+  toggleEditableTag(tagName: string): void {
+    const normalized = tagName.toLowerCase();
+    const current = this.editableTags();
+    if (current.includes(normalized)) {
+      this.editableTags.set(current.filter(t => t !== normalized));
+    } else if (current.length < 5) {
+      this.editableTags.set([...current, normalized]);
+    }
+  }
+
+  async onSaveTags(): Promise<void> {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+    this.isSavingTags.set(true);
+    const res = await this.packageService.updatePackageTags(pkg, this.editableTags());
+    this.isSavingTags.set(false);
+    if (res.success) {
+      if (res.tags) {
+        this.package = { ...this.package, tags: res.tags };
+      }
+      this.isEditingTags.set(false);
+      this.pwaService.showToast('Package tags updated!');
+    } else if (res.message) {
+      this.pwaService.showToast(res.message);
+    }
   }
 
   readonly topRank = computed(() => {
@@ -1151,7 +1364,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   }
 
   async onSubmitReview(): Promise<void> {
-    if (!this.reviewComment.trim()) return;
+    if (this.isPackageAuthor() || !this.reviewComment.trim()) return;
 
     this.isSubmittingReview.set(true);
     const res = await this.packageService.submitReview(this.package, {
