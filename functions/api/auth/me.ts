@@ -4,7 +4,9 @@ import {
   parseCookies,
   checkIsAdmin,
   isProtectedAdminHandle,
-  verifyProviderToken
+  verifyProviderToken,
+  mergeSecondaryUserIntoPrimary,
+  reconcileAndMergeUserAccount
 } from './lib/session';
 import { syncAuthorContentDbPackages } from '../lib/upstream';
 
@@ -44,31 +46,32 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   try {
-    // 1. Fetch User Record
-    const user = await context.env.DB.prepare(
-      `SELECT * FROM users WHERE id = ?`
-    ).bind(userId).first();
+    // 1. Reconcile & auto-merge any duplicate suffixed accounts
+    const user = await reconcileAndMergeUserAccount(context.env.DB, userId);
 
     if (!user) {
       return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
+    const resolvedUserId = String(user.id);
+
     // 2. Fetch Linked Identities (Codeberg, GitLab, GitHub, ContentDB)
     const identitiesRes = await context.env.DB.prepare(
       `SELECT provider, provider_username as username, profile_url, avatar_url, verified, created_at
        FROM user_identities WHERE user_id = ?`
-    ).bind(userId).all();
+    ).bind(resolvedUserId).all();
     const identities = (identitiesRes.results || []).map((id: any) => ({
       ...id,
       verified: Boolean(id.verified)
     }));
 
-    // 3. Evaluate Admin Role (strictly requires verified identity + D1 role or ADMIN_USERS env variable)
+    // 3. Evaluate Admin Role (strictly requires verified identity + ADMIN_USERS env variable)
     const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
-    if (isAdmin && user.role !== 'admin') {
+    const targetRole = isAdmin ? 'admin' : 'user';
+    if (user.role !== targetRole) {
       try {
-        await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
-        user.role = 'admin';
+        await context.env.DB.prepare(`UPDATE users SET role = ? WHERE id = ?`).bind(targetRole, resolvedUserId).run();
+        user.role = targetRole;
       } catch {
         // Ignore if role column migration not yet run
       }
@@ -79,12 +82,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       `SELECT id, author_name, name, title, type, short_desc, thumbnail_url, score, downloads_count, license, media_license, repo_url, provider, status, status_reason
        FROM packages WHERE author_id = ? OR LOWER(author_name) = LOWER(?)
        ORDER BY downloads_count DESC`
-    ).bind(userId, user.username).all();
+    ).bind(resolvedUserId, user.username).all();
 
     // 5. Fetch User's Synced Favorites
     const favoritesRes = await context.env.DB.prepare(
       `SELECT package_id FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC`
-    ).bind(userId).all();
+    ).bind(resolvedUserId).all();
     const favorites = (favoritesRes.results || []).map((r: any) => r.package_id);
 
     // 6. If Admin, count open moderation reports
@@ -100,9 +103,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
+    const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
+    if (resolvedUserId !== userId) {
+      const refreshedToken = await createSessionToken(resolvedUserId, context.env.SESSION_SECRET);
+      const isHttps = new URL(context.request.url).protocol === 'https:';
+      headers['Set-Cookie'] =
+        `lh_session=${refreshedToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`;
+    }
+
     return Response.json({
       user: {
-        id: user.id,
+        id: resolvedUserId,
         username: user.username,
         display_name: user.display_name || user.username,
         avatar_url: user.avatar_url || `https://github.com/${user.username}.png`,
@@ -117,7 +128,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       },
       oauthProviders
     }, {
-      headers: { 'Cache-Control': 'no-store' }
+      headers
     });
   } catch (err: any) {
     return Response.json({ user: null, oauthProviders, error: err.message }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
@@ -144,6 +155,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     let verifiedUsername = rawUsername;
+    let providerUserId = rawUsername.toLowerCase();
     let displayName = rawUsername;
     let avatarUrl = `https://github.com/${rawUsername}.png`;
     let profileUrl = `https://github.com/${rawUsername}`;
@@ -160,6 +172,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
       isCryptographicallyVerified = true;
       verifiedUsername = tokenCheck.username || rawUsername;
+      providerUserId = tokenCheck.providerUserId || verifiedUsername.toLowerCase();
       displayName = tokenCheck.displayName || verifiedUsername;
       if (tokenCheck.avatarUrl) avatarUrl = tokenCheck.avatarUrl;
       if (tokenCheck.profileUrl) profileUrl = tokenCheck.profileUrl;
@@ -190,6 +203,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (ghRes.ok) {
             const ghUser = await ghRes.json() as any;
             verifiedUsername = ghUser.login || rawUsername;
+            providerUserId = String(ghUser.id || verifiedUsername.toLowerCase());
             displayName = ghUser.name || verifiedUsername;
             avatarUrl = ghUser.avatar_url || avatarUrl;
             profileUrl = ghUser.html_url || profileUrl;
@@ -210,9 +224,33 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let userId = `usr_${verifiedUsername.toLowerCase()}`;
 
     if (context.env.DB) {
-      const existingUser = await context.env.DB.prepare(
-        `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
-      ).bind(verifiedUsername).first() as { id: string; role: string } | null;
+      const cookies = parseCookies(context.request);
+      const existingSessionUserId = cookies['lh_session']
+        ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
+        : null;
+      const activeSessionUser = existingSessionUserId
+        ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(existingSessionUserId).first() as { id: string; role: string } | null
+        : null;
+
+      // First check if this provider identity already exists (by provider_user_id or provider_username)
+      const matchedIdentity = await context.env.DB.prepare(
+        `SELECT id, user_id, verified, provider_user_id FROM user_identities
+         WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+         ORDER BY verified DESC LIMIT 1`
+      ).bind(provider, providerUserId, verifiedUsername).first() as {
+        id: number;
+        user_id: string;
+        verified: number;
+        provider_user_id: string;
+      } | null;
+
+      const existingUser = activeSessionUser
+        ? activeSessionUser
+        : (matchedIdentity
+            ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(matchedIdentity.user_id).first() as { id: string; role: string } | null
+            : await context.env.DB.prepare(
+                `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
+              ).bind(verifiedUsername).first() as { id: string; role: string } | null);
 
       if (existingUser) {
         // Check if existing user has any cryptographically verified identity or admin role
@@ -220,7 +258,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
         ).bind(existingUser.id).first();
 
-        if (!isCryptographicallyVerified && (verifiedIdentity || existingUser.role === 'admin' || existingUser.role === 'moderator')) {
+        if (!activeSessionUser && !isCryptographicallyVerified && (verifiedIdentity || existingUser.role === 'admin' || existingUser.role === 'moderator')) {
           return Response.json(
             {
               error: 'This creator account is verified and protected. Please sign in via OAuth or provide a Personal Access Token.'
@@ -230,6 +268,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         }
 
         userId = existingUser.id;
+        if (activeSessionUser && matchedIdentity && matchedIdentity.user_id !== userId && isCryptographicallyVerified) {
+          await mergeSecondaryUserIntoPrimary(context.env.DB, userId, matchedIdentity.user_id);
+        }
         if (isAdmin) {
           await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
         }
@@ -241,23 +282,41 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         `).bind(userId, verifiedUsername, displayName, avatarUrl, role).run();
       }
 
-      await context.env.DB.prepare(`
-        INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(provider, provider_user_id) DO UPDATE SET
-          user_id = CASE WHEN user_identities.verified = 1 AND excluded.verified = 0 THEN user_identities.user_id ELSE excluded.user_id END,
-          provider_username = excluded.provider_username,
-          avatar_url = excluded.avatar_url,
-          verified = MAX(user_identities.verified, excluded.verified)
-      `).bind(
-        userId,
-        provider,
-        verifiedUsername.toLowerCase(),
-        verifiedUsername,
-        profileUrl,
-        avatarUrl,
-        verifiedFlag
-      ).run();
+      if (matchedIdentity) {
+        const nextVerified = Math.max(Number(matchedIdentity.verified) || 0, verifiedFlag);
+        const nextProviderUserId =
+          isCryptographicallyVerified && providerUserId !== verifiedUsername.toLowerCase()
+            ? providerUserId
+            : matchedIdentity.provider_user_id;
+        await context.env.DB.prepare(`
+          UPDATE user_identities
+          SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = ?
+          WHERE id = ?
+        `).bind(userId, nextProviderUserId, verifiedUsername, profileUrl, avatarUrl, nextVerified, matchedIdentity.id).run();
+      } else {
+        await context.env.DB.prepare(`
+          INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+            user_id = CASE WHEN user_identities.verified = 1 AND excluded.verified = 0 THEN user_identities.user_id ELSE excluded.user_id END,
+            provider_username = excluded.provider_username,
+            avatar_url = excluded.avatar_url,
+            verified = MAX(user_identities.verified, excluded.verified)
+        `).bind(
+          userId,
+          provider,
+          providerUserId,
+          verifiedUsername,
+          profileUrl,
+          avatarUrl,
+          verifiedFlag
+        ).run();
+      }
+
+      const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId);
+      if (reconciledUser?.id) {
+        userId = String(reconciledUser.id);
+      }
 
       // Auto-sync ContentDB packages for this author only when verified or creating initial portfolio view
       await syncAuthorContentDbPackages(context.env.DB, userId, verifiedUsername);

@@ -1,4 +1,11 @@
-import { createSessionToken, verifySessionToken, parseCookies, checkIsAdmin } from '../lib/session';
+import {
+  createSessionToken,
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  mergeSecondaryUserIntoPrimary,
+  reconcileAndMergeUserAccount
+} from '../lib/session';
 import { syncAuthorContentDbPackages } from '../../lib/upstream';
 
 interface Env {
@@ -173,56 +180,114 @@ export async function onRequestGet(context: { params: { provider: string }; requ
 
     if (context.env.DB) {
       if (existingSessionUserId) {
-        // User is ALREADY logged in -> LINK IDENTITY to existing user
+        // User is ALREADY logged in -> LINK IDENTITY to existing user (and merge if this identity belonged to another user row)
         userId = existingSessionUserId;
-        await context.env.DB.prepare(`
-          INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-          VALUES (?, ?, ?, ?, ?, ?, 1)
-          ON CONFLICT(provider, provider_user_id) DO UPDATE SET
-            user_id = excluded.user_id,
-            provider_username = excluded.provider_username,
-            avatar_url = excluded.avatar_url,
-            verified = 1
-        `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+        const existingProviderRow = await context.env.DB.prepare(`
+          SELECT id, user_id FROM user_identities
+          WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+          ORDER BY verified DESC LIMIT 1
+        `).bind(provider, providerUserId, providerUsername).first() as { id: number; user_id: string } | null;
+
+        if (existingProviderRow && existingProviderRow.user_id !== userId) {
+          await mergeSecondaryUserIntoPrimary(context.env.DB, userId, existingProviderRow.user_id);
+        }
+
+        const targetIdentityRow = await context.env.DB.prepare(`
+          SELECT id FROM user_identities
+          WHERE provider = ? AND (provider_user_id = ? OR (user_id = ? AND LOWER(provider_username) = LOWER(?)))
+          LIMIT 1
+        `).bind(provider, providerUserId, userId, providerUsername).first() as { id: number } | null;
+
+        if (targetIdentityRow) {
+          await context.env.DB.prepare(`
+            UPDATE user_identities
+            SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = 1
+            WHERE id = ?
+          `).bind(userId, providerUserId, providerUsername, profileUrl, avatarUrl, targetIdentityRow.id).run();
+        } else {
+          await context.env.DB.prepare(`
+            INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+              user_id = excluded.user_id,
+              provider_username = excluded.provider_username,
+              avatar_url = excluded.avatar_url,
+              verified = 1
+          `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+        }
 
         if (isAdmin) {
           await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
         }
       } else {
-        // Find existing linked identity
+        // Find existing linked identity by either canonical provider_user_id OR matching provider_username on the same provider
         const existingIdentity = await context.env.DB.prepare(`
-          SELECT user_id FROM user_identities WHERE provider = ? AND provider_user_id = ?
-        `).bind(provider, providerUserId).first() as { user_id: string } | null;
+          SELECT id, user_id FROM user_identities
+          WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+          ORDER BY verified DESC LIMIT 1
+        `).bind(provider, providerUserId, providerUsername).first() as { id: number; user_id: string } | null;
 
         if (existingIdentity) {
           userId = existingIdentity.user_id;
           await context.env.DB.prepare(`
-            UPDATE user_identities SET verified = 1, provider_username = ?, avatar_url = ? WHERE provider = ? AND provider_user_id = ?
-          `).bind(providerUsername, avatarUrl, provider, providerUserId).run();
+            UPDATE user_identities
+            SET verified = 1, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?
+            WHERE id = ?
+          `).bind(providerUserId, providerUsername, profileUrl, avatarUrl, existingIdentity.id).run();
           if (isAdmin) {
             await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
           }
         } else {
-          // Ensure unique username in `users` table (avoid UNIQUE constraint failure across providers)
-          let candidateUsername = providerUsername;
-          const collision = await context.env.DB.prepare(
+          // Check if a user with this username already exists
+          const existingUserByUsername = await context.env.DB.prepare(
             `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
-          ).bind(candidateUsername).first();
+          ).bind(providerUsername).first() as { id: string } | null;
 
-          if (collision) {
-            candidateUsername = `${providerUsername}_${provider.slice(0, 2)}`;
+          // Check if that existing user has a conflicting identity on the SAME provider with a different username
+          const conflictingSameProvider = existingUserByUsername
+            ? await context.env.DB.prepare(
+                `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
+              ).bind(existingUserByUsername.id, provider, providerUsername).first()
+            : null;
+
+          if (existingUserByUsername && !conflictingSameProvider) {
+            userId = existingUserByUsername.id;
+            if (isAdmin) {
+              await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
+            }
+            await context.env.DB.prepare(`
+              INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+              VALUES (?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                provider_username = excluded.provider_username,
+                avatar_url = excluded.avatar_url,
+                verified = 1
+            `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+          } else {
+            const candidateUsername = existingUserByUsername
+              ? `${providerUsername}_${provider.slice(0, 2)}`
+              : providerUsername;
+
+            userId = crypto.randomUUID();
+            await context.env.DB.prepare(`
+              INSERT INTO users (id, username, display_name, avatar_url, role)
+              VALUES (?, ?, ?, ?, ?)
+            `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
+
+            await context.env.DB.prepare(`
+              INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+              VALUES (?, ?, ?, ?, ?, ?, 1)
+            `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
           }
+        }
+      }
 
-          userId = crypto.randomUUID();
-          await context.env.DB.prepare(`
-            INSERT INTO users (id, username, display_name, avatar_url, role)
-            VALUES (?, ?, ?, ?, ?)
-          `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
-
-          await context.env.DB.prepare(`
-            INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-          `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+      // Reconcile & merge any duplicate suffixed accounts
+      if (userId) {
+        const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId);
+        if (reconciledUser?.id) {
+          userId = String(reconciledUser.id);
         }
       }
 

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS user_identities (
 
 -- 3. Packages Table (Mods, Games, Texture Packs, Modpacks)
 CREATE TABLE IF NOT EXISTS packages (
-    id TEXT PRIMARY KEY,                 -- "author/name" (e.g. "sakel/sky_realm")
+    id TEXT PRIMARY KEY,                 -- "author/name" (e.g. "creator/sky_realm")
     author_id TEXT,                      -- Foreign key to users(id)
     author_name TEXT NOT NULL,
     name TEXT NOT NULL,                  -- Technical name from mod.conf

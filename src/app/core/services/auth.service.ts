@@ -62,9 +62,11 @@ export class AuthService {
         this._selectedProvider.set(providerParam);
       }
       if (authError) {
+        this.clearAuthCache();
         this._authError.set(authError);
         this._isAuthModalOpen.set(true);
       } else if (authSuccess) {
+        this.clearAuthCache();
         this._isProfileDrawerOpen.set(true);
       }
       if (authError || authSuccess) {
@@ -84,6 +86,7 @@ export class AuthService {
     try {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.removeItem('lh_auth_cache_v1');
+        sessionStorage.removeItem('lh_auth_cache_v2');
       }
     } catch {
       // Ignore storage error
@@ -96,10 +99,12 @@ export class AuthService {
 
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const cachedRaw = sessionStorage.getItem('lh_auth_cache_v1');
+          const cachedRaw = sessionStorage.getItem('lh_auth_cache_v2');
           if (cachedRaw) {
             const parsed = JSON.parse(cachedRaw) as { ts: number; data: any };
-            if (parsed && parsed.data && Date.now() - parsed.ts < 120_000) {
+            const cachedUsername = String(parsed?.data?.user?.username || '');
+            const hasLegacySuffix = /_(gi|gl|co|cd)$/i.test(cachedUsername);
+            if (parsed && parsed.data && !hasLegacySuffix && Date.now() - parsed.ts < 120_000) {
               this.settingsService.edgeApiAvailable.set(true);
               if (parsed.data.oauthProviders && typeof parsed.data.oauthProviders === 'object') {
                 this._oauthProviders.set(parsed.data.oauthProviders);
@@ -128,7 +133,7 @@ export class AuthService {
           const data = await res.json();
           try {
             if (typeof sessionStorage !== 'undefined') {
-              sessionStorage.setItem('lh_auth_cache_v1', JSON.stringify({ ts: Date.now(), data }));
+              sessionStorage.setItem('lh_auth_cache_v2', JSON.stringify({ ts: Date.now(), data }));
             }
           } catch {
             // Ignore storage quota error
@@ -182,20 +187,31 @@ export class AuthService {
       this.fetchModerationQueue();
     }
     if (updateUrl && this.router) {
-      this.router.navigate(['/profile'], { queryParamsHandling: 'preserve' });
+      const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
+      this.router.navigate(['/profile'], { queryParamsHandling: 'preserve' }).then(() => {
+        if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+        }
+      });
     }
   }
 
   closeProfileDrawer(updateUrl = true): void {
     this._isProfileDrawerOpen.set(false);
     if (updateUrl && this.router && typeof window !== 'undefined' && window.location.pathname === '/profile') {
-      this.router.navigate(['/'], { queryParamsHandling: 'preserve' });
+      const savedY = window.scrollY;
+      this.router.navigate(['/'], { queryParamsHandling: 'preserve' }).then(() => {
+        if (savedY > 0 && window.scrollY !== savedY) {
+          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+        }
+      });
     }
   }
 
   loginWith(provider: GitProvider): void {
     this._selectedProvider.set(provider);
     if (this.isOAuthConfigured(provider)) {
+      this.clearAuthCache();
       if (typeof window !== 'undefined') {
         window.location.href = `/api/auth/${provider}/login`;
       }

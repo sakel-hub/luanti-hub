@@ -57,9 +57,8 @@ export function parseCookies(request: Request): Record<string, string> {
 }
 
 /**
- * Determines whether a user qualifies as an Admin via either:
- * 1. Their D1 database `role` column ('admin' or 'moderator'), provided they have a verified identity
- * 2. Matching a VERIFIED identity against the `ADMIN_USERS` environment variable (e.g. "sakel,github:sakel-hub")
+ * Determines whether a user qualifies as an Admin by matching a VERIFIED identity
+ * against the `ADMIN_USERS` environment variable (or D1 `role` if `ADMIN_USERS` is not set).
  */
 export function checkIsAdmin(
   user: { username?: string; role?: string } | null,
@@ -71,41 +70,187 @@ export function checkIsAdmin(
   const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
   const hasVerifiedIdentity = verifiedIdentities.length > 0;
 
-  if ((user.role === 'admin' || user.role === 'moderator') && hasVerifiedIdentity) {
-    return true;
-  }
-
   if (!hasVerifiedIdentity) {
     return false;
   }
 
-  const rawList = (adminUsersEnv || 'sakel,sakel-hub').split(',')
+  const rawList = (adminUsersEnv || '')
+    .split(',')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
 
-  for (const id of verifiedIdentities) {
-    const handle = (id.username || '').toLowerCase();
-    const qualified = `${(id.provider || '').toLowerCase()}:${handle}`;
-    if (rawList.includes(handle) || rawList.includes(qualified)) {
+  if (rawList.length > 0) {
+    const userHandle = (user.username || '').trim().toLowerCase();
+    const baseUserHandle = userHandle.replace(/_(gi|gl|co|cd)$/i, '');
+    if ((userHandle && rawList.includes(userHandle)) || (baseUserHandle && rawList.includes(baseUserHandle))) {
       return true;
     }
+
+    for (const id of verifiedIdentities) {
+      const handle = (id.username || '').trim().toLowerCase();
+      const baseHandle = handle.replace(/_(gi|gl|co|cd)$/i, '');
+      const qualified = `${(id.provider || '').toLowerCase()}:${handle}`;
+      if (rawList.includes(handle) || rawList.includes(baseHandle) || rawList.includes(qualified)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
+  return user.role === 'admin' || user.role === 'moderator';
+}
+
+/**
+ * Checks whether a username is listed in the protected `ADMIN_USERS` environment variable
+ */
+export function isProtectedAdminHandle(username: string, provider?: string, adminUsersEnv?: string): boolean {
+  const rawList = (adminUsersEnv || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (rawList.length === 0) return false;
+  const lower = (username || '').trim().toLowerCase();
+  const baseLower = lower.replace(/_(gi|gl|co|cd)$/i, '');
+  if (!lower) return false;
+  if (rawList.includes(lower) || rawList.includes(baseLower)) return true;
+  if (provider && (rawList.includes(`${provider.toLowerCase()}:${lower}`) || rawList.includes(`${provider.toLowerCase()}:${baseLower}`))) {
+    return true;
+  }
   return false;
 }
 
 /**
- * Checks whether a username is listed in the protected `ADMIN_USERS` list
+ * Deduplicates `user_identities` rows for the same (user_id, provider, LOWER(provider_username))
+ * and automatically merges duplicate suffixed accounts (e.g. `username_gi` -> `username`)
+ * caused by signing in via both Handle/PAT and 1-Click OAuth.
  */
-export function isProtectedAdminHandle(username: string, provider?: string, adminUsersEnv?: string): boolean {
-  const rawList = (adminUsersEnv || 'sakel,sakel-hub').split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-  const lower = (username || '').trim().toLowerCase();
-  if (!lower) return false;
-  if (rawList.includes(lower)) return true;
-  if (provider && rawList.includes(`${provider.toLowerCase()}:${lower}`)) return true;
-  return false;
+export async function reconcileAndMergeUserAccount(db: any, currentUserId: string): Promise<any | null> {
+  if (!db || !currentUserId) return null;
+
+  let user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(currentUserId).first();
+  if (!user) return null;
+
+  const rawUsername = String(user.username || '').trim();
+  const baseUsername = rawUsername.replace(/_(gi|gl|co|cd)$/i, '');
+  const hasProviderSuffix = baseUsername.toLowerCase() !== rawUsername.toLowerCase();
+
+  try {
+    if (hasProviderSuffix) {
+      // Check if the canonical base user exists
+      const canonicalUser = await db.prepare(
+        `SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND id != ? LIMIT 1`
+      ).bind(baseUsername, user.id).first();
+
+      if (canonicalUser) {
+        await mergeSecondaryUserIntoPrimary(db, canonicalUser.id, user.id);
+        user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(canonicalUser.id).first();
+      } else {
+        // No other user owns the base username — rename suffixed username back to baseUsername
+        await db.prepare(`UPDATE users SET username = ? WHERE id = ?`).bind(baseUsername, user.id).run();
+        user.username = baseUsername;
+      }
+    } else {
+      // Current user is the canonical base user.
+      // Check if any suffixed duplicate accounts (`_gi`, `_gl`, `_co`, `_cd`) exist for the same creator.
+      const suffixedDuplicates = await db.prepare(
+        `SELECT id, username FROM users
+         WHERE id != ?
+           AND (
+             LOWER(username) = LOWER(?)
+             OR LOWER(username) = LOWER(?)
+             OR LOWER(username) = LOWER(?)
+             OR LOWER(username) = LOWER(?)
+           )`
+      ).bind(
+        user.id,
+        `${baseUsername}_gi`,
+        `${baseUsername}_gl`,
+        `${baseUsername}_co`,
+        `${baseUsername}_cd`
+      ).all();
+
+      for (const dup of suffixedDuplicates.results || []) {
+        await mergeSecondaryUserIntoPrimary(db, user.id, dup.id);
+      }
+    }
+
+    // Deduplicate any multiple user_identities rows for the same provider on the resolved user
+    await deduplicateUserIdentities(db, user.id);
+  } catch {
+    // Non-fatal if a table is missing in local dev
+  }
+
+  return user;
+}
+
+export async function mergeSecondaryUserIntoPrimary(db: any, primaryId: string, secondaryId: string): Promise<void> {
+  if (!primaryId || !secondaryId || primaryId === secondaryId) return;
+
+  const secondaryIdentities = await db.prepare(
+    `SELECT * FROM user_identities WHERE user_id = ?`
+  ).bind(secondaryId).all();
+
+  for (const secId of secondaryIdentities.results || []) {
+    const existingPrimaryId = await db.prepare(
+      `SELECT * FROM user_identities
+       WHERE user_id = ? AND provider = ? AND LOWER(provider_username) = LOWER(?)
+       LIMIT 1`
+    ).bind(primaryId, secId.provider, secId.provider_username).first();
+
+    if (existingPrimaryId) {
+      const mergedVerified = Math.max(Number(existingPrimaryId.verified) || 0, Number(secId.verified) || 0);
+      // Prefer OAuth numeric/canonical provider_user_id over lowercase username string
+      const preferredProviderUserId =
+        secId.verified && secId.provider_user_id !== String(secId.provider_username || '').toLowerCase()
+          ? secId.provider_user_id
+          : existingPrimaryId.provider_user_id;
+
+      await db.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(secId.id).run();
+      await db.prepare(
+        `UPDATE user_identities
+         SET verified = ?, provider_user_id = ?, avatar_url = COALESCE(NULLIF(?, ''), avatar_url)
+         WHERE id = ?`
+      ).bind(mergedVerified, preferredProviderUserId, secId.avatar_url || '', existingPrimaryId.id).run();
+    } else {
+      await db.prepare(
+        `UPDATE OR IGNORE user_identities SET user_id = ? WHERE id = ?`
+      ).bind(primaryId, secId.id).run();
+      await db.prepare(`DELETE FROM user_identities WHERE id = ? AND user_id = ?`).bind(secId.id, secondaryId).run();
+    }
+  }
+
+  await db.prepare(`UPDATE packages SET author_id = ? WHERE author_id = ?`).bind(primaryId, secondaryId).run();
+  await db.prepare(`UPDATE OR IGNORE user_favorites SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
+  await db.prepare(`DELETE FROM user_favorites WHERE user_id = ?`).bind(secondaryId).run();
+  await db.prepare(`UPDATE OR IGNORE package_reviews SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
+  await db.prepare(`DELETE FROM package_reviews WHERE user_id = ?`).bind(secondaryId).run();
+
+  const secUser = await db.prepare(`SELECT role FROM users WHERE id = ?`).bind(secondaryId).first();
+  if (secUser?.role === 'admin') {
+    await db.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(primaryId).run();
+  }
+
+  await db.prepare(`DELETE FROM users WHERE id = ?`).bind(secondaryId).run();
+}
+
+async function deduplicateUserIdentities(db: any, userId: string): Promise<void> {
+  const allRes = await db.prepare(
+    `SELECT * FROM user_identities WHERE user_id = ? ORDER BY verified DESC, created_at DESC`
+  ).bind(userId).all();
+  const seenByProvider = new Map<string, any>();
+
+  for (const row of allRes.results || []) {
+    const key = `${String(row.provider).toLowerCase()}::${String(row.provider_username).toLowerCase()}`;
+    const existing = seenByProvider.get(key);
+    if (!existing) {
+      seenByProvider.set(key, row);
+    } else {
+      const mergedVerified = Math.max(Number(existing.verified) || 0, Number(row.verified) || 0);
+      await db.prepare(`UPDATE user_identities SET verified = ? WHERE id = ?`).bind(mergedVerified, existing.id).run();
+      await db.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(row.id).run();
+    }
+  }
 }
 
 /**

@@ -128,13 +128,13 @@ In your Cloudflare Pages project -> **Settings** -> **Bindings**:
 
 ### 4. Configure Production Environment Variables & Secrets
 
-In your Cloudflare Pages project -> **Settings** -> **Variables and secrets**, you can click **Import .env** and select your [`.env`](file:///Users/juraj/Documents/gits/luanti-hub/.env) file (or see [`.env.example`](file:///Users/juraj/Documents/gits/luanti-hub/.env.example)):
+In your Cloudflare Pages project -> **Settings** -> **Variables and secrets**, you can click **Import .env** and select your `.env` file (or see [`.env.example`](.env.example)):
 
 | Variable Name | Required | Description |
 | :--- | :--- | :--- |
 | `SESSION_SECRET` | **Yes (Required in Prod)** | Random 32+ byte secret string used to sign HMAC-SHA256 `lh_session` cookies (e.g. `openssl rand -hex 32`). |
 | `KILL_SWITCH_SECRET` | Recommended | Bearer secret for emergency CLI/webhook package takedowns (`POST /api/packages/:author/:name/moderate`). |
-| `ADMIN_USERS` | Recommended | Comma-separated list of verified admin handles (e.g. `sakel,sakel-hub,juraj`). |
+| `ADMIN_USERS` | Recommended | Comma-separated list of verified admin handles (e.g. `admin_user,github:admin_handle`). |
 | `ADMIN_SECRET` | Optional | Secret token that allows an admin to verify their handle directly via the login modal if OAuth is not configured. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URI` | Optional | GitHub 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/github/callback`). |
 | `CODEBERG_CLIENT_ID` / `CODEBERG_CLIENT_SECRET` / `CODEBERG_REDIRECT_URI` | Optional | Codeberg 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/codeberg/callback`). |
