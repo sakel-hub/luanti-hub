@@ -8,7 +8,7 @@ import {
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from './lib/session';
-import { syncAuthorContentDbPackages } from '../lib/upstream';
+import { syncAuthorContentDbPackages, ensureModerationColumns } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -136,17 +136,73 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       // Table may not exist yet before first download
     }
 
-    // 6. If Admin, count open moderation reports
+    // 6. Moderation Counts & Zero-Quota Piggybacked Notification Digest
     let openReportsCount = 0;
-    if (isAdmin) {
-      try {
+    let adminLatestOpen: any[] = [];
+    let userAlerts: any[] = [];
+
+    try {
+      await ensureModerationColumns(context.env.DB);
+      if (isAdmin) {
         const repCount = await context.env.DB.prepare(
           `SELECT COUNT(*) as cnt FROM moderation_reports WHERE status = 'open'`
         ).first();
-        openReportsCount = repCount?.cnt || 0;
-      } catch {
-        openReportsCount = 0;
+        openReportsCount = Number(repCount?.cnt || 0);
+
+        const latestOpenRes = await context.env.DB.prepare(`
+          SELECT
+            r.id,
+            r.package_id,
+            r.reason,
+            r.details,
+            r.status,
+            r.created_at,
+            r.updated_at,
+            p.title AS package_title,
+            p.thumbnail_url AS package_thumbnail
+          FROM moderation_reports r
+          LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
+          WHERE r.status = 'open'
+          ORDER BY r.created_at DESC
+          LIMIT 3
+        `).all();
+        adminLatestOpen = latestOpenRes.results || [];
       }
+
+      // Fetch up to 5 recent reports submitted by this user or targeting packages owned by this user
+      const authorPrefixes = Array.from(new Set([
+        String(user.username || '').toLowerCase(),
+        ...identityHandles
+      ])).filter(Boolean);
+
+      const authorClause = authorPrefixes.length > 0
+        ? `OR LOWER(SUBSTR(r.package_id, 1, INSTR(r.package_id, '/') - 1)) IN (${authorPrefixes.map(() => '?').join(', ')})`
+        : '';
+
+      const userAlertsRes = await context.env.DB.prepare(`
+        SELECT
+          r.id,
+          r.package_id,
+          r.reporter_user_id,
+          r.reason,
+          r.details,
+          r.status,
+          r.resolution_note,
+          r.resolved_by,
+          r.resolved_at,
+          r.created_at,
+          COALESCE(r.updated_at, r.resolved_at, r.created_at) AS updated_at,
+          p.title AS package_title,
+          p.thumbnail_url AS package_thumbnail
+        FROM moderation_reports r
+        LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
+        WHERE r.reporter_user_id = ? ${authorClause}
+        ORDER BY COALESCE(r.updated_at, r.resolved_at, r.created_at) DESC
+        LIMIT 5
+      `).bind(resolvedUserId, ...authorPrefixes).all();
+      userAlerts = userAlertsRes.results || [];
+    } catch {
+      openReportsCount = 0;
     }
 
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
@@ -171,7 +227,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         identities,
         packages: userPackages,
         favorites,
-        downloads
+        downloads,
+        notification_digest: {
+          user_alerts: userAlerts,
+          admin_latest_open: adminLatestOpen
+        }
       },
       oauthProviders
     }, {

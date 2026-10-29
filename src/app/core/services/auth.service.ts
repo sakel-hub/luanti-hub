@@ -20,8 +20,18 @@ export class AuthService {
   private readonly _selectedProvider = signal<GitProvider>('contentdb');
   private readonly _oauthProviders = signal<Record<string, boolean>>({});
   private readonly _moderationReports = signal<ModerationReport[]>([]);
+  private readonly _myReports = signal<ModerationReport[]>([]);
   private readonly _delistedPackages = signal<LuantiPackage[]>([]);
+  private readonly _moderationPage = signal<number>(1);
+  private readonly _moderationPageSize = signal<number>(10);
+  private readonly _moderationTotal = signal<number>(0);
+  private readonly _moderationTotalPages = signal<number>(1);
+  private readonly _moderationStatusFilter = signal<'open' | 'closed' | 'delisted'>('open');
+  private readonly _moderationReasonFilter = signal<string>('all');
+  private readonly _closedReportsCount = signal<number>(0);
+  private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | null>(null);
   private lastModerationFetchAt = 0;
+  private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
 
   readonly currentUser = this._currentUser.asReadonly();
@@ -32,7 +42,16 @@ export class AuthService {
   readonly selectedProvider = this._selectedProvider.asReadonly();
   readonly oauthProviders = this._oauthProviders.asReadonly();
   readonly moderationReports = this._moderationReports.asReadonly();
+  readonly myReports = this._myReports.asReadonly();
   readonly delistedPackages = this._delistedPackages.asReadonly();
+  readonly moderationPage = this._moderationPage.asReadonly();
+  readonly moderationPageSize = this._moderationPageSize.asReadonly();
+  readonly moderationTotal = this._moderationTotal.asReadonly();
+  readonly moderationTotalPages = this._moderationTotalPages.asReadonly();
+  readonly moderationStatusFilter = this._moderationStatusFilter.asReadonly();
+  readonly moderationReasonFilter = this._moderationReasonFilter.asReadonly();
+  readonly closedReportsCount = this._closedReportsCount.asReadonly();
+  readonly requestedDrawerTab = this._requestedDrawerTab.asReadonly();
 
   readonly isLoggedIn = computed(() => this._currentUser() !== null);
   readonly isAdmin = computed(() => Boolean(this._currentUser()?.is_admin || this._currentUser()?.role === 'admin'));
@@ -40,6 +59,12 @@ export class AuthService {
   readonly linkedIdentities = computed(() => this._currentUser()?.identities || []);
 
   constructor() {
+    this.pwaService.registerNotificationClickHandler((data: any) => {
+      if (data?.targetTab) {
+        this._requestedDrawerTab.set(data.targetTab);
+      }
+      this.openProfileDrawer();
+    });
     this.handleUrlAuthParams();
     this.initAuth();
   }
@@ -145,6 +170,7 @@ export class AuthService {
             this.settingsService.isAuthenticatedSession.set(true);
             this.settingsService.mergeServerDownloads(data.user.downloads);
             await this.settingsService.mergeServerFavorites(data.user.favorites);
+            this.processNotificationDigest(data.user);
             if (this._isProfileDrawerOpen() && this.isAdmin()) {
               this.fetchModerationQueue();
             }
@@ -217,7 +243,7 @@ export class AuthService {
 
   private isRedirectingOAuth = false;
 
-  loginWith(provider: GitProvider, loginHint?: string, forceAccountSelect = false): void {
+  loginWith(provider: GitProvider, loginHint?: string, forceAccountSelect = true): void {
     this._selectedProvider.set(provider);
     this._authError.set(null);
     if (this.isOAuthConfigured(provider)) {
@@ -461,14 +487,35 @@ export class AuthService {
     }
   }
 
-  async fetchModerationQueue(force = false): Promise<void> {
+  async fetchModerationQueue(
+    force = false,
+    page?: number,
+    status?: 'open' | 'closed' | 'delisted',
+    reason?: string
+  ): Promise<void> {
     if (!this.isAdmin()) return;
+
+    const targetPage = page ?? this._moderationPage();
+    const targetStatus = status ?? this._moderationStatusFilter();
+    const targetReason = reason ?? this._moderationReasonFilter();
+
+    this._moderationPage.set(targetPage);
+    this._moderationStatusFilter.set(targetStatus);
+    this._moderationReasonFilter.set(targetReason);
+
     if (!force && this.lastModerationFetchAt > 0 && Date.now() - this.lastModerationFetchAt < 60_000) {
       return;
     }
     this.lastModerationFetchAt = Date.now();
     try {
-      const res = await fetch('/api/admin/moderation');
+      const apiStatus = targetStatus === 'delisted' ? 'open' : targetStatus;
+      const params = new URLSearchParams({
+        status: apiStatus,
+        reason: targetReason,
+        page: String(targetPage),
+        limit: String(this._moderationPageSize())
+      });
+      const res = await fetch(`/api/admin/moderation?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.reports)) {
@@ -477,10 +524,156 @@ export class AuthService {
         if (Array.isArray(data.delistedPackages)) {
           this._delistedPackages.set(data.delistedPackages);
         }
-        this._currentUser.update(u => u ? { ...u, open_reports_count: (data.reports || []).length } : null);
+        const openCnt = typeof data.openCount === 'number'
+          ? data.openCount
+          : (data.reports || []).filter((r: ModerationReport) => r.status === 'open').length;
+        const closedCnt = typeof data.closedCount === 'number' ? data.closedCount : 0;
+
+        this._closedReportsCount.set(closedCnt);
+        this._moderationTotal.set(typeof data.total === 'number' ? data.total : (data.reports || []).length);
+        this._moderationTotalPages.set(Math.max(1, Number(data.totalPages || 1)));
+        this._currentUser.update(u => u ? { ...u, open_reports_count: openCnt } : null);
+        this.pwaService.syncAppBadge(openCnt);
       }
     } catch {
       // Ignore
+    }
+  }
+
+  async fetchMyReports(force = false): Promise<void> {
+    if (!this.isLoggedIn()) return;
+    if (!force && this.lastMyReportsFetchAt > 0 && Date.now() - this.lastMyReportsFetchAt < 60_000) {
+      return;
+    }
+    this.lastMyReportsFetchAt = Date.now();
+    try {
+      const res = await fetch('/api/admin/moderation?mine=1');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.reports)) {
+          this._myReports.set(data.reports);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  async actOnModerationReport(
+    reportId: string | number,
+    action: 'dismiss' | 'resolve' | 'reopen' | 'reply' | 'recheck',
+    note?: string
+  ): Promise<{ success: boolean; message?: string; online?: boolean }> {
+    try {
+      const res = await fetch('/api/admin/moderation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, reportId, note })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, message: data.error || 'Could not update moderation report.' };
+      }
+      if (this.isAdmin()) {
+        await this.fetchModerationQueue(true);
+      }
+      await this.fetchMyReports(true);
+      if (data.message) {
+        this.pwaService.showToast(data.message);
+      }
+      return { success: true, message: data.message, online: data.online };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error updating report.' };
+    }
+  }
+
+  async bulkModerationAction(
+    action: 'dismiss_all_broken' | 'clear_closed',
+    note?: string
+  ): Promise<{ success: boolean; message?: string }> {
+    try {
+      const res = await fetch('/api/admin/moderation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, note })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { success: false, message: data.error || 'Bulk moderation action failed.' };
+      }
+      await this.fetchModerationQueue(true, 1);
+      if (data.message) {
+        this.pwaService.showToast(data.message);
+      }
+      return { success: true, message: data.message };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Network error executing bulk action.' };
+    }
+  }
+
+  consumeRequestedDrawerTab(): 'packages' | 'favorites' | 'account' | 'moderation' | null {
+    const tab = this._requestedDrawerTab();
+    this._requestedDrawerTab.set(null);
+    return tab;
+  }
+
+  private processNotificationDigest(user: AuthUser): void {
+    const digest = user.notification_digest;
+    const openCnt = Number(user.open_reports_count || 0);
+    this.pwaService.syncAppBadge(openCnt);
+
+    if (!digest) return;
+
+    if (Array.isArray(digest.user_alerts)) {
+      this._myReports.set(digest.user_alerts);
+
+      for (const alert of digest.user_alerts) {
+        const isResolvedOrReplied = alert.status !== 'open' || Boolean(alert.resolution_note);
+        const isAuthorAlert = String(alert.reporter_user_id || '') !== String(user.id);
+        if (!isResolvedOrReplied && !isAuthorAlert) continue;
+
+        const stamp = alert.updated_at || alert.resolved_at || alert.created_at;
+        const tag = `lh-mod-user-${alert.id}-${alert.status}-${stamp}`;
+        const title = alert.status === 'resolved'
+          ? `Issue Resolved · ${alert.package_id}`
+          : alert.status === 'dismissed'
+            ? `Report Dismissed · ${alert.package_id}`
+            : `Moderation Update · ${alert.package_id}`;
+        const body = alert.resolution_note
+          ? String(alert.resolution_note).split('\n').pop() || String(alert.resolution_note)
+          : `${alert.reason.toUpperCase()}: ${alert.details || ''}`;
+
+        this.pwaService.sendNativeNotification({
+          title,
+          body,
+          tag,
+          category: 'moderation',
+          icon: alert.package_thumbnail || undefined,
+          data: {
+            targetTab: 'account',
+            packageId: alert.package_id,
+            reportId: String(alert.id)
+          }
+        });
+      }
+    }
+
+    if (user.is_admin && Array.isArray(digest.admin_latest_open)) {
+      for (const rep of digest.admin_latest_open) {
+        const tag = `lh-mod-admin-${rep.id}-${rep.created_at}`;
+        this.pwaService.sendNativeNotification({
+          title: `New Moderation Report · ${rep.package_id}`,
+          body: `[${String(rep.reason || 'other').toUpperCase()}] ${rep.details || 'Requires moderator review.'}`,
+          tag,
+          category: 'admin_queue',
+          icon: rep.package_thumbnail || undefined,
+          data: {
+            targetTab: 'moderation',
+            packageId: rep.package_id,
+            reportId: String(rep.id)
+          }
+        });
+      }
     }
   }
 }

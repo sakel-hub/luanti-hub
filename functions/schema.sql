@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS user_downloads (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 9. Moderation & Abuse Reports Queue (Supports Instant Kill Switch & DMCA Safe Harbor)
+-- 9. Moderation & Abuse Reports Queue (Supports Instant Kill Switch, Author Communication & Auto-Healing)
 CREATE TABLE IF NOT EXISTS moderation_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id TEXT NOT NULL,
@@ -136,9 +136,11 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
     reason TEXT CHECK(reason IN ('dmca', 'malware', 'license', 'broken', 'inappropriate', 'other')) NOT NULL,
     details TEXT NOT NULL,
     status TEXT DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'dismissed')),
+    resolution_note TEXT,
     resolved_by TEXT,
     resolved_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Indices for rapid querying by Luanti game engine, web search, moderation, and Top 10 rollups

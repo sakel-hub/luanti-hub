@@ -119,6 +119,10 @@ export interface AuthUser {
   packages?: LuantiPackage[];
   favorites?: string[];
   downloads?: Record<string, number>;
+  notification_digest?: {
+    user_alerts?: ModerationReport[];
+    admin_latest_open?: ModerationReport[];
+  };
 }
 
 export interface GitAuditDiagnostic {
@@ -162,12 +166,18 @@ export interface ModerationReport {
   id: string;
   package_id: string;
   reporter_id?: string | null;
+  reporter_user_id?: string | null;
   reporter_username?: string | null;
   reason: string;
   details?: string | null;
   status: 'open' | 'resolved' | 'dismissed';
+  resolution_note?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
   created_at: string;
+  updated_at?: string | null;
   package_title?: string;
+  package_thumbnail?: string | null;
   package_author?: string;
   package_name?: string;
   package_status?: 'active' | 'flagged' | 'delisted';

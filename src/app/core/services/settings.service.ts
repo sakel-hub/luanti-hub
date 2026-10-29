@@ -13,6 +13,10 @@ export class SettingsService {
   readonly favorites = signal<string[]>([]);
   readonly downloadedPackages = signal<Record<string, number>>({});
   readonly highContrast = signal<boolean>(false);
+  readonly notificationsEnabled = signal<boolean>(false);
+  readonly notifyModeration = signal<boolean>(true);
+  readonly notifyAdminQueue = signal<boolean>(true);
+  readonly notifyAppUpdates = signal<boolean>(true);
   readonly isAuthenticatedSession = signal<boolean>(false);
   readonly edgeApiAvailable = signal<boolean>(false);
   readonly clientId = signal<string>('anon_default');
@@ -28,6 +32,15 @@ export class SettingsService {
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
         localStorage.setItem('lh_downloaded_packages', JSON.stringify(this.downloadedPackages()));
         localStorage.setItem('lh_high_contrast', JSON.stringify(this.highContrast()));
+        localStorage.setItem(
+          'lh_notification_prefs',
+          JSON.stringify({
+            enabled: this.notificationsEnabled(),
+            moderation: this.notifyModeration(),
+            adminQueue: this.notifyAdminQueue(),
+            appUpdates: this.notifyAppUpdates()
+          })
+        );
         localStorage.setItem('lh_client_id', this.clientId());
 
         if (typeof document !== 'undefined') {
@@ -73,6 +86,25 @@ export class SettingsService {
       const savedContrast = localStorage.getItem('lh_high_contrast');
       if (savedContrast) {
         this.highContrast.set(Boolean(JSON.parse(savedContrast)));
+      }
+
+      const savedNotifPrefs = localStorage.getItem('lh_notification_prefs');
+      if (savedNotifPrefs) {
+        const parsedPrefs = JSON.parse(savedNotifPrefs);
+        if (parsedPrefs && typeof parsedPrefs === 'object') {
+          if (typeof parsedPrefs.enabled === 'boolean') {
+            this.notificationsEnabled.set(parsedPrefs.enabled);
+          }
+          if (typeof parsedPrefs.moderation === 'boolean') {
+            this.notifyModeration.set(parsedPrefs.moderation);
+          }
+          if (typeof parsedPrefs.adminQueue === 'boolean') {
+            this.notifyAdminQueue.set(parsedPrefs.adminQueue);
+          }
+          if (typeof parsedPrefs.appUpdates === 'boolean') {
+            this.notifyAppUpdates.set(parsedPrefs.appUpdates);
+          }
+        }
       }
 
       const savedDownloads = localStorage.getItem('lh_downloaded_packages');

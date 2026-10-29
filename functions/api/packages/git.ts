@@ -14,7 +14,12 @@ import {
   invalidateEdgeCacheKeys,
   fetchGitRepoReleasesAndTags,
   buildGitBranchArchiveUrl,
-  rewriteRelativeMarkdownUrls
+  rewriteRelativeMarkdownUrls,
+  autoResolveBrokenRepoReport,
+  parseCdbJsonMetadata,
+  CdbJsonMetadata,
+  ensureExtendedPackageColumns,
+  extractEmbeddedVideo
 } from '../lib/upstream';
 
 interface Env {
@@ -417,6 +422,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? await verifySessionToken(sessionToken, context.env.SESSION_SECRET)
       : null;
 
+    if (!loggedInUserId) {
+      return Response.json(
+        {
+          success: false,
+          canPublish: false,
+          error: 'Authentication required. Only signed-in users can audit or submit Git packages.'
+        },
+        { status: 401 }
+      );
+    }
+
     const body = await context.request.json() as {
       repoUrl?: string;
       warrantiesAccepted?: boolean;
@@ -583,7 +599,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const rawConfTags = getConfValue('tags') || getConfValue('categories');
     const rawMinVersion = getConfValue('min_minetest_version') || '5.0.0';
 
-    const technicalName = rawName || sanitizedDefaultName;
+    // Optional: Probe `.cdb.json` (Luanti ContentDB repository metadata specification)
+    let cdbMeta: CdbJsonMetadata | null = null;
+    try {
+      const cdbRes = await fetch(buildRawUrl(branch, '.cdb.json'));
+      if (cdbRes.ok) {
+        const cdbText = await cdbRes.text();
+        cdbMeta = parseCdbJsonMetadata(cdbText);
+        if (cdbMeta) {
+          diagnostics.push({
+            code: 'CDB_JSON_DETECTED',
+            severity: 'pass',
+            file: '.cdb.json',
+            title: 'Luanti .cdb.json Metadata Detected',
+            message: `Parsed ContentDB schema from .cdb.json (${[
+              cdbMeta.license ? `license: ${cdbMeta.license}` : '',
+              cdbMeta.tags.length > 0 ? `${cdbMeta.tags.length} tags` : '',
+              cdbMeta.dev_state ? `state: ${cdbMeta.dev_state}` : ''
+            ].filter(Boolean).join(', ') || 'extended metadata'}).`
+          });
+        }
+      }
+    } catch {
+      // Optional .cdb.json not present
+    }
+
+    const technicalName = rawName || cdbMeta?.name || sanitizedDefaultName;
 
     // Validate `name`
     if (!rawName) {
@@ -619,31 +660,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       });
     }
 
-    // Validate `title` and `description`
-    if (!rawTitle || !rawDesc) {
+    // Validate `title` and `description` (allowing .cdb.json to satisfy missing mod.conf fields)
+    const effectiveRawTitle = rawTitle || cdbMeta?.title || '';
+    const effectiveRawDesc = rawDesc || cdbMeta?.short_description || '';
+    if (!effectiveRawTitle || !effectiveRawDesc) {
       diagnostics.push({
         code: 'CONF_METADATA_INCOMPLETE',
         severity: 'warning',
         file: confFileName,
         title: `Recommended 'title' or 'description' Missing in ${confFileName}`,
-        message: `Adding both 'title' and 'description' in ${confFileName} improves search ranking and in-game Content tab display.`,
+        message: `Adding both 'title' and 'description' in ${confFileName} (or .cdb.json) improves search ranking and in-game Content tab display.`,
         howToFix: `Add descriptive 'title' and 'description' lines to ${confFileName}:`,
-        snippet: `title = ${rawTitle || technicalName.replace(/_/g, ' ')}\ndescription = ${rawDesc || 'Describe what your package adds to Luanti.'}`
+        snippet: `title = ${effectiveRawTitle || technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your package adds to Luanti.'}`
       });
     } else {
       diagnostics.push({
         code: 'CONF_METADATA_OK',
         severity: 'pass',
-        file: confFileName,
+        file: rawTitle && rawDesc ? confFileName : '.cdb.json',
         title: 'Title & Description Present',
-        message: `Title ("${rawTitle}") and description verified.`
+        message: `Title ("${effectiveRawTitle}") and description verified.`
       });
     }
 
-    // Check 3: Detect SPDX Open-Source License from LICENSE / COPYING / README.md
-    // (Note: Luanti mod.conf does not include license fields in the official specification)
-    let detectedLicense = rawLicense || '';
-    let detectedLicenseFile = rawLicense ? confFileName : 'LICENSE';
+    // Check 3: Detect SPDX Open-Source License from mod.conf, .cdb.json, or LICENSE / COPYING / README.md
+    let detectedLicense = rawLicense || cdbMeta?.license || '';
+    let detectedLicenseFile = rawLicense ? confFileName : (cdbMeta?.license ? '.cdb.json' : 'LICENSE');
 
     if (!detectedLicense) {
       const licenseCandidates = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING', 'COPYING.txt'];
@@ -668,14 +710,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     const effectiveLicense = detectedLicense || 'MIT';
-    const effectiveMediaLicense = rawMediaLicense || detectedLicense || 'CC-BY-SA-4.0';
+    const effectiveMediaLicense = rawMediaLicense || cdbMeta?.media_license || detectedLicense || 'CC-BY-SA-4.0';
 
-    if (rawLicense && !isApprovedLicense(rawLicense)) {
+    if ((rawLicense || cdbMeta?.license) && !isApprovedLicense(rawLicense || cdbMeta?.license || '')) {
       diagnostics.push({
         code: 'LICENSE_INVALID',
         severity: 'error',
         file: detectedLicenseFile,
-        title: `Unrecognized or Non-FOSS License: '${rawLicense}'`,
+        title: `Unrecognized or Non-FOSS License: '${rawLicense || cdbMeta?.license}'`,
         message: `LuantiHub requires an OSI-approved Open Source or Free Culture SPDX license.`,
         howToFix: `Include a standard open-source LICENSE file (e.g., MIT, LGPL-2.1-only, GPL-3.0-only, Apache-2.0, CC-BY-SA-4.0) in the root of your repository.`
       });
@@ -943,12 +985,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const confTags = rawConfTags
       ? rawConfTags.split(',').map(s => s.trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
       : [];
+    const cdbTags = cdbMeta?.tags || [];
     const customTags = Array.isArray(userSubmittedTags)
       ? userSubmittedTags.map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
       : [];
 
-    const title = rawTitle || technicalName.replace(/_/g, ' ');
-    const shortDesc = rawDesc || 'Community package for Luanti.';
+    const title = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+    const shortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
 
     // Check if this package already exists on ContentDB or in Cloudflare D1 to prevent duplicates
     // and link both ContentDB + Git Community badges onto the single canonical package!
@@ -1027,6 +1070,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       new Set([
         ...customTags,
         ...confTags,
+        ...cdbTags,
         ...upstreamTags,
         ...(isAlsoOnContentDb ? ['contentdb'] : []),
         'git',
@@ -1064,6 +1108,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     );
     const sources: Array<'official' | 'git'> = isAlsoOnContentDb ? ['official', 'git'] : ['git'];
 
+    const resolvedLongDesc = cdbMeta?.long_description || matchedContentDbPkg?.long_description || longDesc || shortDesc;
+    const resolvedVideo = extractEmbeddedVideo(
+      cdbMeta?.video_url || matchedContentDbPkg?.video_url || existingD1Pkg?.video_url,
+      matchedContentDbPkg?.video_thumbnail_url || existingD1Pkg?.video_thumbnail_url,
+      resolvedLongDesc,
+      readmeMarkdown
+    );
+    const resolvedDonateUrl = cdbMeta?.donate_url || matchedContentDbPkg?.donate_url || existingD1Pkg?.donate_url || undefined;
+    const resolvedIssueTracker = cdbMeta?.issue_tracker || matchedContentDbPkg?.issue_tracker || existingD1Pkg?.issue_tracker || undefined;
+    const resolvedForumUrl = cdbMeta?.forum_url || matchedContentDbPkg?.forum_url || existingD1Pkg?.forum_url || undefined;
+    const resolvedTranslationUrl = cdbMeta?.translation_url || matchedContentDbPkg?.translation_url || existingD1Pkg?.translation_url || undefined;
+    const resolvedWebsite = cdbMeta?.website || matchedContentDbPkg?.website || undefined;
+    const resolvedDevState = cdbMeta?.dev_state || matchedContentDbPkg?.dev_state || existingD1Pkg?.dev_state || undefined;
+    const resolvedWarnings = (cdbMeta?.content_warnings && cdbMeta.content_warnings.length > 0)
+      ? cdbMeta.content_warnings
+      : parseJsonArray(existingD1Pkg?.content_warnings);
+
     const packagePayload = {
       id: packageId,
       author: canonicalAuthor,
@@ -1071,7 +1132,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       title: matchedContentDbPkg?.title || title,
       type: packageType,
       short_desc: shortDesc,
-      desc: matchedContentDbPkg?.long_description || shortDesc,
+      desc: resolvedLongDesc,
       readme: readmeMarkdown || undefined,
       thumbnail: resolvedThumbnail,
       banner: resolvedBanner,
@@ -1082,6 +1143,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       license: effectiveLicense,
       media_license: effectiveMediaLicense,
       repo_url: repoUrl.trim(),
+      website: resolvedWebsite,
+      issue_tracker: resolvedIssueTracker,
+      forum_url: resolvedForumUrl,
+      donate_url: resolvedDonateUrl,
+      translation_url: resolvedTranslationUrl,
+      video_url: resolvedVideo.video_url,
+      video_thumbnail_url: resolvedVideo.video_thumbnail_url,
+      dev_state: resolvedDevState,
+      content_warnings: resolvedWarnings.length > 0 ? resolvedWarnings : undefined,
       provider,
       default_branch: branch,
       min_minetest_version: rawMinVersion,
@@ -1205,6 +1275,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)
     if (context.env.DB) {
+      await ensureExtendedPackageColumns(context.env.DB);
       const authorId = resolvedUserId || existingD1Pkg?.author_id || `ext_${canonicalAuthor}`;
 
       await context.env.DB.prepare(`
@@ -1225,9 +1296,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
           downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
-          min_minetest_version, status
+          min_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
+          video_url, video_thumbnail_url, dev_state, content_warnings, status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           short_desc = excluded.short_desc,
@@ -1246,6 +1318,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           dependencies = excluded.dependencies,
           optional_dependencies = excluded.optional_dependencies,
           min_minetest_version = excluded.min_minetest_version,
+          donate_url = COALESCE(excluded.donate_url, packages.donate_url),
+          translation_url = COALESCE(excluded.translation_url, packages.translation_url),
+          forum_url = COALESCE(excluded.forum_url, packages.forum_url),
+          issue_tracker = COALESCE(excluded.issue_tracker, packages.issue_tracker),
+          video_url = COALESCE(excluded.video_url, packages.video_url),
+          video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
+          dev_state = COALESCE(excluded.dev_state, packages.dev_state),
+          content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
           updated_at = CURRENT_TIMESTAMP
       `).bind(
         packageId,
@@ -1255,7 +1335,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         packagePayload.title,
         packageType,
         shortDesc,
-        longDesc,
+        resolvedLongDesc,
         repoUrl.trim(),
         provider,
         branch,
@@ -1269,7 +1349,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         JSON.stringify(mergedTags),
         JSON.stringify(dependencies),
         JSON.stringify(optionalDependencies),
-        rawMinVersion
+        rawMinVersion,
+        resolvedDonateUrl || null,
+        resolvedTranslationUrl || null,
+        resolvedForumUrl || null,
+        resolvedIssueTracker || null,
+        resolvedVideo.video_url || null,
+        resolvedVideo.video_thumbnail_url || null,
+        resolvedDevState || null,
+        resolvedWarnings.length > 0 ? JSON.stringify(resolvedWarnings) : null
       ).run();
 
       await context.env.DB.prepare(
@@ -1298,6 +1386,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           VALUES (?, 'latest', ?, 'HEAD', ?, ?)
         `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
       }
+
+      // Auto-resolve any open 'broken' (404) moderation reports for this package now that its Git repo passed audit
+      await autoResolveBrokenRepoReport(
+        context.env.DB,
+        packageId,
+        `Repository verified and updated via Git Pre-Flight Audit (${repoUrl.trim()}).`
+      );
     }
 
     await invalidateEdgeCacheKeys([

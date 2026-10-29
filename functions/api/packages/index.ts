@@ -420,6 +420,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: cdbDl + lhDl,
+      min_minetest_version: item.min_minetest_version || '5.0.0',
       source: 'official',
       sources: ['official']
     });

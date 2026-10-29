@@ -20,9 +20,11 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
     reason TEXT CHECK(reason IN ('dmca', 'malware', 'license', 'broken', 'inappropriate', 'other')) NOT NULL,
     details TEXT NOT NULL,
     status TEXT DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'dismissed')),
+    resolution_note TEXT,
     resolved_by TEXT,
     resolved_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 3. Create indices for moderation_reports

@@ -345,7 +345,7 @@ import {
                 </span>
               }
               @if (authService.openReportsCount() > 0) {
-                <span class="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-rose-600 text-white text-[10px] font-black flex items-center justify-center shadow">
+                <span class="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full glass-badge glass-badge-rose text-[10px] font-black flex items-center justify-center shadow">
                   {{ authService.openReportsCount() }}
                 </span>
               }

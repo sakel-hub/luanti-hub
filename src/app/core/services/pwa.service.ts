@@ -1,25 +1,55 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
+import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
+import { SettingsService } from './settings.service';
+
+export interface NativeNotificationPayload {
+  title: string;
+  body: string;
+  tag: string;
+  category: 'moderation' | 'admin_queue' | 'app_update';
+  icon?: string;
+  data?: {
+    targetTab?: 'moderation' | 'account' | 'packages';
+    packageId?: string;
+    reportId?: string;
+    action?: 'reload_update';
+  };
+}
+
+const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
+const MAX_SEEN_TAGS = 100;
 
 @Injectable({
   providedIn: 'root'
 })
 export class PwaService {
   private readonly swUpdate = inject(SwUpdate, { optional: true });
+  private readonly swPush = inject(SwPush, { optional: true });
+  private readonly settingsService = inject(SettingsService);
 
   readonly updateAvailable = signal<boolean>(false);
   readonly canInstall = signal<boolean>(false);
   readonly isInstalled = signal<boolean>(this.checkIfInstalled());
   readonly checkingForUpdate = signal<boolean>(false);
   readonly statusMessage = signal<string | null>(null);
+  readonly notificationPermission = signal<NotificationPermission>(this.readBrowserNotificationPermission());
 
   private deferredPrompt: any = null;
   private messageClearTimer: any = null;
+  private notificationClickHandler: ((data: any) => void) | null = null;
 
   constructor() {
     this.initSwUpdate();
     this.initInstallPrompt();
+    this.initNotificationClickRouting();
+  }
+
+  private readBrowserNotificationPermission(): NotificationPermission {
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return 'default';
+    }
+    return Notification.permission;
   }
 
   private checkIfInstalled(): boolean {
@@ -39,9 +69,17 @@ export class PwaService {
       // 1. Listen for version ready
       this.swUpdate.versionUpdates
         .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
-        .subscribe(() => {
+        .subscribe((evt) => {
           this.updateAvailable.set(true);
           this.statusMessage.set(null);
+          const hash = (evt as any).latestVersion?.hash || Date.now();
+          this.sendNativeNotification({
+            title: 'LuantiHub Update Available',
+            body: 'A new version of LuantiHub is ready. Click to reload with the latest features.',
+            tag: `lh-app-update-${hash}`,
+            category: 'app_update',
+            data: { action: 'reload_update' }
+          });
         });
 
       // 2. Periodic background check every 30 minutes
@@ -76,6 +114,156 @@ export class PwaService {
         this.isInstalled.set(true);
         this.showToast('pwa.installSuccess');
       });
+    }
+  }
+
+  private initNotificationClickRouting(): void {
+    if (this.swPush?.isEnabled) {
+      this.swPush.notificationClicks.subscribe(({ notification }) => {
+        this.handleNotificationAction(notification?.data);
+      });
+    }
+  }
+
+  registerNotificationClickHandler(handler: (data: any) => void): void {
+    this.notificationClickHandler = handler;
+  }
+
+  private handleNotificationAction(data: any): void {
+    if (typeof window !== 'undefined' && typeof window.focus === 'function') {
+      try {
+        window.focus();
+      } catch {
+        // ignore
+      }
+    }
+    if (data?.action === 'reload_update') {
+      this.activateUpdate();
+      return;
+    }
+    if (this.notificationClickHandler && data) {
+      this.notificationClickHandler(data);
+    }
+  }
+
+  async setNotificationsEnabled(enabled: boolean): Promise<boolean> {
+    if (!enabled) {
+      this.settingsService.notificationsEnabled.set(false);
+      return false;
+    }
+
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      this.settingsService.notificationsEnabled.set(false);
+      return false;
+    }
+
+    let perm = Notification.permission;
+    if (perm === 'default') {
+      try {
+        perm = await Notification.requestPermission();
+      } catch {
+        perm = 'denied';
+      }
+    }
+    this.notificationPermission.set(perm);
+
+    const granted = perm === 'granted';
+    this.settingsService.notificationsEnabled.set(granted);
+    return granted;
+  }
+
+  hasSeenNotificationTag(tag: string): boolean {
+    if (!tag) return false;
+    try {
+      const raw = localStorage.getItem(SEEN_NOTIFICATION_TAGS_KEY);
+      if (!raw) return false;
+      const list = JSON.parse(raw);
+      return Array.isArray(list) && list.includes(tag);
+    } catch {
+      return false;
+    }
+  }
+
+  markNotificationTagSeen(tag: string): void {
+    if (!tag) return;
+    try {
+      const raw = localStorage.getItem(SEEN_NOTIFICATION_TAGS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const list = Array.isArray(parsed) ? parsed.filter((t: any) => typeof t === 'string') : [];
+      if (!list.includes(tag)) {
+        list.push(tag);
+      }
+      const trimmed = list.slice(-MAX_SEEN_TAGS);
+      localStorage.setItem(SEEN_NOTIFICATION_TAGS_KEY, JSON.stringify(trimmed));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  private isCategoryEnabled(category: NativeNotificationPayload['category']): boolean {
+    if (!this.settingsService.notificationsEnabled()) return false;
+    if (category === 'moderation') return this.settingsService.notifyModeration();
+    if (category === 'admin_queue') return this.settingsService.notifyAdminQueue();
+    if (category === 'app_update') return this.settingsService.notifyAppUpdates();
+    return false;
+  }
+
+  async sendNativeNotification(payload: NativeNotificationPayload): Promise<boolean> {
+    if (!payload?.tag || !this.isCategoryEnabled(payload.category)) {
+      return false;
+    }
+    if (typeof window === 'undefined' || typeof Notification === 'undefined') {
+      return false;
+    }
+    this.notificationPermission.set(Notification.permission);
+    if (Notification.permission !== 'granted') {
+      return false;
+    }
+    if (this.hasSeenNotificationTag(payload.tag)) {
+      return false;
+    }
+
+    this.markNotificationTagSeen(payload.tag);
+
+    const options: NotificationOptions = {
+      body: payload.body,
+      icon: payload.icon && payload.icon !== 'logo.svg' ? payload.icon : '/icons/icon-192x192.png',
+      badge: '/icons/icon-72x72.png',
+      tag: payload.tag,
+      data: payload.data || {}
+    };
+
+    try {
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg && typeof reg.showNotification === 'function') {
+          await reg.showNotification(payload.title, options);
+          return true;
+        }
+      }
+
+      const notif = new Notification(payload.title, options);
+      notif.onclick = () => {
+        notif.close();
+        this.handleNotificationAction(payload.data);
+      };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async syncAppBadge(count: number): Promise<void> {
+    if (typeof navigator === 'undefined') return;
+    const nav = navigator as any;
+    try {
+      if (count > 0 && typeof nav.setAppBadge === 'function') {
+        await nav.setAppBadge(count);
+      } else if (count <= 0 && typeof nav.clearAppBadge === 'function') {
+        await nav.clearAppBadge();
+      }
+    } catch {
+      // Ignore unsupported badge API errors
     }
   }
 
@@ -139,8 +327,6 @@ export class PwaService {
   }
 
   async checkForUpdate(interactive = true): Promise<boolean> {
-    // If an update was already detected (e.g. by the automatic visibilitychange check when focusing the tab),
-    // immediately report true instead of letting a second swUpdate.checkForUpdate() return false.
     if (this.updateAvailable()) {
       return true;
     }

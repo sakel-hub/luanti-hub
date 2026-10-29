@@ -138,7 +138,7 @@ import {
               <button
                 type="button"
                 (click)="onRunAudit()"
-                [disabled]="isAuditing() || !repoUrl.trim()"
+                [disabled]="isAuditing() || !repoUrl.trim() || !authService.isLoggedIn()"
                 [appTooltip]="'submit.runAuditTooltip' | translate"
                 class="px-4 py-2.5 rounded-xl glass-btn-amber disabled:opacity-50 font-black text-xs flex items-center justify-center gap-2 hover:scale-[1.02] transition whitespace-nowrap cursor-pointer">
                 @if (isAuditing()) {
@@ -225,8 +225,8 @@ import {
                     <div class="flex items-start justify-between gap-2">
                       <div class="flex items-center gap-2 flex-wrap">
                         <span
-                          [class]="diag.severity === 'error' ? 'bg-rose-600 text-white' : diag.severity === 'warning' ? 'bg-amber-500 text-slate-950' : 'bg-emerald-600 text-white'"
-                          class="px-1.5 py-0.5 rounded text-[10px] font-black font-mono uppercase">
+                          [class]="diag.severity === 'error' ? 'glass-badge glass-badge-rose' : diag.severity === 'warning' ? 'glass-badge glass-badge-amber' : 'glass-badge glass-badge-emerald'"
+                          class="font-black font-mono uppercase">
                           {{ diag.code }}
                         </span>
                         <span class="font-bold text-white">{{ diag.title }}</span>

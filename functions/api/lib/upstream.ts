@@ -28,8 +28,11 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
     throw new Error(`Primary returned HTTP ${res.status}`);
   } catch {
     clearTimeout(timeoutId);
-    // Automatic Failover to milcho.org mirror
-    return fetch(`${MIRROR_UPSTREAM}${path}`, {
+    // Automatic Failover to milcho.org mirror (rewrite single-package detail routes to /for-client/ which the static mirror caches)
+    const mirrorPath = /^\/packages\/[^/?#]+\/[^/?#]+\/?$/.test(path)
+      ? `${path.replace(/\/+$/, '')}/for-client/?formspec_version=8`
+      : path;
+    return fetch(`${MIRROR_UPSTREAM}${mirrorPath}`, {
       ...options,
       headers: {
         ...defaultHeaders,
@@ -86,6 +89,14 @@ export async function fetchUpstreamJsonCached<T = any>(
   }
 }
 
+function buildEdgeCacheRequestUrl(cacheKeyPath: string): string {
+  if (!cacheKeyPath) return 'https://cache.luantihub.internal/';
+  if (cacheKeyPath.startsWith('http://') || cacheKeyPath.startsWith('https://')) {
+    return cacheKeyPath;
+  }
+  return `https://cache.luantihub.internal${cacheKeyPath.startsWith('/') ? cacheKeyPath : '/' + cacheKeyPath}`;
+}
+
 /**
  * Reads a cached JSON response payload from Cloudflare's Edge Cache (`caches.default`).
  */
@@ -93,7 +104,7 @@ export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache) return null;
   try {
-    const cacheReq = new Request(`https://cache.luantihub.internal${cacheKeyPath}`, { method: 'GET' });
+    const cacheReq = new Request(buildEdgeCacheRequestUrl(cacheKeyPath), { method: 'GET' });
     const cached = await edgeCache.match(cacheReq);
     if (cached) {
       return await cached.json() as T;
@@ -115,7 +126,7 @@ export async function writeEdgeCacheJson(
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache) return;
   try {
-    const cacheReq = new Request(`https://cache.luantihub.internal${cacheKeyPath}`, { method: 'GET' });
+    const cacheReq = new Request(buildEdgeCacheRequestUrl(cacheKeyPath), { method: 'GET' });
     const cacheRes = new Response(JSON.stringify(payload), {
       headers: {
         'Content-Type': 'application/json',
@@ -130,14 +141,32 @@ export async function writeEdgeCacheJson(
 
 /**
  * Evicts one or more keys from Cloudflare's Edge Cache (`caches.default`) after a D1 mutation.
+ * Automatically expands package detail keys so both `/full/`, `/lite/`, and legacy URLs are evicted.
  */
 export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<void> {
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache || !Array.isArray(cacheKeyPaths)) return;
+
+  const expandedUrls = new Set<string>();
+  for (const p of cacheKeyPaths) {
+    if (!p) continue;
+    expandedUrls.add(buildEdgeCacheRequestUrl(p));
+    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v2\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
+    if (pkgDetailMatch) {
+      const a = encodeURIComponent(pkgDetailMatch[1].toLowerCase());
+      const n = encodeURIComponent(pkgDetailMatch[2].toLowerCase());
+      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/${a}/${n}`);
+      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/full/${a}/${n}`);
+      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/lite/${a}/${n}`);
+    }
+  }
+
   await Promise.all(
-    cacheKeyPaths.map(async (p) => {
+    Array.from(expandedUrls).map(async (url) => {
       try {
-        const req = new Request(`https://cache.luantihub.internal${p}`, { method: 'GET' });
+        const req = new Request(url, { method: 'GET' });
         await edgeCache.delete(req);
       } catch {
         // Ignore individual delete error
@@ -729,4 +758,168 @@ export function formatByteSize(val: any): string | undefined {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   }
   return undefined;
+}
+
+let moderationColsEnsured = false;
+
+/**
+ * Ensures `moderation_reports` table and its communication/auto-heal columns (`resolution_note`, `updated_at`) exist.
+ */
+export async function ensureModerationColumns(db: any): Promise<void> {
+  if (!db || moderationColsEnsured) return;
+  moderationColsEnsured = true;
+
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS moderation_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        package_id TEXT NOT NULL,
+        reporter_user_id TEXT,
+        reason TEXT CHECK(reason IN ('dmca', 'malware', 'license', 'broken', 'inappropriate', 'other')) NOT NULL,
+        details TEXT NOT NULL,
+        status TEXT DEFAULT 'open' CHECK(status IN ('open', 'resolved', 'dismissed')),
+        resolution_note TEXT,
+        resolved_by TEXT,
+        resolved_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+  } catch {
+    // Table exists
+  }
+
+  for (const colDef of ['resolution_note TEXT', 'updated_at DATETIME']) {
+    try {
+      await db.prepare(`ALTER TABLE moderation_reports ADD COLUMN ${colDef}`).run();
+    } catch {
+      // Column already exists
+    }
+  }
+}
+
+export interface CdbJsonMetadata {
+  type?: 'mod' | 'game' | 'txp' | 'modpack';
+  name?: string;
+  title?: string;
+  short_description?: string;
+  long_description?: string;
+  dev_state?: string;
+  tags: string[];
+  content_warnings: string[];
+  license?: string;
+  media_license?: string;
+  repo?: string;
+  website?: string;
+  issue_tracker?: string;
+  forum_url?: string;
+  video_url?: string;
+  donate_url?: string;
+  translation_url?: string;
+  screenshots: string[];
+}
+
+/**
+ * Parses a Luanti ContentDB `.cdb.json` file (https://content.luanti.org/help/cdb_json/)
+ * from a raw JSON string or object into normalized package metadata.
+ */
+export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
+  if (!raw) return null;
+  let obj: any = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith('{') || trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+      return null;
+    }
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return null;
+  }
+
+  const str = (v: any): string | undefined => {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    return undefined;
+  };
+
+  let normalizedType: 'mod' | 'game' | 'txp' | 'modpack' | undefined;
+  const rawType = str(obj.type)?.toLowerCase();
+  if (rawType === 'mod') normalizedType = 'mod';
+  else if (rawType === 'game') normalizedType = 'game';
+  else if (rawType === 'txp' || rawType === 'texture_pack') normalizedType = 'txp';
+  else if (rawType === 'modpack') normalizedType = 'modpack';
+
+  const rawForum = obj.forums ?? obj.forum_url;
+  let forumUrl: string | undefined;
+  if (typeof rawForum === 'number' && Number.isFinite(rawForum) && rawForum > 0) {
+    forumUrl = `https://forum.luanti.org/viewtopic.php?t=${Math.trunc(rawForum)}`;
+  } else if (typeof rawForum === 'string' && rawForum.trim()) {
+    const cleanForum = rawForum.trim();
+    forumUrl = cleanForum.startsWith('http')
+      ? cleanForum
+      : (/^\d+$/.test(cleanForum) ? `https://forum.luanti.org/viewtopic.php?t=${cleanForum}` : undefined);
+  }
+
+  const parseStringArray = (arr: any): string[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((item: any) => (typeof item === 'string' ? item.trim() : String(item?.name || item?.title || '').trim()))
+      .filter(Boolean);
+  };
+
+  const tags = parseStringArray(obj.tags).map(t => t.toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean);
+  const contentWarnings = parseStringArray(obj.content_warnings);
+  const screenshots = parseStringArray(obj.screenshots);
+
+  return {
+    type: normalizedType,
+    name: str(obj.name),
+    title: str(obj.title),
+    short_description: str(obj.short_description) || str(obj.short_desc),
+    long_description: str(obj.long_description) || str(obj.long_desc),
+    dev_state: str(obj.dev_state),
+    tags,
+    content_warnings: contentWarnings,
+    license: str(obj.license),
+    media_license: str(obj.media_license),
+    repo: str(obj.repo) || str(obj.repo_url),
+    website: str(obj.website),
+    issue_tracker: str(obj.issue_tracker),
+    forum_url: forumUrl,
+    video_url: str(obj.video_url),
+    donate_url: str(obj.donate_url),
+    translation_url: str(obj.translation_url),
+    screenshots
+  };
+}
+
+/**
+ * Automatically resolves any open 'broken' (404) moderation reports for a package
+ * once its Git repository is verified back online (HTTP 200).
+ */
+export async function autoResolveBrokenRepoReport(
+  db: any,
+  packageId: string,
+  note = 'Automated check confirmed repository URL is back online and verified (HTTP 200).'
+): Promise<boolean> {
+  if (!db || !packageId) return false;
+  try {
+    await ensureModerationColumns(db);
+    const res = await db.prepare(`
+      UPDATE moderation_reports
+      SET status = 'resolved',
+          resolved_by = 'system-auto-heal',
+          resolution_note = ?,
+          resolved_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE LOWER(package_id) = LOWER(?) AND reason = 'broken' AND status = 'open'
+    `).bind(note, packageId).run();
+    return Boolean((res?.meta?.changes || 0) > 0);
+  } catch {
+    return false;
+  }
 }

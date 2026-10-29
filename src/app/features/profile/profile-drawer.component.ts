@@ -1,9 +1,10 @@
-import { Component, ChangeDetectionStrategy, inject, signal, computed, OnInit } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, computed, OnInit, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
+import { PwaService } from '../../core/services/pwa.service';
 import { GitProvider, LuantiPackage, ModerationReport } from '../../core/models/package.model';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -19,7 +20,11 @@ import {
   LucideUser,
   LucideShieldAlert,
   LucideLayers,
-  LucideTag
+  LucideTag,
+  LucideRefreshCw,
+  LucideMessageSquare,
+  LucideChevronLeft,
+  LucideChevronRight
 } from '@lucide/angular';
 
 @Component({
@@ -42,7 +47,11 @@ import {
     LucideUser,
     LucideShieldAlert,
     LucideLayers,
-    LucideTag
+    LucideTag,
+    LucideRefreshCw,
+    LucideMessageSquare,
+    LucideChevronLeft,
+    LucideChevronRight
   ],
   template: `
     @if (authService.currentUser(); as user) {
@@ -55,7 +64,7 @@ import {
 
         <div
           (click)="$event.stopPropagation()"
-          class="w-full max-w-xl h-full glass-drawer flex flex-col p-5 sm:p-6 space-y-5 overflow-y-auto luanti-drawer-panel">
+          class="w-full max-w-2xl h-full glass-drawer flex flex-col p-5 sm:p-6 space-y-5 overflow-y-auto luanti-drawer-panel">
 
           <!-- Drawer Header -->
           <div class="flex items-center justify-between border-b border-white/10 pb-4">
@@ -70,7 +79,7 @@ import {
                     {{ user.display_name || user.username }}
                   </h2>
                   @if (authService.isAdmin()) {
-                    <span class="px-2 py-0.5 rounded-md bg-rose-500/20 border border-rose-400/40 text-rose-300 text-[10px] font-black uppercase tracking-wider">
+                    <span class="glass-badge glass-badge-rose font-black uppercase tracking-wider">
                       Admin
                     </span>
                   }
@@ -88,20 +97,20 @@ import {
             </button>
           </div>
 
-          <!-- Responsive Navigation Tabs (My Packages, Favorites, Account, + Admin Moderation) -->
+          <!-- Adaptive Non-Truncating Navigation Tabs (My Packages, Favorites, Account, + Admin Moderation) -->
           <div
             role="tablist"
-            [class]="authService.isAdmin() ? 'grid grid-cols-2 sm:grid-cols-4 gap-1.5 glass-panel p-1.5 rounded-2xl text-[11px] font-bold' : 'grid grid-cols-3 gap-1.5 glass-panel p-1.5 rounded-2xl text-[11px] font-bold'">
+            class="flex flex-wrap gap-1.5 glass-panel p-1.5 rounded-2xl text-xs font-bold">
             <button
               type="button"
               role="tab"
               [attr.aria-selected]="activeTab() === 'packages'"
               (click)="activeTab.set('packages')"
               [class]="activeTab() === 'packages' ? 'bg-sky-500/30 border border-sky-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
-              class="py-2 px-2.5 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 cursor-pointer">
+              class="flex-1 min-w-[130px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
               <svg lucideLayers class="w-3.5 h-3.5 text-sky-400 flex-shrink-0"></svg>
-              <span class="truncate">{{ 'profile.tabPackages' | translate }}</span>
-              <span class="px-1.5 py-0.2 rounded-md bg-slate-950/60 text-sky-300 text-[10px] font-mono flex-shrink-0">
+              <span>{{ 'profile.tabPackages' | translate }}</span>
+              <span class="glass-badge glass-badge-sky font-mono font-bold px-1.5 py-0">
                 {{ userPackages().length }}
               </span>
             </button>
@@ -111,11 +120,11 @@ import {
               role="tab"
               [attr.aria-selected]="activeTab() === 'favorites'"
               (click)="activeTab.set('favorites')"
-              [class]="activeTab() === 'favorites' ? 'bg-rose-500/30 border border-rose-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
-              class="py-2 px-2.5 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 cursor-pointer">
+              [class]="activeTab() === 'favorites' ? 'bg-rose-500/25 border border-rose-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
+              class="flex-1 min-w-[125px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
               <svg lucideHeart class="w-3.5 h-3.5 text-rose-400 flex-shrink-0"></svg>
-              <span class="truncate">{{ 'profile.tabFavorites' | translate }}</span>
-              <span class="px-1.5 py-0.2 rounded-md bg-slate-950/60 text-rose-300 text-[10px] font-mono flex-shrink-0">
+              <span>{{ 'profile.tabFavorites' | translate }}</span>
+              <span class="glass-badge glass-badge-rose font-mono font-bold px-1.5 py-0">
                 {{ favoritePackages().length }}
               </span>
             </button>
@@ -124,11 +133,11 @@ import {
               type="button"
               role="tab"
               [attr.aria-selected]="activeTab() === 'account'"
-              (click)="activeTab.set('account')"
+              (click)="onSelectAccountTab()"
               [class]="activeTab() === 'account' ? 'bg-sky-500/30 border border-sky-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
-              class="py-2 px-2.5 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 cursor-pointer">
+              class="flex-1 min-w-[120px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
               <svg lucideUser class="w-3.5 h-3.5 text-sky-400 flex-shrink-0"></svg>
-              <span class="truncate">{{ 'profile.tabAccount' | translate }}</span>
+              <span>{{ 'profile.tabAccount' | translate }}</span>
             </button>
 
             @if (authService.isAdmin()) {
@@ -137,12 +146,12 @@ import {
                 role="tab"
                 [attr.aria-selected]="activeTab() === 'moderation'"
                 (click)="onSelectModerationTab()"
-                [class]="activeTab() === 'moderation' ? 'bg-rose-500/30 border border-rose-400/50 text-white shadow-sm' : 'border border-transparent text-rose-300/90 hover:text-rose-200 hover:bg-rose-500/10'"
-                class="py-2 px-2.5 rounded-xl transition-all duration-200 flex items-center justify-center gap-1.5 whitespace-nowrap min-w-0 cursor-pointer">
+                [class]="activeTab() === 'moderation' ? 'bg-rose-500/25 border border-rose-400/50 text-white shadow-sm' : 'border border-transparent text-rose-300/90 hover:text-rose-200 hover:bg-rose-500/10'"
+                class="flex-1 min-w-[135px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
                 <svg lucideShieldAlert class="w-3.5 h-3.5 text-rose-400 flex-shrink-0"></svg>
-                <span class="truncate">{{ 'profile.tabModeration' | translate }}</span>
+                <span>{{ 'profile.tabModeration' | translate }}</span>
                 @if (authService.openReportsCount() > 0) {
-                  <span class="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-black flex-shrink-0">
+                  <span class="glass-badge glass-badge-rose font-black px-1.5 py-0">
                     {{ authService.openReportsCount() }}
                   </span>
                 }
@@ -307,7 +316,7 @@ import {
             </div>
           }
 
-          <!-- TAB 3: ACCOUNT INFORMATION & CONNECTED FORGES -->
+          <!-- TAB 3: ACCOUNT INFORMATION, NOTIFICATIONS, REPORTS & CONNECTED FORGES -->
           @if (activeTab() === 'account') {
             <div class="space-y-5 flex-1 text-xs luanti-tab-enter">
               <!-- Edit Account Form -->
@@ -339,36 +348,18 @@ import {
                     class="w-full glass-input rounded-xl p-3 text-xs text-white focus:outline-none"></textarea>
                 </div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                  <div>
-                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                      {{ 'profile.preferredEngine' | translate }}
-                    </label>
-                    <select
-                      [ngModel]="settingsService.preferredEngine()"
-                      (ngModelChange)="settingsService.preferredEngine.set($event)"
-                      name="preferredEngine"
-                      class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white">
-                      <option value="5.10.0" class="bg-slate-900">Luanti 5.10.0+</option>
-                      <option value="5.9.0" class="bg-slate-900">Luanti 5.9.0</option>
-                      <option value="5.8.0" class="bg-slate-900">Minetest 5.8.0</option>
-                    </select>
-                  </div>
-                  <div class="flex items-end pb-1">
-                    <label class="flex items-center gap-2 cursor-pointer text-slate-300">
-                      <input
-                        type="checkbox"
-                        [ngModel]="settingsService.highContrast()"
-                        (ngModelChange)="settingsService.highContrast.set($event)"
-                        name="highContrast"
-                        class="rounded border-slate-700 bg-slate-900 text-sky-500"
-                      />
-                      <span>{{ 'profile.highContrast' | translate }}</span>
-                    </label>
-                  </div>
-                </div>
+                <div class="flex items-center justify-between gap-3 pt-1">
+                  <label class="flex items-center gap-2 cursor-pointer text-slate-300 text-xs">
+                    <input
+                      type="checkbox"
+                      [ngModel]="settingsService.highContrast()"
+                      (ngModelChange)="settingsService.highContrast.set($event)"
+                      name="highContrast"
+                      class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                    />
+                    <span>{{ 'profile.highContrast' | translate }}</span>
+                  </label>
 
-                <div class="flex justify-end pt-1">
                   <button
                     type="submit"
                     [disabled]="isSavingProfile()"
@@ -377,6 +368,160 @@ import {
                   </button>
                 </div>
               </form>
+
+              <!-- Native PWA Notification Preferences -->
+              <div class="p-4 rounded-2xl glass-panel space-y-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 class="font-bold uppercase tracking-wider text-sky-400 text-[10px]">
+                      {{ 'profile.notificationsTitle' | translate }}
+                    </h3>
+                    <p class="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                      {{ 'profile.notificationsDesc' | translate }}
+                    </p>
+                  </div>
+                  @if (pwaService.notificationPermission() === 'denied') {
+                    <span class="glass-badge glass-badge-rose font-bold whitespace-nowrap">
+                      {{ 'profile.permissionBlocked' | translate }}
+                    </span>
+                  } @else if (settingsService.notificationsEnabled() && pwaService.notificationPermission() === 'granted') {
+                    <span class="glass-badge glass-badge-emerald font-bold whitespace-nowrap">
+                      {{ 'profile.permissionGranted' | translate }}
+                    </span>
+                  }
+                </div>
+
+                <div class="space-y-2 pt-1 border-t border-white/10">
+                  <label class="flex items-center justify-between gap-3 cursor-pointer text-slate-200 font-semibold py-1">
+                    <span>{{ 'profile.enableNotifications' | translate }}</span>
+                    <input
+                      type="checkbox"
+                      [ngModel]="settingsService.notificationsEnabled()"
+                      (ngModelChange)="onToggleMasterNotifications($event)"
+                      class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                    />
+                  </label>
+
+                  @if (settingsService.notificationsEnabled()) {
+                    <div class="pl-3 border-l border-white/10 space-y-2 text-[11px] text-slate-300">
+                      <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span>{{ 'profile.notifyModerationLabel' | translate }}</span>
+                        <input
+                          type="checkbox"
+                          [ngModel]="settingsService.notifyModeration()"
+                          (ngModelChange)="settingsService.notifyModeration.set($event)"
+                          class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                        />
+                      </label>
+
+                      @if (authService.isAdmin()) {
+                        <label class="flex items-center justify-between gap-3 cursor-pointer">
+                          <span>{{ 'profile.notifyAdminQueueLabel' | translate }}</span>
+                          <input
+                            type="checkbox"
+                            [ngModel]="settingsService.notifyAdminQueue()"
+                            (ngModelChange)="settingsService.notifyAdminQueue.set($event)"
+                            class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                          />
+                        </label>
+                      }
+
+                      <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span>{{ 'profile.notifyAppUpdatesLabel' | translate }}</span>
+                        <input
+                          type="checkbox"
+                          [ngModel]="settingsService.notifyAppUpdates()"
+                          (ngModelChange)="settingsService.notifyAppUpdates.set($event)"
+                          class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                        />
+                      </label>
+                    </div>
+                  }
+                </div>
+              </div>
+
+              <!-- My Submitted Reports & Author Package Alerts -->
+              <div class="space-y-2.5">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                  <svg lucideMessageSquare class="w-3.5 h-3.5 text-sky-400"></svg>
+                  <span>{{ 'profile.myReportsTitle' | translate }} ({{ authService.myReports().length }})</span>
+                </h3>
+
+                @if (authService.myReports().length === 0) {
+                  <div class="p-4 rounded-2xl glass-panel text-slate-400 text-[11px]">
+                    {{ 'profile.noMyReports' | translate }}
+                  </div>
+                } @else {
+                  <div class="space-y-2.5">
+                    @for (rep of authService.myReports(); track rep.id) {
+                      <div class="p-3.5 rounded-2xl glass-panel space-y-2.5">
+                        <div class="flex items-center justify-between gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            (click)="openPackageById(rep.package_id)"
+                            class="font-bold text-white hover:text-sky-400 transition text-left truncate cursor-pointer">
+                            {{ rep.package_title || rep.package_id }}
+                            <span class="text-[10px] font-mono text-slate-400 ml-1">({{ rep.package_id }})</span>
+                          </button>
+
+                          <div class="flex items-center gap-1.5 flex-shrink-0">
+                            <span
+                              [class]="rep.reason === 'broken' ? 'glass-badge-amber' : 'glass-badge-rose'"
+                              class="glass-badge font-black uppercase">
+                              {{ rep.reason }}
+                            </span>
+                            <span
+                              [class]="rep.status === 'resolved' ? 'glass-badge-emerald' : rep.status === 'dismissed' ? 'glass-badge-sky' : 'glass-badge-rose'"
+                              class="glass-badge font-bold uppercase">
+                              {{ rep.status }}
+                            </span>
+                          </div>
+                        </div>
+
+                        @if (rep.details) {
+                          <p class="text-[11px] text-slate-300 leading-relaxed">{{ rep.details }}</p>
+                        }
+
+                        @if (rep.resolution_note) {
+                          <div class="p-2.5 rounded-xl bg-slate-950/75 border border-sky-500/25 text-[11px] text-sky-200 whitespace-pre-line leading-relaxed">
+                            {{ rep.resolution_note }}
+                          </div>
+                        }
+
+                        <!-- Author / Reporter Reply & Live 404 Re-Check -->
+                        <div class="flex flex-col sm:flex-row gap-2 pt-1">
+                          <input
+                            type="text"
+                            [ngModel]="getNoteInput(rep.id)"
+                            (ngModelChange)="setNoteInput(rep.id, $event)"
+                            [placeholder]="'profile.notePlaceholder' | translate"
+                            class="flex-1 glass-input rounded-xl px-3 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                          <div class="flex items-center gap-1.5 flex-shrink-0">
+                            @if (rep.reason === 'broken' && rep.status === 'open') {
+                              <button
+                                type="button"
+                                [disabled]="isActingOnReport(rep.id)"
+                                (click)="onRecheckReport(rep)"
+                                class="px-2.5 py-1.5 rounded-xl glass-btn-amber font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                                <svg lucideRefreshCw class="w-3 h-3" [class.animate-spin]="isActingOnReport(rep.id)"></svg>
+                                <span>{{ 'profile.recheckUrlBtn' | translate }}</span>
+                              </button>
+                            }
+                            <button
+                              type="button"
+                              [disabled]="isActingOnReport(rep.id) || !getNoteInput(rep.id).trim()"
+                              (click)="onReplyToReport(rep)"
+                              class="px-3 py-1.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-[11px] transition cursor-pointer">
+                              {{ 'profile.sendNoteBtn' | translate }}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
 
               <!-- Connected Accounts & Forges -->
               <div class="space-y-3">
@@ -400,7 +545,7 @@ import {
                         <span class="text-slate-300 font-mono truncate">&#64;{{ id.username }}</span>
                       </div>
                       <div class="flex items-center gap-2 flex-shrink-0">
-                        <span class="text-[10px] font-bold text-emerald-400 bg-emerald-950/50 border border-emerald-800/60 px-2 py-0.5 rounded-md flex items-center gap-1">
+                        <span class="glass-badge glass-badge-emerald font-bold flex items-center gap-1">
                           <svg lucideCheck class="w-3 h-3 text-emerald-400"></svg>
                           <span>{{ 'profile.verified' | translate }}</span>
                         </span>
@@ -417,7 +562,6 @@ import {
                   }
                 </div>
 
-                <!-- Connect Other Forges or Additional Accounts (Ordered by Popularity & Authentic Brand Colors) -->
                 <div class="pt-1 flex flex-wrap gap-2">
                   <button type="button" (click)="authService.loginWith('github', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>
@@ -444,71 +588,264 @@ import {
             </div>
           }
 
-          <!-- TAB 4: ADMIN MODERATION & KILL SWITCH QUEUE -->
+          <!-- TAB 4: ADMIN MODERATION QUEUE, COMMUNICATION, AUTO-HEAL & PAGINATION -->
           @if (activeTab() === 'moderation' && authService.isAdmin()) {
-            <div class="space-y-5 flex-1 text-xs luanti-tab-enter">
-              <div class="space-y-2.5">
-                <h3 class="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-1.5">
-                  <svg lucideShieldAlert class="w-4 h-4"></svg>
-                  <span>{{ 'profile.moderationQueueTitle' | translate }} ({{ authService.moderationReports().length }})</span>
-                </h3>
+            <div class="space-y-4 flex-1 text-xs luanti-tab-enter">
 
-                @if (authService.moderationReports().length === 0) {
-                  <div class="p-6 rounded-2xl glass-panel text-center text-slate-400">
-                    {{ 'profile.noReports' | translate }}
+              <!-- Moderation Status Sub-Tabs + Reason Filter + Batch Actions -->
+              <div class="p-3 rounded-2xl glass-panel space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      (click)="onFilterModerationStatus('open')"
+                      [class]="authService.moderationStatusFilter() === 'open' ? 'glass-btn-rose font-black' : 'glass-btn text-slate-300'"
+                      class="px-3 py-1.5 rounded-xl text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                      <span>{{ 'profile.filterOpen' | translate }}</span>
+                      <span class="glass-badge glass-badge-rose font-mono px-1.5 py-0">{{ authService.openReportsCount() }}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      (click)="onFilterModerationStatus('closed')"
+                      [class]="authService.moderationStatusFilter() === 'closed' ? 'glass-btn-emerald font-black' : 'glass-btn text-slate-300'"
+                      class="px-3 py-1.5 rounded-xl text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                      <span>{{ 'profile.filterClosed' | translate }}</span>
+                      <span class="glass-badge glass-badge-emerald font-mono px-1.5 py-0">{{ authService.closedReportsCount() }}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      (click)="onFilterModerationStatus('delisted')"
+                      [class]="authService.moderationStatusFilter() === 'delisted' ? 'glass-btn-amber font-black' : 'glass-btn text-slate-300'"
+                      class="px-3 py-1.5 rounded-xl text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                      <span>{{ 'profile.filterDelisted' | translate }}</span>
+                      <span class="glass-badge glass-badge-amber font-mono px-1.5 py-0">{{ authService.delistedPackages().length }}</span>
+                    </button>
                   </div>
-                } @else {
-                  <div class="space-y-2.5">
-                    @for (rep of authService.moderationReports(); track rep.id) {
-                      <div class="p-3.5 rounded-2xl bg-rose-950/30 border border-rose-500/35 space-y-2">
-                        <div class="flex items-center justify-between gap-2">
-                          <span class="font-bold text-white truncate">{{ rep.package_id }}</span>
-                          <span class="px-2 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-black uppercase flex-shrink-0">
-                            {{ rep.reason }}
-                          </span>
-                        </div>
-                        @if (rep.details) {
-                          <p class="text-slate-300 text-[11px]">{{ rep.details }}</p>
-                        }
-                        <div class="flex items-center justify-between pt-1 gap-2">
-                          <span class="text-[10px] text-slate-400">
-                            By {{ rep.reporter_username || 'Anonymous' }} • {{ rep.created_at | date:'short' }}
-                          </span>
-                          <button
-                            type="button"
-                            (click)="onAdminKillSwitch(rep)"
-                            class="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-black text-[11px] transition cursor-pointer">
-                            {{ 'modal.killSwitchDelist' | translate }}
-                          </button>
-                        </div>
-                      </div>
-                    }
-                  </div>
-                }
+
+                  @if (authService.moderationStatusFilter() !== 'delisted') {
+                    <div class="flex items-center gap-2">
+                      <select
+                        [ngModel]="authService.moderationReasonFilter()"
+                        (ngModelChange)="onFilterModerationReason($event)"
+                        aria-label="Filter moderation reports by reason"
+                        class="glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-slate-200 focus:outline-none">
+                        <option value="all" class="bg-slate-900">{{ 'profile.reasonAll' | translate }}</option>
+                        <option value="broken" class="bg-slate-900">{{ 'profile.reasonBroken' | translate }}</option>
+                        <option value="dmca" class="bg-slate-900">{{ 'profile.reasonDmca' | translate }}</option>
+                        <option value="malware" class="bg-slate-900">{{ 'profile.reasonMalware' | translate }}</option>
+                        <option value="license" class="bg-slate-900">{{ 'profile.reasonLicense' | translate }}</option>
+                        <option value="inappropriate" class="bg-slate-900">{{ 'profile.reasonInappropriate' | translate }}</option>
+                      </select>
+
+                      @if (authService.moderationStatusFilter() === 'open' && authService.openReportsCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="onBulkDismissBroken()"
+                          class="px-2.5 py-1.5 rounded-xl glass-btn text-[11px] font-semibold text-amber-300 hover:text-white transition whitespace-nowrap cursor-pointer">
+                          {{ 'profile.dismissAllBrokenBtn' | translate }}
+                        </button>
+                      }
+
+                      @if (authService.moderationStatusFilter() === 'closed' && authService.closedReportsCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="onBulkClearClosed()"
+                          class="px-2.5 py-1.5 rounded-xl glass-btn text-[11px] font-semibold text-rose-300 hover:text-white transition whitespace-nowrap cursor-pointer">
+                          {{ 'profile.clearClosedBtn' | translate }}
+                        </button>
+                      }
+                    </div>
+                  }
+                </div>
               </div>
 
-              <!-- Delisted / Flagged Packages (With 1-Click Restore) -->
-              @if (authService.delistedPackages().length > 0) {
-                <div class="space-y-2.5 pt-3 border-t border-white/10">
+              <!-- View A: Delisted / Flagged Packages List -->
+              @if (authService.moderationStatusFilter() === 'delisted') {
+                <div class="space-y-2.5">
                   <h4 class="text-[11px] font-bold uppercase tracking-wider text-slate-400">
                     {{ 'profile.moderatedPackagesTitle' | translate }} ({{ authService.delistedPackages().length }})
                   </h4>
-                  @for (dPkg of authService.delistedPackages(); track dPkg.id) {
-                    <div class="p-3 rounded-2xl glass-panel flex items-center justify-between gap-3">
-                      <button
-                        type="button"
-                        (click)="openPackage(dPkg)"
-                        class="text-left min-w-0 flex-1 group cursor-pointer">
-                        <span class="font-bold text-white group-hover:text-sky-400 transition block truncate">{{ dPkg.id }}</span>
-                        <span class="text-[10px] text-rose-400 uppercase font-mono block truncate">{{ dPkg.status }} — {{ dPkg.moderation_reason }}</span>
-                      </button>
-                      <button
-                        type="button"
-                        (click)="onRestorePackage(dPkg)"
-                        class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] transition flex-shrink-0 cursor-pointer">
-                        {{ 'modal.killSwitchRestore' | translate }}
-                      </button>
+                  @if (authService.delistedPackages().length === 0) {
+                    <div class="p-6 rounded-2xl glass-panel text-center text-slate-400">
+                      {{ 'profile.noReports' | translate }}
                     </div>
+                  } @else {
+                    @for (dPkg of authService.delistedPackages(); track dPkg.id) {
+                      <div class="p-3.5 rounded-2xl glass-panel flex items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          (click)="openPackage(dPkg)"
+                          class="text-left min-w-0 flex-1 group cursor-pointer">
+                          <span class="font-bold text-white group-hover:text-sky-400 transition block truncate">{{ dPkg.id }}</span>
+                          <span class="text-[10px] text-rose-300 uppercase font-mono block truncate">{{ dPkg.status }} — {{ dPkg.moderation_reason }}</span>
+                        </button>
+                        <button
+                          type="button"
+                          (click)="onRestorePackage(dPkg)"
+                          class="px-3.5 py-1.5 rounded-xl glass-btn-emerald font-bold text-[11px] transition flex-shrink-0 cursor-pointer">
+                          {{ 'modal.killSwitchRestore' | translate }}
+                        </button>
+                      </div>
+                    }
+                  }
+                </div>
+              } @else {
+                <!-- View B: Paginated Open or Closed Moderation Reports (Max 10 in DOM) -->
+                <div class="space-y-2.5">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-rose-300 flex items-center gap-1.5">
+                      <svg lucideShieldAlert class="w-4 h-4 text-rose-400"></svg>
+                      <span>{{ 'profile.moderationQueueTitle' | translate }} ({{ authService.moderationTotal() }})</span>
+                    </h3>
+                  </div>
+
+                  @if (authService.moderationReports().length === 0) {
+                    <div class="p-6 rounded-2xl glass-panel text-center text-slate-400">
+                      {{ 'profile.noReports' | translate }}
+                    </div>
+                  } @else {
+                    <div class="space-y-2.5">
+                      @for (rep of authService.moderationReports(); track rep.id) {
+                        <div class="p-4 rounded-2xl glass-panel border-rose-500/25 space-y-2.5">
+                          <div class="flex items-center justify-between gap-2 flex-wrap">
+                            <button
+                              type="button"
+                              (click)="openPackageById(rep.package_id)"
+                              class="font-bold text-white hover:text-sky-400 transition text-left truncate cursor-pointer">
+                              {{ rep.package_title || rep.package_id }}
+                              <span class="text-[10px] font-mono text-slate-400 ml-1">({{ rep.package_id }})</span>
+                            </button>
+
+                            <div class="flex items-center gap-1.5 flex-shrink-0">
+                              <span
+                                [class]="rep.reason === 'broken' ? 'glass-badge-amber' : 'glass-badge-rose'"
+                                class="glass-badge font-black uppercase">
+                                {{ rep.reason }}
+                              </span>
+                              <span
+                                [class]="rep.status === 'resolved' ? 'glass-badge-emerald' : rep.status === 'dismissed' ? 'glass-badge-sky' : 'glass-badge-rose'"
+                                class="glass-badge font-bold uppercase">
+                                {{ rep.status }}
+                              </span>
+                            </div>
+                          </div>
+
+                          @if (rep.details) {
+                            <p class="text-slate-300 text-[11px] leading-relaxed">{{ rep.details }}</p>
+                          }
+
+                          @if (rep.resolution_note) {
+                            <div class="p-2.5 rounded-xl bg-slate-950/75 border border-sky-500/25 text-[11px] text-sky-200 whitespace-pre-line leading-relaxed">
+                              {{ rep.resolution_note }}
+                            </div>
+                          }
+
+                          <!-- Moderator Note / Author Reply Input -->
+                          <div class="flex flex-col sm:flex-row gap-2 pt-0.5">
+                            <input
+                              type="text"
+                              [ngModel]="getNoteInput(rep.id)"
+                              (ngModelChange)="setNoteInput(rep.id, $event)"
+                              [placeholder]="'profile.notePlaceholder' | translate"
+                              class="flex-1 glass-input rounded-xl px-3 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              [disabled]="isActingOnReport(rep.id) || !getNoteInput(rep.id).trim()"
+                              (click)="onReplyToReport(rep)"
+                              class="px-3 py-1.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-[11px] whitespace-nowrap transition cursor-pointer">
+                              {{ 'profile.sendNoteBtn' | translate }}
+                            </button>
+                          </div>
+
+                          <!-- Report Footer Metadata & Frosted Action Bar -->
+                          <div class="flex flex-wrap items-center justify-between pt-1.5 border-t border-white/10 gap-2">
+                            <span class="text-[10px] text-slate-400">
+                              By {{ rep.reporter_username || rep.reporter_user_id || 'Anonymous' }} • {{ rep.created_at | date:'short' }}
+                              @if (rep.resolved_by) {
+                                • Handled by {{ rep.resolved_by }}
+                              }
+                            </span>
+
+                            <div class="flex flex-wrap items-center gap-1.5">
+                              @if (rep.reason === 'broken' && rep.status === 'open') {
+                                <button
+                                  type="button"
+                                  [disabled]="isActingOnReport(rep.id)"
+                                  (click)="onRecheckReport(rep)"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-amber font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                                  <svg lucideRefreshCw class="w-3 h-3" [class.animate-spin]="isActingOnReport(rep.id)"></svg>
+                                  <span>{{ 'profile.recheckUrlBtn' | translate }}</span>
+                                </button>
+                              }
+
+                              @if (rep.status === 'open') {
+                                <button
+                                  type="button"
+                                  [disabled]="isActingOnReport(rep.id)"
+                                  (click)="onResolveReport(rep)"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-emerald font-bold text-[11px] transition cursor-pointer">
+                                  {{ 'profile.resolveBtn' | translate }}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  [disabled]="isActingOnReport(rep.id)"
+                                  (click)="onDismissReport(rep)"
+                                  class="px-2.5 py-1 rounded-lg glass-btn text-slate-200 hover:text-white font-semibold text-[11px] transition cursor-pointer">
+                                  {{ 'profile.dismissBtn' | translate }}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  [disabled]="isActingOnReport(rep.id)"
+                                  (click)="onAdminKillSwitch(rep)"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-rose font-black text-[11px] transition cursor-pointer">
+                                  {{ 'modal.killSwitchDelist' | translate }}
+                                </button>
+                              } @else {
+                                <button
+                                  type="button"
+                                  [disabled]="isActingOnReport(rep.id)"
+                                  (click)="onReopenReport(rep)"
+                                  class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold text-[11px] transition cursor-pointer">
+                                  {{ 'profile.reopenBtn' | translate }}
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        </div>
+                      }
+                    </div>
+
+                    <!-- Server-Backed Pagination Controls (10 items/page) -->
+                    @if (authService.moderationTotalPages() > 1) {
+                      <div class="pt-2 flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          [disabled]="authService.moderationPage() <= 1"
+                          (click)="onChangeModerationPage(authService.moderationPage() - 1)"
+                          class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                          <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
+                          <span>{{ 'profile.prevPage' | translate }}</span>
+                        </button>
+
+                        <span class="text-[11px] font-mono text-slate-300">
+                          {{ 'profile.pageLabel' | translate }} {{ authService.moderationPage() }} / {{ authService.moderationTotalPages() }}
+                        </span>
+
+                        <button
+                          type="button"
+                          [disabled]="authService.moderationPage() >= authService.moderationTotalPages()"
+                          (click)="onChangeModerationPage(authService.moderationPage() + 1)"
+                          class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                          <span>{{ 'profile.nextPage' | translate }}</span>
+                          <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
+                        </button>
+                      </div>
+                    }
                   }
                 </div>
               }
@@ -535,6 +872,7 @@ export class ProfileDrawerComponent implements OnInit {
   readonly authService = inject(AuthService);
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
+  readonly pwaService = inject(PwaService);
 
   readonly activeTab = signal<'packages' | 'favorites' | 'account' | 'moderation'>('packages');
 
@@ -545,6 +883,25 @@ export class ProfileDrawerComponent implements OnInit {
   editDisplayName = '';
   editBio = '';
   readonly isSavingProfile = signal(false);
+
+  private readonly noteInputs = signal<Record<string, string>>({});
+  private readonly actingReportIds = signal<Record<string, boolean>>({});
+
+  constructor() {
+    effect(() => {
+      const requestedTab = this.authService.requestedDrawerTab();
+      if (requestedTab) {
+        this.authService.consumeRequestedDrawerTab();
+        if (requestedTab === 'moderation' && this.authService.isAdmin()) {
+          this.onSelectModerationTab();
+        } else if (requestedTab === 'account') {
+          this.onSelectAccountTab();
+        } else {
+          this.activeTab.set(requestedTab);
+        }
+      }
+    });
+  }
 
   // Merge D1 user.packages with catalog packages matching the user's username or linked identities
   readonly userPackages = computed<LuantiPackage[]>(() => {
@@ -632,14 +989,117 @@ export class ProfileDrawerComponent implements OnInit {
     return this.authService.linkedIdentities().some(id => id.provider === provider);
   }
 
+  onSelectAccountTab(): void {
+    this.activeTab.set('account');
+    this.authService.fetchMyReports();
+  }
+
   onSelectModerationTab(): void {
     this.activeTab.set('moderation');
-    this.authService.fetchModerationQueue();
+    this.authService.fetchModerationQueue(true);
+  }
+
+  onFilterModerationStatus(status: 'open' | 'closed' | 'delisted'): void {
+    this.authService.fetchModerationQueue(true, 1, status, this.authService.moderationReasonFilter());
+  }
+
+  onFilterModerationReason(reason: string): void {
+    this.authService.fetchModerationQueue(true, 1, this.authService.moderationStatusFilter(), reason);
+  }
+
+  onChangeModerationPage(nextPage: number): void {
+    if (nextPage < 1 || nextPage > this.authService.moderationTotalPages()) return;
+    this.authService.fetchModerationQueue(true, nextPage);
+  }
+
+  getNoteInput(reportId: string | number): string {
+    return this.noteInputs()[String(reportId)] || '';
+  }
+
+  setNoteInput(reportId: string | number, val: string): void {
+    this.noteInputs.update(curr => ({ ...curr, [String(reportId)]: val }));
+  }
+
+  isActingOnReport(reportId: string | number): boolean {
+    return Boolean(this.actingReportIds()[String(reportId)]);
+  }
+
+  private setActingOnReport(reportId: string | number, active: boolean): void {
+    this.actingReportIds.update(curr => ({ ...curr, [String(reportId)]: active }));
+  }
+
+  async onToggleMasterNotifications(enabled: boolean): Promise<void> {
+    await this.pwaService.setNotificationsEnabled(enabled);
+  }
+
+  async onReplyToReport(rep: ModerationReport): Promise<void> {
+    const note = this.getNoteInput(rep.id).trim();
+    if (!note) return;
+    this.setActingOnReport(rep.id, true);
+    const res = await this.authService.actOnModerationReport(rep.id, 'reply', note);
+    this.setActingOnReport(rep.id, false);
+    if (res.success) {
+      this.setNoteInput(rep.id, '');
+    }
+  }
+
+  async onRecheckReport(rep: ModerationReport): Promise<void> {
+    this.setActingOnReport(rep.id, true);
+    await this.authService.actOnModerationReport(rep.id, 'recheck', this.getNoteInput(rep.id).trim() || undefined);
+    this.setActingOnReport(rep.id, false);
+  }
+
+  async onResolveReport(rep: ModerationReport): Promise<void> {
+    this.setActingOnReport(rep.id, true);
+    const res = await this.authService.actOnModerationReport(rep.id, 'resolve', this.getNoteInput(rep.id).trim() || undefined);
+    this.setActingOnReport(rep.id, false);
+    if (res.success) {
+      this.setNoteInput(rep.id, '');
+    }
+  }
+
+  async onDismissReport(rep: ModerationReport): Promise<void> {
+    this.setActingOnReport(rep.id, true);
+    const res = await this.authService.actOnModerationReport(rep.id, 'dismiss', this.getNoteInput(rep.id).trim() || undefined);
+    this.setActingOnReport(rep.id, false);
+    if (res.success) {
+      this.setNoteInput(rep.id, '');
+    }
+  }
+
+  async onReopenReport(rep: ModerationReport): Promise<void> {
+    this.setActingOnReport(rep.id, true);
+    await this.authService.actOnModerationReport(rep.id, 'reopen', this.getNoteInput(rep.id).trim() || undefined);
+    this.setActingOnReport(rep.id, false);
+  }
+
+  async onBulkDismissBroken(): Promise<void> {
+    await this.authService.bulkModerationAction('dismiss_all_broken');
+  }
+
+  async onBulkClearClosed(): Promise<void> {
+    await this.authService.bulkModerationAction('clear_closed');
   }
 
   openPackage(pkg: LuantiPackage): void {
     this.authService.closeProfileDrawer(false);
     this.packageService.openPackageModal(pkg);
+  }
+
+  openPackageById(packageId: string): void {
+    if (!packageId) return;
+    this.authService.closeProfileDrawer(false);
+    const existing = this.packageService.packages().find(
+      p => p.id.toLowerCase() === packageId.toLowerCase()
+    );
+    if (existing) {
+      this.packageService.openPackageModal(existing);
+    } else {
+      const [author, name] = packageId.split('/');
+      if (author && name) {
+        this.packageService.openPackageModalById(author, name, true);
+      }
+    }
   }
 
   openPackageAndEditTags(pkg: LuantiPackage): void {
@@ -675,12 +1135,16 @@ export class ProfileDrawerComponent implements OnInit {
   async onAdminKillSwitch(rep: ModerationReport): Promise<void> {
     const [author, name] = rep.package_id.split('/');
     if (!author || !name) return;
+    const note = this.getNoteInput(rep.id).trim();
+    this.setActingOnReport(rep.id, true);
     await this.packageService.moderatePackage(
       { author, name, id: rep.package_id },
       'delist',
-      `Delisted via Admin Report #${rep.id} (${rep.reason})`,
+      note || `Delisted via Admin Report #${rep.id} (${rep.reason})`,
       rep.id
     );
+    this.setActingOnReport(rep.id, false);
+    this.setNoteInput(rep.id, '');
   }
 
   async onRestorePackage(pkg: LuantiPackage): Promise<void> {

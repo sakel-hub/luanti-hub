@@ -14,9 +14,13 @@ import { PackageCardComponent } from './features/card/package-card.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
+import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
+import { PwaService } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
-import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
+import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../../functions/api/packages/git';
+import { onRequest as edgeMiddleware, checkEdgeRateLimit } from '../../functions/_middleware';
+import { autoResolveBrokenRepoReport } from '../../functions/api/lib/upstream';
 import {
   createAuditProofToken,
   verifyAuditProofToken,
@@ -707,5 +711,343 @@ description = Mob animation and spawning framework.
     expect(await verifyOAuthStateToken(stateToken, 'github', secret)).toBe(true);
     expect(await verifyOAuthStateToken(stateToken, 'codeberg', secret)).toBe(false);
     expect(await verifyOAuthStateToken(stateToken, 'github', 'wrong-secret')).toBe(false);
+  });
+
+  it('should guard edge API against cross-origin hotlinking, bots, rate abuse, and unauthenticated git audits', async () => {
+    // 1. Block known scraper bots on /api/*
+    const botReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.0)' }
+    });
+    const botRes = await edgeMiddleware({
+      request: botReq,
+      next: async () => new Response('ok'),
+      env: {}
+    });
+    expect(botRes.status).toBe(403);
+
+    // 2. Block cross-origin browser hotlinking on /api/*
+    const crossOriginReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+      headers: { Origin: 'https://evil-scraper.example.com' }
+    });
+    const crossOriginRes = await edgeMiddleware({
+      request: crossOriginReq,
+      next: async () => new Response('ok'),
+      env: {}
+    });
+    expect(crossOriginRes.status).toBe(403);
+
+    // 3. Allow legitimate Luanti in-game client requests (no Origin header)
+    const luantiClientReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+      headers: { 'User-Agent': 'Luanti/5.10.0' }
+    });
+    const luantiClientRes = await edgeMiddleware({
+      request: luantiClientReq,
+      next: async () => new Response('ok'),
+      env: {}
+    });
+    expect(luantiClientRes.status).toBe(200);
+
+    // 4. Enforce sliding-window rate limits per IP
+    const testIp = '203.0.113.99';
+    for (let i = 0; i < 3; i++) {
+      expect(checkEdgeRateLimit(testIp, 'mutation', 3, 60_000, 1000).allowed).toBe(true);
+    }
+    const throttled = checkEdgeRateLimit(testIp, 'mutation', 3, 60_000, 1000);
+    expect(throttled.allowed).toBe(false);
+    expect(throttled.retryAfterSeconds).toBeGreaterThan(0);
+
+    // 5. Reject unauthenticated POST /api/packages/git (including dryRun) with 401
+    const unauthGitReq = new Request('https://luanti-hub.pages.dev/api/packages/git', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repoUrl: 'https://codeberg.org/user/mod', dryRun: true })
+    });
+    const unauthGitRes = await gitOnRequestPost({ request: unauthGitReq, env: {} });
+    expect(unauthGitRes.status).toBe(401);
+  });
+
+  it('should render adaptive non-truncating tabs, frosted glass badges/buttons, and pagination in ProfileDrawerComponent without any test notification button', () => {
+    const authService = TestBed.inject(AuthService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    (authService as any)._currentUser.set({
+      id: 'admin-1',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'admin',
+      open_reports_count: 12,
+      identities: [{ provider: 'codeberg', username: 'SaKeL', verified: true }],
+      packages: []
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+    (authService as any)._moderationReports.set([
+      {
+        id: 'rep-101',
+        package_id: 'sakel-hub/x_mobs',
+        package_title: 'X Mobs',
+        package_author: 'sakel-hub',
+        reason: 'broken',
+        details: 'Repository returned HTTP 404 during background probe.',
+        status: 'open',
+        resolution_note: 'Investigating repository branch status.',
+        created_at: new Date().toISOString()
+      }
+    ]);
+    (authService as any)._moderationTotal.set(12);
+    (authService as any)._moderationPage.set(1);
+    (authService as any)._moderationTotalPages.set(2);
+
+    const fixture = TestBed.createComponent(ProfileDrawerComponent);
+    const comp = fixture.componentInstance;
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const drawerPanel = el.querySelector('.max-w-2xl');
+    expect(drawerPanel).toBeTruthy();
+
+    // Verify adaptive flex-wrap tab bar without any text truncation classes on tab buttons
+    const tabBar = el.querySelector('.flex.flex-wrap.gap-1\\.5') as HTMLElement;
+    expect(tabBar).toBeTruthy();
+    const tabButtons = Array.from(tabBar.querySelectorAll('button'));
+    expect(tabButtons.length).toBe(4);
+    for (const btn of tabButtons) {
+      expect(btn.querySelector('.truncate')).toBeNull();
+    }
+
+    // Verify frosted glass badge on Moderation tab instead of solid red bg-rose-500
+    const modTabBadge = tabButtons[3].querySelector('.glass-badge-rose');
+    expect(modTabBadge).toBeTruthy();
+    expect(modTabBadge?.textContent?.trim()).toBe('12');
+
+    // Switch to Account tab and verify notification settings without any test notification button
+    comp.activeTab.set('account');
+    settingsService.notificationsEnabled.set(true);
+    fixture.detectChanges();
+    expect(el.textContent).toContain('Native PWA Notifications');
+    expect(el.textContent?.toLowerCase()).not.toContain('test notification');
+
+    // Switch to Moderation tab and verify frosted glass buttons, communication note, 404 re-check, and pagination
+    comp.activeTab.set('moderation');
+    fixture.detectChanges();
+    expect(el.textContent).toContain('Investigating repository branch status.');
+    expect(el.querySelector('.glass-btn-emerald')).toBeTruthy();
+    expect(el.querySelector('.glass-btn-rose')).toBeTruthy();
+    expect(el.querySelector('.glass-btn-amber')).toBeTruthy();
+    expect(el.textContent).toContain('Page 1 / 2');
+  });
+
+  it('should deduplicate native PWA notifications by deterministic tag and auto-resolve broken 404 reports when repo recovers', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    localStorage.removeItem('lh_seen_notification_tags');
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyModeration.set(true);
+
+    const origNotification = (window as any).Notification;
+    class MockNotification {
+      static permission: NotificationPermission = 'granted';
+      onclick: (() => void) | null = null;
+      constructor(public title: string, public options?: NotificationOptions) {}
+      close(): void {}
+    }
+    (window as any).Notification = MockNotification;
+
+    try {
+      const firstSent = await pwaService.sendNativeNotification({
+        category: 'moderation',
+        title: 'Moderation Update • X Mobs',
+        body: 'Auto-resolved: Git repository responded with HTTP 200.',
+        tag: 'lh-mod-rep-101-closed',
+        data: { packageId: 'sakel-hub/x_mobs', targetTab: 'account' }
+      });
+      expect(firstSent).toBe(true);
+
+      // Duplicate tag must be suppressed so users are never spammed across page reloads
+      const duplicateSent = await pwaService.sendNativeNotification({
+        category: 'moderation',
+        title: 'Moderation Update • X Mobs',
+        body: 'Auto-resolved: Git repository responded with HTTP 200.',
+        tag: 'lh-mod-rep-101-closed'
+      });
+      expect(duplicateSent).toBe(false);
+    } finally {
+      (window as any).Notification = origNotification;
+    }
+
+    // Verify autoResolveBrokenRepoReport closes open 'broken' reports in D1 when Git returns HTTP 200
+    const executedQueries: Array<{ sql: string; args: any[] }> = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: (...args: any[]) => ({
+          run: async () => {
+            executedQueries.push({ sql, args });
+            return { meta: { changes: 1 } };
+          }
+        }),
+        run: async () => ({ meta: { changes: 0 } })
+      })
+    };
+
+    const resolved = await autoResolveBrokenRepoReport(mockDb, 'sakel-hub/x_mobs');
+    expect(resolved).toBe(true);
+    const updateQuery = executedQueries.find(q => q.sql.includes("SET status = 'resolved'"));
+    expect(updateQuery).toBeTruthy();
+    expect(updateQuery?.args[1]).toBe('sakel-hub/x_mobs');
+  });
+
+  it('should normalize missing tile metadata with baseline engine version, restore cached metadata, and prioritize visible search/category tiles', () => {
+    const pkgService = TestBed.inject(PackageService) as any;
+
+    pkgService.hydratedMetaCache.set('adikalon/stalker', {
+      license: 'MIT',
+      min_minetest_version: '5.4.0',
+      tags: ['cave', 'monsters'],
+      downloads: 420
+    });
+
+    const normalized = pkgService.normalizePackage({
+      author: 'adikalon',
+      name: 'stalker',
+      title: 'Stalker',
+      type: 'mod',
+      short_description: 'Adds a scary and strong monster that lives in caves'
+    });
+
+    expect(normalized.license).toBe('MIT');
+    expect(normalized.min_minetest_version).toBe('5.4.0');
+    expect(normalized.downloads).toBe(420);
+    expect(normalized.tags).toEqual(['cave', 'monsters']);
+
+    const unhydrated = pkgService.normalizePackage({
+      author: 'Liil',
+      name: 'livingcaves',
+      title: 'Livingcaves',
+      type: 'mod',
+      short_description: 'Adds more life to the caves of your world'
+    });
+    expect(unhydrated.min_minetest_version).toBe('5.0.0');
+
+    const other1 = pkgService.normalizePackage({ author: 'other', name: 'pkg1', title: 'P1', type: 'mod' });
+    const other2 = pkgService.normalizePackage({ author: 'other', name: 'pkg2', title: 'P2', type: 'mod' });
+    pkgService.hydrationQueue.length = 0;
+    pkgService.hydrationQueue.push(other1, other2);
+    pkgService.activeHydrationWorkers = 8; // Pause queue draining so we can inspect queue order
+
+    pkgService.prioritizePackagesForHydration([unhydrated]);
+    expect(pkgService.hydrationQueue[0]?.id).toBe('Liil/livingcaves');
+    pkgService.activeHydrationWorkers = 0;
+  });
+
+  it('should parse .cdb.json Luanti ContentDB metadata schema and build obstruction-free hover video embed URLs', async () => {
+    const { parseCdbJsonMetadata } = await import('../../functions/api/lib/upstream');
+    const cdbRaw = JSON.stringify({
+      type: 'MOD',
+      name: 'mesecons',
+      title: 'Mesecons',
+      short_description: 'Digital circuitry and logic gates for Luanti',
+      dev_state: 'ACTIVELY_DEVELOPED',
+      tags: ['technology', 'creative'],
+      license: 'LGPL-3.0-only',
+      media_license: 'CC-BY-SA-3.0',
+      repo: 'https://github.com/minetest-mods/mesecons',
+      issue_tracker: 'https://github.com/minetest-mods/mesecons/issues',
+      forums: 628,
+      video_url: 'https://www.youtube.com/watch?v=628mesecons'
+    });
+
+    const parsedBackend = parseCdbJsonMetadata(cdbRaw);
+    expect(parsedBackend).toBeTruthy();
+    expect(parsedBackend?.type).toBe('mod');
+    expect(parsedBackend?.license).toBe('LGPL-3.0-only');
+    expect(parsedBackend?.media_license).toBe('CC-BY-SA-3.0');
+    expect(parsedBackend?.tags).toEqual(['technology', 'creative']);
+    expect(parsedBackend?.forum_url).toBe('https://forum.luanti.org/viewtopic.php?t=628');
+    expect(parsedBackend?.video_url).toBe('https://www.youtube.com/watch?v=628mesecons');
+
+    const pkgService = TestBed.inject(PackageService) as any;
+    const parsedFrontend = pkgService.parseCdbJsonText(cdbRaw);
+    expect(parsedFrontend?.license).toBe('LGPL-3.0-only');
+    expect(parsedFrontend?.forum_url).toBe('https://forum.luanti.org/viewtopic.php?t=628');
+
+    // Verify obstruction-free YouTube hover embed URL and ready state in PackageCardComponent
+    const cardFixture = TestBed.createComponent(PackageCardComponent);
+    const cardComp = cardFixture.componentInstance as any;
+    const embedUrl = cardComp.buildHoverEmbedUrl('https://www.youtube.com/watch?v=628mesecons');
+    expect(embedUrl).toContain('youtube-nocookie.com/embed/628mesecons');
+    expect(embedUrl).toContain('controls=0');
+    expect(embedUrl).toContain('disablekb=1');
+    expect(embedUrl).toContain('fs=0');
+    expect(embedUrl).toContain('iv_load_policy=3');
+    expect(embedUrl).toContain('modestbranding=1');
+  });
+
+  it('should allow flagging reviews and allow admins or review authors to remove reviews in PackageDetailModalComponent', () => {
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+    const fixture = TestBed.createComponent(PackageDetailModalComponent);
+    const comp = fixture.componentInstance;
+
+    comp.package = (pkgService as any).normalizePackage({
+      id: 'Jeija/mesecons',
+      author: 'Jeija',
+      name: 'mesecons',
+      title: 'Mesecons',
+      type: 'mod'
+    });
+
+    const sampleReview = {
+      id: 'lh_42',
+      package_id: 'Jeija/mesecons',
+      source: 'luantihub' as const,
+      rating: 5,
+      title: 'Great logic mod',
+      comment: 'Works well in 5.10',
+      created_at: new Date().toISOString(),
+      author: {
+        username: 'reviewer1',
+        display_name: 'Reviewer One',
+        avatar_url: 'logo.svg'
+      }
+    };
+
+    // Signed in as reviewer1 (own review): canDeleteReview = true, isOwnReview = true
+    (authService as any)._currentUser.set({
+      id: 'u1',
+      username: 'reviewer1',
+      display_name: 'Reviewer One',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [],
+      packages: []
+    });
+    expect(comp.isOwnReview(sampleReview)).toBe(true);
+    expect(comp.canDeleteReview(sampleReview)).toBe(true);
+
+    // Signed in as another regular user: canDeleteReview = false, isOwnReview = false
+    (authService as any)._currentUser.set({
+      id: 'u2',
+      username: 'otheruser',
+      display_name: 'Other User',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [],
+      packages: []
+    });
+    expect(comp.isOwnReview(sampleReview)).toBe(false);
+    expect(comp.canDeleteReview(sampleReview)).toBe(false);
+
+    // Signed in as Admin: canDeleteReview = true even for another user's review
+    (authService as any)._currentUser.set({
+      id: 'admin1',
+      username: 'sakel',
+      display_name: 'Sakel Admin',
+      avatar_url: 'logo.svg',
+      role: 'admin',
+      identities: [],
+      packages: []
+    });
+    expect(comp.canDeleteReview(sampleReview)).toBe(true);
   });
 });

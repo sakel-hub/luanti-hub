@@ -6,6 +6,7 @@ import {
   signal,
   ElementRef,
   ViewChild,
+  OnChanges,
   OnDestroy
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
@@ -69,9 +70,9 @@ import {
           class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
         />
 
-        <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute Toggle) -->
+        <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute Toggle & Obstruction-Free Crop) -->
         @if (isHoverVideoActive() && package.video_url) {
-          <div class="absolute inset-0 z-10 bg-black animate-fade-in">
+          <div class="absolute inset-0 z-10 bg-black overflow-hidden animate-fade-in">
             @if (isDirectVideo(package.video_url)) {
               <video
                 #hoverVideoEl
@@ -81,17 +82,35 @@ import {
                 autoplay
                 loop
                 playsinline
-                class="w-full h-full object-cover">
+                disablePictureInPicture
+                controlsList="nodownload nofullscreen noremoteplayback"
+                class="w-full h-full object-cover pointer-events-none">
               </video>
             } @else if (hoverEmbedSafeUrl(); as safeEmbed) {
+              <!-- Vertical aspect-ratio letterbox crop pushes YouTube top title/avatar bar and bottom watermark/controls outside overflow-hidden while keeping the 16:9 video centered -->
               <iframe
                 #hoverIframeEl
                 [src]="safeEmbed"
                 [title]="package.title + ' preview'"
-                class="w-full h-full border-0 pointer-events-none scale-[1.04]"
+                (load)="onHoverIframeLoad()"
+                tabindex="-1"
+                aria-hidden="true"
+                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[106%] h-[240%] border-0 pointer-events-none select-none"
                 allow="autoplay; encrypted-media">
               </iframe>
+              <!-- Smooth thumbnail curtain hides initial YouTube buffer & center play/pause icon flash -->
+              <img
+                [src]="package.banner || package.video_thumbnail_url || package.thumbnail || 'logo.svg'"
+                [fallbackThumbnail]="package.thumbnail"
+                appImgFallback
+                alt=""
+                aria-hidden="true"
+                [class]="'absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-500 ' + (isEmbedVideoReady() ? 'opacity-0' : 'opacity-100')"
+              />
             }
+
+            <!-- Subtle edge vignette to mask any residual player chrome -->
+            <div class="absolute inset-0 bg-gradient-to-b from-slate-950/35 via-transparent to-slate-950/50 pointer-events-none"></div>
 
             <!-- Floating Mute / Unmute Toggle Button -->
             <button
@@ -230,7 +249,7 @@ import {
     </div>
   `
 })
-export class PackageCardComponent implements OnDestroy {
+export class PackageCardComponent implements OnChanges, OnDestroy {
   @Input({ required: true }) package!: LuantiPackage;
   @Input() isFirst = false;
   @Input() isLast = false;
@@ -244,9 +263,17 @@ export class PackageCardComponent implements OnDestroy {
 
   readonly isHoverVideoActive = signal<boolean>(false);
   readonly isHoverMuted = signal<boolean>(true);
+  readonly isEmbedVideoReady = signal<boolean>(false);
   readonly hoverEmbedSafeUrl = signal<SafeResourceUrl | null>(null);
 
   private hoverIntentTimer: any = null;
+  private embedReadyTimer: any = null;
+
+  ngOnChanges(): void {
+    if (this.package && (!this.package.license || !this.package.downloads)) {
+      this.packageService.ensurePackageHydrated(this.package);
+    }
+  }
 
   ngOnDestroy(): void {
     this.clearHoverVideo();
@@ -275,31 +302,46 @@ export class PackageCardComponent implements OnDestroy {
     try {
       const u = new URL(rawUrl);
       const host = u.hostname.toLowerCase();
+      const ytParams = 'autoplay=1&mute=1&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1';
       if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
         const v = u.searchParams.get('v') || (u.pathname.startsWith('/embed/') ? u.pathname.split('/embed/')[1]?.split('/')[0] : null);
         if (v) {
-          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(v)}?autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&loop=1&playlist=${encodeURIComponent(v)}&enablejsapi=1&playsinline=1`;
+          const encodedV = encodeURIComponent(v);
+          return `https://www.youtube-nocookie.com/embed/${encodedV}?${ytParams}&loop=1&playlist=${encodedV}`;
         }
       }
       if (host === 'youtu.be') {
         const id = u.pathname.split('/').filter(Boolean)[0];
         if (id) {
-          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&loop=1&playlist=${encodeURIComponent(id)}&enablejsapi=1&playsinline=1`;
+          const encodedId = encodeURIComponent(id);
+          return `https://www.youtube-nocookie.com/embed/${encodedId}?${ytParams}&loop=1&playlist=${encodedId}`;
         }
       }
       if (host.includes('vimeo.com')) {
         const id = u.pathname.split('/').filter(Boolean).pop();
         if (id && /^\d+$/.test(id)) {
-          return `https://player.vimeo.com/video/${id}?autoplay=1&muted=1&background=1`;
+          return `https://player.vimeo.com/video/${id}?autoplay=1&muted=1&background=1&controls=0&title=0&byline=0&portrait=0`;
         }
       }
       if (u.pathname.includes('/videos/watch/')) {
-        return rawUrl.replace('/videos/watch/', '/videos/embed/') + (rawUrl.includes('?') ? '&autoplay=1&muted=1&controls=0' : '?autoplay=1&muted=1&controls=0');
+        return rawUrl.replace('/videos/watch/', '/videos/embed/') + (rawUrl.includes('?') ? '&autoplay=1&muted=1&controls=0&title=0&warningTitle=0&peertubeLink=0' : '?autoplay=1&muted=1&controls=0&title=0&warningTitle=0&peertubeLink=0');
       }
       return null;
     } catch {
       return null;
     }
+  }
+
+  onHoverIframeLoad(): void {
+    if (this.embedReadyTimer) {
+      clearTimeout(this.embedReadyTimer);
+    }
+    this.embedReadyTimer = setTimeout(() => {
+      this.embedReadyTimer = null;
+      if (this.isHoverVideoActive()) {
+        this.isEmbedVideoReady.set(true);
+      }
+    }, 680);
   }
 
   onCardMouseEnter(): void {
@@ -321,6 +363,7 @@ export class PackageCardComponent implements OnDestroy {
       }
       if (!rawUrl) return;
       this.isHoverMuted.set(true);
+      this.isEmbedVideoReady.set(false);
       if (!this.isDirectVideo(rawUrl)) {
         const embed = this.buildHoverEmbedUrl(rawUrl);
         if (!embed) return;
@@ -341,8 +384,13 @@ export class PackageCardComponent implements OnDestroy {
       clearTimeout(this.hoverIntentTimer);
       this.hoverIntentTimer = null;
     }
+    if (this.embedReadyTimer) {
+      clearTimeout(this.embedReadyTimer);
+      this.embedReadyTimer = null;
+    }
     if (this.isHoverVideoActive()) {
       this.isHoverVideoActive.set(false);
+      this.isEmbedVideoReady.set(false);
       this.hoverEmbedSafeUrl.set(null);
       this.isHoverMuted.set(true);
     }

@@ -22,7 +22,6 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const { provider } = context.params;
   const url = new URL(context.request.url);
   const loginHint = (url.searchParams.get('login') || '').trim();
-  const forceSelectAccount = url.searchParams.get('prompt') === 'select_account' || Boolean(loginHint);
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const state = await createOAuthStateToken(provider, cleanEnvValue(context.env.SESSION_SECRET) || undefined);
 
@@ -35,7 +34,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       clientId = cleanEnvValue(context.env.CODEBERG_CLIENT_ID);
       redirectUri = cleanEnvValue(context.env.CODEBERG_REDIRECT_URI) || defaultRedirectUri;
       if (clientId) {
-        authUrl = `https://codeberg.org/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code${forceSelectAccount ? '&prompt=select_account' : ''}&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
+        authUrl = `https://codeberg.org/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
       }
       break;
     }
@@ -43,7 +42,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       clientId = cleanEnvValue(context.env.MESEHUB_CLIENT_ID);
       redirectUri = cleanEnvValue(context.env.MESEHUB_REDIRECT_URI) || defaultRedirectUri;
       if (clientId) {
-        authUrl = `https://git.minetest.land/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code${forceSelectAccount ? '&prompt=select_account' : ''}&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
+        authUrl = `https://git.minetest.land/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
       }
       break;
     }
@@ -51,7 +50,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       clientId = cleanEnvValue(context.env.GITLAB_CLIENT_ID);
       redirectUri = cleanEnvValue(context.env.GITLAB_REDIRECT_URI) || defaultRedirectUri;
       if (clientId) {
-        authUrl = `https://gitlab.com/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=read_user${forceSelectAccount ? '&prompt=select_account' : ''}&state=${encodeURIComponent(state)}${loginHint ? `&login_hint=${encodeURIComponent(loginHint)}` : ''}`;
+        authUrl = `https://gitlab.com/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=read_user&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login_hint=${encodeURIComponent(loginHint)}` : ''}`;
       }
       break;
     }
@@ -59,8 +58,8 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       clientId = cleanEnvValue(context.env.GITHUB_CLIENT_ID);
       redirectUri = cleanEnvValue(context.env.GITHUB_REDIRECT_URI) || defaultRedirectUri;
       if (clientId) {
-        // GitHub honors `prompt=select_account` and `login` when explicitly switching/adding accounts
-        authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user${forceSelectAccount ? '&prompt=select_account' : ''}&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
+        // GitHub honors `prompt=select_account` and `login` to always display the account chooser
+        authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
       }
       break;
     }

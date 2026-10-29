@@ -77,9 +77,14 @@ export class PackageService {
 
   private searchDebounceTimer: any = null;
   private bootCacheSyncTimer: any = null;
+  private hydratedMetaPersistTimer: any = null;
+  private d1WritebackTimer: any = null;
+  private bulkScoresInFlight: Promise<void> | null = null;
   private initialUrlSynced = false;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
+  private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
+  private readonly pendingD1Writeback = new Map<string, any>();
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
   private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
@@ -383,6 +388,7 @@ export class PackageService {
   });
 
   constructor() {
+    this.loadHydratedMetaCache();
     this.initCatalog();
     this.initRouterSync();
 
@@ -404,6 +410,106 @@ export class PackageService {
         });
       }
     }, { allowSignalWrites: true });
+
+    // Proactively hydrate visible packages whenever the user searches, switches categories, filters by tag, or loads more
+    effect(() => {
+      const visible = this.visiblePackages();
+      if (visible.length === 0) return;
+      this.prioritizePackagesForHydration(visible);
+    });
+  }
+
+  private loadHydratedMetaCache(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem('lh_hydrated_meta_v1');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (k && v && typeof v === 'object') {
+            this.hydratedMetaCache.set(k.toLowerCase(), v as Partial<LuantiPackage>);
+          }
+        }
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+  }
+
+  private scheduleHydratedMetaPersist(): void {
+    if (typeof localStorage === 'undefined') return;
+    if (this.hydratedMetaPersistTimer) {
+      clearTimeout(this.hydratedMetaPersistTimer);
+    }
+    this.hydratedMetaPersistTimer = setTimeout(() => {
+      try {
+        const entries = Array.from(this.hydratedMetaCache.entries()).slice(-1800);
+        const obj: Record<string, any> = {};
+        for (const [k, v] of entries) {
+          obj[k] = v;
+        }
+        localStorage.setItem('lh_hydrated_meta_v1', JSON.stringify(obj));
+      } catch {
+        // Ignore quota errors
+      }
+    }, 400);
+  }
+
+  private queueD1Writeback(pkg: LuantiPackage, fields: Partial<LuantiPackage>): void {
+    if (!this.edgeApiAvailable || !pkg?.author || !pkg?.name) return;
+    const lic = fields.license || pkg.license || '';
+    const cdbDl = Number(fields.contentdb_downloads ?? pkg.contentdb_downloads ?? 0);
+    if (!lic && cdbDl <= 0) return;
+
+    const key = pkg.id.toLowerCase();
+    this.pendingD1Writeback.set(key, {
+      id: pkg.id,
+      author: pkg.author,
+      name: pkg.name,
+      title: pkg.title,
+      type: pkg.type,
+      short_desc: fields.short_desc || pkg.short_desc,
+      license: lic,
+      media_license: fields.media_license || pkg.media_license || lic,
+      min_minetest_version: fields.min_minetest_version || pkg.min_minetest_version || '5.0.0',
+      tags: fields.tags || pkg.tags,
+      contentdb_downloads: cdbDl,
+      downloads: Number(fields.downloads ?? pkg.downloads ?? cdbDl),
+      file_size: fields.file_size || pkg.file_size,
+      video_url: fields.video_url || pkg.video_url,
+      video_thumbnail_url: fields.video_thumbnail_url || pkg.video_thumbnail_url,
+      repo_url: fields.repo_url || pkg.repo_url,
+      thumbnail: pkg.thumbnail,
+      banner: fields.banner || pkg.banner
+    });
+
+    if (this.d1WritebackTimer) {
+      clearTimeout(this.d1WritebackTimer);
+    }
+    this.d1WritebackTimer = setTimeout(() => {
+      this.flushD1WritebackBatch();
+    }, 1200);
+  }
+
+  private async flushD1WritebackBatch(): Promise<void> {
+    if (!this.edgeApiAvailable || this.pendingD1Writeback.size === 0) return;
+    const batch = Array.from(this.pendingD1Writeback.values()).slice(0, 50);
+    for (const item of batch) {
+      this.pendingD1Writeback.delete(String(item.id).toLowerCase());
+    }
+    try {
+      await fetch('/api/packages/hydrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: batch })
+      });
+    } catch {
+      // Best-effort background D1 writeback
+    }
+    if (this.pendingD1Writeback.size > 0) {
+      this.d1WritebackTimer = setTimeout(() => this.flushD1WritebackBatch(), 1500);
+    }
   }
 
   private buildSearchBlob(pkg: Partial<LuantiPackage>): string {
@@ -509,16 +615,29 @@ export class PackageService {
 
   private normalizePackage(item: any): LuantiPackage {
     const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
-    const shortDesc = item.short_desc || item.short_description || '';
+    const pkgId = item.id || `${resolvedAuthor}/${item.name}`;
+    const cachedMeta = this.hydratedMetaCache.get(String(pkgId).toLowerCase());
+
+    const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
     const hasSplitDownloads = item?.contentdb_downloads !== undefined || item?.luantihub_downloads !== undefined;
-    const contentdbDownloads = Math.max(0, Number(item?.contentdb_downloads ?? (item?.provider !== 'github' && item?.provider !== 'codeberg' && item?.provider !== 'gitlab' ? item?.downloads : 0) ?? 0) || 0);
+    const rawCdbDl = Math.max(
+      0,
+      Number(
+        item?.contentdb_downloads ??
+          (item?.provider !== 'github' && item?.provider !== 'codeberg' && item?.provider !== 'gitlab' && item?.provider !== 'mesehub'
+            ? item?.downloads
+            : 0) ??
+          0
+      ) || 0
+    );
+    const contentdbDownloads = Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
     const luantihubDownloads = Math.max(0, Number(item?.luantihub_downloads ?? 0) || 0);
     const downloads = hasSplitDownloads
-      ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? 0) || 0)
-      : Math.max(0, Number(item?.downloads ?? item?.downloads_count ?? 0) || 0);
+      ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
+      : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
 
-    const score = this.computeStarRatingFromData(item, 0);
-    const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? 0);
+    const score = this.computeStarRatingFromData(item, cachedMeta?.score || 0);
+    const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? cachedMeta?.contentdb_score ?? 0);
     const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
 
     const thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
@@ -527,13 +646,13 @@ export class PackageService {
       banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
     }
 
-    const rawDownloadSizeBytes = this.parseDownloadSizeBytes(item.download_size);
+    const rawDownloadSizeBytes = this.parseDownloadSizeBytes(item.download_size ?? cachedMeta?.download_size);
     const sanitizedItemFileSize =
       item.download_size === undefined && String(item.file_size || '').trim() === '2 KB'
         ? undefined
-        : item.file_size;
+        : (item.file_size || cachedMeta?.file_size);
     const sizeFormatted =
-      this.formatDownloadSize(item.download_size) ||
+      this.formatDownloadSize(item.download_size ?? cachedMeta?.download_size) ||
       this.formatDownloadSize(sanitizedItemFileSize);
 
     const rawDeps = this.parseArrayField(item.dependencies);
@@ -546,14 +665,17 @@ export class PackageService {
       ? rawOptDeps.map((d: any) => (typeof d === 'string' ? d : d?.name || '')).filter(Boolean)
       : this.parseArrayField(item.soft_dependencies).map((d: any) => (typeof d === 'string' ? d : d?.name || '')).filter(Boolean);
 
-    const repoUrl = this.normalizeGitRepoUrl(item.repo_url || item.repo || undefined);
+    const repoUrl = this.normalizeGitRepoUrl(item.repo_url || item.repo || cachedMeta?.repo_url || undefined);
     const isGitProvider = Boolean(item.provider && item.provider !== 'contentdb');
     const source: PackageSource = (item.source === 'git' || isGitProvider) ? 'git' : (item.source === 'mirror' ? 'mirror' : 'official');
 
     const parsedTagList = this.parseArrayField(item.tags);
-    const rawTags = parsedTagList
+    const rawTagsFromItem = parsedTagList
       .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
       .filter(Boolean);
+    const rawTags = rawTagsFromItem.length > 0
+      ? rawTagsFromItem
+      : (Array.isArray(cachedMeta?.tags) ? cachedMeta!.tags! : []);
 
     const lowerTags = rawTags.map((t: string) => t.toLowerCase());
     const explicitSources: PackageSource[] = Array.isArray(item.sources)
@@ -609,14 +731,17 @@ export class PackageService {
       this.extractLongDescription(item.long_desc);
 
     const resolvedVideo = this.extractEmbeddedVideo(
-      item.video_url,
-      item.video_thumbnail_url,
+      item.video_url || cachedMeta?.video_url,
+      item.video_thumbnail_url || cachedMeta?.video_thumbnail_url,
       longDesc,
       item.readme
     );
 
+    const resolvedLic = item.license || item.media_license || cachedMeta?.license || cachedMeta?.media_license || '';
+    const resolvedMediaLic = item.media_license || item.license || cachedMeta?.media_license || cachedMeta?.license || '';
+
     const pkg: LuantiPackage = {
-      id: item.id || `${resolvedAuthor}/${item.name}`,
+      id: pkgId,
       author: resolvedAuthor,
       name: item.name,
       title: item.title || item.name,
@@ -632,8 +757,8 @@ export class PackageService {
       contentdb_downloads: contentdbDownloads,
       luantihub_downloads: luantihubDownloads,
       downloads,
-      license: item.license || item.media_license || '',
-      media_license: item.media_license || item.license || '',
+      license: resolvedLic,
+      media_license: resolvedMediaLic,
       repo_url: repoUrl,
       website: item.website || undefined,
       issue_tracker: item.issue_tracker || undefined,
@@ -662,7 +787,7 @@ export class PackageService {
       source,
       sources,
       tags: rawTags.length > 0 ? rawTags : [item.type || 'mod'],
-      min_minetest_version: item.min_minetest_version,
+      min_minetest_version: item.min_minetest_version || cachedMeta?.min_minetest_version || '5.0.0',
       max_minetest_version: item.max_minetest_version,
       featured: Boolean(item.featured),
       download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : undefined,
@@ -676,7 +801,8 @@ export class PackageService {
     };
 
     const hasFullDownloads = hasOfficial ? contentdbDownloads > 0 : downloads > 0;
-    if (hasFullDownloads && Boolean(pkg.license)) {
+    const hasRichTags = pkg.tags.some(t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase()));
+    if (hasFullDownloads && Boolean(pkg.license) && (hasRichTags || !hasOfficial)) {
       this.hydratedIds.add(pkg.id.toLowerCase());
     }
 
@@ -1011,6 +1137,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v2');
         sessionStorage.removeItem('lh_boot_cache_v3');
         sessionStorage.removeItem('lh_boot_cache_v4');
+        sessionStorage.removeItem('lh_boot_cache_v5');
       }
     } catch {
       // Ignore storage errors
@@ -1054,12 +1181,106 @@ export class PackageService {
       this._serverTop10Today.set(payload.top10Today.map(item => this.normalizePackage(item)));
     }
 
-    // Proactively hydrate visible Hero, Top 10, and swimlane packages so aggregated downloads & licenses appear immediately without requiring hover
+    // Ensure all 3,500+ packages have exact ContentDB download counts even if ContentDB blocked the Worker IP on /scores/
+    this.ensureBulkScoresEnriched();
+
+    // Proactively hydrate visible Hero, Top 10, filtered grid, and swimlane packages so downloads, licenses & tags appear immediately
     this.queueInitialVisibleHydration();
+  }
+
+  /**
+   * When Cloudflare Worker IPs are challenged by ContentDB's bot filter on `/api/scores/`,
+   * non-D1 packages in the boot bundle may arrive with `contentdb_downloads === 0`.
+   * Fetching `/scores/` once from the client enriches all 3,500+ packages in 1 request.
+   */
+  private ensureBulkScoresEnriched(): void {
+    if (this.bulkScoresInFlight) return;
+    const list = this._packages();
+    if (list.length === 0) return;
+
+    const officialPkgs = list.filter(p => p.sources?.includes('official') || p.source === 'official');
+    if (officialPkgs.length === 0) return;
+    const withDownloads = officialPkgs.filter(p => (p.contentdb_downloads || 0) > 0 || (p.downloads || 0) > 0);
+    if (withDownloads.length >= Math.min(200, Math.floor(officialPkgs.length * 0.45))) {
+      return;
+    }
+
+    this.bulkScoresInFlight = (async () => {
+      try {
+        const scoresList = await this.fetchUpstreamWithMirrorFallback('/scores/');
+        if (!Array.isArray(scoresList) || scoresList.length === 0) return;
+
+        const scoresMap = new Map<string, any>();
+        for (const s of scoresList) {
+          if (s?.author && s?.name) {
+            scoresMap.set(`${s.author}/${s.name}`.toLowerCase(), s);
+          }
+        }
+        if (scoresMap.size === 0) return;
+
+        this._packages.update(current =>
+          current.map(pkg => {
+            const s = scoresMap.get(pkg.id.toLowerCase()) || scoresMap.get(`${pkg.author}/${pkg.name}`.toLowerCase());
+            if (!s) return pkg;
+
+            const cdbDl = typeof s.downloads === 'number'
+              ? Math.max(pkg.contentdb_downloads || 0, s.downloads)
+              : (pkg.contentdb_downloads || 0);
+            const lhDl = pkg.luantihub_downloads || 0;
+            const totalDl = Math.max(pkg.downloads || 0, cdbDl + lhDl);
+            const rawCdbScore = typeof s.score === 'number' ? Math.round(s.score * 10) / 10 : (pkg.contentdb_score || 0);
+            const starScore = this.computeStarRatingFromData(s, pkg.score || 0);
+            const revCounts = s.reviews && typeof s.reviews === 'object'
+              ? {
+                  positive: Number(s.reviews.positive || 0),
+                  neutral: Number(s.reviews.neutral || 0),
+                  negative: Number(s.reviews.negative || 0)
+                }
+              : pkg.review_thread_counts;
+
+            const existingMeta = this.hydratedMetaCache.get(pkg.id.toLowerCase()) || {};
+            this.hydratedMetaCache.set(pkg.id.toLowerCase(), {
+              ...existingMeta,
+              contentdb_downloads: cdbDl,
+              downloads: totalDl,
+              contentdb_score: rawCdbScore,
+              score: starScore || existingMeta.score
+            });
+
+            return {
+              ...pkg,
+              contentdb_downloads: cdbDl,
+              downloads: totalDl,
+              contentdb_score: rawCdbScore,
+              score: starScore,
+              review_thread_counts: revCounts
+            };
+          })
+        );
+
+        this.scheduleHydratedMetaPersist();
+        this.scheduleBootCachePersist();
+      } catch {
+        // Ignore bulk scores error
+      } finally {
+        this.bulkScoresInFlight = null;
+      }
+    })();
+  }
+
+  private needsTileHydration(pkg: LuantiPackage | null | undefined): boolean {
+    if (!pkg || !pkg.author || !pkg.name) return false;
+    const isOfficial = pkg.sources?.includes('official') || pkg.source === 'official';
+    const hasDownloads = isOfficial ? (pkg.contentdb_downloads || 0) > 0 : (pkg.downloads || 0) > 0;
+    const hasRichTags = (pkg.tags || []).some(
+      t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
+    );
+    return !pkg.license || !hasDownloads || (isOfficial && !hasRichTags);
   }
 
   private queueInitialVisibleHydration(): void {
     const priorityCandidates: LuantiPackage[] = [
+      ...this.visiblePackages(),
       ...this.heroShowcasePackages(),
       ...this.top10TodayPackages(),
       ...this.top10WeekPackages(),
@@ -1071,9 +1292,29 @@ export class PackageService {
     ];
 
     for (const pkg of priorityCandidates) {
-      if (!pkg.license || (pkg.sources?.includes('official') && !(pkg.contentdb_downloads && pkg.contentdb_downloads > 0))) {
+      if (this.needsTileHydration(pkg)) {
         this.ensurePackageHydrated(pkg);
       }
+    }
+  }
+
+  /**
+   * Prioritizes visible grid/search/category packages at the very front of the hydration queue
+   * so tiles on the user's screen populate immediately without waiting for off-screen carousels.
+   */
+  prioritizePackagesForHydration(candidates: LuantiPackage[]): void {
+    if (!Array.isArray(candidates) || candidates.length === 0) return;
+    const toPrioritize: LuantiPackage[] = [];
+    for (const pkg of candidates) {
+      if (this.needsTileHydration(pkg)) {
+        toPrioritize.push(pkg);
+      }
+    }
+    if (toPrioritize.length === 0) return;
+
+    // Unshift in reverse order so the top-left visible tile is popped first
+    for (let i = toPrioritize.length - 1; i >= 0; i--) {
+      this.ensurePackageHydrated(toPrioritize[i], true);
     }
   }
 
@@ -1084,10 +1325,10 @@ export class PackageService {
     }
     this.bootCacheSyncTimer = setTimeout(() => {
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v4');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v5');
         const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
         sessionStorage.setItem(
-          'lh_boot_cache_v4',
+          'lh_boot_cache_v5',
           JSON.stringify({
             ts: existingTs,
             edge: this.edgeApiAvailable,
@@ -1112,7 +1353,7 @@ export class PackageService {
 
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v4');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v5');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -1213,7 +1454,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v4',
+                'lh_boot_cache_v5',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -1270,20 +1511,33 @@ export class PackageService {
   }
 
   /**
-   * Queue background hydration of a package's full ContentDB metrics (downloads, score, tags, file_size)
-   * with a concurrency cap so visible cards populate smoothly.
+   * Queue background hydration of a package's full ContentDB metrics (downloads, license, tags, min_minetest_version)
+   * with priority support for currently visible search/category tiles.
    */
-  ensurePackageHydrated(pkg: LuantiPackage | null | undefined): void {
+  ensurePackageHydrated(pkg: LuantiPackage | null | undefined, highPriority = false): void {
     if (!pkg || !pkg.author || !pkg.name) return;
     const key = pkg.id.toLowerCase();
-    if (this.hydratedIds.has(key)) return;
+    if (this.hydratedIds.has(key)) {
+      if (highPriority) {
+        const existingIdx = this.hydrationQueue.findIndex(p => p.id.toLowerCase() === key);
+        if (existingIdx > 0) {
+          const [item] = this.hydrationQueue.splice(existingIdx, 1);
+          this.hydrationQueue.unshift(item);
+        }
+      }
+      return;
+    }
     this.hydratedIds.add(key);
-    this.hydrationQueue.push(pkg);
+    if (highPriority) {
+      this.hydrationQueue.unshift(pkg);
+    } else {
+      this.hydrationQueue.push(pkg);
+    }
     this.drainHydrationQueue();
   }
 
   private drainHydrationQueue(): void {
-    const MAX_CONCURRENT = 4;
+    const MAX_CONCURRENT = 8;
     while (this.activeHydrationWorkers < MAX_CONCURRENT && this.hydrationQueue.length > 0) {
       const nextPkg = this.hydrationQueue.shift();
       if (!nextPkg) break;
@@ -2202,6 +2456,64 @@ export class PackageService {
     }
   }
 
+  private parseCdbJsonText(rawText: string): {
+    license?: string;
+    media_license?: string;
+    tags?: string[];
+    dev_state?: string;
+    video_url?: string;
+    donate_url?: string;
+    issue_tracker?: string;
+    forum_url?: string;
+    translation_url?: string;
+    website?: string;
+    content_warnings?: string[];
+    short_description?: string;
+    long_description?: string;
+  } | null {
+    if (!rawText || typeof rawText !== 'string') return null;
+    try {
+      const parsed = JSON.parse(rawText);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      const cleanStr = (v: any): string | undefined =>
+        typeof v === 'string' && v.trim() ? v.trim() : undefined;
+      const cleanUrl = (v: any): string | undefined => {
+        if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+          return `https://forum.luanti.org/viewtopic.php?t=${Math.floor(v)}`;
+        }
+        const s = cleanStr(v);
+        if (!s) return undefined;
+        if (/^https?:\/\//i.test(s)) return s;
+        if (/^\d+$/.test(s)) return `https://forum.luanti.org/viewtopic.php?t=${s}`;
+        return undefined;
+      };
+      const cleanArr = (v: any): string[] | undefined => {
+        if (!Array.isArray(v)) return undefined;
+        const arr = v
+          .map(x => (typeof x === 'string' ? x.trim() : x?.name || x?.title || ''))
+          .filter(Boolean);
+        return arr.length > 0 ? arr : undefined;
+      };
+      return {
+        license: cleanStr(parsed.license),
+        media_license: cleanStr(parsed.media_license),
+        tags: cleanArr(parsed.tags),
+        dev_state: cleanStr(parsed.dev_state),
+        video_url: cleanUrl(parsed.video_url),
+        donate_url: cleanUrl(parsed.donate_url),
+        issue_tracker: cleanUrl(parsed.issue_tracker),
+        forum_url: cleanUrl(parsed.forum_url ?? parsed.forums),
+        translation_url: cleanUrl(parsed.translation_url),
+        website: cleanUrl(parsed.website),
+        content_warnings: cleanArr(parsed.content_warnings),
+        short_description: cleanStr(parsed.short_description ?? parsed.short_desc),
+        long_description: cleanStr(parsed.long_description)
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private async probeGitRepoMetadata(
     pkg: LuantiPackage,
     existingRepoUrl?: string,
@@ -2214,6 +2526,7 @@ export class PackageService {
     deps: string[];
     optDeps: string[];
     minVersion?: string;
+    cdbMeta?: ReturnType<PackageService['parseCdbJsonText']>;
   }> {
     const normalizedInputUrl = this.normalizeGitRepoUrl(existingRepoUrl);
     const confFiles = ['mod.conf', 'game.conf', 'texture_pack.conf'];
@@ -2226,6 +2539,7 @@ export class PackageService {
     let minVersion: string | undefined;
     let resolvedRepoUrl: string | undefined;
     let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
+    let cdbMeta: ReturnType<PackageService['parseCdbJsonText']> = null;
 
     const confirmedRepos = await this.discoverConfirmedRepos(pkg, normalizedInputUrl);
 
@@ -2233,16 +2547,32 @@ export class PackageService {
       const listing = await this.getRepoRootListing(repo.forge, repo.fullName);
       if (listing.length === 0) continue;
 
+      const cdbEntry = listing.find(f => f.name.toLowerCase() === '.cdb.json');
       const confEntry = listing.find(f => confFiles.includes(f.name.toLowerCase()));
       const initLuaEntry = listing.find(f => f.name.toLowerCase() === 'init.lua');
       const dependsTxtEntry = listing.find(f => f.name.toLowerCase() === 'depends.txt');
 
-      if (!confEntry && !initLuaEntry && !dependsTxtEntry) {
+      if (!cdbEntry && !confEntry && !initLuaEntry && !dependsTxtEntry) {
         continue;
       }
 
       resolvedRepoUrl = repo.repoUrl;
       gitRepoStatus = 'verified';
+
+      if (cdbEntry) {
+        const cdbUrl = cdbEntry.download_url || `${repo.rawBase}/${encodeURIComponent(cdbEntry.name)}`;
+        try {
+          const cdbRes = await fetch(cdbUrl);
+          if (cdbRes.ok) {
+            const cdbText = await cdbRes.text();
+            cdbMeta = this.parseCdbJsonText(cdbText);
+            if (cdbMeta?.license && !license) license = cdbMeta.license;
+            if (cdbMeta?.media_license && !mediaLicense) mediaLicense = cdbMeta.media_license;
+          }
+        } catch {
+          // Ignore error reading .cdb.json
+        }
+      }
 
       if (confEntry) {
         const confUrl = confEntry.download_url || `${repo.rawBase}/${encodeURIComponent(confEntry.name)}`;
@@ -2341,7 +2671,8 @@ export class PackageService {
       mediaLicense,
       deps,
       optDeps,
-      minVersion
+      minVersion,
+      cdbMeta
     };
   }
 
@@ -2367,8 +2698,13 @@ export class PackageService {
         const encAuthor = encodeURIComponent(pkg.author);
         const encName = encodeURIComponent(pkg.name);
 
+        const isPureGitOnly =
+          pkg.source === 'git' &&
+          !pkg.sources?.includes('official') &&
+          Boolean(pkg.provider && pkg.provider !== 'contentdb');
+
         let edgeResolved = false;
-        if (this.edgeApiAvailable) {
+        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly)) {
           try {
             const res = await fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`);
             if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
@@ -2380,17 +2716,12 @@ export class PackageService {
           }
         }
 
-        const isPureGitOnly =
-          pkg.source === 'git' &&
-          !pkg.sources?.includes('official') &&
-          Boolean(pkg.provider && pkg.provider !== 'contentdb');
-
         // Discard poisoned '2 KB' size returned by older Worker deployments that read Content-Length from content.luanti.org's HTML error page
         if (data && data.download_size === undefined && String(data.file_size || '').trim() === '2 KB') {
           data.file_size = undefined;
         }
 
-        // Query ContentDB directly from the browser when the Edge API is unavailable/failed OR returned 0 downloads for a ContentDB-linked package
+        // Query ContentDB directly from the browser when light-hydrating tiles (saving Worker quota) or when Edge API lacked full detail
         const needsUpstreamDetail =
           !edgeResolved ||
           !data ||
@@ -2400,77 +2731,113 @@ export class PackageService {
 
         if (!isPureGitOnly && needsUpstreamDetail) {
           try {
-            const [forClientData, pkgDetailData, depsUpstreamData] = await Promise.all([
-              this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`),
-              needsUpstreamDetail
-                ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`)
-                : Promise.resolve(null),
-              deepFetch && !Array.isArray(data?.dependencies)
-                ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`)
-                : Promise.resolve(null)
-            ]);
+            if (!deepFetch) {
+              // Fast single-request tile hydration: 1 call to /packages/:author/:name/ returns license, tags, downloads, min_minetest_version & video
+              let pkgDetailData = await this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`);
+              if (!pkgDetailData || !pkgDetailData.license) {
+                const forClientFallback = await this.fetchUpstreamWithMirrorFallback(
+                  `/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`
+                );
+                pkgDetailData = { ...(forClientFallback || {}), ...(pkgDetailData || {}) };
+              }
+              if ((!pkgDetailData || Object.keys(pkgDetailData).length === 0) && this.edgeApiAvailable) {
+                const res = await fetch(`/api/packages/${encAuthor}/${encName}/?lite=1`).catch(() => null);
+                if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+                  pkgDetailData = await res.json();
+                }
+              }
+              if (pkgDetailData && Object.keys(pkgDetailData).length > 0) {
+                const resolvedDlSize = pkgDetailData.download_size ?? data?.download_size;
+                data = {
+                  ...pkgDetailData,
+                  ...data,
+                  download_size: resolvedDlSize,
+                  file_size: this.formatDownloadSize(resolvedDlSize) || data?.file_size,
+                  downloads: Math.max(
+                    Number(data?.downloads ?? data?.downloads_count ?? 0) || 0,
+                    Number(pkgDetailData.downloads ?? pkgDetailData.downloads_count ?? 0) || 0
+                  ),
+                  repo: data?.repo || pkgDetailData.repo,
+                  repo_url: data?.repo_url || pkgDetailData.repo || pkgDetailData.repo_url,
+                  license: data?.license || pkgDetailData.license,
+                  media_license: data?.media_license || pkgDetailData.media_license,
+                  video_url: data?.video_url || pkgDetailData.video_url,
+                  video_thumbnail_url: data?.video_thumbnail_url || pkgDetailData.video_thumbnail_url
+                };
+              }
+            } else {
+              const [forClientData, pkgDetailData, depsUpstreamData] = await Promise.all([
+                this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`),
+                needsUpstreamDetail
+                  ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`)
+                  : Promise.resolve(null),
+                deepFetch && !Array.isArray(data?.dependencies)
+                  ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`)
+                  : Promise.resolve(null)
+              ]);
 
-            const resolvedDlSize = forClientData?.download_size ?? pkgDetailData?.download_size ?? data?.download_size;
-            const upstreamLongDesc =
-              this.extractLongDescription(pkgDetailData?.long_description) ||
-              this.extractLongDescription(forClientData?.long_description) ||
-              this.extractLongDescription(depsUpstreamData?.long_description) ||
-              this.extractLongDescription(data?.long_description);
+              const resolvedDlSize = forClientData?.download_size ?? pkgDetailData?.download_size ?? data?.download_size;
+              const upstreamLongDesc =
+                this.extractLongDescription(pkgDetailData?.long_description) ||
+                this.extractLongDescription(forClientData?.long_description) ||
+                this.extractLongDescription(depsUpstreamData?.long_description) ||
+                this.extractLongDescription(data?.long_description);
 
-            const combinedUpstream = {
-              ...(forClientData || {}),
-              ...(pkgDetailData || {}),
-              download_size: resolvedDlSize,
-              long_description: upstreamLongDesc
-            };
-
-            if (Object.keys(combinedUpstream).length > 0) {
-              data = {
-                ...combinedUpstream,
-                ...data,
+              const combinedUpstream = {
+                ...(forClientData || {}),
+                ...(pkgDetailData || {}),
                 download_size: resolvedDlSize,
-                file_size: this.formatDownloadSize(resolvedDlSize) || data?.file_size,
-                downloads: Math.max(
-                  Number(data?.downloads ?? data?.downloads_count ?? 0) || 0,
-                  Number(combinedUpstream.downloads ?? combinedUpstream.downloads_count ?? 0) || 0
-                ),
-                repo: data?.repo || combinedUpstream.repo,
-                repo_url: data?.repo_url || combinedUpstream.repo || combinedUpstream.repo_url,
-                website: data?.website || combinedUpstream.website,
-                issue_tracker: data?.issue_tracker || combinedUpstream.issue_tracker,
-                forum_url: data?.forum_url || combinedUpstream.forum_url || data?.forums || combinedUpstream.forums,
-                forums: data?.forums || combinedUpstream.forums || combinedUpstream.forum_url,
-                donate_url: data?.donate_url || combinedUpstream.donate_url,
-                translation_url: data?.translation_url || combinedUpstream.translation_url,
-                video_url: data?.video_url || combinedUpstream.video_url,
-                video_thumbnail_url: data?.video_thumbnail_url || combinedUpstream.video_thumbnail_url,
-                dev_state: data?.dev_state || combinedUpstream.dev_state,
-                provides: (Array.isArray(data?.provides) && data.provides.length > 0) ? data.provides : combinedUpstream.provides,
-                content_warnings: (Array.isArray(data?.content_warnings) && data.content_warnings.length > 0) ? data.content_warnings : combinedUpstream.content_warnings,
-                ai_disclosures: (Array.isArray(data?.ai_disclosures) && data.ai_disclosures.length > 0) ? data.ai_disclosures : combinedUpstream.ai_disclosures,
-                maintainers: (Array.isArray(data?.maintainers) && data.maintainers.length > 0) ? data.maintainers : combinedUpstream.maintainers,
-                reviews: data?.reviews || combinedUpstream.reviews,
-                created_at: data?.created_at || combinedUpstream.created_at,
-                updated_at: data?.updated_at || combinedUpstream.updated_at,
-                license: data?.license || combinedUpstream.license,
-                media_license: data?.media_license || combinedUpstream.media_license,
-                long_description: upstreamLongDesc || data?.long_description,
-                screenshots: (Array.isArray(data?.screenshots) && data.screenshots.length > 1)
-                  ? data.screenshots
-                  : (Array.isArray(combinedUpstream.screenshots) && combinedUpstream.screenshots.length > 0
-                      ? combinedUpstream.screenshots
-                      : data?.screenshots)
+                long_description: upstreamLongDesc
               };
-            }
 
-            if (depsUpstreamData && (!Array.isArray(data.dependencies) || data.dependencies.length === 0)) {
-              const key = `${pkg.author}/${pkg.name}`;
-              const depList = Array.isArray(depsUpstreamData)
-                ? depsUpstreamData
-                : (depsUpstreamData[key] || depsUpstreamData[key.toLowerCase()] || Object.values(depsUpstreamData).find(v => Array.isArray(v)));
-              if (Array.isArray(depList)) {
-                data.dependencies = Array.from(new Set(depList.filter((d: any) => !d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
-                data.optional_dependencies = Array.from(new Set(depList.filter((d: any) => d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
+              if (Object.keys(combinedUpstream).length > 0) {
+                data = {
+                  ...combinedUpstream,
+                  ...data,
+                  download_size: resolvedDlSize,
+                  file_size: this.formatDownloadSize(resolvedDlSize) || data?.file_size,
+                  downloads: Math.max(
+                    Number(data?.downloads ?? data?.downloads_count ?? 0) || 0,
+                    Number(combinedUpstream.downloads ?? combinedUpstream.downloads_count ?? 0) || 0
+                  ),
+                  repo: data?.repo || combinedUpstream.repo,
+                  repo_url: data?.repo_url || combinedUpstream.repo || combinedUpstream.repo_url,
+                  website: data?.website || combinedUpstream.website,
+                  issue_tracker: data?.issue_tracker || combinedUpstream.issue_tracker,
+                  forum_url: data?.forum_url || combinedUpstream.forum_url || data?.forums || combinedUpstream.forums,
+                  forums: data?.forums || combinedUpstream.forums || combinedUpstream.forum_url,
+                  donate_url: data?.donate_url || combinedUpstream.donate_url,
+                  translation_url: data?.translation_url || combinedUpstream.translation_url,
+                  video_url: data?.video_url || combinedUpstream.video_url,
+                  video_thumbnail_url: data?.video_thumbnail_url || combinedUpstream.video_thumbnail_url,
+                  dev_state: data?.dev_state || combinedUpstream.dev_state,
+                  provides: (Array.isArray(data?.provides) && data.provides.length > 0) ? data.provides : combinedUpstream.provides,
+                  content_warnings: (Array.isArray(data?.content_warnings) && data.content_warnings.length > 0) ? data.content_warnings : combinedUpstream.content_warnings,
+                  ai_disclosures: (Array.isArray(data?.ai_disclosures) && data.ai_disclosures.length > 0) ? data.ai_disclosures : combinedUpstream.ai_disclosures,
+                  maintainers: (Array.isArray(data?.maintainers) && data.maintainers.length > 0) ? data.maintainers : combinedUpstream.maintainers,
+                  reviews: data?.reviews || combinedUpstream.reviews,
+                  created_at: data?.created_at || combinedUpstream.created_at,
+                  updated_at: data?.updated_at || combinedUpstream.updated_at,
+                  license: data?.license || combinedUpstream.license,
+                  media_license: data?.media_license || combinedUpstream.media_license,
+                  long_description: upstreamLongDesc || data?.long_description,
+                  screenshots: (Array.isArray(data?.screenshots) && data.screenshots.length > 1)
+                    ? data.screenshots
+                    : (Array.isArray(combinedUpstream.screenshots) && combinedUpstream.screenshots.length > 0
+                        ? combinedUpstream.screenshots
+                        : data?.screenshots)
+                };
+              }
+
+              if (depsUpstreamData && (!Array.isArray(data.dependencies) || data.dependencies.length === 0)) {
+                const key = `${pkg.author}/${pkg.name}`;
+                const depList = Array.isArray(depsUpstreamData)
+                  ? depsUpstreamData
+                  : (depsUpstreamData[key] || depsUpstreamData[key.toLowerCase()] || Object.values(depsUpstreamData).find(v => Array.isArray(v)));
+                if (Array.isArray(depList)) {
+                  data.dependencies = Array.from(new Set(depList.filter((d: any) => !d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
+                  data.optional_dependencies = Array.from(new Set(depList.filter((d: any) => d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
+                }
               }
             }
           } catch {
@@ -2563,10 +2930,10 @@ export class PackageService {
         let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = data.git_repo_status || (repoUrl ? 'verified' : 'unverified');
         let resolvedLicense = data.license || data.media_license || pkg.license || '';
         let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
-        let minVersion = data.min_minetest_version || pkg.min_minetest_version;
+        let minVersion = data.min_minetest_version || pkg.min_minetest_version || '5.0.0';
 
-        // Only probe Git repository metadata on the client when running without the bundled Edge API
-        if (deepFetch && !hasBundledEdgeResponse) {
+        // Probe Git repository metadata when opening full details OR when a package still lacks a license
+        if ((deepFetch || !resolvedLicense) && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
           if (gitMeta.gitRepoStatus === 'verified') {
             gitRepoStatus = 'verified';
@@ -2593,8 +2960,28 @@ export class PackageService {
           if (!repoUrl && gitMeta.repoUrl) {
             repoUrl = gitMeta.repoUrl;
           }
-          if (!minVersion && gitMeta.minVersion) {
+          if (gitMeta.minVersion && (!data.min_minetest_version || minVersion === '5.0.0')) {
             minVersion = gitMeta.minVersion;
+          }
+          if (gitMeta.cdbMeta) {
+            const cdb = gitMeta.cdbMeta;
+            if ((!Array.isArray(data.tags) || data.tags.length === 0) && cdb.tags) data.tags = cdb.tags;
+            if (!data.dev_state && cdb.dev_state) data.dev_state = cdb.dev_state;
+            if (!data.video_url && cdb.video_url) data.video_url = cdb.video_url;
+            if (!data.donate_url && cdb.donate_url) data.donate_url = cdb.donate_url;
+            if (!data.issue_tracker && cdb.issue_tracker) data.issue_tracker = cdb.issue_tracker;
+            if (!data.forum_url && !data.forums && cdb.forum_url) data.forum_url = cdb.forum_url;
+            if (!data.translation_url && cdb.translation_url) data.translation_url = cdb.translation_url;
+            if (!data.website && cdb.website) data.website = cdb.website;
+            if ((!Array.isArray(data.content_warnings) || data.content_warnings.length === 0) && cdb.content_warnings) {
+              data.content_warnings = cdb.content_warnings;
+            }
+            if (!data.short_desc && !data.short_description && cdb.short_description) {
+              data.short_description = cdb.short_description;
+            }
+            if (!data.long_description && !data.desc && cdb.long_description) {
+              data.long_description = cdb.long_description;
+            }
           }
         }
 
@@ -2717,6 +3104,27 @@ export class PackageService {
         const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
         const targetAuthorLower = (pkg.author || '').toLowerCase();
         const targetNameLower = (pkg.name || '').toLowerCase();
+
+        // Persist compact hydrated tile metadata locally and queue debounced D1 batch writeback
+        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0) {
+          const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
+          this.hydratedMetaCache.set(targetIdLower, {
+            ...prevMeta,
+            license: resolvedLicense || prevMeta.license,
+            media_license: resolvedMediaLicense || prevMeta.media_license,
+            min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
+            contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
+            downloads: resolvedDownloads || prevMeta.downloads,
+            score: resolvedScore || prevMeta.score,
+            tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
+            file_size: sizeFormatted || prevMeta.file_size,
+            video_url: resolvedVideo.video_url || prevMeta.video_url,
+            video_thumbnail_url: resolvedVideo.video_thumbnail_url || prevMeta.video_thumbnail_url,
+            repo_url: repoUrl || prevMeta.repo_url
+          });
+          this.scheduleHydratedMetaPersist();
+          this.queueD1Writeback(pkg, updatedFields);
+        }
 
         this._activePackage.update(current => {
           if (
@@ -3159,21 +3567,23 @@ export class PackageService {
   }
 
   // Fetch Live Reviews from Backend API (Mixed ContentDB + D1) with in-memory caching
-  async fetchReviews(pkg: LuantiPackage): Promise<CommunityReview[]> {
+  async fetchReviews(pkg: LuantiPackage, forceRefresh = false): Promise<CommunityReview[]> {
     const cacheKey = pkg.id.toLowerCase();
     const cached = this.reviewsCache.get(cacheKey);
-    if (cached) {
+    if (cached && !forceRefresh) {
       this.applyReviewAverageToPackage(pkg, cached);
       return cached;
     }
 
     if (!this.edgeApiAvailable && !this.contentDbOnline) {
-      return [];
+      return cached || [];
     }
     try {
       let res: Response | null = null;
       if (this.edgeApiAvailable) {
-        res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`);
+        res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
+          cache: 'no-store'
+        });
       }
       if ((!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) && this.contentDbOnline) {
         res = await fetch(`https://content.luanti.org/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews/`);
@@ -3199,7 +3609,7 @@ export class PackageService {
             return mapped;
           }
         }
-        return [];
+        return cached || [];
       }
       if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const data = await res.json();
@@ -3212,7 +3622,7 @@ export class PackageService {
     } catch (err) {
       console.warn('Could not fetch reviews:', err);
     }
-    return [];
+    return cached || [];
   }
 
   // Submit Interactive Review to D1
@@ -3252,8 +3662,11 @@ export class PackageService {
         return { success: true, review: data.review };
       }
 
+      if (this.edgeApiAvailable && !res.ok) {
+        return { success: false, message: `Failed to submit review (HTTP ${res.status}).` };
+      }
+
       // Local fallback when testing on ng serve without Cloudflare D1 worker
-      const user = this.authService.currentUser();
       const fallbackReview: CommunityReview = {
         id: `local-${Date.now()}`,
         package_id: pkg.id,
@@ -3272,6 +3685,74 @@ export class PackageService {
       return { success: true, review: fallbackReview };
     } catch (err: any) {
       return { success: false, message: err.message || 'Error submitting review.' };
+    }
+  }
+
+  // Flag an inappropriate review / comment for moderation
+  async flagReview(pkg: LuantiPackage, reviewId: string, details?: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'flag',
+          reviewId,
+          details: details?.trim() || 'Flagged inappropriate review comment'
+        })
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          return { success: false, message: data.error || 'Failed to flag review.' };
+        }
+        if (this.authService.isAdmin()) {
+          this.authService.fetchModerationQueue();
+        }
+        return { success: true, message: data.message };
+      }
+      if (!this.edgeApiAvailable) {
+        return { success: true };
+      }
+      return { success: false, message: 'Failed to flag review.' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Error flagging review.' };
+    }
+  }
+
+  // Delete a review (Admins or Review Author)
+  async deleteReview(pkg: LuantiPackage, reviewId: string): Promise<{ success: boolean; message?: string }> {
+    const cacheKey = pkg.id.toLowerCase();
+    try {
+      const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete',
+          reviewId
+        })
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          return { success: false, message: data.error || 'Failed to delete review.' };
+        }
+        this.reviewsCache.delete(cacheKey);
+        this.deepHydratedIds.delete(cacheKey);
+        this.clearBootCache();
+        if (this.authService.isAdmin()) {
+          this.authService.fetchModerationQueue();
+        }
+        return { success: true, message: data.message };
+      }
+      if (!this.edgeApiAvailable) {
+        this.reviewsCache.delete(cacheKey);
+        return { success: true };
+      }
+      return { success: false, message: 'Failed to delete review.' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'Error deleting review.' };
     }
   }
 

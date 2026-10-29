@@ -10,7 +10,11 @@ import {
   rewriteRelativeMarkdownUrls,
   ensureExtendedPackageColumns,
   extractLongDescriptionText,
-  extractEmbeddedVideo
+  extractEmbeddedVideo,
+  ensureModerationColumns,
+  autoResolveBrokenRepoReport,
+  parseCdbJsonMetadata,
+  CdbJsonMetadata
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -365,6 +369,7 @@ async function probeGitRepoConfAndLicense(
   hardDeps: string[];
   softDeps: string[];
   minVersion?: string;
+  cdbMeta?: CdbJsonMetadata | null;
 }> {
   const normalizedInputUrl = normalizeDefunctGitHost(existingRepoUrl);
   let owner = author;
@@ -421,15 +426,32 @@ async function probeGitRepoConfAndLicense(
   let resolvedRepoUrl: string | undefined;
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
   let sawExplicit404 = false;
+  let cdbMeta: CdbJsonMetadata | null = null;
 
   const tryCandidates = async (candidates: Array<{ base: string; repoUrl: string }>): Promise<boolean> => {
     for (const cand of candidates) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1600);
       try {
-        const res = await fetch(`${cand.base}/${confFile}`, { signal: controller.signal });
+        const [res, cdbRes] = await Promise.all([
+          fetch(`${cand.base}/${confFile}`, { signal: controller.signal }),
+          fetch(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null)
+        ]);
         clearTimeout(timer);
-        if (res.status === 404) {
+
+        if (cdbRes && cdbRes.ok) {
+          const cdbText = await cdbRes.text().catch(() => '');
+          const parsedCdb = parseCdbJsonMetadata(cdbText);
+          if (parsedCdb) {
+            cdbMeta = parsedCdb;
+            resolvedRepoUrl = cand.repoUrl;
+            gitRepoStatus = 'verified';
+            if (parsedCdb.license) license = parsedCdb.license;
+            if (parsedCdb.media_license) mediaLicense = parsedCdb.media_license;
+          }
+        }
+
+        if (res.status === 404 && !cdbMeta) {
           sawExplicit404 = true;
           const fallbackCtrl = new AbortController();
           const fallbackTimer = setTimeout(() => fallbackCtrl.abort(), 1200);
@@ -487,8 +509,8 @@ async function probeGitRepoConfAndLicense(
             if (optStr) {
               optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => softDeps.push(d));
             }
-            license = getVal('license') || undefined;
-            mediaLicense = getVal('media_license') || undefined;
+            license = getVal('license') || license || undefined;
+            mediaLicense = getVal('media_license') || mediaLicense || undefined;
             minVersion = getVal('min_minetest_version') || undefined;
 
             if (!license) {
@@ -510,6 +532,9 @@ async function probeGitRepoConfAndLicense(
             }
             return true;
           }
+        }
+        if (cdbMeta) {
+          return true;
         }
       } catch {
         clearTimeout(timer);
@@ -585,7 +610,8 @@ async function probeGitRepoConfAndLicense(
     mediaLicense,
     hardDeps,
     softDeps,
-    minVersion
+    minVersion,
+    cdbMeta
   };
 }
 
@@ -691,13 +717,53 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
     if (cachedEdge) {
+      // Always merge fresh D1 reviews on full detail requests so newly posted or moderated reviews appear immediately on refresh
+      if (!isLite && context.env.DB) {
+        try {
+          const freshLocalRevRes = await context.env.DB.prepare(`
+            SELECT r.id, r.rating, r.title, r.comment, r.created_at,
+                   u.username, u.display_name, u.avatar_url
+            FROM reviews r
+            LEFT JOIN users u ON r.user_id = u.id
+            WHERE LOWER(r.package_id) = LOWER(?)
+            ORDER BY r.created_at DESC
+          `).bind(pkgId).all().catch(() => ({ results: [] }));
+          const freshLocalReviews = freshLocalRevRes?.results || [];
+          const existingOfficialOnly = Array.isArray(cachedEdge.reviews_list)
+            ? cachedEdge.reviews_list.filter((r: any) => r && r.source === 'contentdb')
+            : [];
+          const normalizedFreshLocal = freshLocalReviews.map((r: any) => ({
+            id: `lh_${r.id}`,
+            source: 'luantihub',
+            rating: Number(r.rating) || 5,
+            title: r.title || undefined,
+            comment: r.comment || '',
+            created_at: r.created_at,
+            author: {
+              username: r.username || 'community_user',
+              display_name: r.display_name || r.username || 'Community Member',
+              avatar_url: r.avatar_url || `https://github.com/${r.username || 'octocat'}.png`
+            }
+          }));
+          cachedEdge.reviews_list = [...normalizedFreshLocal, ...existingOfficialOnly].sort(
+            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+          if (freshLocalReviews.length > 0) {
+            const sum = freshLocalReviews.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
+            cachedEdge.score = Number((sum / freshLocalReviews.length).toFixed(1));
+          }
+        } catch {
+          // Ignore D1 refresh error
+        }
+      }
+
       return new Response(JSON.stringify(cachedEdge), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': isLite
             ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
-            : 'public, max-age=60, s-maxage=300, stale-while-revalidate=120'
+            : 'no-cache'
         }
       });
     }
@@ -1065,6 +1131,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const maxVersion = upstreamData.max_minetest_version || forClientData?.max_minetest_version || d1Pkg?.max_minetest_version || undefined;
 
   // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license
+  let probedCdbMeta: CdbJsonMetadata | null = null;
   const needsGitProbe = isLite
     ? !resolvedLicense
     : (!repoUrl || (finalHardDeps.length === 0 && finalSoftDeps.length === 0) || !resolvedLicense);
@@ -1076,6 +1143,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       repoUrl
     );
     gitRepoStatus = gitProbe.gitRepoStatus;
+    probedCdbMeta = gitProbe.cdbMeta || null;
     if (finalHardDeps.length === 0 && gitProbe.hardDeps.length > 0) {
       finalHardDeps = gitProbe.hardDeps;
     }
@@ -1095,9 +1163,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       minVersion = gitProbe.minVersion;
     }
 
-    // Automated 404 Git Repository Detection: report stale/404 Git repos to admins/moderators in D1
+    // Automated 404 Git Repository Detection & Self-Healing:
+    // Report stale/404 Git repos to admins/moderators in D1, or auto-resolve open 'broken' reports once back online
     if (gitRepoStatus === 'broken_404' && context.env.DB) {
       try {
+        await ensureModerationColumns(context.env.DB);
         const existingReport = await context.env.DB.prepare(
           `SELECT id FROM moderation_reports WHERE LOWER(package_id) = LOWER(?) AND reason = 'broken' AND status = 'open' LIMIT 1`
         ).bind(canonicalId).first();
@@ -1113,7 +1183,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       } catch {
         // Non-blocking auto-report
       }
+    } else if (gitRepoStatus === 'verified' && context.env.DB) {
+      await autoResolveBrokenRepoReport(context.env.DB, canonicalId);
     }
+  } else if (gitRepoStatus === 'verified' && context.env.DB) {
+    await autoResolveBrokenRepoReport(context.env.DB, canonicalId);
   }
 
   // Normalize tags array
@@ -1128,7 +1202,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   }
   if (normalizedTags.length === 0) {
     const fallbackD1Tags = parseJsonArray(d1Pkg?.tags);
-    normalizedTags = fallbackD1Tags.length > 0 ? fallbackD1Tags : [upstreamData.type || 'mod'];
+    const cdbTags = probedCdbMeta?.tags || [];
+    normalizedTags = fallbackD1Tags.length > 0
+      ? fallbackD1Tags
+      : (cdbTags.length > 0 ? cdbTags : [upstreamData.type || 'mod']);
+  } else if (probedCdbMeta?.tags && probedCdbMeta.tags.length > 0) {
+    normalizedTags = Array.from(new Set([...normalizedTags, ...probedCdbMeta.tags]));
   }
 
   // Normalize screenshots array
@@ -1176,12 +1255,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   );
   const sources: Array<'official' | 'git'> = isRegisteredInGitCommunity ? ['official', 'git'] : ['official'];
 
-  // Extract long_description (supports plain string or { type: 'hypertext', body: '...' } across detail, for-client, and dependencies payloads)
+  // Extract long_description (supports plain string or { type: 'hypertext', body: '...' } across detail, for-client, .cdb.json, and dependencies payloads)
   const extractedLongDesc =
     extractLongDescriptionText(upstreamData.long_description) ||
     extractLongDescriptionText(forClientData?.long_description) ||
     extractLongDescriptionText(depsPayload?.long_description) ||
     extractLongDescriptionText(upstreamData.desc) ||
+    probedCdbMeta?.long_description ||
     (!readmeText ? d1Pkg?.long_desc : undefined) ||
     '';
 
@@ -1189,6 +1269,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     upstreamData.short_desc ||
     upstreamData.short_description ||
     forClientData?.short_desc ||
+    probedCdbMeta?.short_description ||
     d1Pkg?.short_desc ||
     '';
 
@@ -1204,25 +1285,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   );
   const totalDownloads = contentdbDownloads + luantihubDownloads;
 
-  // Normalize URLs & extra ContentDB metadata
-  const rawForum = upstreamData.forum_url || forClientData?.forum_url || upstreamData.forums || forClientData?.forums || d1Pkg?.forum_url;
+  // Normalize URLs & extra ContentDB / .cdb.json metadata
+  const rawForum = upstreamData.forum_url || forClientData?.forum_url || upstreamData.forums || forClientData?.forums || probedCdbMeta?.forum_url || d1Pkg?.forum_url;
   const forumUrl = rawForum
     ? (String(rawForum).startsWith('http')
         ? String(rawForum)
         : `https://forum.luanti.org/viewtopic.php?t=${rawForum}`)
     : undefined;
-  const donateUrl = upstreamData.donate_url || forClientData?.donate_url || d1Pkg?.donate_url || undefined;
-  const issueTrackerUrl = upstreamData.issue_tracker || forClientData?.issue_tracker || d1Pkg?.issue_tracker || undefined;
-  const translationUrl = upstreamData.translation_url || forClientData?.translation_url || d1Pkg?.translation_url || undefined;
+  const donateUrl = upstreamData.donate_url || forClientData?.donate_url || probedCdbMeta?.donate_url || d1Pkg?.donate_url || undefined;
+  const issueTrackerUrl = upstreamData.issue_tracker || forClientData?.issue_tracker || probedCdbMeta?.issue_tracker || d1Pkg?.issue_tracker || undefined;
+  const translationUrl = upstreamData.translation_url || forClientData?.translation_url || probedCdbMeta?.translation_url || d1Pkg?.translation_url || undefined;
   const resolvedVideo = extractEmbeddedVideo(
-    upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url,
+    upstreamData.video_url || forClientData?.video_url || probedCdbMeta?.video_url || d1Pkg?.video_url,
     upstreamData.video_thumbnail_url || forClientData?.video_thumbnail_url || d1Pkg?.video_thumbnail_url,
     extractedLongDesc,
     readmeText
   );
   const videoUrl = resolvedVideo.video_url;
   const videoThumbnailUrl = resolvedVideo.video_thumbnail_url;
-  const devState = upstreamData.dev_state || forClientData?.dev_state || d1Pkg?.dev_state || undefined;
+  const devState = upstreamData.dev_state || forClientData?.dev_state || probedCdbMeta?.dev_state || d1Pkg?.dev_state || undefined;
 
   const rawProvides = Array.isArray(upstreamData.provides)
     ? upstreamData.provides
@@ -1233,7 +1314,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   const rawWarnings = Array.isArray(upstreamData.content_warnings)
     ? upstreamData.content_warnings
-    : (Array.isArray(forClientData?.content_warnings) ? forClientData.content_warnings : parseJsonArray(d1Pkg?.content_warnings));
+    : (Array.isArray(forClientData?.content_warnings)
+        ? forClientData.content_warnings
+        : (probedCdbMeta?.content_warnings?.length ? probedCdbMeta.content_warnings : parseJsonArray(d1Pkg?.content_warnings)));
   const contentWarnings = rawWarnings
     .map((w: any) => (typeof w === 'string' ? w : w?.name || w?.title || ''))
     .filter(Boolean);
@@ -1370,7 +1453,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     readme: readmeText || undefined,
     repo_url: repoUrl,
     git_repo_status: gitRepoStatus,
-    website: upstreamData.website || forClientData?.website || undefined,
+    website: upstreamData.website || forClientData?.website || probedCdbMeta?.website || undefined,
     issue_tracker: issueTrackerUrl,
     forum_url: forumUrl,
     forums: forumUrl,
@@ -1411,7 +1494,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': isLite
         ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
-        : 'public, max-age=60, s-maxage=300, stale-while-revalidate=120'
+        : 'no-cache'
     }
   });
 }

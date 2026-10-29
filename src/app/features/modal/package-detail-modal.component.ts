@@ -47,7 +47,8 @@ import {
   LucideChevronDown,
   LucideChevronLeft,
   LucideChevronRight,
-  LucideTag
+  LucideTag,
+  LucideTrash2
 } from '@lucide/angular';
 
 @Component({
@@ -84,7 +85,8 @@ import {
     LucideChevronDown,
     LucideChevronLeft,
     LucideChevronRight,
-    LucideTag
+    LucideTag,
+    LucideTrash2
   ],
   template: `
     @if (package) {
@@ -116,7 +118,7 @@ import {
                       type="button"
                       (click)="onKillSwitch('restore')"
                       [disabled]="isModerating()"
-                      class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-black text-[11px] transition shadow cursor-pointer">
+                      class="px-3.5 py-1.5 rounded-xl glass-btn-emerald disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
                       {{ 'modal.killSwitchRestore' | translate }}
                     </button>
                   } @else {
@@ -124,7 +126,7 @@ import {
                       type="button"
                       (click)="onKillSwitch('delist')"
                       [disabled]="isModerating()"
-                      class="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-[11px] transition shadow cursor-pointer">
+                      class="px-3.5 py-1.5 rounded-xl glass-btn-rose disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
                       {{ 'modal.killSwitchDelist' | translate }}
                     </button>
                   }
@@ -293,7 +295,7 @@ import {
                 <button
                   type="submit"
                   [disabled]="isReporting() || !reportDetails.trim()"
-                  class="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer">
+                  class="px-4 py-1.5 rounded-lg glass-btn-rose disabled:opacity-50 font-bold text-xs transition cursor-pointer">
                   {{ 'modal.reportSubmit' | translate }}
                 </button>
               </div>
@@ -1200,20 +1202,77 @@ import {
                     <div class="space-y-3">
                       @for (rev of reviews(); track rev.id) {
                         <div class="p-3.5 rounded-2xl glass-panel space-y-1.5 text-xs">
-                          <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                              <span class="font-bold text-white">{{ rev.author.display_name || rev.author.username }}</span>
-                              <div class="flex items-center gap-0.5 text-amber-400">
+                          <div class="flex items-center justify-between gap-2">
+                            <div class="flex items-center gap-2 min-w-0">
+                              <span class="font-bold text-white truncate">{{ rev.author.display_name || rev.author.username }}</span>
+                              <div class="flex items-center gap-0.5 text-amber-400 flex-shrink-0">
                                 <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
                                 <span class="font-bold text-[11px]">{{ rev.rating }}/5</span>
                               </div>
                             </div>
-                            <span class="text-[10px] text-slate-500">{{ rev.created_at | date }}</span>
+                            <div class="flex items-center gap-2 flex-shrink-0">
+                              <span class="text-[10px] text-slate-500">{{ rev.created_at | date }}</span>
+                              @if (authService.currentUser() && !isOwnReview(rev)) {
+                                @if (flaggedReviewIds().has(rev.id)) {
+                                  <span class="px-2 py-0.5 rounded-lg bg-amber-500/15 border border-amber-400/30 text-[10px] font-semibold text-amber-300 flex items-center gap-1">
+                                    <svg lucideFlag class="w-2.5 h-2.5"></svg>
+                                    <span>{{ 'modal.reviewFlagged' | translate }}</span>
+                                  </span>
+                                } @else {
+                                  <button
+                                    type="button"
+                                    (click)="toggleFlagReviewPrompt(rev.id)"
+                                    [appTooltip]="'modal.flagReview' | translate"
+                                    [attr.aria-label]="'modal.flagReview' | translate"
+                                    class="p-1 rounded-lg glass-icon-btn text-slate-400 hover:text-amber-300 transition cursor-pointer">
+                                    <svg lucideFlag class="w-3 h-3"></svg>
+                                  </button>
+                                }
+                              }
+                              @if (canDeleteReview(rev)) {
+                                <button
+                                  type="button"
+                                  (click)="onDeleteReview(rev)"
+                                  [disabled]="deletingReviewId() === rev.id"
+                                  [appTooltip]="'modal.removeReview' | translate"
+                                  [attr.aria-label]="'modal.removeReview' | translate"
+                                  class="px-2 py-0.5 rounded-lg glass-btn-rose text-[10px] font-bold flex items-center gap-1 disabled:opacity-50 transition cursor-pointer">
+                                  <svg lucideTrash2 class="w-3 h-3"></svg>
+                                  <span class="hidden sm:inline">{{ 'modal.removeReview' | translate }}</span>
+                                </button>
+                              }
+                            </div>
                           </div>
                           @if (rev.title) {
                             <h4 class="font-bold text-slate-200 text-xs">{{ rev.title }}</h4>
                           }
                           <p class="text-slate-300 leading-relaxed">{{ rev.comment }}</p>
+
+                          @if (flaggingReviewId() === rev.id) {
+                            <div class="pt-2 mt-2 border-t border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                              <input
+                                type="text"
+                                [(ngModel)]="flagReviewReason"
+                                [placeholder]="'modal.flagReviewPrompt' | translate"
+                                class="flex-1 glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                              <div class="flex items-center gap-1.5 justify-end">
+                                <button
+                                  type="button"
+                                  (click)="flaggingReviewId.set(null)"
+                                  class="px-2.5 py-1 rounded-lg glass-pill text-[10px] text-slate-300 hover:text-white transition cursor-pointer">
+                                  {{ 'profile.cancel' | translate }}
+                                </button>
+                                <button
+                                  type="button"
+                                  (click)="onConfirmFlagReview(rev)"
+                                  [disabled]="isSubmittingReviewFlag()"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-amber text-[10px] font-bold flex items-center gap-1 disabled:opacity-50 transition cursor-pointer">
+                                  <svg lucideFlag class="w-3 h-3"></svg>
+                                  <span>{{ 'modal.flagReview' | translate }}</span>
+                                </button>
+                              </div>
+                            </div>
+                          }
                         </div>
                       }
                     </div>
@@ -1501,6 +1560,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   reviewTitle = '';
   reviewComment = '';
   readonly isSubmittingReview = signal(false);
+  readonly flaggingReviewId = signal<string | null>(null);
+  flagReviewReason = '';
+  readonly isSubmittingReviewFlag = signal(false);
+  readonly flaggedReviewIds = signal<Set<string>>(new Set());
+  readonly deletingReviewId = signal<string | null>(null);
 
   // Report & Moderation state
   readonly isReportOpen = signal(false);
@@ -1732,7 +1796,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
-    this.packageService.fetchReviews(this.package).then(res => this.reviews.set(res));
+    this.packageService.fetchReviews(this.package, true).then(res => this.reviews.set(res));
     this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
   }
 
@@ -2010,16 +2074,73 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
       const newReview: CommunityReview = {
         ...res.review,
         author: {
-          username: this.authService.currentUser()?.username || 'user',
-          display_name: this.authService.currentUser()?.display_name,
-          avatar_url: this.authService.currentUser()?.avatar_url || 'logo.svg'
+          username: res.review.author?.username || this.authService.currentUser()?.username || 'user',
+          display_name: res.review.author?.display_name || this.authService.currentUser()?.display_name,
+          avatar_url: res.review.author?.avatar_url || this.authService.currentUser()?.avatar_url || 'logo.svg'
         }
       };
-      const updatedList = [newReview, ...this.reviews()];
+      const existingFiltered = this.reviews().filter(
+        r => r.id !== newReview.id && r.author.username.toLowerCase() !== newReview.author.username.toLowerCase()
+      );
+      const updatedList = [newReview, ...existingFiltered];
       this.reviews.set(updatedList);
       this.packageService.applyReviewAverageToPackage(this.package, updatedList);
       this.reviewTitle = '';
       this.reviewComment = '';
+    } else if (res.message) {
+      this.pwaService.showToast(res.message);
+    }
+  }
+
+  isOwnReview(rev: CommunityReview): boolean {
+    const user = this.authService.currentUser();
+    if (!user || !rev?.author?.username) return false;
+    const revAuthor = rev.author.username.toLowerCase();
+    if (user.username && user.username.toLowerCase() === revAuthor) return true;
+    return (user.identities || []).some(id => (id.username || '').toLowerCase() === revAuthor);
+  }
+
+  canDeleteReview(rev: CommunityReview): boolean {
+    if (!rev || rev.source === 'contentdb') return false;
+    if (this.authService.isAdmin()) return true;
+    return this.isOwnReview(rev);
+  }
+
+  toggleFlagReviewPrompt(reviewId: string): void {
+    if (this.flaggingReviewId() === reviewId) {
+      this.flaggingReviewId.set(null);
+      this.flagReviewReason = '';
+    } else {
+      this.flaggingReviewId.set(reviewId);
+      this.flagReviewReason = '';
+    }
+  }
+
+  async onConfirmFlagReview(rev: CommunityReview): Promise<void> {
+    this.isSubmittingReviewFlag.set(true);
+    const res = await this.packageService.flagReview(this.package, rev.id, this.flagReviewReason);
+    this.isSubmittingReviewFlag.set(false);
+    if (res.success) {
+      const nextSet = new Set(this.flaggedReviewIds());
+      nextSet.add(rev.id);
+      this.flaggedReviewIds.set(nextSet);
+      this.flaggingReviewId.set(null);
+      this.flagReviewReason = '';
+      this.pwaService.showToast(res.message || 'Review flagged for moderation.');
+    } else if (res.message) {
+      this.pwaService.showToast(res.message);
+    }
+  }
+
+  async onDeleteReview(rev: CommunityReview): Promise<void> {
+    this.deletingReviewId.set(rev.id);
+    const res = await this.packageService.deleteReview(this.package, rev.id);
+    this.deletingReviewId.set(null);
+    if (res.success) {
+      const updatedList = this.reviews().filter(r => r.id !== rev.id);
+      this.reviews.set(updatedList);
+      this.packageService.applyReviewAverageToPackage(this.package, updatedList);
+      this.pwaService.showToast(res.message || 'Review removed.');
     } else if (res.message) {
       this.pwaService.showToast(res.message);
     }

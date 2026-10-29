@@ -211,6 +211,10 @@ export interface TranslationDictionary {
     killSwitchDelist: string;
     killSwitchFlag: string;
     killSwitchRestore: string;
+    flagReview: string;
+    flagReviewPrompt: string;
+    reviewFlagged: string;
+    removeReview: string;
   };
   auth: {
     title: string;
@@ -290,6 +294,36 @@ export interface TranslationDictionary {
     delistBtn: string;
     flagBtn: string;
     restoreBtn: string;
+    filterOpen: string;
+    filterClosed: string;
+    filterDelisted: string;
+    reasonAll: string;
+    reasonBroken: string;
+    reasonDmca: string;
+    reasonMalware: string;
+    reasonLicense: string;
+    reasonInappropriate: string;
+    resolveBtn: string;
+    dismissBtn: string;
+    reopenBtn: string;
+    recheckUrlBtn: string;
+    dismissAllBrokenBtn: string;
+    clearClosedBtn: string;
+    notePlaceholder: string;
+    sendNoteBtn: string;
+    pageLabel: string;
+    prevPage: string;
+    nextPage: string;
+    myReportsTitle: string;
+    noMyReports: string;
+    notificationsTitle: string;
+    notificationsDesc: string;
+    enableNotifications: string;
+    notifyModerationLabel: string;
+    notifyAdminQueueLabel: string;
+    notifyAppUpdatesLabel: string;
+    permissionGranted: string;
+    permissionBlocked: string;
   };
   setup: {
     title: string;

@@ -1,6 +1,6 @@
 // Community Abuse Reporting & Instant Cloudflare D1 Kill Switch Endpoint
 import { verifySessionToken, parseCookies, checkIsAdmin } from '../../../auth/lib/session';
-import { invalidateEdgeCacheKeys } from '../../../lib/upstream';
+import { invalidateEdgeCacheKeys, ensureModerationColumns } from '../../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -40,8 +40,11 @@ export async function onRequestPost(context: {
     action: 'report' | 'delist' | 'flag' | 'restore';
     reason?: 'dmca' | 'malware' | 'license' | 'broken' | 'inappropriate' | 'other';
     details?: string;
-    reportId?: number;
+    resolutionNote?: string;
+    reportId?: number | string;
   };
+
+  await ensureModerationColumns(env.DB);
 
   // Mode 1: Community or Automated Git-404 Report Submission
   if (body.action === 'report') {
@@ -130,19 +133,28 @@ export async function onRequestPost(context: {
   `).bind(packageId, author, name, name, newStatus, statusReason).run();
 
   // Resolve any open reports for this package
+  const noteToSave = (body.resolutionNote || body.details || statusReason || '').trim() || null;
   if (body.reportId) {
     const repStatus = newStatus === 'active' ? 'dismissed' : 'resolved';
     await env.DB.prepare(`
       UPDATE moderation_reports
-      SET status = ?, resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+      SET status = ?,
+          resolution_note = COALESCE(?, resolution_note),
+          resolved_by = ?,
+          resolved_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(repStatus, currentUser?.username || 'admin', body.reportId).run();
-  } else if (newStatus !== 'active') {
+    `).bind(repStatus, noteToSave, currentUser?.username || 'admin', body.reportId).run();
+  } else {
     await env.DB.prepare(`
       UPDATE moderation_reports
-      SET status = 'resolved', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+      SET status = 'resolved',
+          resolution_note = COALESCE(?, resolution_note),
+          resolved_by = ?,
+          resolved_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
       WHERE LOWER(package_id) = LOWER(?) AND status = 'open'
-    `).bind(currentUser?.username || 'admin', packageId).run();
+    `).bind(noteToSave, currentUser?.username || 'admin', packageId).run();
   }
 
   await invalidateEdgeCacheKeys([
