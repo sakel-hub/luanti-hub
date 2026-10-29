@@ -291,13 +291,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       upstreamByNameTitle.get(pNameTitleKey) ||
       (upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined);
 
-    const canonicalAuthor = matchedUpstream?.author || p.author_name;
-    const canonicalName = matchedUpstream?.name || p.name;
+    let canonicalAuthor = matchedUpstream?.author || p.author_name;
+    let canonicalName = matchedUpstream?.name || p.name;
     const canonicalKey = `${canonicalAuthor}/${canonicalName}`.toLowerCase();
     if (blockedIds.has(canonicalKey) || seenKeys.has(canonicalKey)) continue;
 
     seenKeys.add(d1Key);
     seenKeys.add(canonicalKey);
+
+    // Ensure strict Luanti client validation regex compliance (contentdb.lua:429-430)
+    const aliases: string[] = Array.isArray(matchedUpstream?.aliases) ? [...matchedUpstream.aliases] : [];
+    const safeName = String(canonicalName || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .replace(/^_+|_+$/g, '') || 'mod';
+    if (safeName !== canonicalName) {
+      aliases.push(`${canonicalAuthor}/${canonicalName}`);
+      canonicalName = safeName;
+    }
+    if (p.author_name && p.author_name.toLowerCase() !== canonicalAuthor.toLowerCase()) {
+      const aliasEntry = `${p.author_name}/${p.name}`;
+      if (!aliases.includes(aliasEntry)) {
+        aliases.push(aliasEntry);
+      }
+    }
 
     const parsedTags = parseJsonArray(p.tags);
     const isGitSource = p.provider !== 'contentdb' || parsedTags.includes('git');
@@ -354,8 +371,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       id: `${canonicalAuthor}/${canonicalName}`,
       author: canonicalAuthor,
       name: canonicalName,
+      aliases: aliases.length > 0 ? aliases : undefined,
       title: matchedUpstream?.title || p.title || canonicalName,
-      type: p.type || matchedUpstream?.type || 'mod',
+      type: p.type === 'modpack' ? 'mod' : (p.type || matchedUpstream?.type || 'mod'),
       short_desc: shortDescText,
       short_description: shortDescText,
       release: releaseId,
@@ -407,6 +425,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     });
   }
 
+  // Promote Top 10 trending packages as featured for in-game Luanti Content tab (renders gold star badge in dlg_contentdb.lua:355)
+  const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
+  const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
+  const featuredIds = new Set<string>(
+    [...top10Today.slice(0, 5), ...top10Week.slice(0, 10)].map(p => String(p.id || '').toLowerCase())
+  );
+  for (const pkg of merged) {
+    if (featuredIds.has(String(pkg.id || '').toLowerCase())) {
+      pkg.featured = true;
+    }
+  }
+
   let responsePayload: any = merged;
   if (isBootBundle) {
     let tags = DEFAULT_CONTENTDB_TAGS;
@@ -421,9 +451,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         tags = normalizedTags;
       }
     }
-
-    const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
-    const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
 
     // Pre-hydrate licenses, tags & ContentDB downloads on the server for top carousel & Git Community packages (cached 1h at Cloudflare Edge + saved to D1)
     const carouselPool: any[] = [];

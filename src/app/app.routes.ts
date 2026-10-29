@@ -11,6 +11,10 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'packages/:author/:name',
+    component: CatalogComponent
+  },
+  {
     path: 'submit',
     component: CatalogComponent
   },

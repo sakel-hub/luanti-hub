@@ -1,17 +1,48 @@
 import {
   fetchUpstreamJsonCached,
   parseJsonArray,
-  ensureExtendedPackageColumns
+  ensureExtendedPackageColumns,
+  formatByteSize
 } from '../../../lib/upstream';
 
 interface Env {
   DB?: any;
 }
 
-function markdownToLuantiHypertext(md: string, title?: string): string {
+const HYPERTEXT_HEAD = '<tag name=code color=#7bf font=mono> <tag name=action color=#4CDAFA hovercolor=#97EAFC>';
+
+function escapeHypertext(text: string): string {
+  return String(text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/</g, '\\<')
+    .replace(/>/g, '\\>');
+}
+
+function formatInlineHypertext(line: string, linksMap: Record<string, string>): string {
+  // Strip Markdown images ![alt](url) and convert [label](url) to clickable <action name=link_N><u>label</u></action>
+  const withoutImages = String(line || '').replace(/!\[[^\]]*\]\([^)]+\)/g, '');
+  const tokens: Array<{ key: string; label: string }> = [];
+  const withPlaceholders = withoutImages.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_m, label, url) => {
+    const key = `link_${Object.keys(linksMap).length + 1}`;
+    linksMap[key] = url;
+    const idx = tokens.push({ key, label }) - 1;
+    return `@@LH_LINK_${idx}@@`;
+  });
+  let formatted = escapeHypertext(withPlaceholders)
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  formatted = formatted.replace(/@@LH_LINK_(\d+)@@/g, (_m, idxStr) => {
+    const t = tokens[Number(idxStr)];
+    return t ? `<action name=${t.key}><u>${escapeHypertext(t.label)}</u></action>` : '';
+  });
+  return formatted;
+}
+
+function markdownToLuantiHypertext(md: string, linksMap: Record<string, string>, title?: string): string {
   const raw = (md || '').trim();
   if (!raw) {
-    return title ? `<bigger>${escapeHypertext(title)}</bigger>` : '';
+    return title ? `<big>${escapeHypertext(title)}</big>\n` : '';
   }
 
   const lines = raw.split(/\r?\n/);
@@ -25,45 +56,28 @@ function markdownToLuantiHypertext(md: string, title?: string): string {
       continue;
     }
     if (inCodeBlock) {
-      out.push(`<mono>${escapeHypertext(rawLine)}</mono>`);
+      out.push(`<code>${escapeHypertext(rawLine)}</code>`);
       continue;
     }
-    const h1 = trimmed.match(/^#\s+(.+)$/);
-    if (h1) {
-      out.push(`<bigger><b>${escapeHypertext(h1[1])}</b></bigger>`);
+    const h12 = trimmed.match(/^#{1,2}\s+(.+)$/);
+    if (h12) {
+      out.push(`<big>${escapeHypertext(h12[1])}</big>`);
       continue;
     }
-    const h2 = trimmed.match(/^#{2,3}\s+(.+)$/);
-    if (h2) {
-      out.push(`<b>${escapeHypertext(h2[1])}</b>`);
+    const h35 = trimmed.match(/^#{3,5}\s+(.+)$/);
+    if (h35) {
+      out.push(`<b>${escapeHypertext(h35[1])}</b>`);
       continue;
     }
     const bullet = trimmed.match(/^[-*+]\s+(.+)$/);
     if (bullet) {
-      out.push(`• ${formatInlineHypertext(bullet[1])}`);
+      out.push(`<img name=blank.png width=16 height=1>• ${formatInlineHypertext(bullet[1], linksMap)}`);
       continue;
     }
-    out.push(formatInlineHypertext(rawLine));
+    out.push(formatInlineHypertext(rawLine, linksMap));
   }
 
-  return out.join('\n');
-}
-
-function escapeHypertext(text: string): string {
-  return String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-function formatInlineHypertext(line: string): string {
-  // Strip Markdown images ![alt](url) and convert [label](url) to label (url)
-  const withoutImages = String(line || '').replace(/!\[[^\]]*\]\([^)]+\)/g, '');
-  const withLinks = withoutImages.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1 ($2)');
-  const escaped = escapeHypertext(withLinks);
-  return escaped
-    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-    .replace(/`([^`]+)`/g, '<mono>$1</mono>');
+  return out.join('\n') + '\n';
 }
 
 export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
@@ -81,13 +95,15 @@ export async function onRequestGet(context: { request: Request; params: { author
 
   let d1Pkg: any = null;
   let lhDownloads = 0;
+  let d1ReviewsCount = { positive: 0, neutral: 0, negative: 0 };
 
   if (context.env.DB) {
     try {
       await ensureExtendedPackageColumns(context.env.DB);
+      const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       d1Pkg = await context.env.DB.prepare(
-        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-      ).bind(pkgId, author, name).first();
+        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
+      ).bind(pkgId, author, name, sanitizedName).first();
 
       if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
         return Response.json({
@@ -99,14 +115,26 @@ export async function onRequestGet(context: { request: Request; params: { author
         });
       }
 
-      const dailySumRow = await context.env.DB.prepare(
-        `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-      ).bind(d1Pkg?.id || pkgId).first().catch(() => null);
+      const [dailySumRow, reviewRowsRes] = await Promise.all([
+        context.env.DB.prepare(
+          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(d1Pkg?.id || pkgId).first().catch(() => null),
+        context.env.DB.prepare(
+          `SELECT rating FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(d1Pkg?.id || pkgId).all().catch(() => ({ results: [] }))
+      ]);
 
       lhDownloads = Math.max(
         Number(d1Pkg?.luantihub_downloads) || 0,
         Number(dailySumRow?.total_lh) || 0
       );
+
+      for (const rev of reviewRowsRes?.results || []) {
+        const r = Number(rev.rating || 5);
+        if (r >= 4) d1ReviewsCount.positive++;
+        else if (r === 3) d1ReviewsCount.neutral++;
+        else d1ReviewsCount.negative++;
+      }
     } catch {
       // Ignore D1 lookup error
     }
@@ -122,11 +150,25 @@ export async function onRequestGet(context: { request: Request; params: { author
       Number(data.downloads) || 0,
       Number(d1Pkg?.contentdb_downloads) || 0
     );
+    const baseReviews = data.reviews && typeof data.reviews === 'object'
+      ? data.reviews
+      : { positive: 0, neutral: 0, negative: 0 };
+    const mergedReviews = {
+      positive: (Number(baseReviews.positive) || 0) + d1ReviewsCount.positive,
+      neutral: (Number(baseReviews.neutral) || 0) + d1ReviewsCount.neutral,
+      negative: (Number(baseReviews.negative) || 0) + d1ReviewsCount.negative
+    };
+    const normalizedScreenshots = Array.isArray(data.screenshots)
+      ? data.screenshots.map((s: any) => (typeof s === 'string' ? { url: s } : s)).filter((s: any) => Boolean(s?.url))
+      : [];
     const enriched = {
       ...data,
+      name: name || data.name,
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
-      downloads: cdbDownloads + lhDownloads
+      downloads: cdbDownloads + lhDownloads,
+      reviews: mergedReviews,
+      screenshots: normalizedScreenshots
     };
     return new Response(JSON.stringify(enriched), {
       headers: {
@@ -147,62 +189,63 @@ export async function onRequestGet(context: { request: Request; params: { author
     const provides = parseJsonArray(d1Pkg.provides);
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
     const softDeps = parseJsonArray(d1Pkg.optional_dependencies);
-    const screenshots: string[] = [];
+    const screenshots: Array<{ url: string }> = [];
     if (d1Pkg.banner_url && String(d1Pkg.banner_url).startsWith('http')) {
-      screenshots.push(String(d1Pkg.banner_url));
+      screenshots.push({ url: String(d1Pkg.banner_url) });
     } else if (d1Pkg.thumbnail_url && String(d1Pkg.thumbnail_url).startsWith('http')) {
-      screenshots.push(String(d1Pkg.thumbnail_url));
+      screenshots.push({ url: String(d1Pkg.thumbnail_url) });
     }
 
+    const descLinksMap: Record<string, string> = {};
     const bodyHypertext = markdownToLuantiHypertext(
       d1Pkg.long_desc || d1Pkg.short_desc || '',
+      descLinksMap,
       d1Pkg.title || d1Pkg.name
     );
 
+    const infoLinksMap: Record<string, string> = {};
+    const typeLabel = d1Pkg.type === 'game' ? 'Game' : (d1Pkg.type === 'txp' ? 'Texture Pack' : 'Mod');
     const infoLines: string[] = [
-      `<b>Author:</b> ${escapeHypertext(d1Pkg.author_name || author)}`,
-      `<b>License:</b> ${escapeHypertext(d1Pkg.license || 'MIT')}`,
-      `<b>Media License:</b> ${escapeHypertext(d1Pkg.media_license || d1Pkg.license || 'MIT')}`,
-      `<b>Downloads:</b> ${totalDl}`,
-      `<b>Source:</b> Luanti Hub Git Community`
+      `Type: <b>${escapeHypertext(typeLabel)}</b>\n`,
+      `Tags: ${tags.length > 0 ? tags.map((t: string) => `<b>${escapeHypertext(t)}</b>`).join(', ') : '<i>none</i>'}\n`,
+      `Dependencies: ${hardDeps.length > 0 ? hardDeps.map((d: string) => `<b>${escapeHypertext(d)}</b>`).join(', ') : '<i>none</i>'}\n`,
+      `Optional dependencies: ${softDeps.length > 0 ? softDeps.map((d: string) => `<b>${escapeHypertext(d)}</b>`).join(', ') : '<i>none</i>'}\n`,
+      `License: <b>${escapeHypertext(d1Pkg.license || 'MIT')}</b>\n`,
+      `Media License: <b>${escapeHypertext(d1Pkg.media_license || d1Pkg.license || 'MIT')}</b>\n`,
+      `Maintenance State: <b>${escapeHypertext(d1Pkg.dev_state || 'ACTIVELY_DEVELOPED')}</b>\n`,
+      `Added: <b>${escapeHypertext(d1Pkg.created_at || new Date().toISOString())}</b>\n`,
+      `Maintainers: <b>${escapeHypertext(d1Pkg.author_name || author)}</b>\n`,
+      `Provides: <b>${escapeHypertext((provides.length > 0 ? provides : [d1Pkg.name || name]).join(', '))}</b>\n`
     ];
-    if (tags.length > 0) {
-      infoLines.push(`<b>Tags:</b> ${escapeHypertext(tags.join(', '))}`);
-    }
-    if (hardDeps.length > 0) {
-      infoLines.push(`<b>Required Dependencies:</b> ${escapeHypertext(hardDeps.join(', '))}`);
-    }
-    if (softDeps.length > 0) {
-      infoLines.push(`<b>Optional Dependencies:</b> ${escapeHypertext(softDeps.join(', '))}`);
-    }
-
-    const linksMap: Record<string, string> = {};
     if (d1Pkg.repo_url) {
-      linksMap['git_repo'] = d1Pkg.repo_url;
-      infoLines.push(`<action name="git_repo">Git Repository</action>`);
+      infoLinksMap['git_repo'] = d1Pkg.repo_url;
+      infoLines.push(`<action name=git_repo><u>Git Repository</u></action>\n`);
     }
     if (d1Pkg.issue_tracker) {
-      linksMap['issue_tracker'] = d1Pkg.issue_tracker;
-      infoLines.push(`<action name="issue_tracker">Issue Tracker</action>`);
+      infoLinksMap['issue_tracker'] = d1Pkg.issue_tracker;
+      infoLines.push(`<action name=issue_tracker><u>Issue Tracker</u></action>\n`);
     }
 
+    // Ensure info.name matches the requested parameter so Luanti's assert(data.package.name == info.name) in dlg_package.lua:87 never fails
     const clientPayload = {
       author: d1Pkg.author_name || author,
-      name: d1Pkg.name || name,
+      name: name || d1Pkg.name,
       title: d1Pkg.title || d1Pkg.name || name,
-      type: d1Pkg.type || 'mod',
+      type: d1Pkg.type === 'modpack' ? 'mod' : (d1Pkg.type || 'mod'),
       short_description: d1Pkg.short_desc || '',
       long_description: {
-        head: '<bigger>',
+        head: HYPERTEXT_HEAD,
         body: bodyHypertext,
-        links: linksMap,
-        images: {}
+        links: descLinksMap,
+        images: {},
+        image_tooltips: {}
       },
       info_hypertext: {
-        head: '',
+        head: HYPERTEXT_HEAD,
         body: infoLines.join('\n'),
-        links: linksMap,
-        images: {}
+        links: infoLinksMap,
+        images: {},
+        image_tooltips: {}
       },
       release: releaseId,
       license: d1Pkg.license || 'MIT',
@@ -216,11 +259,12 @@ export async function onRequestGet(context: { request: Request; params: { author
       video_url: d1Pkg.video_url || null,
       video_thumbnail_url: d1Pkg.video_thumbnail_url || null,
       dev_state: d1Pkg.dev_state || 'ACTIVELY_DEVELOPED',
-      download_size: d1Pkg.download_size ? Number(d1Pkg.download_size) : 0,
+      download_size: d1Pkg.download_size ? formatByteSize(d1Pkg.download_size) || 'Archive' : (d1Pkg.file_size || 'Archive'),
       downloads: totalDl,
       contentdb_downloads: Number(d1Pkg.contentdb_downloads) || 0,
       luantihub_downloads: totalDl,
       score: Number(d1Pkg.score) || 0,
+      reviews: d1ReviewsCount,
       screenshots,
       tags,
       provides: provides.length > 0 ? provides : [d1Pkg.name || name],

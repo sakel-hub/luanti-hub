@@ -25,12 +25,13 @@ export async function onRequest(context: {
   // 1. Instant Kill Switch Check & Package Metadata Lookup in Cloudflare D1
   if (env.DB) {
     try {
+      const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       pkgRecord = await env.DB.prepare(
         `SELECT id, author_name, name, status, status_reason, repo_url, provider, default_branch, min_minetest_version
          FROM packages
-         WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
+         WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
          LIMIT 1`
-      ).bind(packageId, author, name).first();
+      ).bind(packageId, author, name, sanitizedName).first();
 
       if (!pkgRecord && (!author || author === 'undefined')) {
         pkgRecord = await env.DB.prepare(

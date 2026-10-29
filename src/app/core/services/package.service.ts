@@ -862,6 +862,7 @@ export class PackageService {
     const path = pathPart || '/';
     const isModalRoute =
       path.startsWith('/package/') ||
+      path.startsWith('/packages/') ||
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
@@ -898,8 +899,8 @@ export class PackageService {
       }
     }
 
-    if (path.startsWith('/package/')) {
-      const parts = path.replace('/package/', '').split('/');
+    if (path.startsWith('/package/') || path.startsWith('/packages/')) {
+      const parts = path.replace(/^\/packages?\//, '').split('/').filter(Boolean);
       if (parts[0] && parts[1]) {
         this._isSubmitModalOpen.set(false);
         this._isSetupModalOpen.set(false);
