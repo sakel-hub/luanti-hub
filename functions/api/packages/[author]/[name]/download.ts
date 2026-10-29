@@ -1,7 +1,8 @@
 import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
-  buildGitBranchArchiveUrl
+  buildGitBranchArchiveUrl,
+  ensureExtendedPackageColumns
 } from '../../../lib/upstream';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
@@ -10,8 +11,12 @@ interface Env {
   SESSION_SECRET?: string;
 }
 
-export async function onRequest(context: { params: { author: string; name: string }; request: Request; env: Env }) {
-  const { author, name } = context.params;
+export async function onRequest(context: {
+  params: { author: string; name: string; release?: string };
+  request: Request;
+  env: Env;
+}) {
+  const { author, name, release } = context.params;
   const packageId = `${author}/${name}`;
   const { env, request } = context;
 
@@ -55,8 +60,9 @@ export async function onRequest(context: { params: { author: string; name: strin
 
     const effectivePkgId = pkgRecord?.id || packageId;
 
-    // 2. Atomically record download in Cloudflare D1 (global daily rollup + per-user download count)
+    // 2. Atomically record download in Cloudflare D1 (global daily rollup + dual-counter package total + per-user download count)
     try {
+      await ensureExtendedPackageColumns(env.DB);
       await env.DB.prepare(`
         INSERT INTO package_daily_downloads (package_id, download_date, downloads_count)
         VALUES (?, DATE('now'), 1)
@@ -66,7 +72,10 @@ export async function onRequest(context: { params: { author: string; name: strin
 
       await env.DB.prepare(`
         UPDATE packages
-        SET downloads_count = downloads_count + 1, updated_at = CURRENT_TIMESTAMP
+        SET
+          luantihub_downloads = COALESCE(luantihub_downloads, 0) + 1,
+          downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1,
+          updated_at = CURRENT_TIMESTAMP
         WHERE LOWER(id) = LOWER(?)
       `).bind(effectivePkgId).run();
 
@@ -196,26 +205,69 @@ export async function onRequest(context: { params: { author: string; name: strin
     }
   }
 
-  // 5. Resolve exact latest release .zip URL from ContentDB API if available
-  let targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/download/`;
-  try {
-    const releases = await fetchUpstreamJsonCached<any[]>(
-      `/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/releases/`,
-      300
-    );
-    if (Array.isArray(releases) && releases.length > 0 && releases[0]) {
-      const first = releases[0];
-      if (first.url) {
-        targetZipUrl = first.url.startsWith('http')
-          ? first.url
-          : `https://content.luanti.org${first.url}`;
-      } else if (first.id) {
-        targetZipUrl = `https://content.luanti.org/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/releases/${first.id}/download/`;
+  // 5. Resolve exact latest release .zip URL from ContentDB / milcho.org mirror
+  const encAuthor = encodeURIComponent(effectiveAuthor);
+  const encName = encodeURIComponent(effectiveName);
+  let resolvedReleaseId = release && /^\d+$/.test(String(release)) ? String(release) : '';
+
+  if (!resolvedReleaseId) {
+    try {
+      const releases = await fetchUpstreamJsonCached<any[]>(
+        `/packages/${encAuthor}/${encName}/releases/`,
+        300
+      );
+      if (Array.isArray(releases) && releases.length > 0 && releases[0]) {
+        const first = releases[0];
+        if (first.id) {
+          resolvedReleaseId = String(first.id);
+        }
       }
+    } catch {
+      // Fallback to /for-client/ release ID
     }
-  } catch {
-    // Keep default ContentDB /download/ URL
   }
 
-  return Response.redirect(targetZipUrl, 302);
+  if (!resolvedReleaseId) {
+    try {
+      const forClient = await fetchUpstreamJsonCached<any>(
+        `/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`,
+        300
+      );
+      if (forClient?.release) {
+        resolvedReleaseId = String(forClient.release);
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  const downloadPath = resolvedReleaseId
+    ? `/packages/${encAuthor}/${encName}/releases/${encodeURIComponent(resolvedReleaseId)}/download/`
+    : `/packages/${encAuthor}/${encName}/download/`;
+
+  // Probe whether primary ContentDB download endpoint is serving a valid binary/redirect or an HTML maintenance page
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1800);
+    const primaryRes = await fetch(`https://content.luanti.org${downloadPath}`, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: ctrl.signal,
+      headers: {
+        'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)'
+      }
+    });
+    clearTimeout(timer);
+    const ct = (primaryRes.headers.get('content-type') || '').toLowerCase();
+    if (
+      (primaryRes.status === 301 || primaryRes.status === 302 || primaryRes.status === 303 || primaryRes.status === 307 || primaryRes.status === 308) ||
+      (primaryRes.ok && !ct.includes('text/html'))
+    ) {
+      return Response.redirect(`https://content.luanti.org${downloadPath}`, 302);
+    }
+  } catch {
+    // Primary unreachable; fall back to milcho.org mirror below
+  }
+
+  return Response.redirect(`https://contentdb.milcho.org${downloadPath}`, 302);
 }

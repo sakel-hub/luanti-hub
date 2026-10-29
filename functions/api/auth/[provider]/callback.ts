@@ -13,6 +13,9 @@ interface Env {
   CODEBERG_CLIENT_ID?: string;
   CODEBERG_CLIENT_SECRET?: string;
   CODEBERG_REDIRECT_URI?: string;
+  MESEHUB_CLIENT_ID?: string;
+  MESEHUB_CLIENT_SECRET?: string;
+  MESEHUB_REDIRECT_URI?: string;
   GITLAB_CLIENT_ID?: string;
   GITLAB_CLIENT_SECRET?: string;
   GITLAB_REDIRECT_URI?: string;
@@ -34,6 +37,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
     codeberg: context.env.CODEBERG_REDIRECT_URI,
+    mesehub: context.env.MESEHUB_REDIRECT_URI,
     gitlab: context.env.GITLAB_REDIRECT_URI,
     github: context.env.GITHUB_REDIRECT_URI,
     contentdb: context.env.CONTENTDB_REDIRECT_URI
@@ -82,6 +86,31 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       displayName = user.full_name || providerUsername;
       avatarUrl = user.avatar_url || '';
       profileUrl = `https://codeberg.org/${providerUsername}`;
+
+    } else if (provider === 'mesehub') {
+      const tokenRes = await fetch('https://git.minetest.land/login/oauth/access_token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+        body: new URLSearchParams({
+          client_id: context.env.MESEHUB_CLIENT_ID || '',
+          client_secret: context.env.MESEHUB_CLIENT_SECRET || '',
+          code,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri
+        })
+      });
+      if (!tokenRes.ok) throw new Error('Mesehub token exchange failed');
+      const tokenData = await tokenRes.json() as any;
+      const userRes = await fetch('https://git.minetest.land/api/v1/user', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      if (!userRes.ok) throw new Error('Mesehub user profile fetch failed');
+      const user = await userRes.json() as any;
+      providerUserId = String(user.id || user.username || user.login || '');
+      providerUsername = user.username || user.login || '';
+      displayName = user.full_name || providerUsername;
+      avatarUrl = user.avatar_url || `https://git.minetest.land/${providerUsername}.png`;
+      profileUrl = `https://git.minetest.land/${providerUsername}`;
 
     } else if (provider === 'gitlab') {
       const tokenRes = await fetch('https://gitlab.com/oauth/token', {
@@ -261,13 +290,14 @@ export async function onRequestGet(context: { params: { provider: string }; requ
           }
         }
 
-        // Clean up duplicate identity rows for this provider/user before upserting canonical OAuth identity
+        // Clean up duplicate identity rows for this specific (provider, provider_user_id / provider_username)
+        // while preserving any OTHER accounts on the same provider linked to this userId!
         const currentIdentitiesRes = await context.env.DB.prepare(`
           SELECT id FROM user_identities
           WHERE provider = ?
-            AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?) OR user_id = ?)
+            AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
           ORDER BY verified DESC, id ASC
-        `).bind(provider, providerUserId, providerUsername, userId).all();
+        `).bind(provider, providerUserId, providerUsername).all();
         const currentIds = (currentIdentitiesRes.results || []) as Array<{ id: number }>;
 
         if (currentIds.length > 0) {

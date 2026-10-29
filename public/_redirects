@@ -1,2 +1,3 @@
-/api/*  /api/:splat  200
-/*      /index.html  200
+/api/*       /api/:splat       200
+/packages/*  /packages/:splat  200
+/*           /index.html       200

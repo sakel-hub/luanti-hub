@@ -59,7 +59,7 @@ export class AuthService {
       const authError = params.get('auth_error');
       const authSuccess = params.get('auth_success');
       const providerParam = params.get('provider') as GitProvider | null;
-      if (providerParam && ['codeberg', 'gitlab', 'github', 'contentdb'].includes(providerParam)) {
+      if (providerParam && ['codeberg', 'mesehub', 'gitlab', 'github', 'contentdb'].includes(providerParam)) {
         this._selectedProvider.set(providerParam);
       }
       if (authError) {
@@ -215,12 +215,13 @@ export class AuthService {
     }
   }
 
-  loginWith(provider: GitProvider): void {
+  loginWith(provider: GitProvider, loginHint?: string): void {
     this._selectedProvider.set(provider);
     if (this.isOAuthConfigured(provider)) {
       this.clearAuthCache();
       if (typeof window !== 'undefined') {
-        window.location.href = `/api/auth/${provider}/login`;
+        const cleanHint = (loginHint || '').trim();
+        window.location.href = `/api/auth/${provider}/login${cleanHint ? `?login=${encodeURIComponent(cleanHint)}` : ''}`;
       }
       return;
     }
@@ -276,7 +277,11 @@ export class AuthService {
             username: cleanHandle,
             profile_url: provider === 'contentdb'
               ? `https://content.luanti.org/users/${cleanHandle}/`
-              : `https://${provider}.com/${cleanHandle}`,
+              : provider === 'mesehub'
+                ? `https://git.minetest.land/${cleanHandle}`
+                : provider === 'codeberg'
+                  ? `https://codeberg.org/${cleanHandle}`
+                  : `https://${provider}.com/${cleanHandle}`,
             verified: false
           }
         ],
@@ -384,9 +389,11 @@ export class AuthService {
     }
   }
 
-  async unlinkIdentity(provider: GitProvider): Promise<{ success: boolean; message?: string }> {
+  async unlinkIdentity(provider: GitProvider, username?: string): Promise<{ success: boolean; message?: string }> {
     try {
-      const res = await fetch(`/api/auth/me?provider=${encodeURIComponent(provider)}`, {
+      const cleanUsername = (username || '').trim();
+      const query = `provider=${encodeURIComponent(provider)}${cleanUsername ? `&username=${encodeURIComponent(cleanUsername)}` : ''}`;
+      const res = await fetch(`/api/auth/me?${query}`, {
         method: 'DELETE'
       });
       if (res.ok) {

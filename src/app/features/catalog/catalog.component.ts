@@ -51,7 +51,7 @@ import {
         <app-hero-billboard></app-hero-billboard>
 
         <!-- Skeleton Tags Bar -->
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-5">
+        <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-5">
           <div class="flex items-center gap-2 flex-wrap py-1">
             @for (pill of [1, 2, 3, 4, 5, 6, 7, 8, 9]; track pill) {
               <div class="h-7 w-24 rounded-full skeleton-shimmer border border-white/10"></div>
@@ -62,7 +62,7 @@ import {
         <!-- Skeleton Swimlanes & Package Tiles -->
         <div class="relative z-10 mt-6 sm:mt-8 space-y-10 pb-16" aria-busy="true">
           @for (lane of [1, 2, 3]; track lane) {
-            <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-4">
+            <section class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 space-y-4">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
                   <div class="w-7 h-7 rounded-lg skeleton-shimmer"></div>
@@ -72,9 +72,8 @@ import {
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                 @for (tile of [1, 2, 3, 4]; track tile) {
-                  <div class="h-[312px] w-full rounded-2xl glass-card overflow-hidden flex flex-col">
+                  <div class="h-[344px] w-full rounded-2xl glass-card overflow-hidden flex flex-col">
                     <div class="h-40 w-full skeleton-shimmer relative">
-                      <div class="absolute top-2.5 left-2.5 h-4 w-12 rounded bg-slate-800/80"></div>
                       <div class="absolute top-2.5 right-2.5 h-5 w-12 rounded-full bg-slate-800/80"></div>
                     </div>
                     <div class="p-3.5 flex-1 flex flex-col justify-between">
@@ -122,7 +121,7 @@ import {
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             @for (tile of [1, 2, 3, 4, 5, 6, 7, 8]; track tile) {
-              <div class="h-[312px] w-full rounded-2xl glass-card overflow-hidden flex flex-col">
+              <div class="h-[344px] w-full rounded-2xl glass-card overflow-hidden flex flex-col">
                 <div class="h-40 w-full skeleton-shimmer"></div>
                 <div class="p-3.5 flex-1 flex flex-col justify-between">
                   <div class="space-y-2.5">
@@ -303,7 +302,7 @@ import {
       <app-hero-billboard></app-hero-billboard>
 
       <!-- ContentDB & Custom Git Tags Quick-Filter Bar + Expandable Drawer -->
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-5 space-y-2.5">
+      <div class="relative z-10 max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-5 space-y-2.5">
         <div class="flex items-center gap-2 flex-wrap py-1">
           <div class="flex items-center gap-1.5 text-xs font-bold text-slate-400 pr-1 flex-shrink-0">
             <svg lucideTag class="w-3.5 h-3.5 text-sky-400"></svg>

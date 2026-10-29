@@ -6,7 +6,10 @@ import {
   invalidateEdgeCacheKeys,
   fetchGitRepoReleasesAndTags,
   buildGitBranchArchiveUrl,
-  rewriteRelativeMarkdownUrls
+  rewriteRelativeMarkdownUrls,
+  ensureExtendedPackageColumns,
+  extractLongDescriptionText,
+  extractEmbeddedVideo
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -21,12 +24,40 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
-function formatByteSize(bytes: number): string | undefined {
-  if (!Number.isFinite(bytes) || bytes <= 0) return undefined;
-  if (bytes >= 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+function parseDownloadSizeBytes(val: any): number {
+  if (typeof val === 'number') {
+    return Number.isFinite(val) && val > 0 ? Math.round(val) : 0;
   }
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return 0;
+    const match = trimmed.match(/^([\d.]+)\s*(gb|mb|kb|b)?$/i);
+    if (match) {
+      const num = Number(match[1]);
+      if (!Number.isFinite(num) || num <= 0) return 0;
+      const unit = (match[2] || 'b').toLowerCase();
+      if (unit === 'gb') return Math.round(num * 1024 * 1024 * 1024);
+      if (unit === 'mb') return Math.round(num * 1024 * 1024);
+      if (unit === 'kb') return Math.round(num * 1024);
+      return Math.round(num);
+    }
+  }
+  return 0;
+}
+
+function formatByteSize(val: any): string | undefined {
+  const bytes = parseDownloadSizeBytes(val);
+  if (bytes > 0) {
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (trimmed && /[a-zA-Z]/.test(trimmed) && trimmed !== '2 KB') return trimmed;
+  }
+  return undefined;
 }
 
 function computeStarRating(upstreamData: any, _d1Score?: number, d1ReviewAvg?: number): number {
@@ -130,7 +161,7 @@ function extractDependencies(
 
 async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | undefined> {
   if (!downloadUrl || !downloadUrl.startsWith('http')) return undefined;
-  const cacheKeyUrl = `https://cache.luantihub.internal/filesize?url=${encodeURIComponent(downloadUrl)}`;
+  const cacheKeyUrl = `https://cache.luantihub.internal/filesize_v2?url=${encodeURIComponent(downloadUrl)}`;
   const cacheReq = new Request(cacheKeyUrl, { method: 'GET' });
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
 
@@ -158,7 +189,13 @@ async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | 
       }
     });
     clearTimeout(timeoutId);
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    // Never accept Content-Length from HTML error pages or JSON responses
+    if (!res.ok || contentType.includes('text/') || contentType.includes('json')) {
+      return undefined;
+    }
     const len = Number(res.headers.get('content-length') || 0);
+    if (!Number.isFinite(len) || len <= 0) return undefined;
     const formatted = formatByteSize(len);
     if (formatted && edgeCache) {
       try {
@@ -360,6 +397,9 @@ async function probeGitRepoConfAndLicense(
   if (host.includes('codeberg.org')) {
     pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
     pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
+  } else if (host.includes('minetest.land')) {
+    pushCandidate(`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw`, `https://git.minetest.land/${owner}/${repo}`);
+    pushCandidate(`https://git.minetest.land/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://git.minetest.land/${lowerOwner}/${repo}`);
   } else if (host.includes('gitlab.com')) {
     pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
   } else if (host.includes('github.com')) {
@@ -479,10 +519,12 @@ async function probeGitRepoConfAndLicense(
 
   const foundDirect = await tryCandidates(rawBaseCandidates);
 
-  // Dynamic Codeberg & GitHub search discovery when ContentDB is offline or repo owner differs from author
-  if (!foundDirect && name) {
+  // Dynamic Codeberg & GitHub search discovery ONLY when no explicit repo_url was provided
+  // and restricted strictly to repositories owned by the package author.
+  if (!foundDirect && !normalizedInputUrl && name) {
     const searchCandidates: Array<{ base: string; repoUrl: string }> = [];
     const targetName = name.toLowerCase();
+    const targetAuthor = author.toLowerCase();
 
     try {
       const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(name)}&limit=8`, {
@@ -492,7 +534,8 @@ async function probeGitRepoConfAndLicense(
         const cbJson: any = await cbRes.json();
         const cbRepos: any[] = Array.isArray(cbJson?.data) ? cbJson.data : [];
         for (const r of cbRepos) {
-          if (r && String(r.name || '').toLowerCase() === targetName && r.full_name) {
+          const rOwner = String(r?.owner?.login || r?.owner?.username || '').toLowerCase();
+          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
             searchCandidates.push({
               base: `https://codeberg.org/api/v1/repos/${r.full_name}/raw`,
               repoUrl: r.html_url || `https://codeberg.org/${r.full_name}`
@@ -512,7 +555,8 @@ async function probeGitRepoConfAndLicense(
         const ghJson: any = await ghRes.json();
         const ghRepos: any[] = Array.isArray(ghJson?.items) ? ghJson.items : [];
         for (const r of ghRepos) {
-          if (r && String(r.name || '').toLowerCase() === targetName && r.full_name) {
+          const rOwner = String(r?.owner?.login || '').toLowerCase();
+          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
             searchCandidates.push({
               base: `https://raw.githubusercontent.com/${r.full_name}/HEAD`,
               repoUrl: r.html_url || `https://github.com/${r.full_name}`
@@ -559,6 +603,8 @@ function buildNormalizedReleases(
       commit_sha: r.commit_sha,
       url: r.download_url || r.url,
       download_url: r.download_url || r.url,
+      size: r.size || r.file_size || undefined,
+      file_size: typeof r.file_size === 'string' ? r.file_size : (Number(r.size) > 0 ? formatByteSize(Number(r.size)) : undefined),
       min_minetest_version: r.min_minetest_version,
       max_minetest_version: r.max_minetest_version,
       changelog: r.changelog,
@@ -577,6 +623,7 @@ function buildNormalizedReleases(
         : rawUrl
           ? `https://content.luanti.org${rawUrl}`
           : `https://content.luanti.org/packages/${encAuthor}/${encName}/releases/${r.id}/download/`;
+      const rawBytes = Number(r.size || r.file_size || r.download_size || 0);
 
       return {
         id: r.id,
@@ -586,7 +633,8 @@ function buildNormalizedReleases(
         commit_sha: r.commit || '',
         url: fullDownloadUrl,
         download_url: fullDownloadUrl,
-        size: r.size || r.file_size || undefined,
+        size: rawBytes > 0 ? rawBytes : undefined,
+        file_size: rawBytes > 0 ? formatByteSize(rawBytes) : undefined,
         min_minetest_version: r.min_minetest_version || r.min_protocol_version || undefined,
         max_minetest_version: r.max_minetest_version || r.max_protocol_version || undefined,
         released_at: r.release_date || new Date().toISOString()
@@ -635,12 +683,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
 
-  // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews & releases)
+  // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews, releases & downloads)
   let d1Pkg: any = null;
   let d1ReviewAvg: number | undefined;
   let d1Releases: any[] = [];
   let d1Reviews: any[] = [];
+  let d1DailyDownloadsSum = 0;
   if (context.env.DB) {
+    await ensureExtendedPackageColumns(context.env.DB);
     d1Pkg = await context.env.DB.prepare(
       `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
     ).bind(pkgId, author, name).first();
@@ -659,7 +709,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const effectivePkgId = d1Pkg?.id || pkgId;
 
     try {
-      const [revAvgRow, revRowsRes, relRowsRes] = await Promise.all([
+      const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
         ).bind(effectivePkgId).first(),
@@ -673,7 +723,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         `).bind(effectivePkgId).all().catch(() => ({ results: [] })),
         context.env.DB.prepare(
           `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
-        ).bind(effectivePkgId).all().catch(() => ({ results: [] }))
+        ).bind(effectivePkgId).all().catch(() => ({ results: [] })),
+        context.env.DB.prepare(
+          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }))
       ]);
 
       if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
@@ -685,16 +738,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       }
       d1Reviews = revRowsRes?.results || [];
       d1Releases = relRowsRes?.results || [];
+      d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
     } catch {
       // Ignore if reviews/releases query fails
     }
   }
 
-  // 2. Fetch upstream ContentDB detail, dependencies, releases, and reviews in parallel
+  // 2. Fetch upstream ContentDB detail, for-client, dependencies, releases, and reviews in parallel
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
-  let [upstreamData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
+  let [upstreamData, forClientData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
     fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 300),
+    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300),
     fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`, 600),
     fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
     fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
@@ -762,6 +817,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
   const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload);
 
+  // Merge forClientData into upstreamData if single-package endpoint is missing or partial
+  if (!upstreamData && forClientData) {
+    upstreamData = forClientData;
+  } else if (upstreamData && forClientData) {
+    upstreamData = { ...forClientData, ...upstreamData, download_size: forClientData.download_size ?? upstreamData.download_size };
+  }
+
   // Fallback: If single-package endpoint is unavailable on mirror, resolve from cached bulk catalog (/packages/)
   if (!upstreamData) {
     const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/', 600);
@@ -796,6 +858,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         ? rewriteRelativeMarkdownUrls(d1Pkg.long_desc, fallbackRawBase)
         : undefined;
 
+      // Only show file_size on pure Git packages when a reliable byte size exists (e.g. uploaded binary asset or verified D1 size)
+      const firstRelSize = Number(bundledReleases[0]?.size || d1Pkg.download_size || 0);
+      const gitFileSize = firstRelSize > 0
+        ? formatByteSize(firstRelSize)
+        : (d1Pkg.file_size || undefined);
+
+      const lhDownloads = Math.max(
+        Number(d1Pkg.luantihub_downloads || 0),
+        d1DailyDownloadsSum,
+        Number(d1Pkg.downloads_count || 0)
+      );
+
+      const resolvedGitVideo = extractEmbeddedVideo(
+        d1Pkg.video_url,
+        d1Pkg.video_thumbnail_url,
+        d1Pkg.long_desc || d1Pkg.short_desc,
+        readme || fallbackReadme
+      );
+
       const pureGitPayload = {
         id: `${d1Pkg.author_name}/${d1Pkg.name}`,
         author: d1Pkg.author_name,
@@ -803,24 +884,42 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         title: d1Pkg.title,
         type: d1Pkg.type,
         short_desc: d1Pkg.short_desc,
-        long_description: d1Pkg.short_desc,
-        desc: d1Pkg.short_desc,
+        long_description: d1Pkg.long_desc || d1Pkg.short_desc,
+        desc: d1Pkg.long_desc || d1Pkg.short_desc,
         readme: readme || fallbackReadme || undefined,
         thumbnail: d1Pkg.thumbnail_url,
         banner: d1Pkg.banner_url || d1Pkg.thumbnail_url,
         license: d1Pkg.license,
         media_license: d1Pkg.media_license,
         score: d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : 0,
-        downloads: Number(d1Pkg.downloads_count) || 0,
+        contentdb_downloads: 0,
+        luantihub_downloads: lhDownloads,
+        downloads: lhDownloads,
         repo: d1Pkg.repo_url,
         repo_url: d1Pkg.repo_url,
+        issue_tracker: d1Pkg.issue_tracker || undefined,
+        forum_url: d1Pkg.forum_url || undefined,
+        forums: d1Pkg.forum_url || undefined,
+        donate_url: d1Pkg.donate_url || undefined,
+        translation_url: d1Pkg.translation_url || undefined,
+        video_url: resolvedGitVideo.video_url,
+        video_thumbnail_url: resolvedGitVideo.video_thumbnail_url,
+        dev_state: d1Pkg.dev_state || undefined,
+        provides: parseJsonArray(d1Pkg.provides),
+        content_warnings: parseJsonArray(d1Pkg.content_warnings),
+        ai_disclosures: parseJsonArray(d1Pkg.ai_disclosures),
+        maintainers: parseJsonArray(d1Pkg.maintainers),
+        created_at: d1Pkg.created_at || undefined,
+        updated_at: d1Pkg.updated_at || undefined,
         provider: d1Pkg.provider,
         default_branch: d1Pkg.default_branch || 'main',
         min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
+        max_minetest_version: d1Pkg.max_minetest_version || undefined,
         tags: d1Tags.length > 0 ? d1Tags : [d1Pkg.type || 'mod'],
         dependencies: parseJsonArray(d1Pkg.dependencies),
         optional_dependencies: parseJsonArray(d1Pkg.optional_dependencies),
-        file_size: d1Pkg.file_size || undefined,
+        download_size: firstRelSize > 0 ? firstRelSize : undefined,
+        file_size: gitFileSize,
         status: d1Pkg.status || 'active',
         source: isGitPkg ? 'git' : 'official',
         sources,
@@ -848,7 +947,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let resolvedMediaLicense = upstreamData.media_license || upstreamData.license || d1Pkg?.media_license || '';
   let repoUrl = normalizeDefunctGitHost(upstreamData.repo || upstreamData.repo_url || d1Pkg?.repo_url || undefined);
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = repoUrl ? 'verified' : 'unverified';
-  let minVersion = upstreamData.min_minetest_version || d1Pkg?.min_minetest_version || undefined;
+  let minVersion = upstreamData.min_minetest_version || forClientData?.min_minetest_version || d1Pkg?.min_minetest_version || undefined;
+  const maxVersion = upstreamData.max_minetest_version || forClientData?.max_minetest_version || d1Pkg?.max_minetest_version || undefined;
 
   // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license
   if (!repoUrl || (finalHardDeps.length === 0 && finalSoftDeps.length === 0) || !resolvedLicense) {
@@ -901,8 +1001,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   // Normalize tags array
   let normalizedTags: string[] = [];
-  if (Array.isArray(upstreamData.tags)) {
-    normalizedTags = upstreamData.tags
+  const rawTagsSource = Array.isArray(upstreamData.tags)
+    ? upstreamData.tags
+    : (Array.isArray(forClientData?.tags) ? forClientData.tags : []);
+  if (rawTagsSource.length > 0) {
+    normalizedTags = rawTagsSource
       .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
       .filter(Boolean);
   }
@@ -913,21 +1016,26 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   // Normalize screenshots array
   let screenshots: string[] = [];
-  if (Array.isArray(upstreamData.screenshots)) {
-    screenshots = upstreamData.screenshots
+  const rawScreenshotsSource = Array.isArray(upstreamData.screenshots)
+    ? upstreamData.screenshots
+    : (Array.isArray(forClientData?.screenshots) ? forClientData.screenshots : []);
+  if (rawScreenshotsSource.length > 0) {
+    screenshots = rawScreenshotsSource
       .map((s: any) => (typeof s === 'string' ? s : s?.url || ''))
       .filter(Boolean);
   }
 
-  // Resolve file_size from latest release or Content-Length HEAD check
-  let fileSize: string | undefined;
+  // Resolve download_size & file_size from /for-client/, /packages/:author/:name/, latest release, or Content-Length HEAD check
+  const rawSizeSource =
+    forClientData?.download_size ??
+    upstreamData.download_size ??
+    (Array.isArray(releasesPayload) && releasesPayload[0] ? (releasesPayload[0].size || releasesPayload[0].file_size) : undefined) ??
+    d1Pkg?.download_size;
+  const downloadSizeBytes = parseDownloadSizeBytes(rawSizeSource);
+  const fileSize: string | undefined = formatByteSize(rawSizeSource);
   let latestDownloadUrl = `https://content.luanti.org/packages/${encAuthor}/${encName}/download/`;
   if (Array.isArray(releasesPayload) && releasesPayload.length > 0) {
     const firstRel = releasesPayload[0];
-    const rawBytes = Number(firstRel.size || firstRel.file_size || 0);
-    if (rawBytes > 0) {
-      fileSize = formatByteSize(rawBytes);
-    }
     const rawRelUrl = firstRel.url || '';
     if (rawRelUrl) {
       latestDownloadUrl = rawRelUrl.startsWith('http')
@@ -949,28 +1057,173 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   );
   const sources: Array<'official' | 'git'> = isRegisteredInGitCommunity ? ['official', 'git'] : ['official'];
 
+  // Extract long_description (supports plain string or { type: 'hypertext', body: '...' } across detail, for-client, and dependencies payloads)
+  const extractedLongDesc =
+    extractLongDescriptionText(upstreamData.long_description) ||
+    extractLongDescriptionText(forClientData?.long_description) ||
+    extractLongDescriptionText(depsPayload?.long_description) ||
+    extractLongDescriptionText(upstreamData.desc) ||
+    (!readmeText ? d1Pkg?.long_desc : undefined) ||
+    '';
+
+  const shortDesc =
+    upstreamData.short_desc ||
+    upstreamData.short_description ||
+    forClientData?.short_desc ||
+    d1Pkg?.short_desc ||
+    '';
+
+  // Dual-counter downloads: contentdb_downloads + luantihub_downloads
+  const contentdbDownloads = Math.max(
+    Number(upstreamData.downloads || 0),
+    Number(forClientData?.downloads || 0),
+    Number(d1Pkg?.contentdb_downloads || 0)
+  );
+  const luantihubDownloads = Math.max(
+    Number(d1Pkg?.luantihub_downloads || 0),
+    d1DailyDownloadsSum
+  );
+  const totalDownloads = contentdbDownloads + luantihubDownloads;
+
+  // Normalize URLs & extra ContentDB metadata
+  const rawForum = upstreamData.forum_url || forClientData?.forum_url || upstreamData.forums || forClientData?.forums || d1Pkg?.forum_url;
+  const forumUrl = rawForum
+    ? (String(rawForum).startsWith('http')
+        ? String(rawForum)
+        : `https://forum.luanti.org/viewtopic.php?t=${rawForum}`)
+    : undefined;
+  const donateUrl = upstreamData.donate_url || forClientData?.donate_url || d1Pkg?.donate_url || undefined;
+  const issueTrackerUrl = upstreamData.issue_tracker || forClientData?.issue_tracker || d1Pkg?.issue_tracker || undefined;
+  const translationUrl = upstreamData.translation_url || forClientData?.translation_url || d1Pkg?.translation_url || undefined;
+  const resolvedVideo = extractEmbeddedVideo(
+    upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url,
+    upstreamData.video_thumbnail_url || forClientData?.video_thumbnail_url || d1Pkg?.video_thumbnail_url,
+    extractedLongDesc,
+    readmeText
+  );
+  const videoUrl = resolvedVideo.video_url;
+  const videoThumbnailUrl = resolvedVideo.video_thumbnail_url;
+  const devState = upstreamData.dev_state || forClientData?.dev_state || d1Pkg?.dev_state || undefined;
+
+  const rawProvides = Array.isArray(upstreamData.provides)
+    ? upstreamData.provides
+    : (Array.isArray(forClientData?.provides) ? forClientData.provides : parseJsonArray(d1Pkg?.provides));
+  const providesList = rawProvides
+    .map((p: any) => (typeof p === 'string' ? p : p?.name || ''))
+    .filter(Boolean);
+
+  const rawWarnings = Array.isArray(upstreamData.content_warnings)
+    ? upstreamData.content_warnings
+    : (Array.isArray(forClientData?.content_warnings) ? forClientData.content_warnings : parseJsonArray(d1Pkg?.content_warnings));
+  const contentWarnings = rawWarnings
+    .map((w: any) => (typeof w === 'string' ? w : w?.name || w?.title || ''))
+    .filter(Boolean);
+
+  const rawAiDisclosures = Array.isArray(upstreamData.ai_disclosures)
+    ? upstreamData.ai_disclosures
+    : (Array.isArray(forClientData?.ai_disclosures) ? forClientData.ai_disclosures : parseJsonArray(d1Pkg?.ai_disclosures));
+  const aiDisclosures = rawAiDisclosures
+    .map((a: any) => (typeof a === 'string' ? a : a?.name || a?.title || ''))
+    .filter(Boolean);
+
+  const rawMaintainers = Array.isArray(upstreamData.maintainers)
+    ? upstreamData.maintainers
+    : (Array.isArray(forClientData?.maintainers) ? forClientData.maintainers : parseJsonArray(d1Pkg?.maintainers));
+  const maintainersList = rawMaintainers
+    .map((m: any) => (typeof m === 'string' ? m : m?.username || m?.name || ''))
+    .filter(Boolean);
+
+  const rawReviewCounts = upstreamData.reviews && !Array.isArray(upstreamData.reviews) && typeof upstreamData.reviews === 'object'
+    ? upstreamData.reviews
+    : (forClientData?.reviews && !Array.isArray(forClientData.reviews) && typeof forClientData.reviews === 'object'
+        ? forClientData.reviews
+        : undefined);
+  const reviewThreadCounts = rawReviewCounts
+    ? {
+        positive: Number(rawReviewCounts.positive || 0),
+        neutral: Number(rawReviewCounts.neutral || 0),
+        negative: Number(rawReviewCounts.negative || 0)
+      }
+    : undefined;
+
+  const createdAt = upstreamData.created_at || forClientData?.created_at || d1Pkg?.created_at || undefined;
+  const updatedAt =
+    upstreamData.updated_at ||
+    forClientData?.updated_at ||
+    (bundledReleases[0]?.release_date) ||
+    d1Pkg?.updated_at ||
+    undefined;
+
+  // Persist synced ContentDB downloads & extended metadata back to D1 if row exists
+  if (context.env.DB && d1Pkg) {
+    context.env.DB.prepare(`
+      UPDATE packages SET
+        contentdb_downloads = ?,
+        luantihub_downloads = ?,
+        downloads_count = ?,
+        download_size = COALESCE(?, download_size),
+        file_size = COALESCE(?, file_size),
+        donate_url = COALESCE(?, donate_url),
+        issue_tracker = COALESCE(?, issue_tracker),
+        translation_url = COALESCE(?, translation_url),
+        forum_url = COALESCE(?, forum_url),
+        video_url = COALESCE(?, video_url),
+        video_thumbnail_url = COALESCE(?, video_thumbnail_url),
+        dev_state = COALESCE(?, dev_state)
+      WHERE id = ?
+    `).bind(
+      contentdbDownloads,
+      luantihubDownloads,
+      totalDownloads,
+      downloadSizeBytes > 0 ? downloadSizeBytes : null,
+      resolvedHeadSize || null,
+      donateUrl || null,
+      issueTrackerUrl || null,
+      translationUrl || null,
+      forumUrl || null,
+      videoUrl || null,
+      videoThumbnailUrl || null,
+      devState || null,
+      d1Pkg.id
+    ).run().catch(() => {});
+  }
+
   const enriched = {
     ...upstreamData,
     id: canonicalId,
     license: resolvedLicense,
     media_license: resolvedMediaLicense,
     min_minetest_version: minVersion,
-    short_desc: upstreamData.short_desc || upstreamData.short_description || d1Pkg?.short_desc || '',
-    desc: upstreamData.long_description || upstreamData.desc || (!readmeText ? d1Pkg?.long_desc : undefined) || upstreamData.short_desc || d1Pkg?.short_desc || '',
+    max_minetest_version: maxVersion,
+    short_desc: shortDesc,
+    long_description: extractedLongDesc || shortDesc,
+    desc: extractedLongDesc || shortDesc,
     readme: readmeText || undefined,
     repo_url: repoUrl,
     git_repo_status: gitRepoStatus,
-    website: upstreamData.website || undefined,
-    issue_tracker: upstreamData.issue_tracker || undefined,
-    forums: upstreamData.forums
-      ? (String(upstreamData.forums).startsWith('http')
-          ? String(upstreamData.forums)
-          : `https://forum.luanti.org/viewtopic.php?t=${upstreamData.forums}`)
-      : undefined,
+    website: upstreamData.website || forClientData?.website || undefined,
+    issue_tracker: issueTrackerUrl,
+    forum_url: forumUrl,
+    forums: forumUrl,
+    donate_url: donateUrl,
+    translation_url: translationUrl,
+    video_url: videoUrl,
+    video_thumbnail_url: videoThumbnailUrl,
+    dev_state: devState,
+    provides: providesList,
+    content_warnings: contentWarnings,
+    ai_disclosures: aiDisclosures,
+    maintainers: maintainersList,
+    review_thread_counts: reviewThreadCounts,
+    created_at: createdAt,
+    updated_at: updatedAt,
     screenshots,
     tags: Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean),
-    downloads: Math.max(Number(upstreamData.downloads) || 0, Number(d1Pkg?.downloads_count) || 0),
+    contentdb_downloads: contentdbDownloads,
+    luantihub_downloads: luantihubDownloads,
+    downloads: totalDownloads,
     score: computeStarRating(upstreamData, d1Pkg?.score, d1ReviewAvg),
+    download_size: downloadSizeBytes > 0 ? downloadSizeBytes : undefined,
     file_size: resolvedHeadSize || undefined,
     dependencies: finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps,
     optional_dependencies: finalSoftDeps.length > 0 ? finalSoftDeps : d1SoftDeps,

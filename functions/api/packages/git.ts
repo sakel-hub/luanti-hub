@@ -29,7 +29,7 @@ interface RepoEntry {
 }
 
 async function fetchRepoRootEntries(
-  provider: 'codeberg' | 'gitlab' | 'github',
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
   host: string,
   owner: string,
   repo: string,
@@ -53,7 +53,7 @@ async function fetchRepoRootEntries(
         type: it.type === 'dir' ? 'dir' : 'file'
       }));
     }
-    if (provider === 'codeberg') {
+    if (provider === 'codeberg' || provider === 'mesehub') {
       const res = await fetch(
         `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
         { headers }
@@ -87,7 +87,7 @@ async function fetchRepoRootEntries(
 }
 
 async function verifyOrgOrRepoMembership(
-  provider: 'codeberg' | 'gitlab' | 'github',
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
   host: string,
   owner: string,
   repo: string,
@@ -120,7 +120,7 @@ async function verifyOrgOrRepoMembership(
           return true;
         }
       }
-    } else if (provider === 'codeberg') {
+    } else if (provider === 'codeberg' || provider === 'mesehub') {
       const orgRes = await fetch(
         `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
         { headers }
@@ -454,15 +454,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const repo = parts[1].replace(/\.git$/i, '');
 
     // 1. Detect Provider & Candidate Branches / Config Files
-    let provider: 'codeberg' | 'gitlab' | 'github' = 'github';
-    if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+    let provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' = 'github';
+    if (host.includes('git.minetest.land')) {
+      provider = 'mesehub';
+    } else if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
       provider = 'codeberg';
     } else if (host.includes('gitlab')) {
       provider = 'gitlab';
     }
 
     const buildRawUrl = (branchName: string, filePath: string): string => {
-      if (provider === 'codeberg') {
+      if (provider === 'codeberg' || provider === 'mesehub') {
         return `https://${host}/${owner}/${repo}/raw/branch/${branchName}/${filePath}`;
       } else if (provider === 'gitlab') {
         return `https://${host}/${owner}/${repo}/-/raw/${branchName}/${filePath}`;

@@ -8,5 +8,29 @@
       "Accept": "application/json",
       "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
     }
+  },
+  "/mirror-api": {
+    "target": "https://contentdb.milcho.org",
+    "secure": true,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/mirror-api": "/api"
+    },
+    "headers": {
+      "Accept": "application/json",
+      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
+    }
+  },
+  "/cdb-api": {
+    "target": "https://content.luanti.org",
+    "secure": true,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/cdb-api": "/api"
+    },
+    "headers": {
+      "Accept": "application/json",
+      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
+    }
   }
 }

@@ -2,11 +2,11 @@
 
 **The Decentralized Package Registry & Content Hub for Luanti**
 
-[![Luanti Engine](https://img.shields.io/badge/Luanti-5.0+-38bdf8?style=flat-square&logo=cube)](https://www.luanti.org)
-[![Angular 22](https://img.shields.io/badge/Angular-22.2-dd0031?style=flat-square&logo=angular)](https://angular.dev)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-38bdf8?style=flat-square&logo=tailwindcss)](https://tailwindcss.com)
-[![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1-f38020?style=flat-square&logo=cloudflare)](https://pages.cloudflare.com)
-[![PWA Ready](https://img.shields.io/badge/PWA-Offline%20First-emerald-500?style=flat-square)](https://web.dev/progressive-web-apps/)
+[![Luanti Engine](https://img.shields.io/badge/Luanti-5.0+-38bdf8?style=flat-square&logo=lua&logoColor=white)](https://www.luanti.org)
+[![Angular 22](https://img.shields.io/badge/Angular-22.2-dd0031?style=flat-square&logo=angular&logoColor=white)](https://angular.dev)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind-v4-38bdf8?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1-f38020?style=flat-square&logo=cloudflare&logoColor=white)](https://pages.cloudflare.com)
+[![PWA Ready](https://img.shields.io/badge/PWA-Offline%20First-10b981?style=flat-square&logo=pwa&logoColor=white)](https://web.dev/progressive-web-apps/)
 
 LuantiHub is a package discovery platform and decentralized content repository for the [Luanti](https://www.luanti.org) voxel game engine (formerly Minetest). It provides a modern, cinematic frosted-glass browsing experience while serving as a direct drop-in replacement for the in-game Luanti **Content** tab.
 
@@ -138,6 +138,7 @@ In your Cloudflare Pages project -> **Settings** -> **Variables and secrets**, y
 | `ADMIN_SECRET` | Optional | Secret token that allows an admin to verify their handle directly via the login modal if OAuth is not configured. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_REDIRECT_URI` | Optional | GitHub 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/github/callback`). |
 | `CODEBERG_CLIENT_ID` / `CODEBERG_CLIENT_SECRET` / `CODEBERG_REDIRECT_URI` | Optional | Codeberg 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/codeberg/callback`). |
+| `MESEHUB_CLIENT_ID` / `MESEHUB_CLIENT_SECRET` / `MESEHUB_REDIRECT_URI` | Optional | Mesehub (`https://git.minetest.land`) 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/mesehub/callback`). |
 | `GITLAB_CLIENT_ID` / `GITLAB_CLIENT_SECRET` / `GITLAB_REDIRECT_URI` | Optional | GitLab 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/gitlab/callback`). |
 | `CONTENTDB_CLIENT_ID` / `CONTENTDB_CLIENT_SECRET` / `CONTENTDB_REDIRECT_URI` | Optional | ContentDB 1-click OAuth redirect credentials (`https://luanti-hub.pages.dev/api/auth/contentdb/callback`). |
 

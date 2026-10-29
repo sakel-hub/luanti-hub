@@ -2,6 +2,8 @@ import {
   Component,
   ChangeDetectionStrategy,
   Input,
+  ViewChild,
+  ElementRef,
   inject,
   signal,
   computed,
@@ -10,7 +12,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { LuantiPackage, CommunityReview, PackageRelease } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
@@ -41,6 +43,8 @@ import {
   LucideImage,
   LucideUser,
   LucideChevronDown,
+  LucideChevronLeft,
+  LucideChevronRight,
   LucideTag
 } from '@lucide/angular';
 
@@ -74,6 +78,8 @@ import {
     LucideImage,
     LucideUser,
     LucideChevronDown,
+    LucideChevronLeft,
+    LucideChevronRight,
     LucideTag
   ],
   template: `
@@ -87,7 +93,7 @@ import {
 
         <div
           (click)="$event.stopPropagation()"
-          class="relative w-full max-w-4xl max-h-screen sm:max-h-[92vh] glass-modal rounded-none sm:rounded-3xl overflow-hidden flex flex-col luanti-dialog-panel my-auto">
+          class="relative w-full max-w-5xl xl:max-w-[1120px] max-h-screen sm:max-h-[94vh] glass-modal rounded-none sm:rounded-3xl overflow-hidden flex flex-col luanti-dialog-panel my-auto">
 
           <div class="overflow-y-auto flex-1 flex flex-col">
 
@@ -122,8 +128,8 @@ import {
               </div>
             }
 
-          <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio for HD Screenshots) -->
-          <div class="relative w-full aspect-video min-h-[240px] max-h-[504px] bg-slate-950 flex-shrink-0 overflow-hidden">
+          <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio for HD Screenshots, Netflix-Matched Proportions) -->
+          <div class="relative w-full aspect-video min-h-[260px] sm:min-h-[380px] lg:min-h-[480px] max-h-[630px] bg-slate-950 flex-shrink-0 overflow-hidden">
             <img
               [src]="activeBannerUrl() || bannerImage"
               [fallbackThumbnail]="package.thumbnail"
@@ -314,21 +320,32 @@ import {
           }
 
           <!-- 2-Column Details Body -->
-          <div class="p-5 sm:p-8 space-y-6">
+          <div class="p-6 sm:p-8 lg:p-10 space-y-7">
 
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-10">
 
               <!-- Left Column: Synopsis, Screenshots, Dependencies, README & 1-Click Setup -->
-              <div class="lg:col-span-2 space-y-5">
+              <div class="lg:col-span-2 space-y-6">
 
                 <!-- Metrics Bar -->
                 <div class="flex items-center gap-3 text-xs sm:text-sm flex-wrap">
                   <span class="text-emerald-400 font-bold">
                     {{ packageService.getMatchScore(package) }}% {{ 'card.match' | translate }}
                   </span>
-                  @if (package.min_minetest_version) {
+                  @if (devStateBadge(); as devBadge) {
+                    <span
+                      [class]="devBadge.classes"
+                      class="px-2 py-0.5 rounded font-semibold text-xs border">
+                      {{ devBadge.label }}
+                    </span>
+                  }
+                  @if (package.min_minetest_version || package.max_minetest_version) {
                     <span class="text-slate-300 font-mono px-2 py-0.5 rounded glass-pill text-xs">
-                      Luanti {{ package.min_minetest_version }}+
+                      @if (package.min_minetest_version && package.max_minetest_version && package.min_minetest_version !== package.max_minetest_version) {
+                        Luanti {{ package.min_minetest_version }} – {{ package.max_minetest_version }}
+                      } @else {
+                        Luanti {{ package.min_minetest_version || package.max_minetest_version }}+
+                      }
                     </span>
                   }
                   @if (package.license || package.media_license) {
@@ -357,35 +374,199 @@ import {
                   </div>
                 }
 
-                <!-- Screenshots Gallery (When multiple screenshots exist) -->
-                @if (package.screenshots && package.screenshots.length > 1) {
-                  <div class="space-y-2.5">
-                    <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                      <svg lucideImage class="w-3.5 h-3.5 text-sky-400"></svg>
-                      <span>{{ 'modal.screenshots' | translate }} ({{ package.screenshots.length }})</span>
-                    </h3>
-                    <div class="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-1">
-                      @for (shot of package.screenshots; track shot) {
+                <!-- Media & Screenshots Carousel (Consistent with HeroBillboardComponent + Click-to-Zoom Lightbox) -->
+                @if (mediaSlides().length > 0) {
+                  <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                      <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <svg lucideImage class="w-3.5 h-3.5 text-sky-400"></svg>
+                        <span>{{ 'modal.screenshots' | translate }} ({{ mediaSlides().length }})</span>
+                      </h3>
+                      @if (currentMediaSlide()?.type === 'image') {
                         <button
                           type="button"
-                          (click)="activeBannerUrl.set(shot)"
-                          [class.ring-2]="activeBannerUrl() === shot"
-                          [class.ring-sky-400]="activeBannerUrl() === shot"
-                          class="relative w-28 h-16 sm:w-36 sm:h-20 rounded-xl overflow-hidden flex-shrink-0 border border-white/10 hover:border-sky-400/60 transition cursor-pointer">
-                          <img [src]="shot" [alt]="package.title" loading="lazy" class="w-full h-full object-cover" />
+                          (click)="openLightbox(currentMediaSlide()!.url)"
+                          class="text-[11px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            <line x1="11" y1="8" x2="11" y2="14"></line>
+                            <line x1="8" y1="11" x2="14" y2="11"></line>
+                          </svg>
+                          <span>{{ 'modal.enlargeImage' | translate }}</span>
                         </button>
                       }
                     </div>
+
+                    <div
+                      (keydown.arrowleft)="prevMediaSlide($event)"
+                      (keydown.arrowright)="nextMediaSlide($event)"
+                      tabindex="0"
+                      role="region"
+                      aria-roledescription="carousel"
+                      [attr.aria-label]="package.title + ' media gallery'"
+                      class="relative w-full aspect-video rounded-2xl overflow-hidden select-none bg-slate-950 border border-white/10 shadow-xl focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+
+                      <!-- Hardware-Accelerated Horizontal Slide Track (Matching HeroBillboardComponent) -->
+                      <div
+                        class="flex w-full h-full transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform"
+                        [style.transform]="'translate3d(-' + (mediaCarouselIndex() * 100) + '%, 0, 0)'">
+                        @for (slide of mediaSlides(); track slide.url; let idx = $index) {
+                          <div
+                            class="w-full h-full flex-shrink-0 relative overflow-hidden bg-slate-950"
+                            [attr.aria-hidden]="idx !== mediaCarouselIndex()">
+                            @if (slide.type === 'video') {
+                              @if (isVideoPlaying() && idx === mediaCarouselIndex()) {
+                                @if (isDirectVideoUrl(slide.url)) {
+                                  <video
+                                    [src]="slide.url"
+                                    [poster]="slide.thumbnail"
+                                    controls
+                                    autoplay
+                                    playsinline
+                                    class="w-full h-full object-contain bg-black">
+                                  </video>
+                                } @else if (safeVideoEmbedUrl(); as embedUrl) {
+                                  <iframe
+                                    [src]="embedUrl"
+                                    [title]="package.title + ' video'"
+                                    class="w-full h-full border-0 bg-black"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                    allowfullscreen>
+                                  </iframe>
+                                }
+                              } @else {
+                                <div
+                                  (click)="playModalVideo()"
+                                  class="relative w-full h-full cursor-pointer group">
+                                  <img
+                                    [src]="slide.thumbnail"
+                                    [fallbackThumbnail]="package.thumbnail"
+                                    appImgFallback
+                                    [alt]="package.title + ' video preview'"
+                                    class="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
+                                  />
+                                  <div class="absolute inset-0 bg-slate-950/40 group-hover:bg-slate-950/25 transition-colors flex items-center justify-center">
+                                    <div class="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-sky-500/90 group-hover:bg-sky-400 text-slate-950 flex items-center justify-center shadow-[0_0_30px_rgba(56,189,248,0.6)] group-hover:scale-110 transition-all">
+                                      <svg class="w-7 h-7 ml-1 fill-current" viewBox="0 0 24 24">
+                                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                      </svg>
+                                    </div>
+                                  </div>
+                                  <span class="absolute top-3 left-3 px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-slate-950/80 text-sky-300 border border-sky-400/40 backdrop-blur-md">
+                                    Video Preview
+                                  </span>
+                                </div>
+                              }
+                            } @else {
+                              <div
+                                (click)="openLightbox(slide.url)"
+                                class="relative w-full h-full cursor-zoom-in group">
+                                <img
+                                  [src]="slide.url"
+                                  [fallbackThumbnail]="package.thumbnail"
+                                  appImgFallback
+                                  [alt]="package.title + ' screenshot ' + (idx + 1)"
+                                  loading="lazy"
+                                  class="w-full h-full object-cover object-center group-hover:scale-[1.02] transition-transform duration-500"
+                                />
+                                <button
+                                  type="button"
+                                  (click)="openLightbox(slide.url, $event)"
+                                  [appTooltip]="'modal.enlargeImage' | translate"
+                                  [attr.aria-label]="'modal.enlargeImage' | translate"
+                                  class="absolute top-3 right-3 p-2 rounded-xl glass-btn text-slate-200 hover:text-white opacity-85 group-hover:opacity-100 transition cursor-pointer z-20">
+                                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="15 3 21 3 21 9"></polyline>
+                                    <polyline points="9 21 3 21 3 15"></polyline>
+                                    <line x1="21" y1="3" x2="14" y2="10"></line>
+                                    <line x1="3" y1="21" x2="10" y2="14"></line>
+                                  </svg>
+                                </button>
+                              </div>
+                            }
+                          </div>
+                        }
+                      </div>
+
+                      @if (mediaSlides().length > 1) {
+                        <!-- Carousel Navigation Controls (Matching HeroBillboardComponent) -->
+                        <div class="absolute bottom-3 right-4 z-30 pointer-events-auto flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            (click)="prevMediaSlide($event)"
+                            [appTooltip]="'hero.prevSlide' | translate"
+                            aria-label="Previous slide"
+                            class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 active:scale-95 cursor-pointer">
+                            <svg lucideChevronLeft class="w-4 h-4"></svg>
+                          </button>
+
+                          <button
+                            type="button"
+                            (click)="nextMediaSlide($event)"
+                            [appTooltip]="'hero.nextSlide' | translate"
+                            aria-label="Next slide"
+                            class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 active:scale-95 cursor-pointer">
+                            <svg lucideChevronRight class="w-4 h-4"></svg>
+                          </button>
+                        </div>
+
+                        <!-- Frosted Pill Indicator Dock (Matching HeroBillboardComponent, no 1/N text counter) -->
+                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-950/55 backdrop-blur-md border border-white/10 shadow-lg">
+                          @for (slide of mediaSlides(); track slide.url; let idx = $index) {
+                            <button
+                              type="button"
+                              (click)="goToMediaSlide(idx, $event)"
+                              [attr.aria-label]="'Go to media slide ' + (idx + 1)"
+                              class="h-1.5 rounded-full transition-all duration-500 ease-out overflow-hidden cursor-pointer"
+                              [class.w-6]="idx === mediaCarouselIndex()"
+                              [class.bg-sky-400]="idx === mediaCarouselIndex()"
+                              [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="idx === mediaCarouselIndex()"
+                              [class.w-2]="idx !== mediaCarouselIndex()"
+                              [class.bg-white/35]="idx !== mediaCarouselIndex()"
+                              [class.hover:bg-white/60]="idx !== mediaCarouselIndex()">
+                            </button>
+                          }
+                        </div>
+                      }
+                    </div>
+
+                    @if (mediaSlides().length > 1) {
+                      <div
+                        #mediaThumbStrip
+                        class="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-1 pt-0.5 scroll-smooth">
+                        @for (slide of mediaSlides(); track slide.url; let idx = $index) {
+                          <button
+                            type="button"
+                            [attr.data-thumb-idx]="idx"
+                            (click)="goToMediaSlide(idx)"
+                            [class.ring-2]="mediaCarouselIndex() === idx"
+                            [class.ring-sky-400]="mediaCarouselIndex() === idx"
+                            [class.opacity-100]="mediaCarouselIndex() === idx"
+                            [class.opacity-65]="mediaCarouselIndex() !== idx"
+                            class="relative w-24 h-14 sm:w-28 sm:h-16 rounded-xl overflow-hidden flex-shrink-0 border border-white/10 hover:border-sky-400/60 hover:opacity-100 transition cursor-pointer">
+                            <img [src]="slide.thumbnail" [alt]="package.title" loading="lazy" class="w-full h-full object-cover" />
+                            @if (slide.type === 'video') {
+                              <div class="absolute inset-0 bg-slate-950/45 flex items-center justify-center">
+                                <svg class="w-4 h-4 text-sky-300 fill-current" viewBox="0 0 24 24">
+                                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                </svg>
+                              </div>
+                            }
+                          </button>
+                        }
+                      </div>
+                    }
                   </div>
                 }
 
-                <!-- Dependencies Section (Always visible so dependency status is clear) -->
+                <!-- Dependencies & Provided Mods Section (Always visible so dependency status is clear) -->
                 <div class="space-y-3 p-4 rounded-2xl glass-panel">
                   <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wider">
                     {{ 'modal.dependencies' | translate }}
                   </h3>
 
-                  @if ((package.dependencies && package.dependencies.length > 0) || (package.optional_dependencies && package.optional_dependencies.length > 0)) {
+                  @if ((package.dependencies && package.dependencies.length > 0) || (package.optional_dependencies && package.optional_dependencies.length > 0) || (package.provides && package.provides.length > 0)) {
                     @if (package.dependencies && package.dependencies.length > 0) {
                       <div>
                         <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.requiredDeps' | translate }} ({{ package.dependencies.length }})</span>
@@ -417,6 +598,22 @@ import {
                         </div>
                       </div>
                     }
+
+                    @if (package.provides && package.provides.length > 0) {
+                      <div>
+                        <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.providesMods' | translate }} ({{ package.provides.length }})</span>
+                        <div class="flex flex-wrap gap-1.5">
+                          @for (prov of package.provides; track prov) {
+                            <button
+                              type="button"
+                              (click)="filterByTerm(prov)"
+                              class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 font-mono text-[11px] border border-emerald-400/30 transition cursor-pointer">
+                              {{ prov }}
+                            </button>
+                          }
+                        </div>
+                      </div>
+                    }
                   } @else {
                     <p class="text-xs text-slate-400">
                       {{ 'modal.noDependencies' | translate }}
@@ -442,7 +639,7 @@ import {
                       </a>
                     </div>
                     <div
-                      class="luanti-markdown text-slate-200 text-xs sm:text-sm leading-relaxed max-h-[28rem] overflow-y-auto pr-1.5 break-words"
+                      class="luanti-markdown text-slate-200 text-sm leading-relaxed max-h-[32rem] overflow-y-auto pr-1.5 break-words"
                       [innerHTML]="readmeHtml">
                     </div>
                   </div>
@@ -569,33 +766,66 @@ import {
               <!-- Right Column: Author, Downloads, Score, Tags, License & External Links -->
               <div class="space-y-4 text-xs text-slate-300 border-t lg:border-t-0 lg:border-l border-white/10 lg:pl-6 pt-4 lg:pt-0">
 
-                <!-- Author (Clickable to filter by author) -->
-                <div>
-                  <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
-                    {{ 'modal.author' | translate }}
-                  </span>
-                  <button
-                    type="button"
-                    (click)="filterByTerm(package.author)"
-                    class="flex items-center gap-2 mt-1 group text-left cursor-pointer">
-                    <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs">
-                      {{ package.author.charAt(0).toUpperCase() }}
+                <!-- Author & Maintainers -->
+                <div class="space-y-2">
+                  <div>
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      {{ 'modal.author' | translate }}
+                    </span>
+                    <button
+                      type="button"
+                      (click)="filterByTerm(package.author)"
+                      class="flex items-center gap-2 mt-1 group text-left cursor-pointer">
+                      <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs">
+                        {{ package.author.charAt(0).toUpperCase() }}
+                      </div>
+                      <span class="font-bold text-white group-hover:text-sky-400 transition text-sm">{{ package.author }}</span>
+                    </button>
+                  </div>
+
+                  @if (extraMaintainers().length > 0) {
+                    <div>
+                      <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                        {{ 'modal.maintainers' | translate }}
+                      </span>
+                      <div class="flex flex-wrap gap-1.5 mt-1">
+                        @for (m of extraMaintainers(); track m) {
+                          <button
+                            type="button"
+                            (click)="filterByTerm(m)"
+                            class="px-2 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 font-medium text-[11px] transition cursor-pointer">
+                            @{{ m }}
+                          </button>
+                        }
+                      </div>
                     </div>
-                    <span class="font-bold text-white group-hover:text-sky-400 transition text-sm">{{ package.author }}</span>
-                  </button>
+                  }
                 </div>
 
-                <!-- Technical ID -->
-                <div>
-                  <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
-                    {{ 'modal.technicalId' | translate }}
-                  </span>
-                  <code class="text-sky-300 bg-slate-950/80 border border-white/10 px-2 py-0.5 rounded-md font-mono text-xs mt-1 inline-block">
-                    {{ package.name }}
-                  </code>
+                <!-- Technical ID & Published/Updated Dates -->
+                <div class="flex items-start justify-between gap-3 flex-wrap">
+                  <div>
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      {{ 'modal.technicalId' | translate }}
+                    </span>
+                    <code class="text-sky-300 bg-slate-950/80 border border-white/10 px-2 py-0.5 rounded-md font-mono text-xs mt-1 inline-block">
+                      {{ package.name }}
+                    </code>
+                  </div>
+
+                  @if (package.updated_at || package.created_at) {
+                    <div class="text-right">
+                      <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                        {{ (package.updated_at ? 'modal.lastUpdated' : 'modal.published') | translate }}
+                      </span>
+                      <span class="text-slate-300 font-medium text-[11px] mt-1 inline-block">
+                        {{ (package.updated_at || package.created_at) | date:'mediumDate' }}
+                      </span>
+                    </div>
+                  }
                 </div>
 
-                <!-- Downloads & Community Score -->
+                <!-- Downloads & Community Score (With ContentDB + Luanti Hub Dual-Counter Breakdown & Review Sentiment) -->
                 <div
                   [class.grid-cols-2]="package.score > 0"
                   [class.grid-cols-1]="package.score <= 0"
@@ -607,6 +837,11 @@ import {
                     <span class="font-black text-white text-sm mt-0.5 block">
                       {{ package.downloads | number }}
                     </span>
+                    @if ((package.contentdb_downloads || 0) > 0 || (package.luantihub_downloads || 0) > 0) {
+                      <span class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
+                        ContentDB: {{ (package.contentdb_downloads || 0) | number }} • Hub: {{ (package.luantihub_downloads || 0) | number }}
+                      </span>
+                    }
                   </div>
                   @if (package.score > 0) {
                     <div>
@@ -617,6 +852,19 @@ import {
                         <svg lucideStar class="w-4 h-4 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
                         <span>{{ package.score }} / 5.0</span>
                       </div>
+                      @if (package.review_thread_counts; as revCounts) {
+                        @if (revCounts.positive + revCounts.neutral + revCounts.negative > 0) {
+                          <div class="flex items-center gap-2 text-[10px] mt-0.5 font-semibold">
+                            <span class="text-emerald-400">+{{ revCounts.positive }}</span>
+                            @if (revCounts.neutral > 0) {
+                              <span class="text-slate-400">~{{ revCounts.neutral }}</span>
+                            }
+                            @if (revCounts.negative > 0) {
+                              <span class="text-rose-400">-{{ revCounts.negative }}</span>
+                            }
+                          </div>
+                        }
+                      }
                     </div>
                   }
                 </div>
@@ -638,12 +886,26 @@ import {
                   </div>
                 }
 
-                <!-- External Project Links -->
+                <!-- External Project Links & Resources -->
                 <div class="space-y-1.5">
                   <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                     {{ 'modal.linksTitle' | translate }}
                   </span>
                   <div class="flex flex-col gap-1.5">
+                    @if (package.donate_url) {
+                      <a
+                        [href]="package.donate_url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="px-2.5 py-2 rounded-lg bg-gradient-to-r from-rose-500/20 via-amber-500/15 to-rose-500/20 border border-rose-400/40 hover:border-rose-400/70 text-rose-200 hover:text-white flex items-center justify-between text-xs font-bold transition shadow-sm cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideHeart class="w-3.5 h-3.5 fill-rose-400 text-rose-400" [style.fill]="'#fb7185'" [color]="'#fb7185'"></svg>
+                          <span>{{ 'modal.donate' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-rose-300"></svg>
+                      </a>
+                    }
+
                     <a
                       [href]="gitRepoUrl"
                       target="_blank"
@@ -667,46 +929,93 @@ import {
                       </div>
                     }
                     @if (package.website) {
-                        <a
-                          [href]="package.website"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
-                          <span class="flex items-center gap-2">
-                            <svg lucideGlobe class="w-3.5 h-3.5 text-sky-400"></svg>
-                            <span>{{ 'modal.website' | translate }}</span>
-                          </span>
-                          <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
-                        </a>
-                      }
-                      @if (package.issue_tracker) {
-                        <a
-                          [href]="package.issue_tracker"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
-                          <span class="flex items-center gap-2">
-                            <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400"></svg>
-                            <span>{{ 'modal.issueTracker' | translate }}</span>
-                          </span>
-                          <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
-                        </a>
-                      }
-                      @if (package.forums) {
-                        <a
-                          [href]="package.forums"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
-                          <span class="flex items-center gap-2">
-                            <svg lucideMessageSquare class="w-3.5 h-3.5 text-emerald-400"></svg>
-                            <span>{{ 'modal.forums' | translate }}</span>
-                          </span>
-                          <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
-                        </a>
-                      }
+                      <a
+                        [href]="package.website"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideGlobe class="w-3.5 h-3.5 text-sky-400"></svg>
+                          <span>{{ 'modal.website' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
+                    @if (package.issue_tracker) {
+                      <a
+                        [href]="package.issue_tracker"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400"></svg>
+                          <span>{{ 'modal.issueTracker' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
+                    @if (package.forum_url || package.forums) {
+                      <a
+                        [href]="package.forum_url || package.forums"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideMessageSquare class="w-3.5 h-3.5 text-emerald-400"></svg>
+                          <span>{{ 'modal.forums' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
+                    @if (package.translation_url) {
+                      <a
+                        [href]="package.translation_url"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideGlobe class="w-3.5 h-3.5 text-purple-400"></svg>
+                          <span>{{ 'modal.translations' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
                   </div>
                 </div>
+
+                <!-- Content Warnings & AI Disclosures (When present on ContentDB) -->
+                @if ((package.content_warnings && package.content_warnings.length > 0) || (package.ai_disclosures && package.ai_disclosures.length > 0)) {
+                  <div class="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2 text-[11px]">
+                    @if (package.content_warnings && package.content_warnings.length > 0) {
+                      <div>
+                        <span class="text-amber-300 font-bold uppercase tracking-wider block text-[10px]">
+                          {{ 'modal.contentWarnings' | translate }}
+                        </span>
+                        <div class="flex flex-wrap gap-1 mt-1">
+                          @for (w of package.content_warnings; track w) {
+                            <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[10px] font-medium">
+                              {{ w }}
+                            </span>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (package.ai_disclosures && package.ai_disclosures.length > 0) {
+                      <div>
+                        <span class="text-purple-300 font-bold uppercase tracking-wider block text-[10px]">
+                          {{ 'modal.aiDisclosures' | translate }}
+                        </span>
+                        <div class="flex flex-wrap gap-1 mt-1">
+                          @for (ai of package.ai_disclosures; track ai) {
+                            <span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-200 border border-purple-400/30 text-[10px] font-medium">
+                              {{ ai }}
+                            </span>
+                          }
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
 
                 <!-- Tags Pills (Clickable to filter by ContentDB Tag, with inline Tag Editor for Author/Admin) -->
                 @if ((package.tags && package.tags.length > 0) || isPackageAuthor() || canModerate()) {
@@ -986,6 +1295,34 @@ import {
               <!-- Compliance Content -->
               @if (activeTab() === 'compliance') {
                 <div class="pt-4 space-y-3 text-xs text-slate-300 leading-relaxed luanti-tab-enter">
+                  @if ((package.content_warnings && package.content_warnings.length > 0) || (package.ai_disclosures && package.ai_disclosures.length > 0)) {
+                    <div class="p-3.5 rounded-2xl bg-amber-950/35 border border-amber-500/30 space-y-2">
+                      @if (package.content_warnings && package.content_warnings.length > 0) {
+                        <div>
+                          <span class="font-bold text-amber-300 block mb-1">{{ 'modal.contentWarnings' | translate }}</span>
+                          <div class="flex flex-wrap gap-1.5">
+                            @for (w of package.content_warnings; track w) {
+                              <span class="px-2.5 py-0.5 rounded-md bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[11px] font-medium">
+                                {{ w }}
+                              </span>
+                            }
+                          </div>
+                        </div>
+                      }
+                      @if (package.ai_disclosures && package.ai_disclosures.length > 0) {
+                        <div>
+                          <span class="font-bold text-purple-300 block mb-1">{{ 'modal.aiDisclosures' | translate }}</span>
+                          <div class="flex flex-wrap gap-1.5">
+                            @for (ai of package.ai_disclosures; track ai) {
+                              <span class="px-2.5 py-0.5 rounded-md bg-purple-500/20 text-purple-200 border border-purple-400/30 text-[11px] font-medium">
+                                {{ ai }}
+                              </span>
+                            }
+                          </div>
+                        </div>
+                      }
+                    </div>
+                  }
                   <div class="flex items-start gap-2.5 p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-300">
                     <svg lucideShieldCheck class="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-400"></svg>
                     <span>{{ 'modal.spdxNotice' | translate }}</span>
@@ -1002,6 +1339,83 @@ import {
           </div>
 
         </div>
+
+        <!-- Fullscreen Screenshot Zoom Lightbox (z-[70]) -->
+        @if (lightboxImageUrl(); as zoomImg) {
+          <div
+            (click)="closeLightbox($event)"
+            (keydown.escape)="closeLightbox($event)"
+            (keydown.arrowleft)="prevLightboxImage($event)"
+            (keydown.arrowright)="nextLightboxImage($event)"
+            tabindex="0"
+            role="dialog"
+            aria-modal="true"
+            [attr.aria-label]="package.title + ' enlarged screenshot'"
+            class="fixed inset-0 z-[70] bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-3 sm:p-6 select-none">
+
+            <!-- Lightbox Top Controls -->
+            <div
+              (click)="$event.stopPropagation()"
+              class="absolute top-4 right-4 z-30 flex items-center gap-2">
+              <button
+                type="button"
+                (click)="toggleLightboxZoom($event)"
+                class="px-3.5 py-2 rounded-xl glass-btn text-slate-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  @if (!isLightboxZoomed()) {
+                    <line x1="11" y1="8" x2="11" y2="14"></line>
+                  }
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+                <span>{{ isLightboxZoomed() ? '1x' : '2x' }}</span>
+              </button>
+
+              <button
+                type="button"
+                (click)="closeLightbox($event)"
+                [attr.aria-label]="'modal.close' | translate"
+                class="w-10 h-10 rounded-full glass-icon-btn text-slate-200 hover:text-white flex items-center justify-center transition cursor-pointer">
+                <svg lucideX class="w-5 h-5"></svg>
+              </button>
+            </div>
+
+            <!-- Lightbox Image Viewport -->
+            <div
+              (click)="$event.stopPropagation()"
+              class="relative max-w-6xl max-h-[86vh] w-full h-full flex items-center justify-center overflow-auto">
+              <img
+                [src]="zoomImg"
+                [alt]="package.title + ' full resolution screenshot'"
+                (click)="toggleLightboxZoom($event)"
+                [class]="isLightboxZoomed() ? 'max-w-none w-[165%] sm:w-[150%] h-auto object-contain cursor-zoom-out transition-transform duration-300' : 'max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl cursor-zoom-in transition-transform duration-300'"
+              />
+            </div>
+
+            @if (package.screenshots && package.screenshots.length > 1) {
+              <!-- Lightbox Prev / Next Navigation Controls -->
+              <div
+                (click)="$event.stopPropagation()"
+                class="absolute bottom-5 right-6 z-30 flex items-center gap-2">
+                <button
+                  type="button"
+                  (click)="prevLightboxImage($event)"
+                  aria-label="Previous screenshot"
+                  class="p-2.5 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 cursor-pointer">
+                  <svg lucideChevronLeft class="w-5 h-5"></svg>
+                </button>
+                <button
+                  type="button"
+                  (click)="nextLightboxImage($event)"
+                  aria-label="Next screenshot"
+                  class="p-2.5 rounded-xl glass-btn text-slate-200 hover:text-white transition hover:scale-105 cursor-pointer">
+                  <svg lucideChevronRight class="w-5 h-5"></svg>
+                </button>
+              </div>
+            }
+          </div>
+        }
 
       </div>
     }
@@ -1023,6 +1437,83 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   readonly copiedUrl = signal(false);
   readonly showConfLocations = signal(false);
   readonly activeBannerUrl = signal<string | null>(null);
+
+  // Media Carousel, Video Player & Zoom Lightbox state
+  @ViewChild('mediaThumbStrip') mediaThumbStripRef?: ElementRef<HTMLDivElement>;
+  readonly mediaCarouselIndex = signal<number>(0);
+  readonly isVideoPlaying = signal<boolean>(false);
+  readonly lightboxImageUrl = signal<string | null>(null);
+  readonly isLightboxZoomed = signal<boolean>(false);
+
+  readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string }>>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return [];
+    const slides: Array<{ type: 'video' | 'image'; url: string; thumbnail: string }> = [];
+    if (pkg.video_url) {
+      slides.push({
+        type: 'video',
+        url: pkg.video_url,
+        thumbnail: pkg.video_thumbnail_url || this.bannerImage
+      });
+    }
+    const shots = Array.isArray(pkg.screenshots) ? pkg.screenshots.filter(Boolean) : [];
+    for (const shot of shots) {
+      slides.push({
+        type: 'image',
+        url: shot,
+        thumbnail: shot
+      });
+    }
+    return slides;
+  });
+
+  readonly currentMediaSlide = computed(() => {
+    const slides = this.mediaSlides();
+    if (slides.length === 0) return null;
+    const idx = Math.min(Math.max(0, this.mediaCarouselIndex()), slides.length - 1);
+    return slides[idx];
+  });
+
+  readonly safeVideoEmbedUrl = computed<SafeResourceUrl | null>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    const rawUrl = pkg?.video_url;
+    if (!rawUrl || this.isDirectVideoUrl(rawUrl)) return null;
+    const embedUrl = this.buildVideoEmbedUrl(rawUrl);
+    if (!embedUrl) return null;
+    return this.sanitizer.bypassSecurityTrustResourceUrl(embedUrl);
+  });
+
+  readonly devStateBadge = computed<{ label: string; classes: string } | null>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    const raw = (pkg?.dev_state || '').trim().toUpperCase();
+    if (!raw) return null;
+    switch (raw) {
+      case 'ACTIVELY_DEVELOPED':
+        return { label: 'Actively Developed', classes: 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40' };
+      case 'MAINTENANCE_ONLY':
+        return { label: 'Maintenance Only', classes: 'bg-sky-500/20 text-sky-300 border-sky-400/40' };
+      case 'WIP':
+        return { label: 'Work in Progress', classes: 'bg-amber-500/20 text-amber-300 border-amber-400/40' };
+      case 'AS_IS':
+        return { label: 'Provided As-Is', classes: 'bg-slate-500/20 text-slate-300 border-slate-400/40' };
+      case 'DEPRECATED':
+        return { label: 'Deprecated', classes: 'bg-rose-500/20 text-rose-300 border-rose-400/40' };
+      case 'LOOKING_FOR_MAINTAINER':
+        return { label: 'Needs Maintainer', classes: 'bg-purple-500/20 text-purple-300 border-purple-400/40' };
+      default:
+        return {
+          label: raw.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()),
+          classes: 'bg-slate-500/20 text-slate-300 border-slate-400/40'
+        };
+    }
+  });
+
+  readonly extraMaintainers = computed<string[]>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg || !Array.isArray(pkg.maintainers)) return [];
+    const authorLower = (pkg.author || '').toLowerCase();
+    return pkg.maintainers.filter(m => Boolean(m) && m.toLowerCase() !== authorLower);
+  });
 
   // Review Form state
   readonly userRating = signal(5);
@@ -1145,6 +1636,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
         if (u.hostname === 'codeberg.org') {
           return `https://codeberg.org/${owner}/${repo}/raw/branch/${branch}`;
         }
+        if (u.hostname === 'git.minetest.land') {
+          return `https://git.minetest.land/${owner}/${repo}/raw/branch/${branch}`;
+        }
         if (u.hostname === 'gitlab.com') {
           return `https://gitlab.com/${owner}/${repo}/-/raw/${branch}`;
         }
@@ -1248,6 +1742,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
     if (this.loadedPackageKey === key) return;
     this.loadedPackageKey = key;
     this.activeBannerUrl.set(null);
+    this.mediaCarouselIndex.set(0);
+    this.isVideoPlaying.set(false);
+    this.lightboxImageUrl.set(null);
+    this.isLightboxZoomed.set(false);
 
     // Wait for bundled package details first (which populates reviewsCache & releasesCache in 1 request)
     await this.packageService.loadPackageDetails(this.package, true);
@@ -1255,6 +1753,158 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
     this.packageService.fetchReviews(this.package).then(res => this.reviews.set(res));
     this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
+  }
+
+  isDirectVideoUrl(url?: string): boolean {
+    if (!url) return false;
+    const clean = url.split('?')[0].toLowerCase();
+    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+  }
+
+  private buildVideoEmbedUrl(rawUrl: string): string | null {
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname.toLowerCase();
+      if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+        if (u.pathname.startsWith('/embed/')) {
+          return `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}autoplay=1`;
+        }
+        const v = u.searchParams.get('v');
+        if (v) {
+          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0`;
+        }
+      }
+      if (host === 'youtu.be') {
+        const id = u.pathname.split('/').filter(Boolean)[0];
+        if (id) {
+          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0`;
+        }
+      }
+      if (host.includes('vimeo.com')) {
+        const id = u.pathname.split('/').filter(Boolean).pop();
+        if (id && /^\d+$/.test(id)) {
+          return `https://player.vimeo.com/video/${id}?autoplay=1`;
+        }
+      }
+      if (u.pathname.includes('/videos/watch/')) {
+        return rawUrl.replace('/videos/watch/', '/videos/embed/') + (rawUrl.includes('?') ? '&autoplay=1' : '?autoplay=1');
+      }
+      return rawUrl;
+    } catch {
+      return null;
+    }
+  }
+
+  playModalVideo(): void {
+    this.isVideoPlaying.set(true);
+  }
+
+  private scrollActiveThumbnailIntoView(idx: number): void {
+    const strip = this.mediaThumbStripRef?.nativeElement;
+    if (!strip) return;
+    const btn = strip.querySelector(`[data-thumb-idx="${idx}"]`) as HTMLElement | null;
+    if (!btn) return;
+    const targetLeft = Math.max(0, btn.offsetLeft - strip.clientWidth / 2 + btn.clientWidth / 2);
+    if (typeof strip.scrollTo === 'function') {
+      strip.scrollTo({
+        left: targetLeft,
+        behavior: 'smooth'
+      });
+    } else {
+      strip.scrollLeft = targetLeft;
+    }
+  }
+
+  prevMediaSlide(event?: Event): void {
+    if (event) event.stopPropagation();
+    const slides = this.mediaSlides();
+    if (slides.length <= 1) return;
+    this.isVideoPlaying.set(false);
+    const nextIdx = (this.mediaCarouselIndex() - 1 + slides.length) % slides.length;
+    this.mediaCarouselIndex.set(nextIdx);
+    this.scrollActiveThumbnailIntoView(nextIdx);
+    if (slides[nextIdx]?.type === 'image') {
+      this.activeBannerUrl.set(slides[nextIdx].url);
+    }
+  }
+
+  nextMediaSlide(event?: Event): void {
+    if (event) event.stopPropagation();
+    const slides = this.mediaSlides();
+    if (slides.length <= 1) return;
+    this.isVideoPlaying.set(false);
+    const nextIdx = (this.mediaCarouselIndex() + 1) % slides.length;
+    this.mediaCarouselIndex.set(nextIdx);
+    this.scrollActiveThumbnailIntoView(nextIdx);
+    if (slides[nextIdx]?.type === 'image') {
+      this.activeBannerUrl.set(slides[nextIdx].url);
+    }
+  }
+
+  goToMediaSlide(idx: number, event?: Event): void {
+    if (event) event.stopPropagation();
+    const slides = this.mediaSlides();
+    if (idx < 0 || idx >= slides.length) return;
+    if (idx !== this.mediaCarouselIndex()) {
+      this.isVideoPlaying.set(false);
+    }
+    this.mediaCarouselIndex.set(idx);
+    this.scrollActiveThumbnailIntoView(idx);
+    if (slides[idx]?.type === 'image') {
+      this.activeBannerUrl.set(slides[idx].url);
+    }
+  }
+
+  openLightbox(imageUrl: string, event?: Event): void {
+    if (event) event.stopPropagation();
+    if (!imageUrl) return;
+    this.lightboxImageUrl.set(imageUrl);
+    this.isLightboxZoomed.set(false);
+  }
+
+  closeLightbox(event?: Event): void {
+    if (event) event.stopPropagation();
+    this.lightboxImageUrl.set(null);
+    this.isLightboxZoomed.set(false);
+  }
+
+  toggleLightboxZoom(event?: Event): void {
+    if (event) event.stopPropagation();
+    this.isLightboxZoomed.update(v => !v);
+  }
+
+  prevLightboxImage(event?: Event): void {
+    if (event) event.stopPropagation();
+    const shots = this.package?.screenshots || [];
+    const current = this.lightboxImageUrl();
+    if (shots.length <= 1 || !current) return;
+    const idx = shots.indexOf(current);
+    const prevIdx = (idx - 1 + shots.length) % shots.length;
+    const nextShot = shots[prevIdx];
+    this.lightboxImageUrl.set(nextShot);
+    this.isLightboxZoomed.set(false);
+    const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
+    if (slideIdx >= 0) {
+      this.mediaCarouselIndex.set(slideIdx);
+      this.scrollActiveThumbnailIntoView(slideIdx);
+    }
+  }
+
+  nextLightboxImage(event?: Event): void {
+    if (event) event.stopPropagation();
+    const shots = this.package?.screenshots || [];
+    const current = this.lightboxImageUrl();
+    if (shots.length <= 1 || !current) return;
+    const idx = shots.indexOf(current);
+    const nextIdx = (idx + 1) % shots.length;
+    const nextShot = shots[nextIdx];
+    this.lightboxImageUrl.set(nextShot);
+    this.isLightboxZoomed.set(false);
+    const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
+    if (slideIdx >= 0) {
+      this.mediaCarouselIndex.set(slideIdx);
+      this.scrollActiveThumbnailIntoView(slideIdx);
+    }
   }
 
   openEditTags(): void {

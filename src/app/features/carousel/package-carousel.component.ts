@@ -54,7 +54,7 @@ import {
       <section class="py-4 space-y-3 select-none overflow-hidden max-w-full">
 
         <!-- Section Header -->
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-2">
+        <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">
             @if (icon === 'flame') {
               <svg lucideFlame class="w-5 h-5 text-amber-500 flex-shrink-0"></svg>

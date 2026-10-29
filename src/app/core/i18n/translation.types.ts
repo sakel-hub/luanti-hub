@@ -116,6 +116,8 @@ export interface TranslationDictionary {
     unfavoriteTooltip: string;
     gitSourceTooltip: string;
     clickToOpen: string;
+    muteVideo: string;
+    unmuteVideo: string;
   };
   modal: {
     close: string;
@@ -135,6 +137,7 @@ export interface TranslationDictionary {
     tabReleases: string;
     tabCompliance: string;
     author: string;
+    maintainers: string;
     technicalId: string;
     genresTags: string;
     tags: string;
@@ -148,17 +151,25 @@ export interface TranslationDictionary {
     engineVersion: string;
     downloads: string;
     rating: string;
+    published: string;
+    lastUpdated: string;
     dependenciesTitle: string;
     dependencies: string;
     requiredDeps: string;
     optionalDeps: string;
+    providesMods: string;
     noDependencies: string;
     screenshots: string;
+    enlargeImage: string;
     readmeTitle: string;
     linksTitle: string;
     website: string;
     issueTracker: string;
     forums: string;
+    donate: string;
+    translations: string;
+    contentWarnings: string;
+    aiDisclosures: string;
     releasesTitle: string;
     inGameConfigTitle: string;
     registryConfig: string;
@@ -205,6 +216,9 @@ export interface TranslationDictionary {
     codebergTitle: string;
     codebergSub: string;
     codebergDesc: string;
+    mesehubTitle?: string;
+    mesehubSub?: string;
+    mesehubDesc?: string;
     gitlabTitle: string;
     gitlabSub: string;
     gitlabDesc: string;
@@ -233,6 +247,7 @@ export interface TranslationDictionary {
     linkedCount: string;
     verified: string;
     linkCodeberg: string;
+    linkMesehub?: string;
     linkGitlab: string;
     linkGithub: string;
     syncCdbTitle: string;

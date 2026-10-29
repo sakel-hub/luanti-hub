@@ -43,3 +43,18 @@ CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
 -- 5. Recalculate package scores strictly from actual community reviews (clears legacy DEFAULT 5.0 scores)
 UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r WHERE LOWER(r.package_id) = LOWER(packages.id)), 0);
 
+-- 6. Separate ContentDB vs Luanti Hub download counters and extended ContentDB metadata columns
+-- (Also auto-initialized at runtime by the Worker if not yet migrated)
+-- ALTER TABLE packages ADD COLUMN contentdb_downloads INTEGER DEFAULT 0;
+-- ALTER TABLE packages ADD COLUMN luantihub_downloads INTEGER DEFAULT 0;
+-- ALTER TABLE packages ADD COLUMN download_size INTEGER;
+-- ALTER TABLE packages ADD COLUMN donate_url TEXT;
+-- ALTER TABLE packages ADD COLUMN translation_url TEXT;
+-- ALTER TABLE packages ADD COLUMN forum_url TEXT;
+-- ALTER TABLE packages ADD COLUMN issue_tracker TEXT;
+-- ALTER TABLE packages ADD COLUMN video_url TEXT;
+-- ALTER TABLE packages ADD COLUMN video_thumbnail_url TEXT;
+-- ALTER TABLE packages ADD COLUMN dev_state TEXT;
+-- ALTER TABLE packages ADD COLUMN provides TEXT;
+
+

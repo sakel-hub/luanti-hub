@@ -1,6 +1,6 @@
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
-export type GitProvider = 'codeberg' | 'gitlab' | 'github' | 'contentdb';
+export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'custom';
 export type SortOption = 'downloads' | 'score' | 'title';
 
 export interface ContentDbTag {
@@ -22,7 +22,9 @@ export interface LuantiPackage {
   screenshots?: string[];
   score: number; // 1.0 - 5.0 star rating (when reviews exist)
   contentdb_score?: number; // Raw ContentDB composite popularity + review score (e.g. 15 - 4000+)
-  downloads: number;
+  downloads: number; // Total aggregated downloads (contentdb_downloads + luantihub_downloads)
+  contentdb_downloads?: number; // Upstream ContentDB downloads count
+  luantihub_downloads?: number; // Native Luanti Hub downloads count
   license: string;
   media_license?: string;
   repo_url?: string;
@@ -30,21 +32,37 @@ export interface LuantiPackage {
   website?: string;
   issue_tracker?: string;
   forums?: string;
+  forum_url?: string;
+  donate_url?: string;
+  translation_url?: string;
+  video_url?: string;
+  video_thumbnail_url?: string;
   provider?: GitProvider;
   default_branch?: string;
   source: PackageSource;
   sources?: PackageSource[];
   tags: string[];
   maintainers?: string[];
+  provides?: string[];
+  dev_state?: string;
+  content_warnings?: string[];
+  ai_disclosures?: string[];
+  review_thread_counts?: {
+    positive: number;
+    neutral: number;
+    negative: number;
+  };
   min_minetest_version?: string;
   max_minetest_version?: string;
   featured?: boolean;
   dependencies?: string[];
   optional_dependencies?: string[];
+  download_size?: number;
   file_size?: string;
   download_url?: string;
   release_id?: number | string;
   created_at?: string;
+  updated_at?: string;
   status?: 'active' | 'flagged' | 'delisted';
   moderation_reason?: string;
   _searchBlob?: string; // Pre-computed lowercase search string for O(1) filtering

@@ -97,7 +97,7 @@ import {
                 </span>
               </div>
               <span class="text-[10px] font-mono text-slate-400 hidden sm:inline">
-                Codeberg · GitLab · GitHub
+                Codeberg · Mesehub · GitLab · GitHub
               </span>
             </div>
             <div class="flex flex-col sm:flex-row gap-2">
@@ -472,7 +472,9 @@ export class SubmitModalComponent {
       const repo = parts[1].replace(/\.git$/i, '');
       if (!owner || !repo) return null;
       let provider: GitProvider = 'github';
-      if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+      if (host.includes('minetest.land') || host.includes('mesehub')) {
+        provider = 'mesehub';
+      } else if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
         provider = 'codeberg';
       } else if (host.includes('gitlab')) {
         provider = 'gitlab';

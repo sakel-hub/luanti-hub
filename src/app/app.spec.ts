@@ -10,7 +10,10 @@ import { AuthService } from './core/services/auth.service';
 import { TranslationService } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
+import { PackageCardComponent } from './features/card/package-card.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
+import { AuthModalComponent } from './features/auth/auth-modal.component';
+import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
 import { createAuditProofToken, verifyAuditProofToken } from '../../functions/api/auth/lib/session';
 
@@ -420,5 +423,192 @@ description = Mob animation and spawning framework.
     const result = await (service as any).probeGitRepoMetadata(mockPkg, 'https://github.com/sakel-hub/x_mob_core');
     expect(result.deps).toEqual([]);
     expect(result.optDeps).toEqual(['player_monoids', 'pova', 'playerphysics']);
+  });
+
+  it('should format accurate download_size from ContentDB /for-client/ and omit file_size for Git-only packages without known size', () => {
+    const service = TestBed.inject(PackageService);
+
+    expect(service.formatDownloadSize(2621440)).toBe('2.5 MB');
+    expect(service.formatDownloadSize('2.5 MB')).toBe('2.5 MB');
+    expect(service.formatDownloadSize(769024)).toBe('751 KB');
+    expect(service.formatDownloadSize('751 KB')).toBe('751 KB');
+    expect(service.formatDownloadSize(undefined)).toBeUndefined();
+    expect(service.formatDownloadSize(0)).toBeUndefined();
+
+    // Poisoned '2 KB' legacy file_size from HTML error page must be discarded when download_size is missing
+    const poisonedNormalized = (service as any).normalizePackage({
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      file_size: '2 KB'
+    });
+    expect(poisonedNormalized.file_size).toBeUndefined();
+
+    const draconisNormalized = (service as any).normalizePackage({
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      short_description: 'Adds terrifying Dragons and powerful equipment.',
+      download_size: 2621440,
+      downloads: 48200,
+      donate_url: 'https://ko-fi.com/elceejo',
+      forum_url: 'https://forum.luanti.org/viewtopic.php?t=26142',
+      translation_url: 'https://hosted.weblate.org/projects/draconis',
+      video_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      video_thumbnail_url: 'https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+      provides: ['draconis', 'draconis_aux'],
+      dev_state: 'ACTIVELY_DEVELOPED',
+      content_warnings: ['fantasy_violence'],
+      ai_disclosures: ['no_ai']
+    });
+
+    expect(draconisNormalized.file_size).toBe('2.5 MB');
+    expect(draconisNormalized.download_size).toBe(2621440);
+    expect(draconisNormalized.contentdb_downloads).toBe(48200);
+    expect(draconisNormalized.luantihub_downloads).toBe(0);
+    expect(draconisNormalized.downloads).toBe(48200);
+    expect(draconisNormalized.donate_url).toBe('https://ko-fi.com/elceejo');
+    expect(draconisNormalized.forum_url).toBe('https://forum.luanti.org/viewtopic.php?t=26142');
+    expect(draconisNormalized.translation_url).toBe('https://hosted.weblate.org/projects/draconis');
+    expect(draconisNormalized.video_url).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    expect(draconisNormalized.provides).toEqual(['draconis', 'draconis_aux']);
+    expect(draconisNormalized.dev_state).toBe('ACTIVELY_DEVELOPED');
+    expect(draconisNormalized.content_warnings).toEqual(['fantasy_violence']);
+
+    // Git-only package without known download_size or file_size must have file_size === undefined (never fake 751 KB)
+    const gitOnlyNormalized = (service as any).normalizePackage({
+      author: 'sakel-hub',
+      name: 'x_mobs',
+      title: 'X Mobs',
+      type: 'mod',
+      source: 'git',
+      repo_url: 'https://github.com/sakel-hub/x_mobs'
+    });
+    expect(gitOnlyNormalized.file_size).toBeUndefined();
+  });
+
+  it('should not leak unrelated third-party repository READMEs when a package repository has no README.md', async () => {
+    const service = TestBed.inject(PackageService);
+
+    // Mock root listing for ElCeejo/draconis without any README file
+    vi.spyOn(service as any, 'getRepoRootListing').mockResolvedValue([
+      { name: 'mod.conf', type: 'file', download_url: 'https://raw.githubusercontent.com/ElCeejo/draconis/main/mod.conf' },
+      { name: 'init.lua', type: 'file', download_url: 'https://raw.githubusercontent.com/ElCeejo/draconis/main/init.lua' }
+    ]);
+
+    const draconisPkg: any = {
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      repo_url: 'https://github.com/ElCeejo/draconis'
+    };
+
+    const readme = await (service as any).fetchRawReadmeFromRepo('https://github.com/ElCeejo/draconis', draconisPkg);
+    expect(readme).toBeUndefined();
+  });
+
+  it('should render category and source badges in the bottom content section of PackageCardComponent rather than overlaying the thumbnail', () => {
+    const service = TestBed.inject(PackageService);
+    const fixture = TestBed.createComponent(PackageCardComponent);
+    const comp = fixture.componentInstance;
+    comp.package = (service as any).normalizePackage({
+      id: 'sakel-hub/x_mob_core',
+      author: 'sakel-hub',
+      name: 'x_mob_core',
+      title: 'X Mob Core',
+      type: 'mod',
+      short_desc: 'A smooth, lightweight mob framework.',
+      thumbnail: 'https://content.luanti.org/thumbnails/1/x_mob_core.png',
+      repo_url: 'https://github.com/sakel-hub/x_mob_core',
+      source: 'official',
+      sources: ['official', 'git'],
+      downloads: 1200,
+      tags: ['pve', 'pvp']
+    });
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const thumbnailBox = el.querySelector('.aspect-video') as HTMLElement;
+    expect(thumbnailBox).toBeTruthy();
+    expect(thumbnailBox.textContent).not.toContain('ContentDB');
+    expect(thumbnailBox.textContent).not.toContain('Git');
+
+    const contentSection = el.querySelector('.flex-1.flex.flex-col.justify-between') as HTMLElement;
+    expect(contentSection).toBeTruthy();
+    expect(contentSection.textContent).toContain('mod');
+    expect(contentSection.textContent).toContain('ContentDB');
+    expect(contentSection.textContent).toContain('Git');
+  });
+
+  it('should prioritize 1-Click OAuth sign-in (including Mesehub) with Direct Sign-In collapsed by default and no trailing colon after favorites', () => {
+    const i18n = TestBed.inject(TranslationService);
+    expect(i18n.translate('auth.quickClaimDesc').endsWith(':')).toBe(false);
+    expect(i18n.translate('auth.directLoginDesc').endsWith(':')).toBe(false);
+
+    const fixture = TestBed.createComponent(AuthModalComponent);
+    const comp = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(comp.isDirectSignInExpanded()).toBe(false);
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Continue with Codeberg');
+    expect(el.textContent).toContain('Continue with Mesehub');
+    expect(el.textContent).toContain('Continue with GitLab');
+    expect(el.textContent).toContain('Continue with GitHub');
+    expect(el.textContent).toContain('Sign in with ContentDB');
+
+    comp.toggleDirectSignIn();
+    fixture.detectChanges();
+    expect(comp.isDirectSignInExpanded()).toBe(true);
+    const options = Array.from(el.querySelectorAll('select option')).map(o => (o as HTMLOptionElement).value);
+    expect(options).toContain('mesehub');
+  });
+
+  it('should detect git.minetest.land as mesehub provider and extract embedded video URLs from descriptions', () => {
+    const service = TestBed.inject(PackageService);
+    const mesehubPkg = (service as any).normalizePackage({
+      author: 'BuckarooBanzay',
+      name: 'mesecons',
+      title: 'Mesecons',
+      type: 'mod',
+      repo_url: 'https://git.minetest.land/MineClone2/MineClone2',
+      long_description: 'Check out the showcase trailer at https://www.youtube.com/watch?v=dQw4w9WgXcQ for gameplay!'
+    });
+
+    expect(mesehubPkg.provider).toBe('mesehub');
+    expect(mesehubPkg.video_url).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    expect(mesehubPkg.video_thumbnail_url).toBe('https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg');
+  });
+
+  it('should synchronize screenshot thumbnail strip scroll position when navigating slides in PackageDetailModalComponent', () => {
+    const service = TestBed.inject(PackageService);
+    const fixture = TestBed.createComponent(PackageDetailModalComponent);
+    const comp = fixture.componentInstance;
+    comp.package = (service as any).normalizePackage({
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      screenshots: [
+        'https://content.luanti.org/shot1.png',
+        'https://content.luanti.org/shot2.png',
+        'https://content.luanti.org/shot3.png'
+      ]
+    });
+    fixture.detectChanges();
+
+    const scrollSpy = vi.spyOn(comp as any, 'scrollActiveThumbnailIntoView');
+    comp.nextMediaSlide();
+    expect(comp.mediaCarouselIndex()).toBe(1);
+    expect(scrollSpy).toHaveBeenCalledWith(1);
+
+    comp.goToMediaSlide(2);
+    expect(comp.mediaCarouselIndex()).toBe(2);
+    expect(scrollSpy).toHaveBeenCalledWith(2);
   });
 });

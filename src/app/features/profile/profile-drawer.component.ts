@@ -382,7 +382,7 @@ import {
                 </div>
 
                 <div class="space-y-2">
-                  @for (id of user.identities; track id.provider) {
+                  @for (id of user.identities; track id.provider + ':' + id.username) {
                     <div class="p-3 rounded-2xl glass-panel flex items-center justify-between text-xs">
                       <div class="flex items-center gap-2 min-w-0">
                         @if (id.provider === 'contentdb') {
@@ -401,7 +401,7 @@ import {
                         @if (user.identities.length > 1) {
                           <button
                             type="button"
-                            (click)="authService.unlinkIdentity(id.provider)"
+                            (click)="authService.unlinkIdentity(id.provider, id.username)"
                             class="text-[10px] text-rose-400 hover:text-rose-300 font-semibold cursor-pointer">
                             {{ 'profile.unlinkBtn' | translate }}
                           </button>
@@ -411,26 +411,28 @@ import {
                   }
                 </div>
 
-                <!-- Connect Other Forges -->
+                <!-- Connect Other Forges or Additional Accounts (Ordered by Popularity & Authentic Brand Colors) -->
                 <div class="pt-1 flex flex-wrap gap-2">
-                  @if (!hasProvider('codeberg')) {
-                    <button type="button" (click)="authService.loginWith('codeberg')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                      <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
-                      <span>{{ 'profile.linkCodeberg' | translate }}</span>
-                    </button>
-                  }
-                  @if (!hasProvider('gitlab')) {
-                    <button type="button" (click)="authService.loginWith('gitlab')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                      <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
-                      <span>{{ 'profile.linkGitlab' | translate }}</span>
-                    </button>
-                  }
-                  @if (!hasProvider('github')) {
-                    <button type="button" (click)="authService.loginWith('github')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                      <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
-                      <span>{{ 'profile.linkGithub' | translate }}</span>
-                    </button>
-                  }
+                  <button type="button" (click)="authService.loginWith('github')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                    <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>
+                    <span>{{ 'profile.linkGithub' | translate }}</span>
+                  </button>
+                  <button type="button" (click)="authService.loginWith('codeberg')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                    <svg lucidePlus class="w-3.5 h-3.5 text-indigo-400"></svg>
+                    <span>{{ 'profile.linkCodeberg' | translate }}</span>
+                  </button>
+                  <button type="button" (click)="authService.loginWith('gitlab')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                    <svg lucidePlus class="w-3.5 h-3.5 text-orange-400"></svg>
+                    <span>{{ 'profile.linkGitlab' | translate }}</span>
+                  </button>
+                  <button type="button" (click)="authService.loginWith('mesehub')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                    <svg lucidePlus class="w-3.5 h-3.5 text-emerald-400"></svg>
+                    <span>{{ 'profile.linkMesehub' | translate }}</span>
+                  </button>
+                  <button type="button" (click)="onOpenLinkAccountModal()" class="px-3 py-1.5 rounded-xl glass-btn text-sky-300 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                    <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
+                    <span>{{ 'auth.directLoginTitle' | translate }}</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -688,5 +690,10 @@ export class ProfileDrawerComponent implements OnInit {
   onOpenSubmitModal(): void {
     this.authService.closeProfileDrawer(false);
     this.packageService.openSubmitModal();
+  }
+
+  onOpenLinkAccountModal(): void {
+    this.authService.closeProfileDrawer(false);
+    this.authService.openAuthModal();
   }
 }

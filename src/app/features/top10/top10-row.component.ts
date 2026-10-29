@@ -47,7 +47,7 @@ import {
       <section class="py-6 space-y-3 select-none overflow-hidden max-w-full" [attr.aria-label]="'Top 10 Packages (' + timeframe + ')'">
 
         <!-- Row Header: Dedicated Timeframe Title & Carousel Scroll Arrows (No Pill Switch) -->
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4 flex-wrap">
+        <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-4 flex-wrap">
           <div class="flex items-center gap-3">
             <div
               [class]="timeframe === 'today' ? 'bg-amber-500/20 border-amber-500/30 text-amber-400' : 'bg-rose-500/20 border-rose-500/30 text-rose-400'"
@@ -125,22 +125,30 @@ import {
               [attr.aria-label]="'#' + (idx + 1) + ' ' + pkg.title"
               class="relative flex items-end flex-shrink-0 group cursor-pointer transition-transform duration-300 hover:-translate-y-2 focus:outline-none">
 
-              <!-- Precision Geometric Netflix Rank Numeral -->
+              <!-- Precision Geometric Netflix Rank Numeral with Right-Side Fade-Out Behind Tile -->
               <svg
                 [attr.viewBox]="rankNumerals[idx]?.vb || '0 0 120 200'"
                 aria-hidden="true"
-                class="h-44 sm:h-56 md:h-60 w-auto -mr-5 sm:-mr-7 md:-mr-8 z-0 pointer-events-none select-none flex-shrink-0 overflow-visible">
+                style="-webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.92) 48%, rgba(0,0,0,0.35) 82%, rgba(0,0,0,0.04) 100%); mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.92) 48%, rgba(0,0,0,0.35) 82%, rgba(0,0,0,0.04) 100%);"
+                class="h-44 sm:h-56 md:h-60 w-auto -mr-6 sm:-mr-8 md:-mr-9 z-0 pointer-events-none select-none flex-shrink-0 overflow-visible">
                 <defs>
-                  <linearGradient [attr.id]="'rank-grad-' + timeframe + '-' + idx" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stop-color="#1e293b" />
-                    <stop offset="100%" stop-color="#020617" />
+                  <linearGradient [attr.id]="'rank-grad-' + timeframe + '-' + idx" x1="0%" y1="0%" x2="100%" y2="25%">
+                    <stop offset="0%" stop-color="#1e293b" stop-opacity="0.95" />
+                    <stop offset="55%" stop-color="#0f172a" stop-opacity="0.7" />
+                    <stop offset="100%" stop-color="#020617" stop-opacity="0.08" />
+                  </linearGradient>
+                  <linearGradient [attr.id]="'rank-stroke-' + timeframe + '-' + idx" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#94a3b8" stop-opacity="0.95" />
+                    <stop offset="55%" stop-color="#64748b" stop-opacity="0.65" />
+                    <stop offset="92%" stop-color="#334155" stop-opacity="0.15" />
+                    <stop offset="100%" stop-color="#0f172a" stop-opacity="0" />
                   </linearGradient>
                 </defs>
                 <path
                   fill-rule="evenodd"
                   [attr.d]="rankNumerals[idx]?.d"
                   [attr.fill]="'url(#rank-grad-' + timeframe + '-' + idx + ')'"
-                  stroke="#64748b"
+                  [attr.stroke]="'url(#rank-stroke-' + timeframe + '-' + idx + ')'"
                   stroke-width="8"
                   stroke-linejoin="miter"
                   stroke-miterlimit="10"

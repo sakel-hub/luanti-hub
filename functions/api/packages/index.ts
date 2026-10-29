@@ -88,7 +88,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const { request, env } = context;
   const url = new URL(request.url);
   const q = (url.searchParams.get('q') || '').trim();
-  const type = (url.searchParams.get('type') || '').trim();
+  const types = url.searchParams
+    .getAll('type')
+    .map(t => t.trim())
+    .filter(t => Boolean(t) && t !== 'all');
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
 
@@ -111,6 +114,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let d1Promise = Promise.resolve<any[]>([]);
   let blockedPromise = Promise.resolve<Set<string>>(new Set());
   let reviewRatingsPromise = Promise.resolve<Map<string, number>>(new Map());
+  let lhDownloadsMapPromise = Promise.resolve<Map<string, number>>(new Map());
   let velocityPromise = Promise.resolve<{ today: Map<string, number>; week: Map<string, number> }>({
     today: new Map(),
     week: new Map()
@@ -120,9 +124,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     let query = `SELECT * FROM packages WHERE status = 'active'`;
     const params: any[] = [];
 
-    if (type && type !== 'all') {
+    if (types.length === 1) {
       query += ` AND type = ?`;
-      params.push(type);
+      params.push(types[0]);
+    } else if (types.length > 1) {
+      const placeholders = types.map(() => '?').join(', ');
+      query += ` AND type IN (${placeholders})`;
+      params.push(...types);
     }
     if (q) {
       query += ` AND (title LIKE ? OR name LIKE ? OR short_desc LIKE ? OR author_name LIKE ?)`;
@@ -161,6 +169,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       })
       .catch(() => new Map<string, number>());
 
+    // All-time Luanti Hub downloads per package from `package_daily_downloads`
+    lhDownloadsMapPromise = env.DB.prepare(
+      `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_lh FROM package_daily_downloads GROUP BY LOWER(package_id)`
+    ).all()
+      .then((res: any) => {
+        const map = new Map<string, number>();
+        for (const r of (res.results || [])) {
+          if (r?.pkg_id && Number(r.total_lh) > 0) {
+            map.set(String(r.pkg_id).toLowerCase(), Number(r.total_lh));
+          }
+        }
+        return map;
+      })
+      .catch(() => new Map<string, number>());
+
     if (isBootBundle) {
       velocityPromise = env.DB.prepare(`
         SELECT
@@ -186,11 +209,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  const [upstreamList, d1List, blockedIds, d1Ratings, rawTags, velocity] = await Promise.all([
+  const [upstreamList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity] = await Promise.all([
     upstreamPromise,
     d1Promise,
     blockedPromise,
     reviewRatingsPromise,
+    lhDownloadsMapPromise,
     tagsPromise,
     velocityPromise
   ]);
@@ -251,12 +275,34 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const parsedDeps = parseJsonArray(p.dependencies);
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
 
-    const resolvedThumb = (p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
+    const rawThumbCandidate = (p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
       ? p.thumbnail_url
-      : (matchedUpstream?.thumbnail || p.thumbnail_url || '');
+      : (matchedUpstream?.thumbnail || p.banner_url || '');
+    const resolvedThumb = rawThumbCandidate && String(rawThumbCandidate).startsWith('http')
+      ? String(rawThumbCandidate)
+      : null;
     const resolvedBanner = (p.banner_url && p.banner_url !== 'logo.svg')
       ? p.banner_url
-      : (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : resolvedThumb);
+      : (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : (resolvedThumb || ''));
+
+    const cdbDownloads = Math.max(
+      typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
+      typeof p.contentdb_downloads === 'number' ? p.contentdb_downloads : 0
+    );
+    const lhDownloads = Math.max(
+      typeof p.luantihub_downloads === 'number' ? p.luantihub_downloads : 0,
+      lhDownloadsMap.get(canonicalKey) ?? lhDownloadsMap.get(d1Key) ?? 0,
+      !isAlsoOfficial && typeof p.downloads_count === 'number' ? p.downloads_count : 0
+    );
+    const combinedDownloads = cdbDownloads + lhDownloads;
+    const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
+    const releaseId =
+      Number(matchedUpstream?.release) > 0
+        ? Number(matchedUpstream.release)
+        : Math.max(
+            1,
+            Math.floor(new Date(p.updated_at || p.created_at || '2026-01-01T00:00:00Z').getTime() / 1000) || 1
+          );
 
     merged.push({
       ...(matchedUpstream || {}),
@@ -265,18 +311,23 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       name: canonicalName,
       title: matchedUpstream?.title || p.title || canonicalName,
       type: p.type || matchedUpstream?.type || 'mod',
-      short_desc: p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '',
+      short_desc: shortDescText,
+      short_description: shortDescText,
+      release: releaseId,
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
       score: d1StarAvg || matchedUpstream?.score || 0,
       contentdb_score: Number(matchedUpstream?.score || 0),
-      downloads: Math.max(
-        typeof p.downloads_count === 'number' ? p.downloads_count : 0,
-        typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0
-      ),
+      contentdb_downloads: cdbDownloads,
+      luantihub_downloads: lhDownloads,
+      downloads: combinedDownloads,
       license: p.license || matchedUpstream?.license || '',
       media_license: p.media_license || matchedUpstream?.media_license || '',
       repo_url: p.repo_url || matchedUpstream?.repo || matchedUpstream?.repo_url || undefined,
+      video_url: p.video_url || matchedUpstream?.video_url || undefined,
+      video_thumbnail_url: p.video_thumbnail_url || matchedUpstream?.video_thumbnail_url || undefined,
+      dev_state: p.dev_state || matchedUpstream?.dev_state || undefined,
+      file_size: p.file_size || undefined,
       provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
       min_minetest_version: p.min_minetest_version || matchedUpstream?.min_minetest_version || '5.0.0',
       tags: combinedTags.length > 0 ? combinedTags : [p.type || 'mod'],
@@ -296,11 +347,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     seenKeys.add(key);
 
     const d1StarAvg = d1Ratings.get(key);
+    const cdbDl = Number(item.downloads || 0);
+    const lhDl = lhDownloadsMap.get(key) || 0;
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
       score: d1StarAvg !== undefined ? d1StarAvg : item.score,
       contentdb_score: Number(item.score || 0),
+      contentdb_downloads: cdbDl,
+      luantihub_downloads: lhDl,
+      downloads: cdbDl + lhDl,
       source: 'official',
       sources: ['official']
     });

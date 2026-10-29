@@ -119,14 +119,14 @@ export function checkIsAdmin(
 
   if (rawList.length > 0) {
     const userHandle = (user.username || '').trim().toLowerCase();
-    const baseUserHandle = userHandle.replace(/_(gi|gl|co|cd)$/i, '');
+    const baseUserHandle = userHandle.replace(/_(gi|gl|co|cd|me)$/i, '');
     if ((userHandle && rawList.includes(userHandle)) || (baseUserHandle && rawList.includes(baseUserHandle))) {
       return true;
     }
 
     for (const id of verifiedIdentities) {
       const handle = (id.username || '').trim().toLowerCase();
-      const baseHandle = handle.replace(/_(gi|gl|co|cd)$/i, '');
+      const baseHandle = handle.replace(/_(gi|gl|co|cd|me)$/i, '');
       const qualified = `${(id.provider || '').toLowerCase()}:${handle}`;
       if (rawList.includes(handle) || rawList.includes(baseHandle) || rawList.includes(qualified)) {
         return true;
@@ -149,7 +149,7 @@ export function isProtectedAdminHandle(username: string, provider?: string, admi
     .filter(Boolean);
   if (rawList.length === 0) return false;
   const lower = (username || '').trim().toLowerCase();
-  const baseLower = lower.replace(/_(gi|gl|co|cd)$/i, '');
+  const baseLower = lower.replace(/_(gi|gl|co|cd|me)$/i, '');
   if (!lower) return false;
   if (rawList.includes(lower) || rawList.includes(baseLower)) return true;
   if (provider && (rawList.includes(`${provider.toLowerCase()}:${lower}`) || rawList.includes(`${provider.toLowerCase()}:${baseLower}`))) {
@@ -177,7 +177,7 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
 
       if (orphanedIdentity && orphanedIdentity.provider_username) {
         const orphanedUsername = String(orphanedIdentity.provider_username).trim();
-        const orphanedBase = orphanedUsername.replace(/_(gi|gl|co|cd)$/i, '');
+        const orphanedBase = orphanedUsername.replace(/_(gi|gl|co|cd|me)$/i, '');
 
         const existingCanonical = await db.prepare(
           `SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) LIMIT 1`
@@ -202,7 +202,7 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
   if (!user) return null;
 
   const rawUsername = String(user.username || '').trim();
-  const baseUsername = rawUsername.replace(/_(gi|gl|co|cd)$/i, '');
+  const baseUsername = rawUsername.replace(/_(gi|gl|co|cd|me)$/i, '');
   const hasProviderSuffix = baseUsername.toLowerCase() !== rawUsername.toLowerCase();
 
   try {
@@ -222,12 +222,13 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
       }
     } else {
       // Current user is the canonical base user.
-      // Check if any suffixed duplicate accounts (`_gi`, `_gl`, `_co`, `_cd`) exist for the same creator.
+      // Check if any suffixed duplicate accounts (`_gi`, `_gl`, `_co`, `_cd`, `_me`) exist for the same creator.
       const suffixedDuplicates = await db.prepare(
         `SELECT id, username FROM users
          WHERE id != ?
            AND (
              LOWER(username) = LOWER(?)
+             OR LOWER(username) = LOWER(?)
              OR LOWER(username) = LOWER(?)
              OR LOWER(username) = LOWER(?)
              OR LOWER(username) = LOWER(?)
@@ -237,7 +238,8 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
         `${baseUsername}_gi`,
         `${baseUsername}_gl`,
         `${baseUsername}_co`,
-        `${baseUsername}_cd`
+        `${baseUsername}_cd`,
+        `${baseUsername}_me`
       ).all();
 
       for (const dup of suffixedDuplicates.results || []) {
@@ -455,6 +457,25 @@ export async function verifyProviderToken(
         displayName: profile.full_name || login,
         avatarUrl: profile.avatar_url,
         profileUrl: profile.html_url || `https://codeberg.org/${login}`,
+        bio: profile.description || ''
+      };
+    }
+
+    if (provider === 'mesehub') {
+      const res = await fetch('https://git.minetest.land/api/v1/user', {
+        headers: { ...headers, Authorization: `token ${cleanToken}` }
+      });
+      if (!res.ok) return { verified: false };
+      const profile: any = await res.json();
+      const login = profile?.login || profile?.username;
+      if (!login) return { verified: false };
+      return {
+        verified: true,
+        providerUserId: String(profile.id || login),
+        username: login,
+        displayName: profile.full_name || login,
+        avatarUrl: profile.avatar_url || `https://git.minetest.land/${login}.png`,
+        profileUrl: profile.html_url || `https://git.minetest.land/${login}`,
         bio: profile.description || ''
       };
     }

@@ -43,7 +43,25 @@ import {
   ],
   template: `
     @if (showcase().length > 0 && currentPkg(); as pkg) {
-      <div class="relative w-full max-w-7xl mx-auto sm:px-4 lg:px-8 mt-1 sm:mt-3">
+      <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4">
+        <!-- Netflix-Style Natural Ambient Backlight Glow Derived from Active Hero Artwork (Per-Slide Opacity Crossfade to Prevent [src] Swap Flicker) -->
+        <div
+          aria-hidden="true"
+          class="pointer-events-none select-none absolute -inset-x-10 sm:-inset-x-20 -top-12 -bottom-20 z-0 overflow-visible blur-[80px] sm:blur-[110px] saturate-[1.85]">
+          @for (glowPkg of showcase(); track glowPkg.id; let idx = $index) {
+            <img
+              [src]="glowPkg.banner || glowPkg.thumbnail"
+              [fallbackThumbnail]="glowPkg.thumbnail"
+              appImgFallback
+              alt=""
+              decoding="async"
+              style="-webkit-mask-image: radial-gradient(ellipse 68% 64% at 50% 50%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.6) 65%, rgba(0,0,0,0) 100%); mask-image: radial-gradient(ellipse 68% 64% at 50% 50%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.6) 65%, rgba(0,0,0,0) 100%);"
+              [class]="idx === currentIndex() ? 'opacity-55' : 'opacity-0'"
+              class="absolute inset-0 w-full h-full object-cover object-center rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
+            />
+          }
+        </div>
+
         <div
           (mouseenter)="onMouseEnter()"
           (mouseleave)="onMouseLeave()"
@@ -55,7 +73,7 @@ import {
           role="region"
           aria-roledescription="carousel"
           [attr.aria-label]="pkg.title"
-          class="relative w-full aspect-video min-h-[360px] max-h-[720px] sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-2xl border border-white/10 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+          class="relative z-10 w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-[0_28px_80px_-15px_rgba(0,0,0,0.85)] border border-white/15 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
 
           <!-- Hardware-Accelerated Horizontal Slide Track (Smooth Slide-In/Out without Image Flash) -->
           <div
@@ -82,9 +100,9 @@ import {
                 </div>
 
                 <!-- Slide Foreground Content with Staggered Fade + Slide-Up Reveal -->
-                <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10 pointer-events-none">
+                <div class="relative w-full px-6 sm:px-10 lg:px-14 h-full flex flex-col justify-end pb-16 sm:pb-20 lg:pb-24 z-10 pointer-events-none">
                   <div
-                    [class]="idx === currentIndex() ? 'max-w-2xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
+                    [class]="idx === currentIndex() ? 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
 
                     <!-- Category & Source Badges (Consistent with Package Tiles & Detail Modal) -->
                     <div class="flex items-center gap-2 flex-wrap">
@@ -121,12 +139,12 @@ import {
                     </div>
 
                     <!-- Title -->
-                    <h2 class="text-3xl sm:text-5xl font-black tracking-tight text-white drop-shadow-md">
+                    <h2 class="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white drop-shadow-md">
                       {{ slidePkg.title }}
                     </h2>
 
                     <!-- Description -->
-                    <p class="text-sm sm:text-base text-slate-300 line-clamp-3 leading-relaxed drop-shadow">
+                    <p class="text-sm sm:text-base lg:text-lg text-slate-200 line-clamp-3 leading-relaxed drop-shadow max-w-2xl">
                       {{ slidePkg.short_desc }}
                     </p>
 
@@ -233,12 +251,12 @@ import {
       </div>
     } @else {
       <!-- Professional 16:9 Hero Billboard Skeleton Preloader -->
-      <div class="relative w-full max-w-7xl mx-auto sm:px-4 lg:px-8 mt-1 sm:mt-3" aria-busy="true" aria-label="Loading featured showcase">
-        <div class="relative w-full aspect-video min-h-[360px] max-h-[720px] sm:rounded-3xl overflow-hidden glass-panel border border-white/10">
+      <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4" aria-busy="true" aria-label="Loading featured showcase">
+        <div class="relative w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden glass-panel border border-white/10">
           <div class="absolute inset-0 skeleton-shimmer opacity-40"></div>
           <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent"></div>
 
-          <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex flex-col justify-end pb-16 sm:pb-20 z-10">
+          <div class="relative w-full px-6 sm:px-10 lg:px-14 h-full flex flex-col justify-end pb-16 sm:pb-20 lg:pb-24 z-10">
             <div class="max-w-2xl space-y-4">
               <div class="flex items-center gap-2">
                 <div class="h-5 w-14 rounded-md skeleton-shimmer"></div>

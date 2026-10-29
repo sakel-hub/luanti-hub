@@ -16,6 +16,7 @@ interface Env {
   ADMIN_USERS?: string;
   ADMIN_SECRET?: string;
   CODEBERG_CLIENT_ID?: string;
+  MESEHUB_CLIENT_ID?: string;
   GITLAB_CLIENT_ID?: string;
   GITHUB_CLIENT_ID?: string;
   CONTENTDB_CLIENT_ID?: string;
@@ -24,6 +25,7 @@ interface Env {
 function getConfiguredOAuthProviders(env: Env): Record<string, boolean> {
   return {
     codeberg: Boolean(env.CODEBERG_CLIENT_ID && env.CODEBERG_CLIENT_ID.trim()),
+    mesehub: Boolean(env.MESEHUB_CLIENT_ID && env.MESEHUB_CLIENT_ID.trim()),
     gitlab: Boolean(env.GITLAB_CLIENT_ID && env.GITLAB_CLIENT_ID.trim()),
     github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_ID.trim()),
     contentdb: Boolean(env.CONTENTDB_CLIENT_ID && env.CONTENTDB_CLIENT_ID.trim())
@@ -189,7 +191,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       token?: string;
     };
 
-    const allowedProviders = ['contentdb', 'codeberg', 'gitlab', 'github'];
+    const allowedProviders = ['contentdb', 'codeberg', 'mesehub', 'gitlab', 'github'];
     const rawProvider = (body.provider || 'contentdb').toLowerCase();
     const provider = allowedProviders.includes(rawProvider) ? rawProvider : 'contentdb';
     const rawUsername = (body.username || '').trim();
@@ -238,6 +240,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       } else if (provider === 'codeberg') {
         avatarUrl = `https://codeberg.org/${rawUsername}.png`;
         profileUrl = `https://codeberg.org/${rawUsername}`;
+      } else if (provider === 'mesehub') {
+        avatarUrl = `https://git.minetest.land/${rawUsername}.png`;
+        profileUrl = `https://git.minetest.land/${rawUsername}`;
       } else if (provider === 'gitlab') {
         profileUrl = `https://gitlab.com/${rawUsername}`;
       } else if (provider === 'github') {
@@ -429,7 +434,7 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
   }
 }
 
-// DELETE /api/auth/me?provider=github: Unlink an identity provider
+// DELETE /api/auth/me?provider=github&username=sakel: Unlink a specific identity handle
 export async function onRequestDelete(context: { request: Request; env: Env }) {
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
@@ -444,6 +449,7 @@ export async function onRequestDelete(context: { request: Request; env: Env }) {
 
   const url = new URL(context.request.url);
   const provider = url.searchParams.get('provider');
+  const username = (url.searchParams.get('username') || '').trim();
 
   if (!provider) {
     return Response.json({ error: 'Provider parameter is required.' }, { status: 400 });
@@ -458,9 +464,15 @@ export async function onRequestDelete(context: { request: Request; env: Env }) {
       return Response.json({ error: 'Cannot unlink your only connected identity.' }, { status: 400 });
     }
 
-    await context.env.DB.prepare(
-      `DELETE FROM user_identities WHERE user_id = ? AND provider = ?`
-    ).bind(userId, provider).run();
+    if (username) {
+      await context.env.DB.prepare(
+        `DELETE FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) = LOWER(?)`
+      ).bind(userId, provider, username).run();
+    } else {
+      await context.env.DB.prepare(
+        `DELETE FROM user_identities WHERE user_id = ? AND provider = ?`
+      ).bind(userId, provider).run();
+    }
 
     return Response.json({ success: true });
   } catch (err: any) {

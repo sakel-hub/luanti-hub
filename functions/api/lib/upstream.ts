@@ -181,7 +181,6 @@ export function detectSpdxFromText(text: string): string {
 }
 
 const DEFUNCT_GIT_HOSTS = [
-  'git.minetest.land',
   'notabug.org',
   'gitea.your-land.de',
   'repo.or.cz'
@@ -263,6 +262,7 @@ export async function syncAuthorContentDbPackages(
   username: string
 ): Promise<any[]> {
   try {
+    await ensureExtendedPackageColumns(db);
     const cdbRes = await fetchWithFailover(`/packages/?author=${encodeURIComponent(username)}`);
     if (!cdbRes.ok) return [];
     const cdbPackages = await cdbRes.json() as any[];
@@ -279,19 +279,21 @@ export async function syncAuthorContentDbPackages(
       const license = typeof p.license === 'string' ? p.license : '';
       const mediaLicense = typeof p.media_license === 'string' ? p.media_license : license;
       const tagsJson = Array.isArray(p.tags) ? JSON.stringify(p.tags) : null;
+      const cdbDownloads = typeof p.downloads === 'number' ? p.downloads : 0;
 
       await db.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc,
-          repo_url, provider, thumbnail_url, score, downloads_count,
+          repo_url, provider, thumbnail_url, score, downloads_count, contentdb_downloads, luantihub_downloads,
           license, media_license, tags, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, 0, ?, ?, ?, 'active')
         ON CONFLICT(id) DO UPDATE SET
           author_id = excluded.author_id,
           title = excluded.title,
           short_desc = excluded.short_desc,
           thumbnail_url = COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url),
-          downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+          contentdb_downloads = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads),
+          downloads_count = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads) + COALESCE(packages.luantihub_downloads, 0),
           license = COALESCE(NULLIF(excluded.license, ''), packages.license),
           media_license = COALESCE(NULLIF(excluded.media_license, ''), packages.media_license),
           tags = COALESCE(excluded.tags, packages.tags),
@@ -307,7 +309,8 @@ export async function syncAuthorContentDbPackages(
         p.repo || p.repo_url || '',
         p.thumbnail || '',
         genuineScore,
-        typeof p.downloads === 'number' ? p.downloads : 0,
+        cdbDownloads,
+        cdbDownloads,
         license,
         mediaLicense,
         tagsJson
@@ -328,10 +331,117 @@ export interface DiscoveredGitRelease {
   commit_sha: string;
   url: string;
   download_url: string;
+  size?: number;
   min_minetest_version?: string;
   changelog?: string;
   release_date?: string;
   released_at: string;
+}
+
+let extendedColumnsEnsured = false;
+
+/**
+ * Ensures `contentdb_downloads` and `luantihub_downloads` columns exist on `packages`
+ * in Cloudflare D1 at runtime so dual-counter tracking works without manual CLI migration.
+ */
+export async function ensureExtendedPackageColumns(db: any): Promise<void> {
+  if (!db || extendedColumnsEnsured) return;
+  extendedColumnsEnsured = true;
+  const cols = [
+    `ALTER TABLE packages ADD COLUMN contentdb_downloads INTEGER DEFAULT 0`,
+    `ALTER TABLE packages ADD COLUMN luantihub_downloads INTEGER DEFAULT 0`,
+    `ALTER TABLE packages ADD COLUMN download_size INTEGER`,
+    `ALTER TABLE packages ADD COLUMN donate_url TEXT`,
+    `ALTER TABLE packages ADD COLUMN translation_url TEXT`,
+    `ALTER TABLE packages ADD COLUMN forum_url TEXT`,
+    `ALTER TABLE packages ADD COLUMN issue_tracker TEXT`,
+    `ALTER TABLE packages ADD COLUMN video_url TEXT`,
+    `ALTER TABLE packages ADD COLUMN video_thumbnail_url TEXT`,
+    `ALTER TABLE packages ADD COLUMN dev_state TEXT`,
+    `ALTER TABLE packages ADD COLUMN provides TEXT`
+  ];
+  for (const sql of cols) {
+    try {
+      await db.prepare(sql).run();
+    } catch {
+      // Column already exists
+    }
+  }
+}
+
+/**
+ * Normalizes ContentDB `long_description` whether it is returned as a plain Markdown string
+ * (from `/api/packages/<author>/<name>/` or `/dependencies/`) or a Luanti hypertext object
+ * (`{ type: 'hypertext', head_level: 2, body: '...' }` from `/for-client/`).
+ */
+export function extractLongDescriptionText(val: any): string {
+  if (!val) return '';
+  if (typeof val === 'string') return val.trim();
+  if (typeof val === 'object' && typeof val.body === 'string') {
+    return val.body
+      .replace(/<bigger>([\s\S]*?)<\/bigger>/gi, '### $1\n')
+      .replace(/<big>([\s\S]*?)<\/big>/gi, '#### $1\n')
+      .replace(/<mono>([\s\S]*?)<\/mono>/gi, '`$1`')
+      .replace(/<style[^>]*>/gi, '')
+      .replace(/<\/style>/gi, '')
+      .replace(/<(?:item|img|global|tag)\b[^>]*>/gi, '')
+      .trim();
+  }
+  return '';
+}
+
+/**
+ * Resolves `video_url` and `video_thumbnail_url` from explicit ContentDB/D1 fields,
+ * falling back to extracting embedded YouTube, Vimeo, or direct `.mp4`/`.webm` showcase
+ * links from `long_description` or `README.md` when `video_url` is not explicitly set.
+ */
+export function extractEmbeddedVideo(
+  videoUrl?: string | null,
+  videoThumbUrl?: string | null,
+  longDesc?: string | null,
+  readme?: string | null
+): { video_url?: string; video_thumbnail_url?: string } {
+  let resolvedVideo = typeof videoUrl === 'string' && videoUrl.trim() ? videoUrl.trim() : undefined;
+  let resolvedThumb = typeof videoThumbUrl === 'string' && videoThumbUrl.trim() ? videoThumbUrl.trim() : undefined;
+
+  if (!resolvedVideo) {
+    const combinedText = `${longDesc || ''}\n${readme || ''}`;
+    if (combinedText.trim()) {
+      const ytMatch = combinedText.match(
+        /https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
+      );
+      if (ytMatch && ytMatch[1]) {
+        resolvedVideo = `https://www.youtube.com/watch?v=${ytMatch[1]}`;
+        if (!resolvedThumb) {
+          resolvedThumb = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+        }
+      } else {
+        const directMatch = combinedText.match(
+          /https?:\/\/[^\s)"'<>]+?\.(?:mp4|webm)(?:\?[^\s)"'<>]*)?/i
+        );
+        if (directMatch && directMatch[0]) {
+          resolvedVideo = directMatch[0];
+        } else {
+          const vimeoMatch = combinedText.match(/https?:\/\/(?:www\.)?vimeo\.com\/(\d{6,12})/i);
+          if (vimeoMatch && vimeoMatch[0]) {
+            resolvedVideo = vimeoMatch[0];
+          }
+        }
+      }
+    }
+  } else if (!resolvedThumb) {
+    const ytMatch = resolvedVideo.match(
+      /(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
+    );
+    if (ytMatch && ytMatch[1]) {
+      resolvedThumb = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+    }
+  }
+
+  return {
+    video_url: resolvedVideo,
+    video_thumbnail_url: resolvedThumb
+  };
 }
 
 export function parseGitRepoTarget(
@@ -349,7 +459,7 @@ export function parseGitRepoTarget(
         const repo = parts[1].replace(/\.git$/i, '');
         if (owner && repo) {
           let provider: 'github' | 'codeberg' | 'gitlab' = 'github';
-          if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+          if (host.includes('codeberg') || host.includes('minetest.land') || host.includes('mesehub') || host.includes('gitea') || host.includes('forgejo')) {
             provider = 'codeberg';
           } else if (host.includes('gitlab')) {
             provider = 'gitlab';
@@ -500,7 +610,11 @@ export async function fetchGitRepoReleasesAndTags(
       const rel = releaseByTag.get(tagName);
       const rawCommit = String(t?.commit?.sha || t?.commit?.id || t?.id || rel?.target_commitish || '').trim();
       const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
-      const archiveUrl = buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const zipAsset = Array.isArray(rel?.assets)
+        ? rel.assets.find((a: any) => String(a?.name || '').toLowerCase().endsWith('.zip') && (a?.browser_download_url || a?.url))
+        : null;
+      const archiveUrl = zipAsset?.browser_download_url || zipAsset?.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const assetSize = Number(zipAsset?.size || 0);
       const relDate = String(rel?.published_at || rel?.released_at || rel?.created_at || t?.commit?.created_at || '');
       const title = String(rel?.name || tagName).trim() || tagName;
 
@@ -512,6 +626,7 @@ export async function fetchGitRepoReleasesAndTags(
         commit_sha: isHexSha ? rawCommit : (tagShaMap.get(tagName) || ''),
         url: archiveUrl,
         download_url: archiveUrl,
+        size: assetSize > 0 ? assetSize : undefined,
         min_minetest_version: minMinetestVersion,
         changelog: rel?.body || rel?.description || t?.message || undefined,
         release_date: relDate,
@@ -530,7 +645,11 @@ export async function fetchGitRepoReleasesAndTags(
 
       const rawCommit = String(tagShaMap.get(tagName) || r.target_commitish || '').trim();
       const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
-      const archiveUrl = buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const zipAsset = Array.isArray(r.assets)
+        ? r.assets.find((a: any) => String(a?.name || '').toLowerCase().endsWith('.zip') && (a?.browser_download_url || a?.url))
+        : null;
+      const archiveUrl = zipAsset?.browser_download_url || zipAsset?.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const assetSize = Number(zipAsset?.size || 0);
       const relDate = String(r.published_at || r.released_at || r.created_at || '');
       const title = String(r.name || tagName).trim() || tagName;
 
@@ -542,6 +661,7 @@ export async function fetchGitRepoReleasesAndTags(
         commit_sha: isHexSha ? rawCommit : '',
         url: archiveUrl,
         download_url: archiveUrl,
+        size: assetSize > 0 ? assetSize : undefined,
         min_minetest_version: minMinetestVersion,
         changelog: r.body || r.description || undefined,
         release_date: relDate,
