@@ -14,7 +14,7 @@ export class SeoService {
   private readonly defaultTitle =
     'LuantiHub – Mods & Packages for Luanti (Minetest)';
   private readonly defaultDesc =
-    'Discover, audit, and install voxel games, mods, and texture packs for Luanti (formerly Minetest). Unified ContentDB mirror with decentralized Git community releases.';
+    'Discover, search, and download Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB with instant failover.';
   private readonly baseUrl = 'https://luanti-hub.pages.dev';
 
   updateForPackage(pkg: LuantiPackage): void {
