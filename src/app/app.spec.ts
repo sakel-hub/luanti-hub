@@ -747,6 +747,37 @@ description = Mob animation and spawning framework.
     });
     expect(luantiClientRes.status).toBe(200);
 
+    // 3b. Allow cross-site OAuth callback redirects from identity providers (e.g. GitHub, GitLab, Codeberg)
+    const oauthCallbackReq = new Request('https://luanti-hub.pages.dev/api/auth/github/callback?code=abc123xyz&state=hmac_state', {
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'navigate',
+        'Referer': 'https://github.com/login/oauth'
+      }
+    });
+    const oauthCallbackRes = await edgeMiddleware({
+      request: oauthCallbackReq,
+      next: async () => new Response('oauth_ok'),
+      env: {}
+    });
+    expect(oauthCallbackRes.status).toBe(200);
+    expect(await oauthCallbackRes.text()).toBe('oauth_ok');
+
+    // 3c. Block cross-site state mutations on internal auth endpoints
+    const crossSiteAuthReq = new Request('https://luanti-hub.pages.dev/api/auth/me', {
+      method: 'POST',
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Referer': 'https://evil.com'
+      }
+    });
+    const crossSiteAuthRes = await edgeMiddleware({
+      request: crossSiteAuthReq,
+      next: async () => new Response('should_block'),
+      env: {}
+    });
+    expect(crossSiteAuthRes.status).toBe(403);
+
     // 4. Enforce sliding-window rate limits per IP
     const testIp = '203.0.113.99';
     for (let i = 0; i < 3; i++) {

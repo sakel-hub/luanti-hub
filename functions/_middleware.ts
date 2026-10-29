@@ -99,12 +99,19 @@ export async function onRequest(context: {
   // 2. Cross-Origin & Hotlink Protection
   // In-game Luanti C++ clients do not send `Origin` or `Sec-Fetch-Site`, so they remain unaffected.
   // Browsers on third-party websites DO send `Origin` and `Sec-Fetch-Site: cross-site`.
+  // Note: OAuth 2.0 authorization and callback redirects inherently cross origins between LuantiHub
+  // and third-party identity providers (GitHub, Codeberg, Mesehub, GitLab, ContentDB) and are
+  // cryptographically protected by signed HMAC state tokens in the callback handler.
   const origin = request.headers.get('Origin');
   const referer = request.headers.get('Referer');
   const secFetchSite = (request.headers.get('Sec-Fetch-Site') || '').toLowerCase();
   const requestHost = url.host;
 
-  if (origin && !isSameHostOrigin(origin, requestHost)) {
+  const isOAuthFlow =
+    pathname.startsWith('/api/auth/') &&
+    (pathname.includes('/callback') || pathname.includes('/login'));
+
+  if (!isOAuthFlow && origin && !isSameHostOrigin(origin, requestHost)) {
     return Response.json(
       { error: 'Forbidden: Cross-origin API hotlinking is not allowed.' },
       { status: 403 }
@@ -113,7 +120,7 @@ export async function onRequest(context: {
 
   const isStateMutating = method === 'POST' || method === 'PUT' || method === 'DELETE' || method === 'PATCH';
   const isInternalWebEndpoint =
-    pathname.startsWith('/api/auth/') ||
+    (pathname.startsWith('/api/auth/') && !isOAuthFlow) ||
     pathname.startsWith('/api/packages/git') ||
     pathname.startsWith('/api/packages/top10') ||
     pathname.startsWith('/api/users/') ||
