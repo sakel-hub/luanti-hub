@@ -16,6 +16,7 @@ import { SettingsService } from '../../core/services/settings.service';
 import { LuantiPackage } from '../../core/models/package.model';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideChevronLeft,
@@ -34,6 +35,7 @@ import {
     CommonModule,
     ImgFallbackDirective,
     TooltipDirective,
+    CompactNumberPipe,
     TranslatePipe,
     LucideChevronLeft,
     LucideChevronRight,
@@ -216,7 +218,7 @@ import {
                   </h3>
                   <div class="flex items-center justify-between text-[10px] text-slate-400">
                     <span class="text-emerald-400 font-semibold">{{ packageService.getMatchScore(pkg) }}% {{ 'card.match' | translate }}</span>
-                    <span>{{ pkg.downloads | number }} dl</span>
+                    <span>{{ pkg.downloads | compactNumber }} dl</span>
                   </div>
                 </div>
 

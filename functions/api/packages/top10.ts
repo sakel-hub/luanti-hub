@@ -1,4 +1,4 @@
-import { fetchUpstreamJsonCached, computeGenuineStarRating } from '../lib/upstream';
+import { fetchUpstreamJsonCached, computeGenuineStarRating, ensureExtendedPackageColumns } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -20,6 +20,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   // 1. Query Cloudflare D1 for real download velocity, star ratings & Kill Switch blacklist
   if (env.DB) {
     try {
+      await ensureExtendedPackageColumns(env.DB);
       const [blockedRes, ratingsRes] = await Promise.all([
         env.DB.prepare(
           `SELECT LOWER(id) as id FROM packages WHERE status IN ('flagged', 'delisted')`
@@ -52,7 +53,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.score,
           p.license,
           p.provider,
-          p.status
+          p.status,
+          p.downloads_count,
+          p.contentdb_downloads,
+          p.luantihub_downloads,
+          p.file_size
         FROM package_daily_downloads d
         LEFT JOIN packages p ON LOWER(p.id) = LOWER(d.package_id)
         WHERE ${dateCondition} AND (p.status IS NULL OR p.status = 'active')
@@ -71,6 +76,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const name = r.name || parts[1];
           if (!author || !name) continue;
 
+          const cdbDl = Number(r.contentdb_downloads || 0);
+          const lhDl = Math.max(Number(r.luantihub_downloads || 0), Number(r.period_downloads || 0));
+          const totalDl = Math.max(
+            Number(r.downloads_count || 0),
+            cdbDl + lhDl,
+            Number(r.period_downloads) || 1
+          );
+
           top10List.push({
             id: `${author}/${name}`,
             author,
@@ -81,7 +94,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             thumbnail: r.thumbnail_url || '',
             banner: r.banner_url || r.thumbnail_url || '',
             score: d1Ratings.get(pkgKey) ?? computeGenuineStarRating(null, r.score),
-            downloads: Number(r.period_downloads) || 1,
+            contentdb_downloads: cdbDl,
+            luantihub_downloads: lhDl,
+            downloads: totalDl,
+            file_size: r.file_size || undefined,
             license: r.license || '',
             source: r.provider && r.provider !== 'contentdb' ? 'git' : 'official'
           });

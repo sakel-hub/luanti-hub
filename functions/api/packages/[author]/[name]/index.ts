@@ -2,6 +2,7 @@ import {
   fetchUpstreamJsonCached,
   parseJsonArray,
   detectSpdxFromText,
+  readEdgeCacheJson,
   writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
   fetchGitRepoReleasesAndTags,
@@ -682,6 +683,25 @@ function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null)
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
+  const reqUrl = context.request ? new URL(context.request.url) : null;
+  const isLite = reqUrl?.searchParams.get('lite') === '1';
+  const noCache = reqUrl?.searchParams.get('nocache') === '1';
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+
+  if (!noCache) {
+    const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
+    if (cachedEdge) {
+      return new Response(JSON.stringify(cachedEdge), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': isLite
+            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
+            : 'public, max-age=60, s-maxage=300, stale-while-revalidate=120'
+        }
+      });
+    }
+  }
 
   // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews, releases & downloads)
   let d1Pkg: any = null;
@@ -708,37 +728,94 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
     const effectivePkgId = d1Pkg?.id || pkgId;
 
-    try {
-      const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
-        context.env.DB.prepare(
-          `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(effectivePkgId).first(),
-        context.env.DB.prepare(`
-          SELECT r.id, r.rating, r.title, r.comment, r.created_at,
-                 u.username, u.display_name, u.avatar_url
-          FROM reviews r
-          LEFT JOIN users u ON r.user_id = u.id
-          WHERE LOWER(r.package_id) = LOWER(?)
-          ORDER BY r.created_at DESC
-        `).bind(effectivePkgId).all().catch(() => ({ results: [] })),
-        context.env.DB.prepare(
-          `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
-        ).bind(effectivePkgId).all().catch(() => ({ results: [] })),
-        context.env.DB.prepare(
-          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }))
-      ]);
+    // Fast path for ?lite=1 when D1 already holds hydrated ContentDB downloads & license
+    if (
+      isLite &&
+      d1Pkg &&
+      d1Pkg.license &&
+      (Number(d1Pkg.contentdb_downloads || 0) > 0 || d1Pkg.provider !== 'contentdb')
+    ) {
+      const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
+      const lhDl = Number(d1Pkg.luantihub_downloads || 0);
+      const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
+      const d1TagsFast = parseJsonArray(d1Pkg.tags);
+      const isGitFast = d1Pkg.provider !== 'contentdb' || d1TagsFast.includes('git');
+      const isOfficialFast = d1Pkg.provider === 'contentdb' || cdbDl > 0 || d1TagsFast.includes('contentdb');
+      const fastSources: Array<'official' | 'git'> = [];
+      if (isOfficialFast) fastSources.push('official');
+      if (isGitFast) fastSources.push('git');
+      if (fastSources.length === 0) fastSources.push('official');
 
-      if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
-        d1ReviewAvg = Number(revAvgRow.avg_rating);
-      } else if (d1Pkg && Number(d1Pkg.score) > 0) {
-        // Heal legacy DEFAULT 5.0 score in D1 when no reviews exist
-        d1Pkg.score = 0;
-        context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
+      const fastLitePayload = {
+        id: d1Pkg.id,
+        author: d1Pkg.author_name || author,
+        name: d1Pkg.name || name,
+        title: d1Pkg.title || name,
+        type: d1Pkg.type || 'mod',
+        short_desc: d1Pkg.short_desc || '',
+        license: d1Pkg.license,
+        media_license: d1Pkg.media_license || d1Pkg.license,
+        min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
+        contentdb_downloads: cdbDl,
+        luantihub_downloads: lhDl,
+        downloads: totalDl,
+        download_size: Number(d1Pkg.download_size || 0) > 0 ? Number(d1Pkg.download_size) : undefined,
+        file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size),
+        video_url: d1Pkg.video_url || undefined,
+        video_thumbnail_url: d1Pkg.video_thumbnail_url || undefined,
+        tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
+        source: isGitFast ? 'git' : 'official',
+        sources: fastSources,
+        git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified'
+      };
+      await writeEdgeCacheJson(edgeCacheKey, fastLitePayload, 1800);
+      return new Response(JSON.stringify(fastLitePayload), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
+        }
+      });
+    }
+
+    try {
+      if (isLite) {
+        const dailyDlRow = await context.env.DB.prepare(
+          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }));
+        d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
+      } else {
+        const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
+          context.env.DB.prepare(
+            `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+          ).bind(effectivePkgId).first(),
+          context.env.DB.prepare(`
+            SELECT r.id, r.rating, r.title, r.comment, r.created_at,
+                   u.username, u.display_name, u.avatar_url
+            FROM reviews r
+            LEFT JOIN users u ON r.user_id = u.id
+            WHERE LOWER(r.package_id) = LOWER(?)
+            ORDER BY r.created_at DESC
+          `).bind(effectivePkgId).all().catch(() => ({ results: [] })),
+          context.env.DB.prepare(
+            `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
+          ).bind(effectivePkgId).all().catch(() => ({ results: [] })),
+          context.env.DB.prepare(
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
+          ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }))
+        ]);
+
+        if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
+          d1ReviewAvg = Number(revAvgRow.avg_rating);
+        } else if (d1Pkg && Number(d1Pkg.score) > 0) {
+          // Heal legacy DEFAULT 5.0 score in D1 when no reviews exist
+          d1Pkg.score = 0;
+          context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
+        }
+        d1Reviews = revRowsRes?.results || [];
+        d1Releases = relRowsRes?.results || [];
+        d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
       }
-      d1Reviews = revRowsRes?.results || [];
-      d1Releases = relRowsRes?.results || [];
-      d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
     } catch {
       // Ignore if reviews/releases query fails
     }
@@ -748,18 +825,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
   let [upstreamData, forClientData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
-    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 300),
-    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300),
-    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`, 600),
-    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
-    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
+    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600),
+    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 600),
+    isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`, 600),
+    isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
+    isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
   ]);
 
   // Ensure Git tags/releases are discovered before falling back to a default branch ('HEAD') row
   const hasRealTaggedD1Releases = d1Releases.some(
     (r: any) => r.commit_sha !== 'HEAD' && r.version !== 'latest'
   );
-  if (!hasRealTaggedD1Releases && (!Array.isArray(releasesPayload) || releasesPayload.length === 0)) {
+  if (!isLite && !hasRealTaggedD1Releases && (!Array.isArray(releasesPayload) || releasesPayload.length === 0)) {
     const discoveredGitReleases = await fetchGitRepoReleasesAndTags(
       d1Pkg?.repo_url,
       d1Pkg?.author_name || author,
@@ -951,7 +1028,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const maxVersion = upstreamData.max_minetest_version || forClientData?.max_minetest_version || d1Pkg?.max_minetest_version || undefined;
 
   // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license
-  if (!repoUrl || (finalHardDeps.length === 0 && finalSoftDeps.length === 0) || !resolvedLicense) {
+  const needsGitProbe = isLite
+    ? !resolvedLicense
+    : (!repoUrl || (finalHardDeps.length === 0 && finalSoftDeps.length === 0) || !resolvedLicense);
+  if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
       upstreamData.name || name,
@@ -1045,8 +1125,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   }
 
   const [resolvedHeadSize, readmeText] = await Promise.all([
-    fileSize ? Promise.resolve(fileSize) : resolveArchiveSizeCached(latestDownloadUrl),
-    fetchRepoReadmeCached(repoUrl)
+    fileSize
+      ? Promise.resolve(fileSize)
+      : (isLite ? Promise.resolve(d1Pkg?.file_size || undefined) : resolveArchiveSizeCached(latestDownloadUrl)),
+    isLite ? Promise.resolve<string | null>(null) : fetchRepoReadmeCached(repoUrl)
   ]);
 
   const d1Tags = parseJsonArray(d1Pkg?.tags);
@@ -1154,37 +1236,87 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     d1Pkg?.updated_at ||
     undefined;
 
-  // Persist synced ContentDB downloads & extended metadata back to D1 if row exists
-  if (context.env.DB && d1Pkg) {
+  const combinedTagsList = Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
+  const resolvedHardDeps = finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps;
+  const resolvedSoftDeps = finalSoftDeps.length > 0 ? finalSoftDeps : d1SoftDeps;
+
+  // Persist synced ContentDB downloads, license, tags & extended metadata back to D1 (upsert for official ContentDB packages)
+  if (context.env.DB) {
+    const cdbAuthor = String(upstreamData.author || author).trim();
+    const cdbName = String(upstreamData.name || name).trim();
+    const cdbTitle = String(upstreamData.title || d1Pkg?.title || cdbName).trim();
+    const cdbType = ['mod', 'game', 'txp', 'modpack'].includes(String(upstreamData.type || d1Pkg?.type || 'mod'))
+      ? String(upstreamData.type || d1Pkg?.type || 'mod')
+      : 'mod';
+    const cdbThumb = upstreamData.thumbnail || d1Pkg?.thumbnail_url || null;
+    const cdbBanner = screenshots[0] || d1Pkg?.banner_url || (cdbThumb && String(cdbThumb).includes('thumbnail.png') ? String(cdbThumb).replace('thumbnail.png', 'shot-0.png') : cdbThumb);
+    const targetRowId = d1Pkg?.id || canonicalId;
+
     context.env.DB.prepare(`
-      UPDATE packages SET
-        contentdb_downloads = ?,
-        luantihub_downloads = ?,
-        downloads_count = ?,
-        download_size = COALESCE(?, download_size),
-        file_size = COALESCE(?, file_size),
-        donate_url = COALESCE(?, donate_url),
-        issue_tracker = COALESCE(?, issue_tracker),
-        translation_url = COALESCE(?, translation_url),
-        forum_url = COALESCE(?, forum_url),
-        video_url = COALESCE(?, video_url),
-        video_thumbnail_url = COALESCE(?, video_thumbnail_url),
-        dev_state = COALESCE(?, dev_state)
-      WHERE id = ?
+      INSERT INTO packages (
+        id, author_name, name, title, type, short_desc, long_desc, repo_url, provider,
+        thumbnail_url, banner_url, license, media_license, tags, dependencies, optional_dependencies,
+        min_minetest_version, status, downloads_count, contentdb_downloads, luantihub_downloads,
+        download_size, file_size, donate_url, translation_url, forum_url, issue_tracker,
+        video_url, video_thumbnail_url, dev_state, provides
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, 'contentdb',
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, 'active', ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        contentdb_downloads = excluded.contentdb_downloads,
+        luantihub_downloads = excluded.luantihub_downloads,
+        downloads_count = excluded.downloads_count,
+        license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
+        media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
+        tags = COALESCE(excluded.tags, packages.tags),
+        dependencies = COALESCE(excluded.dependencies, packages.dependencies),
+        optional_dependencies = COALESCE(excluded.optional_dependencies, packages.optional_dependencies),
+        min_minetest_version = COALESCE(excluded.min_minetest_version, packages.min_minetest_version),
+        download_size = COALESCE(excluded.download_size, packages.download_size),
+        file_size = COALESCE(excluded.file_size, packages.file_size),
+        donate_url = COALESCE(excluded.donate_url, packages.donate_url),
+        issue_tracker = COALESCE(excluded.issue_tracker, packages.issue_tracker),
+        translation_url = COALESCE(excluded.translation_url, packages.translation_url),
+        forum_url = COALESCE(excluded.forum_url, packages.forum_url),
+        video_url = COALESCE(excluded.video_url, packages.video_url),
+        video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
+        dev_state = COALESCE(excluded.dev_state, packages.dev_state),
+        provides = COALESCE(excluded.provides, packages.provides),
+        updated_at = CURRENT_TIMESTAMP
     `).bind(
+      targetRowId,
+      cdbAuthor,
+      cdbName,
+      cdbTitle,
+      cdbType,
+      shortDesc || null,
+      extractedLongDesc || null,
+      repoUrl || '',
+      cdbThumb,
+      cdbBanner || null,
+      resolvedLicense || '',
+      resolvedMediaLicense || resolvedLicense || '',
+      combinedTagsList.length > 0 ? JSON.stringify(combinedTagsList) : null,
+      resolvedHardDeps.length > 0 ? JSON.stringify(resolvedHardDeps) : null,
+      resolvedSoftDeps.length > 0 ? JSON.stringify(resolvedSoftDeps) : null,
+      minVersion || '5.0.0',
+      totalDownloads,
       contentdbDownloads,
       luantihubDownloads,
-      totalDownloads,
       downloadSizeBytes > 0 ? downloadSizeBytes : null,
       resolvedHeadSize || null,
       donateUrl || null,
-      issueTrackerUrl || null,
       translationUrl || null,
       forumUrl || null,
+      issueTrackerUrl || null,
       videoUrl || null,
       videoThumbnailUrl || null,
       devState || null,
-      d1Pkg.id
+      providesList.length > 0 ? JSON.stringify(providesList) : null
     ).run().catch(() => {});
   }
 
@@ -1234,11 +1366,15 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     reviews_list: bundledReviews
   };
 
+  await writeEdgeCacheJson(edgeCacheKey, enriched, isLite ? 1800 : 300);
+
   return new Response(JSON.stringify(enriched), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache'
+      'Cache-Control': isLite
+        ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
+        : 'public, max-age=60, s-maxage=300, stale-while-revalidate=120'
     }
   });
 }

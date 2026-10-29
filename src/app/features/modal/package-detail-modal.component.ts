@@ -21,6 +21,7 @@ import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
@@ -57,6 +58,7 @@ import {
     FormsModule,
     ImgFallbackDirective,
     TooltipDirective,
+    CompactNumberPipe,
     TranslatePipe,
     LucideX,
     LucideShare2,
@@ -835,11 +837,11 @@ import {
                       {{ 'modal.downloads' | translate }}
                     </span>
                     <span class="font-black text-white text-sm mt-0.5 block">
-                      {{ package.downloads | number }}
+                      {{ package.downloads | compactNumber }}
                     </span>
                     @if ((package.contentdb_downloads || 0) > 0 || (package.luantihub_downloads || 0) > 0) {
                       <span class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
-                        ContentDB: {{ (package.contentdb_downloads || 0) | number }} • Hub: {{ (package.luantihub_downloads || 0) | number }}
+                        ContentDB: {{ (package.contentdb_downloads || 0) | compactNumber }} • Hub: {{ (package.luantihub_downloads || 0) | compactNumber }}
                       </span>
                     }
                   </div>

@@ -76,6 +76,7 @@ export class PackageService {
   private readonly _isLegalModalOpen = signal<boolean>(false);
 
   private searchDebounceTimer: any = null;
+  private bootCacheSyncTimer: any = null;
   private initialUrlSynced = false;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
@@ -277,12 +278,24 @@ export class PackageService {
 
   readonly top10TodayPackages = computed<LuantiPackage[]>(() => {
     const serverList = this._serverTop10Today();
+    const list = this._packages();
     if (serverList.length >= 5) {
-      return serverList.slice(0, 10);
+      const byLowerId = new Map<string, LuantiPackage>();
+      for (const p of list) {
+        byLowerId.set(p.id.toLowerCase(), p);
+      }
+      return serverList.slice(0, 10).map(item => {
+        const live = byLowerId.get(item.id.toLowerCase());
+        if (!live) return item;
+        return {
+          ...item,
+          ...live,
+          downloads: Math.max(live.downloads || 0, item.downloads || 0)
+        };
+      });
     }
-    const list = [...this._packages()];
     if (list.length === 0) return [];
-    return list
+    return [...list]
       .sort((a, b) => {
         const cdbA = Number(a.contentdb_score || 0);
         const cdbB = Number(b.contentdb_score || 0);
@@ -295,12 +308,24 @@ export class PackageService {
 
   readonly top10WeekPackages = computed<LuantiPackage[]>(() => {
     const serverList = this._serverTop10Week();
+    const list = this._packages();
     if (serverList.length >= 5) {
-      return serverList.slice(0, 10);
+      const byLowerId = new Map<string, LuantiPackage>();
+      for (const p of list) {
+        byLowerId.set(p.id.toLowerCase(), p);
+      }
+      return serverList.slice(0, 10).map(item => {
+        const live = byLowerId.get(item.id.toLowerCase());
+        if (!live) return item;
+        return {
+          ...item,
+          ...live,
+          downloads: Math.max(live.downloads || 0, item.downloads || 0)
+        };
+      });
     }
-    const list = [...this._packages()];
     if (list.length === 0) return [];
-    return list
+    return [...list]
       .sort((a, b) => {
         const scoreA = (a.downloads || 0) + Number(a.contentdb_score || 0) * 2 + ((a.score || 0) * 500) + (a.featured ? 2500 : 0);
         const scoreB = (b.downloads || 0) + Number(b.contentdb_score || 0) * 2 + ((b.score || 0) * 500) + (b.featured ? 2500 : 0);
@@ -650,7 +675,8 @@ export class PackageService {
       status: item.status || 'active'
     };
 
-    if (downloads > 0 && rawTags.length > 0 && Boolean(pkg.license) && Boolean(pkg.file_size)) {
+    const hasFullDownloads = hasOfficial ? contentdbDownloads > 0 : downloads > 0;
+    if (hasFullDownloads && Boolean(pkg.license)) {
       this.hydratedIds.add(pkg.id.toLowerCase());
     }
 
@@ -971,6 +997,7 @@ export class PackageService {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.removeItem('lh_boot_cache_v1');
         sessionStorage.removeItem('lh_boot_cache_v2');
+        sessionStorage.removeItem('lh_boot_cache_v3');
       }
     } catch {
       // Ignore storage errors
@@ -1013,6 +1040,56 @@ export class PackageService {
     if (Array.isArray(payload.top10Today) && payload.top10Today.length > 0) {
       this._serverTop10Today.set(payload.top10Today.map(item => this.normalizePackage(item)));
     }
+
+    // Proactively hydrate visible Hero, Top 10, and swimlane packages so aggregated downloads & licenses appear immediately without requiring hover
+    this.queueInitialVisibleHydration();
+  }
+
+  private queueInitialVisibleHydration(): void {
+    const priorityCandidates: LuantiPackage[] = [
+      ...this.heroShowcasePackages(),
+      ...this.top10TodayPackages(),
+      ...this.top10WeekPackages(),
+      ...this.trendingPackages(),
+      ...this.standaloneGames(),
+      ...this.decentralizedGitPackages(),
+      ...this.automationMods(),
+      ...this.texturePacks()
+    ];
+
+    for (const pkg of priorityCandidates) {
+      if (!pkg.license || (pkg.sources?.includes('official') && !(pkg.contentdb_downloads && pkg.contentdb_downloads > 0))) {
+        this.ensurePackageHydrated(pkg);
+      }
+    }
+  }
+
+  private scheduleBootCachePersist(): void {
+    if (typeof sessionStorage === 'undefined') return;
+    if (this.bootCacheSyncTimer) {
+      clearTimeout(this.bootCacheSyncTimer);
+    }
+    this.bootCacheSyncTimer = setTimeout(() => {
+      try {
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v3');
+        const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
+        sessionStorage.setItem(
+          'lh_boot_cache_v3',
+          JSON.stringify({
+            ts: existingTs,
+            edge: this.edgeApiAvailable,
+            payload: {
+              packages: this._packages(),
+              tags: this._availableTags(),
+              top10Week: this.top10WeekPackages(),
+              top10Today: this.top10TodayPackages()
+            }
+          })
+        );
+      } catch {
+        // Ignore sessionStorage quota errors
+      }
+    }, 250);
   }
 
   // Fetch Live Packages from Backend API (Bundled Boot Payload: Catalog + Tags + Top 10 Week & Today in 1 call)
@@ -1022,7 +1099,7 @@ export class PackageService {
 
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v2');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v3');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -1039,7 +1116,7 @@ export class PackageService {
 
       const apiUrl = typeof window !== 'undefined' && window.location?.origin
         ? `${window.location.origin}/api/packages/?boot=1${forceRefresh ? '&nocache=1' : ''}`
-        : 'https://contentdb.milcho.org/api/packages/';
+        : 'https://contentdb.milcho.org/api/packages/?fmt=vcs';
 
       let response: Response | null = null;
       try {
@@ -1060,7 +1137,7 @@ export class PackageService {
         this.edgeApiAvailable = false;
         this.settingsService.edgeApiAvailable.set(false);
         try {
-          response = await fetch('https://contentdb.milcho.org/api/packages/', {
+          response = await fetch('https://contentdb.milcho.org/api/packages/?fmt=vcs', {
             headers: { 'Accept': 'application/json' }
           });
         } catch {
@@ -1069,7 +1146,7 @@ export class PackageService {
 
         if (!response || !response.ok) {
           try {
-            response = await fetch('https://content.luanti.org/api/packages/', {
+            response = await fetch('https://content.luanti.org/api/packages/?fmt=vcs', {
               headers: { 'Accept': 'application/json' }
             });
             if (response && response.ok) {
@@ -1083,6 +1160,36 @@ export class PackageService {
 
       if (response && response.ok) {
         const data = await response.json();
+        // When falling back to unbundled upstream array, merge bulk /api/scores/ so all 3,500+ packages have exact downloads before rendering
+        if (Array.isArray(data)) {
+          const scoresList = await this.fetchUpstreamWithMirrorFallback('/scores/');
+          if (Array.isArray(scoresList) && scoresList.length > 0) {
+            const scoresMap = new Map<string, any>();
+            for (const s of scoresList) {
+              if (s?.author && s?.name) {
+                scoresMap.set(`${s.author}/${s.name}`.toLowerCase(), s);
+              }
+            }
+            for (const item of data) {
+              if (!item?.author || !item?.name) continue;
+              const s = scoresMap.get(`${item.author}/${item.name}`.toLowerCase());
+              if (s) {
+                if (typeof s.downloads === 'number') {
+                  item.downloads = s.downloads;
+                  item.contentdb_downloads = s.downloads;
+                }
+                if (typeof s.score === 'number') {
+                  item.score = Math.round(s.score * 10) / 10;
+                  item.contentdb_score = item.score;
+                }
+                if (s.reviews && typeof s.reviews === 'object') {
+                  item.reviews = s.reviews;
+                }
+              }
+            }
+          }
+        }
+
         const bootPayload = Array.isArray(data)
           ? { packages: data }
           : (data && typeof data === 'object' && Array.isArray(data.packages) ? data : null);
@@ -1093,7 +1200,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v2',
+                'lh_boot_cache_v3',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -1163,7 +1270,7 @@ export class PackageService {
   }
 
   private drainHydrationQueue(): void {
-    const MAX_CONCURRENT = 10;
+    const MAX_CONCURRENT = 4;
     while (this.activeHydrationWorkers < MAX_CONCURRENT && this.hydrationQueue.length > 0) {
       const nextPkg = this.hydrationQueue.shift();
       if (!nextPkg) break;
@@ -2247,11 +2354,13 @@ export class PackageService {
         const encAuthor = encodeURIComponent(pkg.author);
         const encName = encodeURIComponent(pkg.name);
 
+        let edgeResolved = false;
         if (this.edgeApiAvailable) {
           try {
-            const res = await fetch(`/api/packages/${encAuthor}/${encName}/`);
+            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`);
             if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
               data = await res.json();
+              edgeResolved = Boolean(data && Object.keys(data).length > 0);
             }
           } catch {
             // Fallback below
@@ -2268,19 +2377,12 @@ export class PackageService {
           data.file_size = undefined;
         }
 
-        // When Edge API is unavailable or returned incomplete metadata for a ContentDB package,
-        // query ContentDB with automatic fallback to `https://contentdb.milcho.org/api` (/for-client/ + /packages/:author/:name/)
+        // Only query ContentDB directly from the browser when the Edge API is unavailable or failed
         const needsUpstreamDetail =
-          !data ||
-          Object.keys(data).length === 0 ||
-          (data.dev_state === undefined && data.video_url === undefined && data.donate_url === undefined);
+          !edgeResolved &&
+          (!data || Object.keys(data).length === 0 || (!data.license && !data.downloads));
 
-        if (
-          !isPureGitOnly &&
-          (needsUpstreamDetail ||
-            data.download_size === undefined ||
-            (deepFetch && data.dev_state === undefined && !Array.isArray(data.provides)))
-        ) {
+        if (!isPureGitOnly && needsUpstreamDetail) {
           try {
             const [forClientData, pkgDetailData, depsUpstreamData] = await Promise.all([
               this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`),
@@ -2626,6 +2728,21 @@ export class PackageService {
           }
           return item;
         }));
+
+        const syncTop10 = (list: LuantiPackage[]) =>
+          list.map(item => {
+            if (
+              (item.id || '').toLowerCase() === targetIdLower ||
+              ((item.author || '').toLowerCase() === targetAuthorLower &&
+                (item.name || '').toLowerCase() === targetNameLower)
+            ) {
+              return { ...item, ...updatedFields };
+            }
+            return item;
+          });
+        this._serverTop10Today.update(syncTop10);
+        this._serverTop10Week.update(syncTop10);
+        this.scheduleBootCachePersist();
 
         if (deepFetch) {
           this.deepHydratedIds.add(cacheKey);

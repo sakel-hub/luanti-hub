@@ -15,6 +15,7 @@ import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideStar,
@@ -34,6 +35,7 @@ import {
     CommonModule,
     ImgFallbackDirective,
     TooltipDirective,
+    CompactNumberPipe,
     TranslatePipe,
     LucideStar,
     LucideHeart,
@@ -159,7 +161,7 @@ import {
 
             @if (package.downloads > 0) {
               <span class="text-[10px] font-mono text-slate-400 ml-1">
-                {{ package.downloads | number }} dl
+                {{ package.downloads | compactNumber }} dl
               </span>
             }
 

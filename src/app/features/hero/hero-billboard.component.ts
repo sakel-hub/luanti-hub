@@ -13,6 +13,7 @@ import { PackageService } from '../../core/services/package.service';
 import { LuantiPackage } from '../../core/models/package.model';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideChevronLeft,
@@ -32,6 +33,7 @@ import {
     CommonModule,
     ImgFallbackDirective,
     TooltipDirective,
+    CompactNumberPipe,
     TranslatePipe,
     LucideChevronLeft,
     LucideChevronRight,
@@ -157,7 +159,7 @@ import {
                         </div>
                         <span>•</span>
                       }
-                      <span>{{ slidePkg.downloads | number }} {{ 'hero.downloads' | translate | lowercase }}</span>
+                      <span>{{ slidePkg.downloads | compactNumber }} {{ 'hero.downloads' | translate | lowercase }}</span>
                       @if (slidePkg.license || slidePkg.media_license) {
                         <span>•</span>
                         <span class="text-slate-400 font-mono">License: {{ slidePkg.license || slidePkg.media_license }}</span>

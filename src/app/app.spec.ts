@@ -14,6 +14,7 @@ import { PackageCardComponent } from './features/card/package-card.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
+import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
 import { createAuditProofToken, verifyAuditProofToken } from '../../functions/api/auth/lib/session';
 
@@ -610,5 +611,16 @@ description = Mob animation and spawning framework.
     comp.goToMediaSlide(2);
     expect(comp.mediaCarouselIndex()).toBe(2);
     expect(scrollSpy).toHaveBeenCalledWith(2);
+  });
+
+  it('should format download counts with compact k/M/B abbreviations via CompactNumberPipe', () => {
+    const pipe = new CompactNumberPipe();
+    expect(pipe.transform(0)).toBe('0');
+    expect(pipe.transform(42)).toBe('42');
+    expect(pipe.transform(1000)).toBe('1k');
+    expect(pipe.transform(1200)).toBe('1.2k');
+    expect(pipe.transform(139553)).toBe('139.6k');
+    expect(pipe.transform(783360)).toBe('783.4k');
+    expect(pipe.transform(1500000)).toBe('1.5M');
   });
 });

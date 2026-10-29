@@ -347,25 +347,32 @@ let extendedColumnsEnsured = false;
 export async function ensureExtendedPackageColumns(db: any): Promise<void> {
   if (!db || extendedColumnsEnsured) return;
   extendedColumnsEnsured = true;
-  const cols = [
-    `ALTER TABLE packages ADD COLUMN contentdb_downloads INTEGER DEFAULT 0`,
-    `ALTER TABLE packages ADD COLUMN luantihub_downloads INTEGER DEFAULT 0`,
-    `ALTER TABLE packages ADD COLUMN download_size INTEGER`,
-    `ALTER TABLE packages ADD COLUMN donate_url TEXT`,
-    `ALTER TABLE packages ADD COLUMN translation_url TEXT`,
-    `ALTER TABLE packages ADD COLUMN forum_url TEXT`,
-    `ALTER TABLE packages ADD COLUMN issue_tracker TEXT`,
-    `ALTER TABLE packages ADD COLUMN video_url TEXT`,
-    `ALTER TABLE packages ADD COLUMN video_thumbnail_url TEXT`,
-    `ALTER TABLE packages ADD COLUMN dev_state TEXT`,
-    `ALTER TABLE packages ADD COLUMN provides TEXT`
+  const requiredCols: Array<[string, string]> = [
+    ['contentdb_downloads', 'INTEGER DEFAULT 0'],
+    ['luantihub_downloads', 'INTEGER DEFAULT 0'],
+    ['download_size', 'INTEGER'],
+    ['file_size', 'TEXT'],
+    ['donate_url', 'TEXT'],
+    ['translation_url', 'TEXT'],
+    ['forum_url', 'TEXT'],
+    ['issue_tracker', 'TEXT'],
+    ['video_url', 'TEXT'],
+    ['video_thumbnail_url', 'TEXT'],
+    ['dev_state', 'TEXT'],
+    ['provides', 'TEXT']
   ];
-  for (const sql of cols) {
-    try {
-      await db.prepare(sql).run();
-    } catch {
-      // Column already exists
+  try {
+    const info = await db.prepare(`PRAGMA table_info(packages)`).all();
+    const existing = new Set<string>(
+      (info?.results || []).map((r: any) => String(r?.name || '').toLowerCase())
+    );
+    for (const [colName, colDef] of requiredCols) {
+      if (!existing.has(colName)) {
+        await db.prepare(`ALTER TABLE packages ADD COLUMN ${colName} ${colDef}`).run().catch(() => {});
+      }
     }
+  } catch {
+    // Ignore schema inspection errors
   }
 }
 

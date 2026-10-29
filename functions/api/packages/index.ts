@@ -3,7 +3,8 @@ import {
   parseJsonArray,
   normalizeRepoKey,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  ensureExtendedPackageColumns
 } from '../lib/upstream';
 
 interface Env {
@@ -59,7 +60,7 @@ function buildTop10FromCatalog(
     if (!match) continue;
     top10.push({
       ...match,
-      downloads: periodDownloads
+      downloads: Math.max(Number(match.downloads || 0), periodDownloads)
     });
   }
 
@@ -98,11 +99,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const upstreamParams = new URLSearchParams(url.searchParams);
   upstreamParams.delete('boot');
   upstreamParams.delete('nocache');
+  if (!upstreamParams.has('fmt')) {
+    upstreamParams.set('fmt', 'vcs');
+  }
   const upstreamQuery = upstreamParams.toString();
   const upstreamPath = `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  // 1. Fetch Upstream Packages (with Cloudflare Edge Cache + mirror failover)
+  // 1. Fetch Upstream Packages + Bulk Scores/Downloads (with Cloudflare Edge Cache + mirror failover)
   const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, 300)
+    .then(list => Array.isArray(list) ? list : [])
+    .catch(() => []);
+
+  const scoresPromise = fetchUpstreamJsonCached<any[]>('/scores/', 900)
     .then(list => Array.isArray(list) ? list : [])
     .catch(() => []);
 
@@ -121,6 +129,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   });
 
   if (env.DB) {
+    await ensureExtendedPackageColumns(env.DB);
     let query = `SELECT * FROM packages WHERE status = 'active'`;
     const params: any[] = [];
 
@@ -141,7 +150,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       params.push(author);
     }
 
-    query += ` ORDER BY downloads_count DESC LIMIT 200`;
+    query += ` ORDER BY downloads_count DESC LIMIT 1000`;
 
     d1Promise = env.DB.prepare(query).bind(...params).all()
       .then((res: any) => res.results || [])
@@ -209,8 +218,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  const [upstreamList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity] = await Promise.all([
+  const [upstreamList, scoresList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity] = await Promise.all([
     upstreamPromise,
+    scoresPromise,
     d1Promise,
     blockedPromise,
     reviewRatingsPromise,
@@ -218,6 +228,31 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     tagsPromise,
     velocityPromise
   ]);
+
+  // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
+  if (Array.isArray(scoresList) && scoresList.length > 0) {
+    const scoresMap = new Map<string, any>();
+    for (const s of scoresList) {
+      if (s?.author && s?.name) {
+        scoresMap.set(`${s.author}/${s.name}`.toLowerCase(), s);
+      }
+    }
+    for (const item of upstreamList) {
+      if (!item?.author || !item?.name) continue;
+      const s = scoresMap.get(`${item.author}/${item.name}`.toLowerCase());
+      if (s) {
+        if (typeof s.downloads === 'number') {
+          item.downloads = s.downloads;
+        }
+        if (typeof s.score === 'number') {
+          item.score = Math.round(s.score * 10) / 10;
+        }
+        if (s.reviews && typeof s.reviews === 'object') {
+          item.reviews = s.reviews;
+        }
+      }
+    }
+  }
 
   // 3. Build upstream ContentDB index by ID, normalized repo URL, and (name + title) to prevent duplicates
   const upstreamById = new Map<string, any>();
@@ -294,7 +329,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       lhDownloadsMap.get(canonicalKey) ?? lhDownloadsMap.get(d1Key) ?? 0,
       !isAlsoOfficial && typeof p.downloads_count === 'number' ? p.downloads_count : 0
     );
-    const combinedDownloads = cdbDownloads + lhDownloads;
+    const combinedDownloads = Math.max(
+      cdbDownloads + lhDownloads,
+      typeof p.downloads_count === 'number' ? p.downloads_count : 0
+    );
     const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
     const releaseId =
       Number(matchedUpstream?.release) > 0
@@ -379,6 +417,86 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
     const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
+
+    // Pre-hydrate licenses & tags on the server for top carousel packages missing license in D1 (cached 1h at Cloudflare Edge + saved to D1)
+    const carouselPool: any[] = [];
+    const pushPool = (items: any[]) => {
+      for (const it of items) {
+        if (it && !it.license && it.author && it.name && !carouselPool.some(x => x.id === it.id)) {
+          carouselPool.push(it);
+        }
+      }
+    };
+    const byDownloadsDesc = [...merged].sort((a, b) => (Number(b.downloads) || 0) - (Number(a.downloads) || 0));
+    pushPool(top10Today);
+    pushPool(top10Week);
+    pushPool(byDownloadsDesc.filter(p => p.type === 'game').slice(0, 24));
+    pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 24));
+    pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 24));
+
+    const batchToHydrate = carouselPool.slice(0, 24);
+    if (batchToHydrate.length > 0) {
+      await Promise.all(
+        batchToHydrate.map(async (pkg) => {
+          const detail = await fetchUpstreamJsonCached<any>(
+            `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`,
+            3600
+          ).catch(() => null);
+          if (!detail) return;
+          const resolvedLic = detail.license || detail.media_license || '';
+          const resolvedMediaLic = detail.media_license || detail.license || '';
+          const detailTags = Array.isArray(detail.tags)
+            ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
+            : [];
+          if (resolvedLic) {
+            pkg.license = resolvedLic;
+            pkg.media_license = resolvedMediaLic;
+          }
+          if (detailTags.length > 0) {
+            pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
+          }
+          if (detail.video_url && !pkg.video_url) {
+            pkg.video_url = detail.video_url;
+          }
+          if (detail.video_thumbnail_url && !pkg.video_thumbnail_url) {
+            pkg.video_thumbnail_url = detail.video_thumbnail_url;
+          }
+          if (env.DB && resolvedLic) {
+            env.DB.prepare(`
+              INSERT INTO packages (
+                id, author_name, name, title, type, short_desc, repo_url, provider,
+                thumbnail_url, banner_url, license, media_license, tags, status,
+                downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
+                media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
+                tags = COALESCE(excluded.tags, packages.tags),
+                contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
+                downloads_count = MAX(packages.downloads_count, excluded.downloads_count)
+            `).bind(
+              pkg.id,
+              pkg.author,
+              pkg.name,
+              pkg.title || pkg.name,
+              ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod',
+              pkg.short_desc || pkg.short_description || null,
+              pkg.repo_url || detail.repo || '',
+              pkg.thumbnail || null,
+              pkg.banner || null,
+              resolvedLic,
+              resolvedMediaLic,
+              detailTags.length > 0 ? JSON.stringify(detailTags) : null,
+              Number(pkg.downloads || 0),
+              Number(pkg.contentdb_downloads || 0),
+              Number(pkg.luantihub_downloads || 0),
+              pkg.video_url || null,
+              pkg.video_thumbnail_url || null
+            ).run().catch(() => {});
+          }
+        })
+      );
+    }
 
     responsePayload = {
       packages: merged,

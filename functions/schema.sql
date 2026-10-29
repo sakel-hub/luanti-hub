@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS packages (
     contentdb_downloads INTEGER DEFAULT 0,
     luantihub_downloads INTEGER DEFAULT 0,
     download_size INTEGER,
+    file_size TEXT,
     donate_url TEXT,
     translation_url TEXT,
     forum_url TEXT,

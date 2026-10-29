@@ -5,6 +5,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { GitProvider, LuantiPackage, ModerationReport } from '../../core/models/package.model';
+import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
@@ -28,6 +29,7 @@ import {
   imports: [
     CommonModule,
     FormsModule,
+    CompactNumberPipe,
     TranslatePipe,
     LucideX,
     LucideCheck,
@@ -219,7 +221,7 @@ import {
                           <div class="min-w-0 flex-1">
                             <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
                             <div class="flex items-center gap-1.5 text-[11px] text-slate-400">
-                              <span>{{ (pkg.downloads || 0) | number }} dl</span>
+                              <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
                               <span>•</span>
                               <span class="uppercase font-mono text-[10px] text-sky-400">{{ pkg.type }}</span>
                             </div>

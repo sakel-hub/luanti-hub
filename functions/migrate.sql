@@ -48,6 +48,7 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE packages ADD COLUMN contentdb_downloads INTEGER DEFAULT 0;
 -- ALTER TABLE packages ADD COLUMN luantihub_downloads INTEGER DEFAULT 0;
 -- ALTER TABLE packages ADD COLUMN download_size INTEGER;
+-- ALTER TABLE packages ADD COLUMN file_size TEXT;
 -- ALTER TABLE packages ADD COLUMN donate_url TEXT;
 -- ALTER TABLE packages ADD COLUMN translation_url TEXT;
 -- ALTER TABLE packages ADD COLUMN forum_url TEXT;
