@@ -1,7 +1,9 @@
 import { fetchUpstreamJsonCached } from '../../../lib/upstream';
+import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
 }
 
 export async function onRequest(context: { params: { author: string; name: string }; request: Request; env: Env }) {
@@ -33,7 +35,7 @@ export async function onRequest(context: { params: { author: string; name: strin
       // Proceed if table not migrated yet
     }
 
-    // 2. Atomically record download in Cloudflare D1
+    // 2. Atomically record download in Cloudflare D1 (global daily rollup + per-user download count)
     try {
       await env.DB.prepare(`
         INSERT INTO package_daily_downloads (package_id, download_date, downloads_count)
@@ -47,6 +49,34 @@ export async function onRequest(context: { params: { author: string; name: strin
         SET downloads_count = downloads_count + 1, updated_at = CURRENT_TIMESTAMP
         WHERE LOWER(id) = LOWER(?)
       `).bind(packageId).run();
+
+      // Track per-user download count if authenticated via session cookie
+      const cookies = parseCookies(request);
+      const sessionToken = cookies['lh_session'];
+      const userId = sessionToken
+        ? await verifySessionToken(sessionToken, env.SESSION_SECRET)
+        : null;
+
+      if (userId) {
+        await env.DB.prepare(`
+          CREATE TABLE IF NOT EXISTS user_downloads (
+            user_id TEXT NOT NULL,
+            package_id TEXT NOT NULL,
+            download_count INTEGER NOT NULL DEFAULT 1,
+            last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, package_id)
+          )
+        `).run();
+
+        await env.DB.prepare(`
+          INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
+          VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+          ON CONFLICT(user_id, package_id)
+          DO UPDATE SET
+            download_count = download_count + 1,
+            last_downloaded_at = CURRENT_TIMESTAMP
+        `).bind(userId, packageId).run();
+      }
     } catch (err) {
       console.warn('D1 download tracking error:', err);
     }

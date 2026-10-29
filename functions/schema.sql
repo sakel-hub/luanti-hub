@@ -106,7 +106,17 @@ CREATE TABLE IF NOT EXISTS user_favorites (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 8. Moderation & Abuse Reports Queue (Supports Instant Kill Switch & DMCA Safe Harbor)
+-- 8. Per-User Package Download History & Counts (For Personalized Match Scoring)
+CREATE TABLE IF NOT EXISTS user_downloads (
+    user_id TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    download_count INTEGER NOT NULL DEFAULT 1,
+    last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, package_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 9. Moderation & Abuse Reports Queue (Supports Instant Kill Switch & DMCA Safe Harbor)
 CREATE TABLE IF NOT EXISTS moderation_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id TEXT NOT NULL,
@@ -128,5 +138,6 @@ CREATE INDEX IF NOT EXISTS idx_packages_author ON packages(author_name);
 CREATE INDEX IF NOT EXISTS idx_reviews_pkg ON reviews(package_id);
 CREATE INDEX IF NOT EXISTS idx_pkg_downloads_date_count ON package_daily_downloads (download_date, downloads_count DESC);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);

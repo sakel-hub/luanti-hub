@@ -285,6 +285,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
       score: d1StarAvg || matchedUpstream?.score || 0,
+      contentdb_score: Number(matchedUpstream?.score || 0),
       downloads: Math.max(
         typeof p.downloads_count === 'number' ? p.downloads_count : 0,
         typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0
@@ -315,6 +316,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ...item,
       id: `${item.author}/${item.name}`,
       score: d1StarAvg !== undefined ? d1StarAvg : item.score,
+      contentdb_score: Number(item.score || 0),
       source: 'official',
       sources: ['official']
     });

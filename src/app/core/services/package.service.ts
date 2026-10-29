@@ -252,12 +252,12 @@ export class PackageService {
 
     return filtered.sort((a, b) => {
       if (sortBy === 'score') {
-        return (b.score || 0) - (a.score || 0) || (b.downloads || 0) - (a.downloads || 0) || Number(b.release_id || 0) - Number(a.release_id || 0);
+        return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'title') {
         return (a.title || a.name).localeCompare(b.title || b.name);
       }
-      return (b.downloads || 0) - (a.downloads || 0) || Number(b.release_id || 0) - Number(a.release_id || 0);
+      return (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0);
     });
   });
 
@@ -284,10 +284,10 @@ export class PackageService {
     if (list.length === 0) return [];
     return list
       .sort((a, b) => {
-        const relA = Number(a.release_id || 0);
-        const relB = Number(b.release_id || 0);
-        const scoreA = relA * 0.4 + ((a.score || 4.6) * 180) + (a.source === 'git' ? 250 : 0);
-        const scoreB = relB * 0.4 + ((b.score || 4.6) * 180) + (b.source === 'git' ? 250 : 0);
+        const cdbA = Number(a.contentdb_score || 0);
+        const cdbB = Number(b.contentdb_score || 0);
+        const scoreA = cdbA + ((a.score || 0) * 180) + (a.source === 'git' ? 250 : 0);
+        const scoreB = cdbB + ((b.score || 0) * 180) + (b.source === 'git' ? 250 : 0);
         return scoreB - scoreA;
       })
       .slice(0, 10);
@@ -302,8 +302,8 @@ export class PackageService {
     if (list.length === 0) return [];
     return list
       .sort((a, b) => {
-        const scoreA = (a.downloads || 0) + ((a.score || 4.6) * 500) + (a.featured ? 2500 : 0);
-        const scoreB = (b.downloads || 0) + ((b.score || 4.6) * 500) + (b.featured ? 2500 : 0);
+        const scoreA = (a.downloads || 0) + Number(a.contentdb_score || 0) * 2 + ((a.score || 0) * 500) + (a.featured ? 2500 : 0);
+        const scoreB = (b.downloads || 0) + Number(b.contentdb_score || 0) * 2 + ((b.score || 0) * 500) + (b.featured ? 2500 : 0);
         return scoreB - scoreA;
       })
       .slice(0, 10);
@@ -316,14 +316,14 @@ export class PackageService {
   readonly trendingPackages = computed(() => {
     return [...this._packages()]
       .filter(p => p.type === 'mod')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || Number(b.release_id || 0) - Number(a.release_id || 0))
+      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
       .slice(0, CAROUSEL_CAP);
   });
 
   readonly standaloneGames = computed(() => {
     return this._packages()
       .filter(p => p.type === 'game')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || Number(b.release_id || 0) - Number(a.release_id || 0))
+      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
       .slice(0, CAROUSEL_CAP);
   });
 
@@ -353,7 +353,7 @@ export class PackageService {
   readonly texturePacks = computed(() => {
     return this._packages()
       .filter(p => p.type === 'txp')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || Number(b.release_id || 0) - Number(a.release_id || 0))
+      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
       .slice(0, CAROUSEL_CAP);
   });
 
@@ -414,6 +414,8 @@ export class PackageService {
     const shortDesc = item.short_desc || item.short_description || '';
     const downloads = Math.max(0, Number(item?.downloads ?? item?.downloads_count ?? 0) || 0);
     const score = this.computeStarRatingFromData(item, 0);
+    const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? 0);
+    const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
 
     const thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
     let banner = item.banner || item.banner_url || item.screenshots?.[0]?.url || item.screenshots?.[0];
@@ -482,6 +484,7 @@ export class PackageService {
       banner: banner || thumbnail,
       screenshots,
       score,
+      contentdb_score: contentdbScore,
       downloads,
       license: item.license || item.media_license || '',
       media_license: item.media_license || item.license || '',
@@ -577,6 +580,7 @@ export class PackageService {
       banner: resolvedBanner,
       downloads: Math.max(primary.downloads || 0, secondary.downloads || 0),
       score: primary.score || secondary.score || 0,
+      contentdb_score: Math.max(primary.contentdb_score || 0, secondary.contentdb_score || 0),
       license: primary.license || secondary.license || '',
       media_license: primary.media_license || secondary.media_license || '',
       repo_url: secondary.repo_url || primary.repo_url,
@@ -805,6 +809,7 @@ export class PackageService {
     try {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.removeItem('lh_boot_cache_v1');
+        sessionStorage.removeItem('lh_boot_cache_v2');
       }
     } catch {
       // Ignore storage errors
@@ -854,7 +859,7 @@ export class PackageService {
 
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v1');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v2');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -922,7 +927,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v1',
+                'lh_boot_cache_v2',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -1256,34 +1261,193 @@ export class PackageService {
   }
 
   /**
-   * Computes a Netflix-style Match % (78%–99%) combining community quality score,
-   * download velocity, and client-side affinity with the user's favorited packages & tags.
+   * Reactive O(1) user taste profile built from:
+   * 1. Saved Favorites (`user_favorites` in D1 + localStorage)
+   * 2. Per-Package Download History & Counts (`user_downloads` in D1 + localStorage)
+   * 3. User's Own Authored / Claimed Packages (`packages` in D1)
    */
-  getMatchScore(pkg: LuantiPackage): number {
-    if (!pkg) return 90;
-    let score = (pkg.score || 4.6) * 18.2; // ~83.7 base for 4.6★, 91.0 for 5.0★
-    if (pkg.downloads > 0) {
-      score += Math.min(4.5, Math.log10(pkg.downloads + 1));
+  private readonly userTasteProfile = computed(() => {
+    const favIds = this.settingsService.favorites().map(id => id.toLowerCase());
+    const dlMap = this.settingsService.downloadedPackages();
+    const userPkgs = this.authService.currentUser()?.packages || [];
+    const catalog = this._packages();
+
+    const pkgWeights = new Map<string, number>();
+    for (const favId of favIds) {
+      pkgWeights.set(favId, (pkgWeights.get(favId) || 0) + 3.0);
     }
-    const favIds = this.settingsService.favorites();
-    if (favIds.length > 0) {
-      if (favIds.includes(pkg.id)) {
-        score += 5;
-      } else {
-        const favPkgs = this._packages().filter(p => favIds.includes(p.id));
-        const sharesAuthor = favPkgs.some(f => f.author === pkg.author);
-        const sharesType = favPkgs.some(f => f.type === pkg.type);
-        const sharesTag = favPkgs.some(f => f.tags?.some(t => t !== 'mod' && t !== 'game' && t !== 'txp' && pkg.tags?.includes(t)));
-        if (sharesAuthor) score += 3;
-        if (sharesTag) score += 3;
-        else if (sharesType) score += 1.5;
+    for (const [dlId, count] of Object.entries(dlMap)) {
+      if (count > 0) {
+        const dlWeight = 1.5 + Math.min(3.5, Math.log2(count + 1));
+        const key = dlId.toLowerCase();
+        pkgWeights.set(key, (pkgWeights.get(key) || 0) + dlWeight);
       }
     }
-    return Math.min(99, Math.max(78, Math.round(score)));
+    for (const up of userPkgs) {
+      if (up?.id) {
+        const key = up.id.toLowerCase();
+        pkgWeights.set(key, (pkgWeights.get(key) || 0) + 2.5);
+      }
+    }
+
+    const authorWeights = new Map<string, number>();
+    const tagWeights = new Map<string, number>();
+    const typeWeights: Record<string, number> = { mod: 0, game: 0, txp: 0, modpack: 0 };
+    const ecosystemNames = new Set<string>();
+    let totalTypeWeight = 0;
+
+    const matchedKeys = new Set<string>();
+    if (pkgWeights.size > 0 && catalog.length > 0) {
+      for (const item of catalog) {
+        const idLower = item.id.toLowerCase();
+        const nameLower = item.name.toLowerCase();
+        const weight = pkgWeights.get(idLower) || pkgWeights.get(nameLower) || 0;
+        if (weight <= 0) continue;
+
+        matchedKeys.add(idLower);
+        matchedKeys.add(nameLower);
+
+        const authorKey = item.author.toLowerCase();
+        authorWeights.set(authorKey, (authorWeights.get(authorKey) || 0) + weight);
+
+        typeWeights[item.type] = (typeWeights[item.type] || 0) + weight;
+        totalTypeWeight += weight;
+
+        ecosystemNames.add(nameLower);
+        for (const dep of item.dependencies || []) {
+          if (dep) ecosystemNames.add(dep.toLowerCase());
+        }
+
+        for (const t of item.tags || []) {
+          const tagKey = t.toLowerCase();
+          if (tagKey === 'mod' || tagKey === 'game' || tagKey === 'txp' || tagKey === 'contentdb' || tagKey === 'git') {
+            continue;
+          }
+          tagWeights.set(tagKey, (tagWeights.get(tagKey) || 0) + weight);
+        }
+      }
+    }
+
+    for (const [pkgKey, weight] of pkgWeights.entries()) {
+      if (matchedKeys.has(pkgKey) || weight <= 0) continue;
+      if (pkgKey.includes('/')) {
+        const [authorPart, namePart] = pkgKey.split('/');
+        if (authorPart) {
+          authorWeights.set(authorPart, (authorWeights.get(authorPart) || 0) + weight);
+        }
+        if (namePart) {
+          ecosystemNames.add(namePart);
+        }
+      } else {
+        ecosystemNames.add(pkgKey);
+      }
+    }
+
+    let maxTagWeight = 1;
+    for (const w of tagWeights.values()) {
+      if (w > maxTagWeight) maxTagWeight = w;
+    }
+
+    return {
+      hasHistory: pkgWeights.size > 0,
+      pkgWeights,
+      authorWeights,
+      tagWeights,
+      maxTagWeight,
+      typeWeights,
+      totalTypeWeight,
+      ecosystemNames
+    };
+  });
+
+  /**
+   * Computes a personalized Match % (64%–99%) combining:
+   * - LuantiHub D1 star reviews (`pkg.score`), LuantiHub downloads (`pkg.downloads`), and ContentDB composite `contentdb_score`
+   * - Personalized user taste profile from Favorites, Per-Package Download Counts, and Ecosystem Dependencies
+   */
+  getMatchScore(pkg: LuantiPackage): number {
+    if (!pkg) return 85;
+
+    const profile = this.userTasteProfile();
+    const cdbScore = Number(pkg.contentdb_score || 0);
+
+    // 1. Base quality & popularity signal (64%–89% before personalization)
+    let score = 64;
+
+    if (cdbScore > 5) {
+      score += Math.min(22, Math.log10(cdbScore + 1) * 6.2);
+    } else if (pkg.score >= 1 && pkg.score <= 5) {
+      score += pkg.score * 4.5;
+    } else {
+      const idStr = `${pkg.author}/${pkg.name}`;
+      let hash = 0;
+      for (let i = 0; i < idStr.length; i++) {
+        hash = (hash * 31 + idStr.charCodeAt(i)) % 100;
+      }
+      score += 5 + (hash % 11);
+    }
+
+    if (pkg.score >= 1 && pkg.score <= 5) {
+      score += (pkg.score - 3.8) * 3.0;
+    }
+
+    if (pkg.downloads > 0) {
+      score += Math.min(3.5, Math.log10(pkg.downloads + 1) * 0.8);
+    }
+
+    // 2. Personalization boost from D1 + local Favorites, Download Counts, Authors, Tags, and Dependencies
+    if (profile.hasHistory) {
+      const pkgIdLower = pkg.id.toLowerCase();
+      const pkgNameLower = pkg.name.toLowerCase();
+
+      // Direct Favorite / Repeated Download boost (up to +7%)
+      const directWeight = profile.pkgWeights.get(pkgIdLower) || profile.pkgWeights.get(pkgNameLower) || 0;
+      if (directWeight > 0) {
+        score += Math.min(7, 3 + directWeight * 0.9);
+      }
+
+      // Author Affinity boost (up to +6% based on how many packages by this author you favorited/downloaded)
+      const authorWeight = profile.authorWeights.get(pkg.author.toLowerCase()) || 0;
+      if (authorWeight > 0) {
+        score += Math.min(6, 2.5 + Math.log2(authorWeight + 1) * 1.4);
+      }
+
+      // Tag Affinity boost (up to +12% weighted by tag frequency across your favorites & download counts)
+      let matchedTagScore = 0;
+      for (const t of pkg.tags || []) {
+        const w = profile.tagWeights.get(t.toLowerCase()) || 0;
+        if (w > 0) {
+          matchedTagScore += 2.2 + (w / profile.maxTagWeight) * 2.3;
+        }
+      }
+      if (matchedTagScore > 0) {
+        score += Math.min(12, matchedTagScore);
+      }
+
+      // Dependency / Ecosystem Graph boost (+4% if this package extends or is required by a package you downloaded/favorited)
+      const inEcosystem =
+        (pkg.dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase())) ||
+        (pkg.optional_dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase()));
+      if (inEcosystem) {
+        score += 4;
+      }
+
+      // Package Type Preference boost (up to +3.5% proportional to your mod/game/txp ratio)
+      if (profile.totalTypeWeight > 0) {
+        const typeShare = (profile.typeWeights[pkg.type] || 0) / profile.totalTypeWeight;
+        score += typeShare * 3.5;
+      }
+    }
+
+    return Math.min(99, Math.max(64, Math.round(score)));
   }
 
   trackDownload(pkg: LuantiPackage): void {
-    if (!pkg || !pkg.author || !pkg.name || !this.edgeApiAvailable) return;
+    if (!pkg || !pkg.author || !pkg.name) return;
+    // Immediately record per-package download count locally so personalized Match % updates in real time
+    this.settingsService.recordLocalDownload(pkg.id);
+
+    if (!this.edgeApiAvailable) return;
     const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`;
     try {
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {

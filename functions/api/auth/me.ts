@@ -84,11 +84,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
        ORDER BY downloads_count DESC`
     ).bind(resolvedUserId, user.username).all();
 
-    // 5. Fetch User's Synced Favorites
+    // 5. Fetch User's Synced Favorites & Per-Package Download Counts
     const favoritesRes = await context.env.DB.prepare(
       `SELECT package_id FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC`
     ).bind(resolvedUserId).all();
     const favorites = (favoritesRes.results || []).map((r: any) => r.package_id);
+
+    const downloads: Record<string, number> = {};
+    try {
+      const downloadsRes = await context.env.DB.prepare(
+        `SELECT package_id, download_count FROM user_downloads WHERE user_id = ?`
+      ).bind(resolvedUserId).all();
+      for (const row of (downloadsRes.results || [])) {
+        if (row?.package_id && Number(row.download_count) > 0) {
+          downloads[String(row.package_id)] = Number(row.download_count);
+        }
+      }
+    } catch {
+      // Table may not exist yet before first download
+    }
 
     // 6. If Admin, count open moderation reports
     let openReportsCount = 0;
@@ -124,7 +138,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         created_at: user.created_at,
         identities,
         packages: packagesRes.results || [],
-        favorites
+        favorites,
+        downloads
       },
       oauthProviders
     }, {

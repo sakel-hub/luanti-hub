@@ -112,6 +112,7 @@ export class AuthService {
               if (parsed.data.user) {
                 this._currentUser.set(parsed.data.user);
                 this.settingsService.isAuthenticatedSession.set(true);
+                this.settingsService.mergeServerDownloads(parsed.data.user.downloads);
                 await this.settingsService.mergeServerFavorites(parsed.data.user.favorites);
                 return;
               } else {
@@ -144,6 +145,7 @@ export class AuthService {
           if (data.user) {
             this._currentUser.set(data.user);
             this.settingsService.isAuthenticatedSession.set(true);
+            this.settingsService.mergeServerDownloads(data.user.downloads);
             await this.settingsService.mergeServerFavorites(data.user.favorites);
             return;
           }

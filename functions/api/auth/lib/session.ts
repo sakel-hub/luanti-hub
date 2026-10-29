@@ -223,6 +223,19 @@ export async function mergeSecondaryUserIntoPrimary(db: any, primaryId: string, 
   await db.prepare(`UPDATE packages SET author_id = ? WHERE author_id = ?`).bind(primaryId, secondaryId).run();
   await db.prepare(`UPDATE OR IGNORE user_favorites SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
   await db.prepare(`DELETE FROM user_favorites WHERE user_id = ?`).bind(secondaryId).run();
+  try {
+    await db.prepare(`
+      INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
+      SELECT ?, package_id, download_count, last_downloaded_at FROM user_downloads WHERE user_id = ?
+      ON CONFLICT(user_id, package_id)
+      DO UPDATE SET
+        download_count = user_downloads.download_count + excluded.download_count,
+        last_downloaded_at = MAX(user_downloads.last_downloaded_at, excluded.last_downloaded_at)
+    `).bind(primaryId, secondaryId).run();
+    await db.prepare(`DELETE FROM user_downloads WHERE user_id = ?`).bind(secondaryId).run();
+  } catch {
+    // Ignore if user_downloads table not yet initialized
+  }
   await db.prepare(`UPDATE OR IGNORE package_reviews SET user_id = ? WHERE user_id = ?`).bind(primaryId, secondaryId).run();
   await db.prepare(`DELETE FROM package_reviews WHERE user_id = ?`).bind(secondaryId).run();
 

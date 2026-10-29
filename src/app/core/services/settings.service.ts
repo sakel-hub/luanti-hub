@@ -11,6 +11,7 @@ export class SettingsService {
   );
   readonly preferredEngine = signal<string>('5.9.0');
   readonly favorites = signal<string[]>([]);
+  readonly downloadedPackages = signal<Record<string, number>>({});
   readonly highContrast = signal<boolean>(false);
   readonly isAuthenticatedSession = signal<boolean>(false);
   readonly edgeApiAvailable = signal<boolean>(false);
@@ -25,6 +26,7 @@ export class SettingsService {
         localStorage.setItem('lh_contentdb_url', this.contentDbUrl());
         localStorage.setItem('lh_preferred_engine', this.preferredEngine());
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
+        localStorage.setItem('lh_downloaded_packages', JSON.stringify(this.downloadedPackages()));
         localStorage.setItem('lh_high_contrast', JSON.stringify(this.highContrast()));
         localStorage.setItem('lh_client_id', this.clientId());
 
@@ -72,9 +74,53 @@ export class SettingsService {
       if (savedContrast) {
         this.highContrast.set(Boolean(JSON.parse(savedContrast)));
       }
+
+      const savedDownloads = localStorage.getItem('lh_downloaded_packages');
+      if (savedDownloads) {
+        const parsedDl = JSON.parse(savedDownloads);
+        if (parsedDl && typeof parsedDl === 'object' && !Array.isArray(parsedDl)) {
+          const cleanDl: Record<string, number> = {};
+          for (const [k, v] of Object.entries(parsedDl)) {
+            const count = Number(v);
+            if (k && k.includes('/') && Number.isFinite(count) && count > 0) {
+              cleanDl[k.toLowerCase()] = Math.floor(count);
+            }
+          }
+          this.downloadedPackages.set(cleanDl);
+        }
+      }
     } catch {
       // Defaults kept
     }
+  }
+
+  recordLocalDownload(packageId: string): void {
+    if (!packageId || !packageId.includes('/')) return;
+    const key = packageId.toLowerCase();
+    this.downloadedPackages.update(curr => ({
+      ...curr,
+      [key]: (curr[key] || 0) + 1
+    }));
+  }
+
+  getDownloadCount(packageId: string): number {
+    if (!packageId) return 0;
+    return this.downloadedPackages()[packageId.toLowerCase()] || 0;
+  }
+
+  mergeServerDownloads(serverDownloads?: Record<string, number>): void {
+    if (!serverDownloads || typeof serverDownloads !== 'object') return;
+    this.downloadedPackages.update(local => {
+      const merged: Record<string, number> = { ...local };
+      for (const [pkgId, count] of Object.entries(serverDownloads)) {
+        const cleanCount = Number(count);
+        if (pkgId && pkgId.includes('/') && Number.isFinite(cleanCount) && cleanCount > 0) {
+          const key = pkgId.toLowerCase();
+          merged[key] = Math.max(merged[key] || 0, Math.floor(cleanCount));
+        }
+      }
+      return merged;
+    });
   }
 
   toggleFavorite(packageId: string): boolean {

@@ -269,4 +269,51 @@ describe('App & Core Services', () => {
     expect(strategy.shouldReuseRoute(homeSnap, pkgSnap)).toBe(true);
     expect(strategy.shouldReuseRoute(submitSnap, homeSnap)).toBe(true);
   });
+
+  it('should compute dynamic and personalized Match % from contentdb_score, favorites, and per-user download counts', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const settings = TestBed.inject(SettingsService);
+
+    const lowScoreMod = {
+      id: 'authorA/small_mod',
+      author: 'authorA',
+      name: 'small_mod',
+      title: 'Small Mod',
+      type: 'mod' as const,
+      short_desc: 'Small utility',
+      thumbnail: 'logo.svg',
+      score: 0,
+      contentdb_score: 18,
+      downloads: 0,
+      license: 'MIT',
+      source: 'official' as const,
+      tags: ['tools']
+    };
+
+    const highScoreGame = {
+      id: 'Wuzzy/mineclone2',
+      author: 'Wuzzy',
+      name: 'mineclone2',
+      title: 'VoxeLibre',
+      type: 'game' as const,
+      short_desc: 'Survival sandbox game',
+      thumbnail: 'logo.svg',
+      score: 0,
+      contentdb_score: 3150,
+      downloads: 0,
+      license: 'GPL-3.0-only',
+      source: 'official' as const,
+      tags: ['survival', 'pve']
+    };
+
+    const baselineLow = pkgService.getMatchScore(lowScoreMod);
+    const baselineHigh = pkgService.getMatchScore(highScoreGame);
+    expect(baselineHigh).toBeGreaterThan(baselineLow);
+
+    // Recording downloads for a package boosts its personalized match score
+    settings.recordLocalDownload('authorA/small_mod');
+    settings.recordLocalDownload('authorA/small_mod');
+    expect(settings.getDownloadCount('authorA/small_mod')).toBeGreaterThanOrEqual(2);
+    expect(pkgService.getMatchScore(lowScoreMod)).toBeGreaterThan(baselineLow);
+  });
 });

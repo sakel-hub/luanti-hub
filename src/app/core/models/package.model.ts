@@ -20,7 +20,8 @@ export interface LuantiPackage {
   thumbnail: string;
   banner?: string;
   screenshots?: string[];
-  score: number; // e.g. 4.8
+  score: number; // 1.0 - 5.0 star rating (when reviews exist)
+  contentdb_score?: number; // Raw ContentDB composite popularity + review score (e.g. 15 - 4000+)
   downloads: number;
   license: string;
   media_license?: string;
@@ -99,6 +100,7 @@ export interface AuthUser {
   identities: UserIdentity[];
   packages?: LuantiPackage[];
   favorites?: string[];
+  downloads?: Record<string, number>;
 }
 
 export interface GitAuditDiagnostic {
