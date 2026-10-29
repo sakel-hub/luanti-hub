@@ -545,9 +545,30 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // 2. Parse Key-Value Metadata from *.conf
     const getConfValue = (key: string): string => {
-      const regex = new RegExp(`^\\s*${key}\\s*=\\s*(.+)$`, 'm');
-      const match = rawConfig.match(regex);
-      return match ? match[1].trim() : '';
+      for (const rawLine of rawConfig.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const eqIdx = line.indexOf('=');
+        if (eqIdx === -1) continue;
+        const k = line.slice(0, eqIdx).trim();
+        if (k.toLowerCase() === key.toLowerCase()) {
+          let val = line.slice(eqIdx + 1).trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1).trim();
+          }
+          return val;
+        }
+      }
+      return '';
+    };
+
+    const cleanDep = (s: string): string => {
+      return s
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .replace(/\?$/, '') // Strip legacy optional modifier
+        .split(/\s+#/)[0]   // Strip inline comment if preceded by space
+        .trim();
     };
 
     const rawName = getConfValue('name');
@@ -773,8 +794,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // Optional Dependency Syntax Check (only if depends / optional_depends are specified; empty is 100% valid)
     const rawDepList = [
-      ...(rawDepends ? rawDepends.split(',').map(s => s.trim()).filter(Boolean) : []),
-      ...(rawOptDepends ? rawOptDepends.split(',').map(s => s.trim()).filter(Boolean) : [])
+      ...(rawDepends ? rawDepends.split(',').map(cleanDep).filter(Boolean) : []),
+      ...(rawOptDepends ? rawOptDepends.split(',').map(cleanDep).filter(Boolean) : [])
     ];
     const invalidDeps = rawDepList.filter(d => !/^[a-z0-9_]+$/.test(d));
     if (invalidDeps.length > 0) {
@@ -911,10 +932,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
 
     const dependencies = rawDepends
-      ? rawDepends.split(',').map(s => s.trim()).filter(Boolean)
+      ? rawDepends.split(',').map(cleanDep).filter(Boolean)
       : [];
     const optionalDependencies = rawOptDepends
-      ? rawOptDepends.split(',').map(s => s.trim()).filter(Boolean)
+      ? rawOptDepends.split(',').map(cleanDep).filter(Boolean)
       : [];
 
     const confTags = rawConfTags

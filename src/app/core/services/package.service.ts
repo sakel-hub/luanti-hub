@@ -1899,17 +1899,38 @@ export class PackageService {
           const confRes = await fetch(confUrl);
           if (confRes.ok) {
             const confText = await confRes.text();
-            const getVal = (key: string) => {
-              const m = confText.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+)$`, 'm'));
-              return m ? m[1].trim() : '';
+            const getVal = (key: string): string => {
+              for (const rawLine of confText.split(/\r?\n/)) {
+                const line = rawLine.trim();
+                if (!line || line.startsWith('#')) continue;
+                const eqIdx = line.indexOf('=');
+                if (eqIdx === -1) continue;
+                const k = line.slice(0, eqIdx).trim();
+                if (k.toLowerCase() === key.toLowerCase()) {
+                  let val = line.slice(eqIdx + 1).trim();
+                  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                    val = val.slice(1, -1).trim();
+                  }
+                  return val;
+                }
+              }
+              return '';
+            };
+            const cleanDep = (s: string): string => {
+              return s
+                .trim()
+                .replace(/^["']|["']$/g, '')
+                .replace(/\?$/, '')
+                .split(/\s+#/)[0]
+                .trim();
             };
             const depStr = getVal('depends');
             const optStr = getVal('optional_depends');
             if (depStr) {
-              depStr.split(',').map(s => s.trim()).filter(Boolean).forEach(d => deps.push(d));
+              depStr.split(',').map(cleanDep).filter(Boolean).forEach(d => deps.push(d));
             }
             if (optStr) {
-              optStr.split(',').map(s => s.trim()).filter(Boolean).forEach(d => optDeps.push(d));
+              optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => optDeps.push(d));
             }
             license = getVal('license') || undefined;
             mediaLicense = getVal('media_license') || undefined;

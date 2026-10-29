@@ -386,4 +386,39 @@ describe('App & Core Services', () => {
 
     expect(comp.canPublish()).toBe(true);
   });
+
+  it('should parse mod.conf line-by-line without false positives for empty depends followed by optional_depends', async () => {
+    const service = TestBed.inject(PackageService);
+
+    vi.spyOn(service as any, 'getRepoRootListing').mockResolvedValue([
+      { name: 'mod.conf', type: 'file', download_url: 'https://raw.githubusercontent.com/sakel-hub/x_mob_core/main/mod.conf' },
+      { name: 'init.lua', type: 'file', download_url: 'https://raw.githubusercontent.com/sakel-hub/x_mob_core/main/init.lua' }
+    ]);
+
+    const mockConf = `name = x_mob_core
+depends =
+optional_depends = player_monoids, pova, playerphysics
+author = ElCeejo
+description = Mob animation and spawning framework.
+`;
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: any) => {
+      const url = String(input);
+      if (url.includes('mod.conf')) {
+        return Promise.resolve(new Response(mockConf, { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+
+    const mockPkg: any = {
+      author: 'sakel-hub',
+      name: 'x_mob_core',
+      title: 'X Mobs Core',
+      type: 'mod'
+    };
+
+    const result = await (service as any).probeGitRepoMetadata(mockPkg, 'https://github.com/sakel-hub/x_mob_core');
+    expect(result.deps).toEqual([]);
+    expect(result.optDeps).toEqual(['player_monoids', 'pova', 'playerphysics']);
+  });
 });
