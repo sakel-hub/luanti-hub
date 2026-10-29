@@ -121,9 +121,9 @@ import {
                     </div>
 
                     <!-- Title -->
-                    <h1 class="text-3xl sm:text-5xl font-black tracking-tight text-white drop-shadow-md">
+                    <h2 class="text-3xl sm:text-5xl font-black tracking-tight text-white drop-shadow-md">
                       {{ slidePkg.title }}
-                    </h1>
+                    </h2>
 
                     <!-- Description -->
                     <p class="text-sm sm:text-base text-slate-300 line-clamp-3 leading-relaxed drop-shadow">

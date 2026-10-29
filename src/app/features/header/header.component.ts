@@ -81,9 +81,9 @@ import {
             (click)="onHomeClick()"
             class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer">
             <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
-            <span class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap">
+            <h1 class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap m-0 inline-block">
               Luanti<span class="text-sky-400">Hub</span>
-            </span>
+            </h1>
           </button>
 
           <!-- Category Nav Tabs (Desktop xl+) -->

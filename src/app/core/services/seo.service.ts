@@ -12,7 +12,7 @@ export class SeoService {
   private readonly doc = inject(DOCUMENT);
 
   private readonly defaultTitle =
-    'Luanti Hub — Next-Gen ContentDB & Git Package Registry for Luanti (Minetest)';
+    'LuantiHub – Mods & Packages for Luanti (Minetest)';
   private readonly defaultDesc =
     'Discover, audit, and install voxel games, mods, and texture packs for Luanti (formerly Minetest). Unified ContentDB mirror with decentralized Git community releases.';
   private readonly baseUrl = 'https://luanti-hub.pages.dev';

@@ -206,7 +206,7 @@ import {
 
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-4">
           <div class="space-y-1">
-            <h1 class="text-lg sm:text-xl font-bold text-white flex items-center gap-2 flex-wrap">
+            <h2 class="text-lg sm:text-xl font-bold text-white flex items-center gap-2 flex-wrap">
               @if (packageService.searchQuery()) {
                 <span>{{ 'catalog.resultsFor' | translate: { query: packageService.searchQuery() } }}</span>
               } @else {
@@ -215,7 +215,7 @@ import {
               <span class="text-xs font-normal text-slate-400">
                 ({{ 'common.resultsCount' | translate: { count: packageService.filteredPackages().length } }})
               </span>
-            </h1>
+            </h2>
             <p class="text-xs text-slate-400">{{ 'catalog.resultsSubtitle' | translate }}</p>
           </div>
 
