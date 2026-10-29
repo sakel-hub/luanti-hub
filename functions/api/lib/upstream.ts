@@ -495,7 +495,8 @@ export function buildGitBranchArchiveUrl(
   repoUrl?: string | null,
   fallbackOwner?: string,
   fallbackRepo?: string,
-  branch = 'main'
+  branch = 'main',
+  _providerHint?: string
 ): string {
   const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
   const safeBranch = encodeURIComponent(branch || 'main');
@@ -704,4 +705,28 @@ export function rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: str
         return `${prefix}${base}/${cleanPath}${suffix}`;
       }
     );
+}
+
+/**
+ * Formats a numeric byte count or size string into a human-readable KB / MB label.
+ */
+export function formatByteSize(val: any): string | undefined {
+  let bytes = 0;
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+    bytes = val;
+  } else if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (/^\d+$/.test(trimmed)) {
+      bytes = parseInt(trimmed, 10);
+    } else if (trimmed && /[a-zA-Z]/.test(trimmed) && trimmed !== '2 KB') {
+      return trimmed;
+    }
+  }
+  if (bytes > 0) {
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return undefined;
 }

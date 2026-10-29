@@ -78,6 +78,29 @@ import {
           </button>
         </div>
 
+        <!-- Guest Sign-In Required Notice -->
+        @if (!authService.isLoggedIn()) {
+          <div class="p-4 rounded-2xl bg-amber-950/35 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div class="flex items-start gap-2.5">
+              <svg lucideShieldAlert class="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5"></svg>
+              <div class="space-y-0.5">
+                <span class="font-bold text-amber-200 block">
+                  {{ 'submit.guestNoticeTitle' | translate }}
+                </span>
+                <p class="text-[11px] text-amber-300/90 leading-relaxed">
+                  {{ 'submit.guestNoticeDesc' | translate }}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              (click)="onSignInFromSubmit()"
+              class="px-4 py-2 rounded-xl glass-btn-sky text-white font-bold text-xs whitespace-nowrap transition cursor-pointer flex-shrink-0">
+              {{ 'header.signIn' | translate }}
+            </button>
+          </div>
+        }
+
         <!-- Form Body -->
         <form (ngSubmit)="onPublish()" class="space-y-4">
 
@@ -492,6 +515,11 @@ export class SubmitModalComponent {
     const target = this.parsedRepoTarget();
     if (!target) return false;
     return this.authService.hasVerifiedProviderOwnership(target.provider, target.owner);
+  }
+
+  onSignInFromSubmit(): void {
+    this.packageService.closeSubmitModal();
+    this.authService.openAuthModal();
   }
 
   isTagSelected(tagName: string): boolean {

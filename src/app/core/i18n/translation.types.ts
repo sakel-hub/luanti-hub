@@ -41,6 +41,8 @@ export interface TranslationDictionary {
     clearCache: string;
     signIn: string;
     adminBadge: string;
+    reportIssue: string;
+    reportIssueTooltip: string;
     reload: string;
     clearCacheConfirm: string;
   };
@@ -337,6 +339,8 @@ export interface TranslationDictionary {
   submit: {
     title: string;
     subtitle: string;
+    guestNoticeTitle: string;
+    guestNoticeDesc: string;
     repoUrlLabel: string;
     repoUrlPlaceholder: string;
     repoUrlTooltip: string;
@@ -401,6 +405,7 @@ export interface TranslationDictionary {
     inGameSetup: string;
     upstreamMirror: string;
     engineSite: string;
+    reportIssue: string;
     legalTerms: string;
     termsPrivacy: string;
     legalModalTitle: string;

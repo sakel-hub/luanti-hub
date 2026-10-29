@@ -26,6 +26,8 @@ export const en: TranslationDictionary = {
     clearCache: 'Clear Cache & Reload',
     signIn: 'Sign In',
     adminBadge: 'Admin',
+    reportIssue: 'Report Bug / Feedback',
+    reportIssueTooltip: 'Report bugs, issues, or request features on GitHub',
     reload: 'Reload',
     clearCacheConfirm: 'Clear all cached files, service workers, and reload LuantiHub?'
   },
@@ -322,6 +324,8 @@ export const en: TranslationDictionary = {
   submit: {
     title: 'Submit & Audit Git Package',
     subtitle: 'Index your mod, game, or texture pack directly from Codeberg, GitLab, or GitHub with automated .conf & Luacheck static analysis.',
+    guestNoticeTitle: 'Sign-In Required to Submit Packages',
+    guestNoticeDesc: 'Only signed-in authors with a verified Git account can publish repositories to LuantiHub. You can still run Pre-Flight checks below as a guest.',
     repoUrlLabel: 'Git Repository HTTPS URL',
     repoUrlPlaceholder: 'https://codeberg.org/user/mod',
     repoUrlTooltip: 'Examples: https://codeberg.org/your-username/my_awesome_mod · https://gitlab.com/author/my_game · https://github.com/author/my_textures (must contain mod.conf, game.conf, modpack.conf, or texture_pack.conf)',
@@ -386,6 +390,7 @@ export const en: TranslationDictionary = {
     inGameSetup: 'In-Game Luanti Config',
     upstreamMirror: 'ContentDB Mirror API',
     engineSite: 'Luanti Official Site',
+    reportIssue: 'GitHub Issues & Feedback',
     legalTerms: 'Legal, Terms & Safe Harbor',
     termsPrivacy: 'Legal, Terms & Safe Harbor',
     legalModalTitle: 'Legal Terms, DMCA Safe Harbor & Privacy',

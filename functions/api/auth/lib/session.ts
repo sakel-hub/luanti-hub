@@ -80,6 +80,61 @@ export async function verifyAuditProofToken(
   }
 }
 
+function toBase64Url(str: string): string {
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function fromBase64Url(b64Url: string): string {
+  let b64 = b64Url.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4 !== 0) {
+    b64 += '=';
+  }
+  return atob(b64);
+}
+
+export async function createOAuthStateToken(
+  provider: string,
+  secret: string = DEFAULT_SECRET
+): Promise<string> {
+  const payload = JSON.stringify({
+    p: provider.trim().toLowerCase(),
+    n: crypto.randomUUID().slice(0, 8),
+    exp: Date.now() + 15 * 60 * 1000 // 15 minutes
+  });
+  const enc = new TextEncoder();
+  const key = await getKey(secret);
+  const signature = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
+  const b64Payload = toBase64Url(payload);
+  const b64Sig = toBase64Url(String.fromCharCode(...new Uint8Array(signature)));
+  return `${b64Payload}.${b64Sig}`;
+}
+
+export async function verifyOAuthStateToken(
+  token: string | undefined | null,
+  expectedProvider: string,
+  secret: string = DEFAULT_SECRET
+): Promise<boolean> {
+  try {
+    if (!token) return false;
+    const [b64Payload, b64Sig] = token.split('.');
+    if (!b64Payload || !b64Sig) return false;
+
+    const payload = fromBase64Url(b64Payload);
+    const data = JSON.parse(payload);
+    if (!data?.p || data.p !== expectedProvider.trim().toLowerCase()) return false;
+    if (!data?.exp || Date.now() > data.exp) return false;
+
+    const key = await getKey(secret);
+    const enc = new TextEncoder();
+    const sigStr = fromBase64Url(b64Sig);
+    const sigBytes = Uint8Array.from(sigStr, c => c.charCodeAt(0));
+
+    return await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
+  } catch {
+    return false;
+  }
+}
+
 export function parseCookies(request: Request): Record<string, string> {
   const cookieHeader = request.headers.get('Cookie') || '';
   const cookies: Record<string, string> = {};

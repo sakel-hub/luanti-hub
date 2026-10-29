@@ -1,6 +1,7 @@
 import {
   createSessionToken,
   verifySessionToken,
+  verifyOAuthStateToken,
   parseCookies,
   checkIsAdmin,
   mergeSecondaryUserIntoPrimary,
@@ -29,32 +30,156 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
-export async function onRequestGet(context: { params: { provider: string }; request: Request; env: Env }) {
+const USER_AGENT = 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)';
+
+// Deduplicate concurrent/retried OAuth callback requests within the same Worker isolate
+const inFlightOAuthCodes = new Map<string, Promise<string>>();
+const completedOAuthCodes = new Map<string, { userId: string; expiresAt: number }>();
+
+function cleanEnvValue(val?: string): string {
+  return (val || '').trim().replace(/^["']|["']$/g, '').trim();
+}
+
+async function exchangeOAuthTokenWithRetry(
+  tokenUrl: string,
+  params: Record<string, string>,
+  providerLabel: string,
+  allowJsonRetry = false
+): Promise<any> {
+  const formBody = new URLSearchParams(params).toString();
+  let lastStatus = 0;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const useJson = allowJsonRetry && attempt === 1;
+      const res = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': useJson ? 'application/json' : 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'User-Agent': USER_AGENT
+        },
+        body: useJson ? JSON.stringify(params) : formBody
+      });
+
+      lastStatus = res.status;
+      if (res.ok) {
+        const rawText = await res.text();
+        try {
+          return JSON.parse(rawText);
+        } catch {
+          const parsedForm = new URLSearchParams(rawText);
+          if (parsedForm.has('access_token') || parsedForm.has('error')) {
+            return {
+              access_token: parsedForm.get('access_token') || undefined,
+              error: parsedForm.get('error') || undefined,
+              error_description: parsedForm.get('error_description') || undefined
+            };
+          }
+          throw new Error(`${providerLabel} returned invalid token payload`);
+        }
+      }
+
+      // Retry on transient 403/408/429/5xx or cold-start proxy errors
+      if (attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+        continue;
+      }
+    } catch (err: any) {
+      if (attempt === 2) {
+        throw err;
+      }
+      await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+
+  throw new Error(`${providerLabel} token exchange failed (HTTP ${lastStatus || 'network error'})`);
+}
+
+async function buildSuccessRedirectResponse(
+  origin: string,
+  isHttps: boolean,
+  userId: string,
+  sessionSecret?: string
+): Promise<Response> {
+  const sessionToken = await createSessionToken(userId, sessionSecret);
+  const headers = new Headers();
+  headers.set('Location', `${origin}/?auth_success=1`);
+  headers.append(
+    'Set-Cookie',
+    `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
+  );
+  headers.append(
+    'Set-Cookie',
+    `lh_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+  );
+  return new Response(null, { status: 302, headers });
+}
+
+export async function onRequestGet(context: {
+  params: { provider: string };
+  request: Request;
+  env: Env;
+  waitUntil?: (promise: Promise<any>) => void;
+}) {
   const { provider } = context.params;
   const url = new URL(context.request.url);
+  const isHttps = url.protocol === 'https:';
   const code = url.searchParams.get('code');
   const stateParam = url.searchParams.get('state');
+  const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
-    codeberg: context.env.CODEBERG_REDIRECT_URI,
-    mesehub: context.env.MESEHUB_REDIRECT_URI,
-    gitlab: context.env.GITLAB_REDIRECT_URI,
-    github: context.env.GITHUB_REDIRECT_URI,
-    contentdb: context.env.CONTENTDB_REDIRECT_URI
+    codeberg: cleanEnvValue(context.env.CODEBERG_REDIRECT_URI) || undefined,
+    mesehub: cleanEnvValue(context.env.MESEHUB_REDIRECT_URI) || undefined,
+    gitlab: cleanEnvValue(context.env.GITLAB_REDIRECT_URI) || undefined,
+    github: cleanEnvValue(context.env.GITHUB_REDIRECT_URI) || undefined,
+    contentdb: cleanEnvValue(context.env.CONTENTDB_REDIRECT_URI) || undefined
   };
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 
   if (!code) {
-    return Response.redirect(`${url.origin}/?auth_error=No+authorization+code+provided`, 302);
+    return Response.redirect(
+      `${url.origin}/?auth_error=No+authorization+code+provided&provider=${encodeURIComponent(provider)}`,
+      302
+    );
   }
 
   const cookies = parseCookies(context.request);
   const expectedState = cookies['lh_oauth_state'];
-  if (!stateParam || !expectedState || stateParam !== expectedState) {
-    return Response.redirect(`${url.origin}/?auth_error=Invalid+OAuth+CSRF+state`, 302);
+  const isCookieStateValid = Boolean(stateParam && expectedState && stateParam === expectedState);
+  const isHmacStateValid = await verifyOAuthStateToken(stateParam, provider, sessionSecret);
+
+  if (!isCookieStateValid && !isHmacStateValid) {
+    return Response.redirect(
+      `${url.origin}/?auth_error=Invalid+OAuth+CSRF+state&provider=${encodeURIComponent(provider)}`,
+      302
+    );
   }
 
-  try {
+  const existingSessionUserId = cookies['lh_session']
+    ? await verifySessionToken(cookies['lh_session'], sessionSecret)
+    : null;
+
+  // Fast-path: If this exact authorization code already completed moments ago (duplicate browser/network navigation)
+  const cachedCodeKey = `${provider}:${code}`;
+  const completedEntry = completedOAuthCodes.get(cachedCodeKey);
+  if (completedEntry && Date.now() < completedEntry.expiresAt) {
+    return buildSuccessRedirectResponse(url.origin, isHttps, completedEntry.userId, sessionSecret);
+  }
+
+  // Fast-path: If this exact authorization code is currently being processed by a concurrent request
+  const existingInFlight = inFlightOAuthCodes.get(cachedCodeKey);
+  if (existingInFlight) {
+    try {
+      const resolvedUserId = await existingInFlight;
+      return buildSuccessRedirectResponse(url.origin, isHttps, resolvedUserId, sessionSecret);
+    } catch {
+      // Fall through to standard flow if in-flight promise failed
+    }
+  }
+
+  const processOAuthCallback = async (): Promise<string> => {
     let providerUserId = '';
     let providerUsername = '';
     let displayName = '';
@@ -63,21 +188,26 @@ export async function onRequestGet(context: { params: { provider: string }; requ
 
     // 1. Exchange OAuth code for Access Token & Profile
     if (provider === 'codeberg') {
-      const tokenRes = await fetch('https://codeberg.org/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: new URLSearchParams({
-          client_id: context.env.CODEBERG_CLIENT_ID || '',
-          client_secret: context.env.CODEBERG_CLIENT_SECRET || '',
+      const tokenData = await exchangeOAuthTokenWithRetry(
+        'https://codeberg.org/login/oauth/access_token',
+        {
+          client_id: cleanEnvValue(context.env.CODEBERG_CLIENT_ID),
+          client_secret: cleanEnvValue(context.env.CODEBERG_CLIENT_SECRET),
           code,
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
-        })
-      });
-      if (!tokenRes.ok) throw new Error('Codeberg token exchange failed');
-      const tokenData = await tokenRes.json() as any;
+        },
+        'Codeberg'
+      );
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'Codeberg token exchange failed');
+      }
       const userRes = await fetch('https://codeberg.org/api/v1/user', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json'
+        }
       });
       if (!userRes.ok) throw new Error('Codeberg user profile fetch failed');
       const user = await userRes.json() as any;
@@ -88,21 +218,26 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       profileUrl = `https://codeberg.org/${providerUsername}`;
 
     } else if (provider === 'mesehub') {
-      const tokenRes = await fetch('https://git.minetest.land/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: new URLSearchParams({
-          client_id: context.env.MESEHUB_CLIENT_ID || '',
-          client_secret: context.env.MESEHUB_CLIENT_SECRET || '',
+      const tokenData = await exchangeOAuthTokenWithRetry(
+        'https://git.minetest.land/login/oauth/access_token',
+        {
+          client_id: cleanEnvValue(context.env.MESEHUB_CLIENT_ID),
+          client_secret: cleanEnvValue(context.env.MESEHUB_CLIENT_SECRET),
           code,
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
-        })
-      });
-      if (!tokenRes.ok) throw new Error('Mesehub token exchange failed');
-      const tokenData = await tokenRes.json() as any;
+        },
+        'Mesehub'
+      );
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'Mesehub token exchange failed');
+      }
       const userRes = await fetch('https://git.minetest.land/api/v1/user', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json'
+        }
       });
       if (!userRes.ok) throw new Error('Mesehub user profile fetch failed');
       const user = await userRes.json() as any;
@@ -113,21 +248,26 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       profileUrl = `https://git.minetest.land/${providerUsername}`;
 
     } else if (provider === 'gitlab') {
-      const tokenRes = await fetch('https://gitlab.com/oauth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: context.env.GITLAB_CLIENT_ID || '',
-          client_secret: context.env.GITLAB_CLIENT_SECRET || '',
+      const tokenData = await exchangeOAuthTokenWithRetry(
+        'https://gitlab.com/oauth/token',
+        {
+          client_id: cleanEnvValue(context.env.GITLAB_CLIENT_ID),
+          client_secret: cleanEnvValue(context.env.GITLAB_CLIENT_SECRET),
           code,
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
-        })
-      });
-      if (!tokenRes.ok) throw new Error('GitLab token exchange failed');
-      const tokenData = await tokenRes.json() as any;
+        },
+        'GitLab'
+      );
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'GitLab token exchange failed');
+      }
       const userRes = await fetch('https://gitlab.com/api/v4/user', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json'
+        }
       });
       if (!userRes.ok) throw new Error('GitLab user profile fetch failed');
       const user = await userRes.json() as any;
@@ -138,25 +278,30 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       profileUrl = user.web_url || `https://gitlab.com/${providerUsername}`;
 
     } else if (provider === 'github') {
-      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-        body: new URLSearchParams({
-          client_id: context.env.GITHUB_CLIENT_ID || '',
-          client_secret: context.env.GITHUB_CLIENT_SECRET || '',
+      const tokenData = await exchangeOAuthTokenWithRetry(
+        'https://github.com/login/oauth/access_token',
+        {
+          client_id: cleanEnvValue(context.env.GITHUB_CLIENT_ID),
+          client_secret: cleanEnvValue(context.env.GITHUB_CLIENT_SECRET),
           code,
           redirect_uri: redirectUri
-        })
-      });
-      if (!tokenRes.ok) throw new Error('GitHub token exchange failed');
-      const tokenData = await tokenRes.json() as any;
+        },
+        'GitHub',
+        true
+      );
       if (tokenData.error || !tokenData.access_token) {
+        // If a duplicate request hit another Worker isolate milliseconds after the code was already consumed
+        // and the user already has a valid session cookie, return that session seamlessly
+        if (tokenData.error === 'bad_verification_code' && existingSessionUserId) {
+          return existingSessionUserId;
+        }
         throw new Error(tokenData.error_description || tokenData.error || 'GitHub OAuth token missing');
       }
       const userRes = await fetch('https://api.github.com/user', {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
-          'User-Agent': 'LuantiHub'
+          'User-Agent': USER_AGENT,
+          Accept: 'application/vnd.github+json'
         }
       });
       if (!userRes.ok) throw new Error('GitHub user profile fetch failed');
@@ -168,21 +313,26 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       profileUrl = user.html_url || `https://github.com/${providerUsername}`;
 
     } else if (provider === 'contentdb') {
-      const tokenRes = await fetch('https://content.luanti.org/oauth/token/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: context.env.CONTENTDB_CLIENT_ID || '',
-          client_secret: context.env.CONTENTDB_CLIENT_SECRET || '',
+      const tokenData = await exchangeOAuthTokenWithRetry(
+        'https://content.luanti.org/oauth/token/',
+        {
+          client_id: cleanEnvValue(context.env.CONTENTDB_CLIENT_ID),
+          client_secret: cleanEnvValue(context.env.CONTENTDB_CLIENT_SECRET),
           code,
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
-        })
-      });
-      if (!tokenRes.ok) throw new Error('ContentDB token exchange failed');
-      const tokenData = await tokenRes.json() as any;
+        },
+        'ContentDB'
+      );
+      if (tokenData.error || !tokenData.access_token) {
+        throw new Error(tokenData.error_description || tokenData.error || 'ContentDB token exchange failed');
+      }
       const whoamiRes = await fetch('https://content.luanti.org/api/whoami/', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json'
+        }
       });
       if (!whoamiRes.ok) throw new Error('ContentDB whoami fetch failed');
       const user = await whoamiRes.json() as any;
@@ -194,14 +344,11 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     }
 
     if (!providerUsername) {
-      return Response.redirect(`${url.origin}/?auth_error=Authentication+failed`, 302);
+      throw new Error('Authentication failed');
     }
 
     // 2. Identify or Create User in Cloudflare D1 (with full orphan & duplicate self-healing)
     let userId: string | null = null;
-    const existingSessionUserId = cookies['lh_session']
-      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
-      : null;
 
     const isAdmin = checkIsAdmin(
       { username: providerUsername },
@@ -343,9 +490,14 @@ export async function onRequestGet(context: { params: { provider: string }; requ
         `).bind(userId, providerUsername, `%/${providerUsername}/%`).run();
       }
 
-      // Sync upstream ContentDB packages authored by this verified username
+      // Sync upstream ContentDB packages authored by this verified username in background
       if (userId) {
-        await syncAuthorContentDbPackages(context.env.DB, userId, providerUsername);
+        const syncPromise = syncAuthorContentDbPackages(context.env.DB, userId, providerUsername).catch(() => {});
+        if (typeof context.waitUntil === 'function') {
+          context.waitUntil(syncPromise);
+        } else {
+          await syncPromise;
+        }
       }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
@@ -353,30 +505,32 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     }
 
     if (!userId) {
-      return Response.redirect(`${url.origin}/?auth_error=User+creation+failed`, 302);
+      throw new Error('User creation failed');
     }
 
-    // 4. Issue Secure HTTP-Only Session Cookie & Clear OAuth State Cookie
-    const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET);
-    const isHttps = url.protocol === 'https:';
+    return userId;
+  };
 
-    const headers = new Headers();
-    headers.set('Location', `${url.origin}/?auth_success=1`);
-    headers.append(
-      'Set-Cookie',
-      `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
-    );
-    headers.append(
-      'Set-Cookie',
-      `lh_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
-    );
+  const inFlightPromise = processOAuthCallback();
+  inFlightOAuthCodes.set(cachedCodeKey, inFlightPromise);
 
-    return new Response(null, {
-      status: 302,
-      headers
+  try {
+    const resolvedUserId = await inFlightPromise;
+    completedOAuthCodes.set(cachedCodeKey, {
+      userId: resolvedUserId,
+      expiresAt: Date.now() + 60_000
     });
-
+    return await buildSuccessRedirectResponse(url.origin, isHttps, resolvedUserId, sessionSecret);
   } catch (err: any) {
-    return Response.redirect(`${url.origin}/?auth_error=${encodeURIComponent(err.message || 'Auth failure')}`, 302);
+    // If another isolate already set a valid session cookie for the user, redirect to success
+    if (existingSessionUserId) {
+      return await buildSuccessRedirectResponse(url.origin, isHttps, existingSessionUserId, sessionSecret);
+    }
+    return Response.redirect(
+      `${url.origin}/?auth_error=${encodeURIComponent(err.message || 'Auth failure')}&provider=${encodeURIComponent(provider)}`,
+      302
+    );
+  } finally {
+    inFlightOAuthCodes.delete(cachedCodeKey);
   }
 }

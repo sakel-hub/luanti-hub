@@ -215,14 +215,26 @@ export class AuthService {
     }
   }
 
-  loginWith(provider: GitProvider, loginHint?: string): void {
+  private isRedirectingOAuth = false;
+
+  loginWith(provider: GitProvider, loginHint?: string, forceAccountSelect = false): void {
     this._selectedProvider.set(provider);
+    this._authError.set(null);
     if (this.isOAuthConfigured(provider)) {
+      if (this.isRedirectingOAuth) return;
+      this.isRedirectingOAuth = true;
       this.clearAuthCache();
       if (typeof window !== 'undefined') {
         const cleanHint = (loginHint || '').trim();
-        window.location.href = `/api/auth/${provider}/login${cleanHint ? `?login=${encodeURIComponent(cleanHint)}` : ''}`;
+        const query = new URLSearchParams();
+        if (cleanHint) query.set('login', cleanHint);
+        if (forceAccountSelect) query.set('prompt', 'select_account');
+        const qs = query.toString();
+        window.location.href = `/api/auth/${provider}/login${qs ? `?${qs}` : ''}`;
       }
+      setTimeout(() => {
+        this.isRedirectingOAuth = false;
+      }, 4000);
       return;
     }
     // When OAuth Client ID is not configured on the server, open the Auth Modal pre-selected to this provider

@@ -419,19 +419,19 @@ import {
 
                 <!-- Connect Other Forges or Additional Accounts (Ordered by Popularity & Authentic Brand Colors) -->
                 <div class="pt-1 flex flex-wrap gap-2">
-                  <button type="button" (click)="authService.loginWith('github')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                  <button type="button" (click)="authService.loginWith('github', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>
                     <span>{{ 'profile.linkGithub' | translate }}</span>
                   </button>
-                  <button type="button" (click)="authService.loginWith('codeberg')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                  <button type="button" (click)="authService.loginWith('codeberg', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-indigo-400"></svg>
                     <span>{{ 'profile.linkCodeberg' | translate }}</span>
                   </button>
-                  <button type="button" (click)="authService.loginWith('gitlab')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                  <button type="button" (click)="authService.loginWith('gitlab', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-orange-400"></svg>
                     <span>{{ 'profile.linkGitlab' | translate }}</span>
                   </button>
-                  <button type="button" (click)="authService.loginWith('mesehub')" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                  <button type="button" (click)="authService.loginWith('mesehub', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-emerald-400"></svg>
                     <span>{{ 'profile.linkMesehub' | translate }}</span>
                   </button>

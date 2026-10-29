@@ -26,6 +26,8 @@ export const ru: TranslationDictionary = {
     clearCache: 'Очистить кэш и перезагрузить',
     signIn: 'Войти',
     adminBadge: 'Админ',
+    reportIssue: 'Сообщить об ошибке / Отзыв',
+    reportIssueTooltip: 'Сообщить об ошибке или предложить функцию на GitHub',
     reload: 'Обновить',
     clearCacheConfirm: 'Очистить все кэшированные файлы, Service Workers и перезагрузить LuantiHub?'
   },
@@ -322,6 +324,8 @@ export const ru: TranslationDictionary = {
   submit: {
     title: 'Добавить и Проверить Пакет Git',
     subtitle: 'Опубликуйте мод, игру или текстуры из Codeberg, GitLab или GitHub с автоматической проверкой .conf и статическим анализом Luacheck.',
+    guestNoticeTitle: 'Для добавления пакетов требуется вход',
+    guestNoticeDesc: 'Только авторизованные авторы с подтвержденным аккаунтом Git могут публиковать репозитории на LuantiHub. Как гость вы можете запустить предварительную проверку ниже.',
     repoUrlLabel: 'HTTPS URL Репозитория Git',
     repoUrlPlaceholder: 'https://codeberg.org/user/mod',
     repoUrlTooltip: 'Примеры: https://codeberg.org/vash-login/vash_mod · https://gitlab.com/author/game · https://github.com/author/textures (должен содержать mod.conf, game.conf, modpack.conf или texture_pack.conf)',
@@ -386,6 +390,7 @@ export const ru: TranslationDictionary = {
     inGameSetup: 'Настройка в Luanti',
     upstreamMirror: 'Зеркало API ContentDB',
     engineSite: 'Официальный Сайт Luanti',
+    reportIssue: 'GitHub Issues и Отзывы',
     legalTerms: 'Правовая информация и Safe Harbor',
     termsPrivacy: 'Правовая информация и Safe Harbor',
     legalModalTitle: 'Правовые условия, DMCA Safe Harbor и Конфиденциальность',

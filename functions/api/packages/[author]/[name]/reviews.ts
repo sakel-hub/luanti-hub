@@ -100,9 +100,9 @@ export async function onRequestPost(context: { request: Request; params: { autho
   if (context.env.DB) {
     // 1b. Prevent package authors from rating or commenting on their own packages
     const [userRow, identitiesRes, pkgRow] = await Promise.all([
-      context.env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(userId).first<any>(),
-      context.env.DB.prepare(`SELECT provider_username FROM user_identities WHERE user_id = ?`).bind(userId).all<any>().catch(() => ({ results: [] })),
-      context.env.DB.prepare(`SELECT author_id, author_name, repo_url FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`).bind(packageId, author, name).first<any>()
+      context.env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(userId).first(),
+      context.env.DB.prepare(`SELECT provider_username FROM user_identities WHERE user_id = ?`).bind(userId).all().catch(() => ({ results: [] })),
+      context.env.DB.prepare(`SELECT author_id, author_name, repo_url FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`).bind(packageId, author, name).first()
     ]);
 
     const userHandles = new Set<string>();

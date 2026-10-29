@@ -17,7 +17,12 @@ import { PackageDetailModalComponent } from './features/modal/package-detail-mod
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
 import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
-import { createAuditProofToken, verifyAuditProofToken } from '../../functions/api/auth/lib/session';
+import {
+  createAuditProofToken,
+  verifyAuditProofToken,
+  createOAuthStateToken,
+  verifyOAuthStateToken
+} from '../../functions/api/auth/lib/session';
 
 describe('App & Core Services', () => {
   beforeEach(async () => {
@@ -42,6 +47,30 @@ describe('App & Core Services', () => {
     const compiled = fixture.nativeElement as HTMLElement;
     expect(compiled.textContent).toContain('LuantiHub');
     expect(compiled.textContent).toContain('DMCA');
+  });
+
+  it('should provide In-Game Setup and GitHub issue tracker link inside header gear menu and footer', async () => {
+    const fixture = TestBed.createComponent(App);
+    await fixture.whenStable();
+    const compiled = fixture.nativeElement as HTMLElement;
+
+    // Open the header gear settings menu
+    const gearBtn = compiled.querySelector<HTMLButtonElement>('button[aria-label="PWA and Cache Settings"]');
+    expect(gearBtn).toBeTruthy();
+    gearBtn?.click();
+    fixture.detectChanges();
+
+    const issueLinks = compiled.querySelectorAll<HTMLAnchorElement>(
+      'a[href="https://github.com/sakel-hub/luanti-hub/issues"]'
+    );
+    expect(issueLinks.length).toBeGreaterThanOrEqual(2);
+    issueLinks.forEach(link => {
+      expect(link.getAttribute('target')).toBe('_blank');
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    });
+
+    // Verify In-Game Setup is available inside the gear menu
+    expect(compiled.textContent).toContain('In-Game Setup');
   });
 
   it('should support mutually exclusive primary navigation tabs and ContentDB tag filtering', () => {
@@ -106,7 +135,12 @@ describe('App & Core Services', () => {
       'setup.failoverNote',
       'modal.optionASettingsHint',
       'catalog.showingCount',
-      'catalog.filterByTag'
+      'catalog.filterByTag',
+      'header.reportIssue',
+      'header.reportIssueTooltip',
+      'footer.reportIssue',
+      'submit.guestNoticeTitle',
+      'submit.guestNoticeDesc'
     ];
 
     for (const loc of locales) {
@@ -663,5 +697,15 @@ description = Mob animation and spawning framework.
     window.dispatchEvent(new Event('scroll'));
     expect(document.querySelector('.luanti-tooltip')).toBeNull();
     testBtn.remove();
+  });
+
+  it('should generate and verify URL-safe HMAC OAuth state tokens and reject provider mismatches', async () => {
+    const secret = 'test-oauth-hmac-secret-key';
+    const stateToken = await createOAuthStateToken('github', secret);
+    expect(stateToken).not.toContain('+');
+    expect(stateToken).not.toContain('/');
+    expect(await verifyOAuthStateToken(stateToken, 'github', secret)).toBe(true);
+    expect(await verifyOAuthStateToken(stateToken, 'codeberg', secret)).toBe(false);
+    expect(await verifyOAuthStateToken(stateToken, 'github', 'wrong-secret')).toBe(false);
   });
 });

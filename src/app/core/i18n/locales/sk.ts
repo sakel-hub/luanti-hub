@@ -26,6 +26,8 @@ export const sk: TranslationDictionary = {
     clearCache: 'Vyčistiť vyrovnávaciu pamäť a reštartovať',
     signIn: 'Prihlásiť sa',
     adminBadge: 'Admin',
+    reportIssue: 'Nahlásiť chybu / Spätná väzba',
+    reportIssueTooltip: 'Nahlásiť chyby alebo navrhnúť funkcie na GitHube',
     reload: 'Obnoviť',
     clearCacheConfirm: 'Vyčistiť všetky uložené súbory, service workerov a reštartovať LuantiHub?'
   },
@@ -322,6 +324,8 @@ export const sk: TranslationDictionary = {
   submit: {
     title: 'Odoslať & Skontrolovať Git Balíček',
     subtitle: 'Indexujte svoj mód, hru alebo textúry priamo z Codebergu, GitLabu alebo GitHubu s automatickou kontrolou .conf a Luacheck analýzou.',
+    guestNoticeTitle: 'Na odoslanie balíčka sa vyžaduje prihlásenie',
+    guestNoticeDesc: 'Iba prihlásení autori s overeným Git účtom môžu publikovať repozitáre na LuantiHub. Ako hosť si však môžete spustiť predbežnú kontrolu nižšie.',
     repoUrlLabel: 'HTTPS URL adresa Git Repozitára',
     repoUrlPlaceholder: 'https://codeberg.org/autor/mod',
     repoUrlTooltip: 'Príklady: https://codeberg.org/vase-meno/vas_mod · https://gitlab.com/autor/hra · https://github.com/autor/textury (musí obsahovať mod.conf, game.conf, modpack.conf alebo texture_pack.conf)',
@@ -386,6 +390,7 @@ export const sk: TranslationDictionary = {
     inGameSetup: 'Nastavenie v Luanti',
     upstreamMirror: 'ContentDB Mirror API',
     engineSite: 'Oficiálny Web Luanti',
+    reportIssue: 'GitHub Issues a Spätná väzba',
     legalTerms: 'Právne Informácie & Safe Harbor',
     termsPrivacy: 'Právne Informácie & Safe Harbor',
     legalModalTitle: 'Právne Podmienky, DMCA Safe Harbor & Súkromie',

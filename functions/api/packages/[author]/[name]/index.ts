@@ -783,7 +783,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       if (isLite) {
         const dailyDlRow = await context.env.DB.prepare(
           `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }));
+        ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }));
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
       } else {
         const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
@@ -803,7 +803,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           ).bind(effectivePkgId).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
             `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(effectivePkgId).first<{ total_lh: number }>().catch(() => ({ total_lh: 0 }))
+          ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }))
         ]);
 
         if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
@@ -1448,7 +1448,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     ).bind(resolvedUserId).all().catch(() => ({ results: [] })),
     context.env.DB.prepare(
       `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, author, name).first<any>()
+    ).bind(pkgId, author, name).first()
   ]);
 
   if (!pkgRow) {

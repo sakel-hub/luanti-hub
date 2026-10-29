@@ -281,7 +281,7 @@ export class AuthModalComponent {
   handleInput = '';
   tokenInput = '';
   readonly localError = signal<string | null>(null);
-  readonly isDirectSignInExpanded = signal<boolean>(Boolean(this.authService.authError()));
+  readonly isDirectSignInExpanded = signal<boolean>(this.authService.authError() === 'oauth_not_configured');
 
   toggleDirectSignIn(): void {
     this.isDirectSignInExpanded.update(v => !v);
