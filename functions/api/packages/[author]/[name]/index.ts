@@ -1050,9 +1050,26 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         Number(d1Pkg.downloads_count || 0)
       );
 
+      let gitVideoUrl = d1Pkg.video_url;
+      let gitVideoThumb = d1Pkg.video_thumbnail_url;
+      if (!gitVideoUrl && d1Pkg.repo_url) {
+        const cdbProbe = await probeGitRepoConfAndLicense(
+          d1Pkg.author_name,
+          d1Pkg.name,
+          d1Pkg.type || 'mod',
+          d1Pkg.repo_url
+        );
+        if (cdbProbe?.cdbMeta?.video_url) {
+          gitVideoUrl = cdbProbe.cdbMeta.video_url;
+          if (context.env.DB) {
+            context.env.DB.prepare('UPDATE packages SET video_url = ? WHERE id = ?').bind(gitVideoUrl, d1Pkg.id).run().catch(() => {});
+          }
+        }
+      }
+
       const resolvedGitVideo = extractEmbeddedVideo(
-        d1Pkg.video_url,
-        d1Pkg.video_thumbnail_url,
+        gitVideoUrl,
+        gitVideoThumb,
         d1Pkg.long_desc || d1Pkg.short_desc,
         readme || fallbackReadme
       );
@@ -1130,11 +1147,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let minVersion = upstreamData.min_minetest_version || forClientData?.min_minetest_version || d1Pkg?.min_minetest_version || undefined;
   const maxVersion = upstreamData.max_minetest_version || forClientData?.max_minetest_version || d1Pkg?.max_minetest_version || undefined;
 
-  // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license
+  // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license/video_url
   let probedCdbMeta: CdbJsonMetadata | null = null;
   const needsGitProbe = isLite
     ? !resolvedLicense
-    : (!repoUrl || (finalHardDeps.length === 0 && finalSoftDeps.length === 0) || !resolvedLicense);
+    : Boolean(repoUrl || !resolvedLicense || !d1Pkg?.video_url);
   if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,

@@ -270,11 +270,11 @@ import {
             </div>
           </div>
         } @else {
-          <!-- Equalized Height Grid -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 items-stretch">
+          <!-- Equalized Height Fluid Responsive Grid (Mobile-First: 1 col mobile, 2 cols tablet, 3 cols iPad Pro/laptop, 4-5 cols desktop) -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-5 sm:gap-6 items-stretch">
             @for (pkg of packageService.visiblePackages(); track pkg.id) {
-              <div class="flex justify-center self-stretch">
-                <app-package-card [package]="pkg" class="w-full flex justify-center h-full"></app-package-card>
+              <div class="flex justify-center self-stretch w-full min-w-0">
+                <app-package-card [package]="pkg" class="w-full flex justify-center h-full min-w-0"></app-package-card>
               </div>
             }
           </div>

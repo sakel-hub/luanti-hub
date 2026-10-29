@@ -532,7 +532,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
                 tags = COALESCE(excluded.tags, packages.tags),
                 contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-                downloads_count = MAX(packages.downloads_count, excluded.downloads_count)
+                downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+                video_url = COALESCE(excluded.video_url, packages.video_url),
+                video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url)
             `).bind(
               pkg.id,
               pkg.author,

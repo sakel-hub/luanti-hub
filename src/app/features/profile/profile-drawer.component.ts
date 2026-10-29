@@ -563,22 +563,30 @@ import {
                 </div>
 
                 <div class="pt-1 flex flex-wrap gap-2">
-                  <button type="button" (click)="authService.loginWith('github', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                    <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>
-                    <span>{{ 'profile.linkGithub' | translate }}</span>
-                  </button>
-                  <button type="button" (click)="authService.loginWith('codeberg', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                    <svg lucidePlus class="w-3.5 h-3.5 text-indigo-400"></svg>
-                    <span>{{ 'profile.linkCodeberg' | translate }}</span>
-                  </button>
-                  <button type="button" (click)="authService.loginWith('gitlab', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                    <svg lucidePlus class="w-3.5 h-3.5 text-orange-400"></svg>
-                    <span>{{ 'profile.linkGitlab' | translate }}</span>
-                  </button>
-                  <button type="button" (click)="authService.loginWith('mesehub', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
-                    <svg lucidePlus class="w-3.5 h-3.5 text-emerald-400"></svg>
-                    <span>{{ 'profile.linkMesehub' | translate }}</span>
-                  </button>
+                  @if (!hasProvider('github')) {
+                    <button type="button" (click)="authService.loginWith('github', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>
+                      <span>{{ 'profile.linkGithub' | translate }}</span>
+                    </button>
+                  }
+                  @if (!hasProvider('codeberg')) {
+                    <button type="button" (click)="authService.loginWith('codeberg', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5 text-indigo-400"></svg>
+                      <span>{{ 'profile.linkCodeberg' | translate }}</span>
+                    </button>
+                  }
+                  @if (!hasProvider('gitlab')) {
+                    <button type="button" (click)="authService.loginWith('gitlab', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5 text-orange-400"></svg>
+                      <span>{{ 'profile.linkGitlab' | translate }}</span>
+                    </button>
+                  }
+                  @if (!hasProvider('mesehub')) {
+                    <button type="button" (click)="authService.loginWith('mesehub', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5 text-emerald-400"></svg>
+                      <span>{{ 'profile.linkMesehub' | translate }}</span>
+                    </button>
+                  }
                   <button type="button" (click)="onOpenLinkAccountModal()" class="px-3 py-1.5 rounded-xl glass-btn text-sky-300 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                     <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
                     <span>{{ 'auth.directLoginTitle' | translate }}</span>

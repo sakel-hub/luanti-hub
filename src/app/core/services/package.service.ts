@@ -99,7 +99,7 @@ export class PackageService {
   private readonly repoDirPromiseCache = new Map<string, Promise<Array<{ name: string; download_url?: string }>>>();
   private readonly discoveredReposCache = new Map<
     string,
-    Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub'; fullName: string; repoUrl: string; rawBase: string }>>
+    Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }>>
   >();
   private readonly inFlightDetailsCache = new Map<string, Promise<void>>();
 
@@ -2111,7 +2111,7 @@ export class PackageService {
    * that are guaranteed to exist — avoiding red 404 console errors in Chrome DevTools.
    */
   private async getRepoRootListing(
-    forge: 'github' | 'codeberg' | 'mesehub',
+    forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab',
     fullName: string
   ): Promise<Array<{ name: string; download_url?: string }>> {
     const cacheKey = `${forge}:${fullName.toLowerCase()}`;
@@ -2125,7 +2125,9 @@ export class PackageService {
       ? `https://codeberg.org/api/v1/repos/${fullName}/contents`
       : forge === 'mesehub'
         ? `https://git.minetest.land/api/v1/repos/${fullName}/contents`
-        : `https://api.github.com/repos/${fullName}/contents`;
+        : forge === 'gitlab'
+          ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(fullName)}/repository/tree`
+          : `https://api.github.com/repos/${fullName}/contents`;
 
     const requestPromise = (async () => {
       try {
@@ -2134,7 +2136,7 @@ export class PackageService {
           const data = await res.json();
           if (Array.isArray(data)) {
             const listing = data
-              .filter((item: any) => item && item.name && item.type === 'file')
+              .filter((item: any) => item && item.name && (item.type === 'file' || item.type === 'blob'))
               .map((item: any) => ({
                 name: String(item.name),
                 download_url: item.download_url ? String(item.download_url) : undefined
@@ -2165,7 +2167,7 @@ export class PackageService {
   private discoverConfirmedRepos(
     pkg: LuantiPackage,
     existingRepoUrl?: string
-  ): Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub'; fullName: string; repoUrl: string; rawBase: string }>> {
+  ): Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }>> {
     const pkgCacheKey = (pkg?.id || `${pkg?.author}/${pkg?.name}`).toLowerCase();
     const existingPromise = this.discoveredReposCache.get(pkgCacheKey);
     if (existingPromise) {
@@ -2173,8 +2175,8 @@ export class PackageService {
     }
 
     const promise = (async () => {
-      const results: Array<{ forge: 'github' | 'codeberg' | 'mesehub'; fullName: string; repoUrl: string; rawBase: string }> = [];
-      const pushUnique = (forge: 'github' | 'codeberg' | 'mesehub', fullName: string, repoUrl: string, rawBase: string) => {
+      const results: Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }> = [];
+      const pushUnique = (forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab', fullName: string, repoUrl: string, rawBase: string) => {
         const key = `${forge}:${fullName.toLowerCase()}`;
         if (!results.some(r => `${r.forge}:${r.fullName.toLowerCase()}` === key)) {
           results.push({ forge, fullName, repoUrl, rawBase });
@@ -2193,6 +2195,8 @@ export class PackageService {
               pushUnique('codeberg', fullName, `https://codeberg.org/${fullName}`, `https://codeberg.org/api/v1/repos/${fullName}/raw`);
             } else if (host.includes('git.minetest.land')) {
               pushUnique('mesehub', fullName, `https://git.minetest.land/${fullName}`, `https://git.minetest.land/api/v1/repos/${fullName}/raw`);
+            } else if (host.includes('gitlab.com')) {
+              pushUnique('gitlab', fullName, `https://gitlab.com/${fullName}`, `https://gitlab.com/${fullName}/-/raw/HEAD`);
             } else if (host.includes('github.com')) {
               pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
             }
@@ -2545,14 +2549,31 @@ export class PackageService {
 
     for (const repo of confirmedRepos) {
       const listing = await this.getRepoRootListing(repo.forge, repo.fullName);
-      if (listing.length === 0) continue;
-
       const cdbEntry = listing.find(f => f.name.toLowerCase() === '.cdb.json');
       const confEntry = listing.find(f => confFiles.includes(f.name.toLowerCase()));
       const initLuaEntry = listing.find(f => f.name.toLowerCase() === 'init.lua');
       const dependsTxtEntry = listing.find(f => f.name.toLowerCase() === 'depends.txt');
 
-      if (!cdbEntry && !confEntry && !initLuaEntry && !dependsTxtEntry) {
+      if (listing.length === 0) {
+        // Fallback when GitHub listing API is rate-limited: direct raw probe for .cdb.json
+        try {
+          const directCdbRes = await fetch(`${repo.rawBase}/.cdb.json`);
+          if (directCdbRes.ok) {
+            const directCdbText = await directCdbRes.text();
+            cdbMeta = this.parseCdbJsonText(directCdbText);
+            if (cdbMeta) {
+              resolvedRepoUrl = repo.repoUrl;
+              gitRepoStatus = 'verified';
+              if (cdbMeta.license && !license) license = cdbMeta.license;
+              if (cdbMeta.media_license && !mediaLicense) mediaLicense = cdbMeta.media_license;
+            }
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      if (!cdbMeta && !cdbEntry && !confEntry && !initLuaEntry && !dependsTxtEntry) {
         continue;
       }
 
@@ -2932,8 +2953,8 @@ export class PackageService {
         let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
         let minVersion = data.min_minetest_version || pkg.min_minetest_version || '5.0.0';
 
-        // Probe Git repository metadata when opening full details OR when a package still lacks a license
-        if ((deepFetch || !resolvedLicense) && !hasBundledEdgeResponse) {
+        // Probe Git repository metadata when opening full details OR when a package still lacks a license or video_url
+        if ((deepFetch || !resolvedLicense || !pkg.video_url) && (!hasBundledEdgeResponse || !data.video_url)) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
           if (gitMeta.gitRepoStatus === 'verified') {
             gitRepoStatus = 'verified';
@@ -3251,12 +3272,16 @@ export class PackageService {
             ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=15`
             : repo.forge === 'mesehub'
               ? `https://git.minetest.land/api/v1/repos/${repo.fullName}/releases?limit=15`
-              : `https://api.github.com/repos/${repo.fullName}/releases?per_page=15`;
+              : repo.forge === 'gitlab'
+                ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(repo.fullName)}/releases?per_page=15`
+                : `https://api.github.com/repos/${repo.fullName}/releases?per_page=15`;
           const tagsApi = repo.forge === 'codeberg'
             ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=15`
             : repo.forge === 'mesehub'
               ? `https://git.minetest.land/api/v1/repos/${repo.fullName}/tags?limit=15`
-              : `https://api.github.com/repos/${repo.fullName}/tags?per_page=15`;
+              : repo.forge === 'gitlab'
+                ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(repo.fullName)}/repository/tags?per_page=15`
+                : `https://api.github.com/repos/${repo.fullName}/tags?per_page=15`;
 
           const [relRes, tagsRes] = await Promise.all([
             fetch(relApi).catch(() => null),

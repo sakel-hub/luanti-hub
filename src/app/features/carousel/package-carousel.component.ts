@@ -133,7 +133,7 @@ import {
           class="flex items-stretch gap-4 sm:gap-5 overflow-x-auto px-6 sm:px-10 lg:px-14 py-8 -my-6 no-scrollbar scroll-smooth">
           @for (pkg of packages; track pkg.id; let first = $first; let last = $last) {
             <div class="flex-shrink-0 flex self-stretch">
-              <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last"></app-package-card>
+              <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last" class="flex-shrink-0 w-60 sm:w-68 block"></app-package-card>
             </div>
           }
         </div>

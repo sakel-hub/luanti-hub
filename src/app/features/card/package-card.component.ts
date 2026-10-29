@@ -56,7 +56,7 @@ import {
       [class.origin-left]="isFirst"
       [class.origin-right]="isLast"
       [class.origin-center]="!isFirst && !isLast"
-      class="group relative flex flex-col h-full min-h-[336px] max-h-[364px] flex-shrink-0 w-60 sm:w-68 rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
+      class="group relative flex flex-col h-full min-h-[336px] max-h-[364px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
 
       <!-- Thumbnail with True 16:9 Widescreen Aspect Ratio + Desktop Hover Video Preview -->
       <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950 overflow-hidden">
