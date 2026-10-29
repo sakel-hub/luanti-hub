@@ -271,6 +271,7 @@ export const sk: TranslationDictionary = {
     savedSuccess: 'Profil bol úspešne uložený!',
     unlinkBtn: 'Odpojiť',
     signOut: 'Odhlásiť sa',
+    cancel: 'Zrušiť',
     openReportsTitle: 'Otvorené Hlásenia Komunity',
     moderationQueueTitle: 'Otvorené Hlásenia Komunity',
     noOpenReports: 'Žiadne otvorené hlásenia. Register je čistý!',

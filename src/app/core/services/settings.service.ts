@@ -12,7 +12,6 @@ export class SettingsService {
   readonly preferredEngine = signal<string>('5.9.0');
   readonly favorites = signal<string[]>([]);
   readonly downloadedPackages = signal<Record<string, number>>({});
-  readonly highContrast = signal<boolean>(false);
   readonly notificationsEnabled = signal<boolean>(false);
   readonly notifyModeration = signal<boolean>(true);
   readonly notifyAdminQueue = signal<boolean>(true);
@@ -31,7 +30,6 @@ export class SettingsService {
         localStorage.setItem('lh_preferred_engine', this.preferredEngine());
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
         localStorage.setItem('lh_downloaded_packages', JSON.stringify(this.downloadedPackages()));
-        localStorage.setItem('lh_high_contrast', JSON.stringify(this.highContrast()));
         localStorage.setItem(
           'lh_notification_prefs',
           JSON.stringify({
@@ -42,10 +40,6 @@ export class SettingsService {
           })
         );
         localStorage.setItem('lh_client_id', this.clientId());
-
-        if (typeof document !== 'undefined') {
-          document.documentElement.classList.toggle('high-contrast', this.highContrast());
-        }
       } catch {
         // LocalStorage disabled or quota exceeded
       }
@@ -81,11 +75,6 @@ export class SettingsService {
           );
           this.favorites.set(validFavs);
         }
-      }
-
-      const savedContrast = localStorage.getItem('lh_high_contrast');
-      if (savedContrast) {
-        this.highContrast.set(Boolean(JSON.parse(savedContrast)));
       }
 
       const savedNotifPrefs = localStorage.getItem('lh_notification_prefs');

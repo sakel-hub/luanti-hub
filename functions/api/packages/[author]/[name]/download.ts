@@ -2,6 +2,9 @@ import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
   buildGitBranchArchiveUrl,
+  buildGitTagArchiveUrl,
+  parseGitRepoTarget,
+  normalizeLuantiPackageZip,
   ensureExtendedPackageColumns,
   readEdgeCacheJson,
   writeEdgeCacheJson
@@ -64,19 +67,25 @@ export async function onRequest(context: {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       pkgRecord = await env.DB.prepare(
-        `SELECT id, author_name, name, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+        `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version
          FROM packages
          WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
          LIMIT 1`
       ).bind(packageId, author, name, sanitizedName).first();
 
-      if (!pkgRecord && (!author || author === 'undefined')) {
+      if (!pkgRecord) {
+        const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
         pkgRecord = await env.DB.prepare(
-          `SELECT id, author_name, name, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version
            FROM packages
-           WHERE LOWER(name) = LOWER(?)
+           WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+             AND (
+               LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = LOWER(?)
+               OR ? = ''
+               OR ? = 'undefined'
+             )
            LIMIT 1`
-        ).bind(name).first();
+        ).bind(name, sanitizedName, baseAuthor, author || '', author || '').first();
       }
 
       if (pkgRecord && (pkgRecord.status === 'flagged' || pkgRecord.status === 'delisted')) {
@@ -172,38 +181,162 @@ export async function onRequest(context: {
     });
   }
 
-  // 4. Resolve Out-of-the-Box Ready-to-Drop .zip Release Archive URL
-  // Prefer Git Tags / Releases first, then fallback to default branch for Git packages
+  // 4. Resolve, Verify & Normalize Ready-to-Install Luanti Engine .zip Archive
+  const reqUrl = new URL(request.url, 'https://luantihub.local');
+  const requestedTag = (reqUrl.searchParams.get('tag') || reqUrl.searchParams.get('ref') || '').trim();
+  const queryRelease = (reqUrl.searchParams.get('release') || '').trim();
+
+  const encAuthor = encodeURIComponent(effectiveAuthor);
+  const encName = encodeURIComponent(effectiveName);
+  let resolvedReleaseId =
+    (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
+    (/^\d+$/.test(queryRelease) ? queryRelease : '');
+
+  // Check Cloudflare Edge Cache for already-normalized .zip binary
+  const edgeZipCacheKey = `https://cache.luantihub.internal/__pkg_zip_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(requestedTag || resolvedReleaseId || 'latest')}`;
+  try {
+    const cache = (globalThis as any).caches?.default;
+    if (cache) {
+      const cachedZip = await cache.match(new Request(edgeZipCacheKey, { method: 'GET' }));
+      if (cachedZip && cachedZip.ok) {
+        return cachedZip;
+      }
+    }
+  } catch {
+    // Proceed if Cache API unavailable in test/dev environment
+  }
+
   let d1Releases: any[] = [];
   if (env.DB) {
     try {
       const relRes = await env.DB.prepare(
-        `SELECT version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id ASC`
+        `SELECT id, version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id ASC`
       ).bind(effectivePkgId).all();
       d1Releases = relRes.results || [];
-
-      const taggedRelease = d1Releases.find(
-        (r: any) => r && r.download_url && r.commit_sha !== 'HEAD' && r.version !== 'latest'
-      );
-      if (taggedRelease?.download_url) {
-        return Response.redirect(taggedRelease.download_url, 302);
-      }
     } catch {
-      // Fallback below
+      // Proceed below
     }
   }
 
-  // If this is a Git-submitted package (or has a repo_url in D1), discover Git tags/releases first before falling back to main branch
-  if (pkgRecord && (pkgRecord.provider !== 'contentdb' || pkgRecord.repo_url)) {
+  let upstreamReleaseUrl = '';
+  let effectiveRepoUrl = String(pkgRecord?.repo_url || '').trim();
+  let effectiveType = String(pkgRecord?.type || 'mod').toLowerCase();
+
+  // Fetch ContentDB releases & for-client metadata (cached at Edge, with milcho.org JSON failover)
+  // to discover `repo_url`, release ID, and fallback `.zip` upload URLs when not already in D1
+  const [upstreamReleases, forClient] = await Promise.all([
+    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300).catch(() => null),
+    (!resolvedReleaseId || !effectiveRepoUrl)
+      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300).catch(() => null)
+      : Promise.resolve(null)
+  ]);
+
+  if (Array.isArray(upstreamReleases) && upstreamReleases.length > 0) {
+    const matchedUpstreamRel = resolvedReleaseId
+      ? upstreamReleases.find((r: any) => String(r?.id) === resolvedReleaseId) || upstreamReleases[0]
+      : upstreamReleases[0];
+    if (matchedUpstreamRel) {
+      if (!resolvedReleaseId && matchedUpstreamRel.id) {
+        resolvedReleaseId = String(matchedUpstreamRel.id);
+      }
+      if (typeof matchedUpstreamRel.url === 'string' && matchedUpstreamRel.url.trim()) {
+        const rawUrl = matchedUpstreamRel.url.trim();
+        upstreamReleaseUrl = rawUrl.startsWith('http')
+          ? rawUrl
+          : `https://content.luanti.org${rawUrl.startsWith('/') ? rawUrl : '/' + rawUrl}`;
+      }
+    }
+  }
+
+  if (forClient) {
+    if (!resolvedReleaseId && forClient.release) {
+      resolvedReleaseId = String(forClient.release);
+    }
+    if (!effectiveRepoUrl && typeof forClient.repo === 'string' && forClient.repo.trim()) {
+      effectiveRepoUrl = forClient.repo.trim();
+      if (env.DB && pkgRecord?.id) {
+        env.DB.prepare(`UPDATE packages SET repo_url = ? WHERE LOWER(id) = LOWER(?) AND COALESCE(repo_url, '') = ''`)
+          .bind(effectiveRepoUrl, pkgRecord.id)
+          .run()
+          .catch(() => {});
+      }
+    }
+    if (forClient.type && (!pkgRecord || !pkgRecord.type)) {
+      effectiveType = String(forClient.type).toLowerCase();
+    }
+    if (Array.isArray(forClient.provides) && forClient.provides.length > 1) {
+      effectiveType = 'modpack';
+    }
+  }
+
+  const downloadPath = resolvedReleaseId
+    ? `/packages/${encAuthor}/${encName}/releases/${encodeURIComponent(resolvedReleaseId)}/download/`
+    : `/packages/${encAuthor}/${encName}/download/`;
+  const primaryContentDbDownloadUrl = `https://content.luanti.org${downloadPath}`;
+
+  // Build prioritized candidate .zip URLs (Git-hosted archives FIRST, ContentDB as fallback)
+  const candidateUrls: string[] = [];
+  const seenCandidates = new Set<string>();
+  const addCandidate = (url?: string | null) => {
+    const clean = typeof url === 'string' ? url.trim() : '';
+    if (!clean || !clean.startsWith('http') || seenCandidates.has(clean)) return;
+    // Never add contentdb.milcho.org for binary downloads (it is a static SPA that returns 200 OK index.html)
+    if (clean.includes('contentdb.milcho.org')) return;
+    seenCandidates.add(clean);
+    candidateUrls.push(clean);
+  };
+
+  // If a specific Git tag or branch ref was requested (e.g. from the Releases tab), prioritize it first
+  if (requestedTag) {
+    const matchedD1Tag = d1Releases.find(
+      (r: any) =>
+        r &&
+        r.download_url &&
+        (String(r.tag_name || '').toLowerCase() === requestedTag.toLowerCase() ||
+          String(r.version || '').toLowerCase() === requestedTag.toLowerCase())
+    );
+    if (matchedD1Tag?.download_url) {
+      addCandidate(matchedD1Tag.download_url);
+    }
+    if (effectiveRepoUrl) {
+      const target = parseGitRepoTarget(effectiveRepoUrl, effectiveAuthor, effectiveName);
+      if (target) {
+        addCandidate(buildGitTagArchiveUrl(target.provider, target.host, target.owner, target.repo, requestedTag));
+      }
+      addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, requestedTag));
+    }
+  }
+
+  const taggedRelease = d1Releases.find(
+    (r: any) => r && r.download_url && r.commit_sha !== 'HEAD' && r.version !== 'latest'
+  );
+  if (taggedRelease?.download_url) {
+    addCandidate(taggedRelease.download_url);
+  }
+
+  if (effectiveRepoUrl) {
     try {
       const gitReleases = await fetchGitRepoReleasesAndTags(
-        pkgRecord.repo_url,
+        effectiveRepoUrl,
         effectiveAuthor,
         effectiveName,
-        pkgRecord.min_minetest_version || '5.0.0'
+        pkgRecord?.min_minetest_version || '5.0.0'
       );
-      if (gitReleases.length > 0 && gitReleases[0].download_url) {
-        if (env.DB && pkgRecord.id) {
+      if (gitReleases.length > 0) {
+        if (requestedTag) {
+          const matchedGitRel = gitReleases.find(
+            r =>
+              r.tag_name.toLowerCase() === requestedTag.toLowerCase() ||
+              r.version.toLowerCase() === requestedTag.toLowerCase()
+          );
+          if (matchedGitRel?.download_url) {
+            addCandidate(matchedGitRel.download_url);
+          }
+        }
+        if (gitReleases[0].download_url) {
+          addCandidate(gitReleases[0].download_url);
+        }
+        if (env.DB && pkgRecord?.id) {
           try {
             await env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(pkgRecord.id).run();
             for (const rel of gitReleases) {
@@ -225,90 +358,100 @@ export async function onRequest(context: {
             // Non-blocking D1 sync
           }
         }
-        return Response.redirect(gitReleases[0].download_url, 302);
       }
     } catch {
-      // Fallback to branch archive below
+      // Proceed to branch archive fallbacks
     }
 
-    if (d1Releases.length > 0 && d1Releases[0].download_url) {
-      return Response.redirect(d1Releases[0].download_url, 302);
+    for (const r of d1Releases) {
+      if (r?.download_url) addCandidate(r.download_url);
     }
 
-    if (pkgRecord.repo_url) {
-      const branchZipUrl = buildGitBranchArchiveUrl(
-        pkgRecord.repo_url,
-        effectiveAuthor,
-        effectiveName,
-        pkgRecord.default_branch || 'main'
-      );
-      return Response.redirect(branchZipUrl, 302);
+    // Always include HEAD.zip (auto-resolves default branch whether `main`, `master`, or custom)
+    addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, 'HEAD'));
+    if (pkgRecord?.default_branch && pkgRecord.default_branch !== 'HEAD') {
+      addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, pkgRecord.default_branch));
     }
+    addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, 'main'));
+    addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, 'master'));
   }
 
-  // 5. Resolve exact latest release .zip URL from ContentDB / milcho.org mirror
-  const encAuthor = encodeURIComponent(effectiveAuthor);
-  const encName = encodeURIComponent(effectiveName);
-  let resolvedReleaseId = release && /^\d+$/.test(String(release)) ? String(release) : '';
+  // Fallback to ContentDB release/package download URLs
+  addCandidate(upstreamReleaseUrl);
+  addCandidate(primaryContentDbDownloadUrl);
 
-  if (!resolvedReleaseId) {
-    try {
-      const releases = await fetchUpstreamJsonCached<any[]>(
-        `/packages/${encAuthor}/${encName}/releases/`,
-        300
-      );
-      if (Array.isArray(releases) && releases.length > 0 && releases[0]) {
-        const first = releases[0];
-        if (first.id) {
-          resolvedReleaseId = String(first.id);
-        }
-      }
-    } catch {
-      // Fallback to /for-client/ release ID
-    }
-  }
+  const safeFileName = (effectiveName || 'mod')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '') || 'mod';
 
-  if (!resolvedReleaseId) {
-    try {
-      const forClient = await fetchUpstreamJsonCached<any>(
-        `/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`,
-        300
-      );
-      if (forClient?.release) {
-        resolvedReleaseId = String(forClient.release);
-      }
-    } catch {
-      // Ignore
-    }
-  }
+  const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB threshold for in-memory ZIP normalization
 
-  const downloadPath = resolvedReleaseId
-    ? `/packages/${encAuthor}/${encName}/releases/${encodeURIComponent(resolvedReleaseId)}/download/`
-    : `/packages/${encAuthor}/${encName}/download/`;
-
-  // Probe whether primary ContentDB download endpoint is serving a valid binary/redirect or an HTML maintenance page
-  try {
+  for (const candidateUrl of candidateUrls) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 1800);
-    const primaryRes = await fetch(`https://content.luanti.org${downloadPath}`, {
-      method: 'HEAD',
-      redirect: 'manual',
-      signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)'
+    const timer = setTimeout(() => ctrl.abort(), 6500);
+    try {
+      const res = await fetch(candidateUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)',
+          'Accept': 'application/zip, application/octet-stream, */*'
+        }
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) continue;
+
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
+        continue;
       }
-    });
-    clearTimeout(timer);
-    const ct = (primaryRes.headers.get('content-type') || '').toLowerCase();
-    if (
-      (primaryRes.status === 301 || primaryRes.status === 302 || primaryRes.status === 303 || primaryRes.status === 307 || primaryRes.status === 308) ||
-      (primaryRes.ok && !ct.includes('text/html'))
-    ) {
-      return Response.redirect(`https://content.luanti.org${downloadPath}`, 302);
+
+      const contentLength = Number(res.headers.get('content-length') || 0);
+      if (contentLength > MAX_BUFFER_BYTES) {
+        return Response.redirect(res.url || candidateUrl, 302);
+      }
+
+      const rawBytes = new Uint8Array(await res.arrayBuffer());
+      if (
+        rawBytes.length < 22 ||
+        rawBytes[0] !== 0x50 ||
+        rawBytes[1] !== 0x4b ||
+        (rawBytes[2] !== 0x03 && rawBytes[2] !== 0x05)
+      ) {
+        continue;
+      }
+
+      const normalizedZip = normalizeLuantiPackageZip(rawBytes, safeFileName, effectiveType);
+
+      const zipResponse = new Response(normalizedZip, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${safeFileName}.zip"`,
+          'Content-Length': String(normalizedZip.byteLength),
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=1800, s-maxage=1800'
+        }
+      });
+
+      try {
+        const cache = (globalThis as any).caches?.default;
+        if (cache) {
+          await cache.put(new Request(edgeZipCacheKey, { method: 'GET' }), zipResponse.clone());
+        }
+      } catch {
+        // Non-blocking cache store
+      }
+
+      return zipResponse;
+    } catch {
+      clearTimeout(timer);
     }
-  } catch {
-    // Primary unreachable; fall back to milcho.org mirror below
   }
 
-  return Response.redirect(`https://contentdb.milcho.org${downloadPath}`, 302);
+  // Final fallback for ContentDB-only packages without a Git repository if ContentDB challenged Worker IP
+  return Response.redirect(primaryContentDbDownloadUrl, 302);
 }

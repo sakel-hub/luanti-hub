@@ -95,7 +95,7 @@ import {
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-package-title"
-        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 overflow-y-auto luanti-backdrop">
+        class="z-50 flex items-center justify-center p-0 sm:p-4 overflow-y-auto luanti-modal-backdrop">
 
         <div
           (click)="$event.stopPropagation()"
@@ -1801,43 +1801,15 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   }
 
   isDirectVideoUrl(url?: string): boolean {
-    if (!url) return false;
-    const clean = url.split('?')[0].toLowerCase();
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+    return this.packageService.isDirectVideoUrl(url);
   }
 
   private buildVideoEmbedUrl(rawUrl: string): string | null {
-    try {
-      const u = new URL(rawUrl);
-      const host = u.hostname.toLowerCase();
-      if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-        if (u.pathname.startsWith('/embed/')) {
-          return `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}autoplay=1`;
-        }
-        const v = u.searchParams.get('v');
-        if (v) {
-          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0`;
-        }
-      }
-      if (host === 'youtu.be') {
-        const id = u.pathname.split('/').filter(Boolean)[0];
-        if (id) {
-          return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0`;
-        }
-      }
-      if (host.includes('vimeo.com')) {
-        const id = u.pathname.split('/').filter(Boolean).pop();
-        if (id && /^\d+$/.test(id)) {
-          return `https://player.vimeo.com/video/${id}?autoplay=1`;
-        }
-      }
-      if (u.pathname.includes('/videos/watch/')) {
-        return rawUrl.replace('/videos/watch/', '/videos/embed/') + (rawUrl.includes('?') ? '&autoplay=1' : '?autoplay=1');
-      }
-      return rawUrl;
-    } catch {
-      return null;
-    }
+    return this.packageService.buildVideoEmbedUrl(rawUrl, {
+      autoplay: true,
+      mute: false,
+      minimalControls: false
+    });
   }
 
   playModalVideo(): void {

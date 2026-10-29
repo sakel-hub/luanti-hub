@@ -19,6 +19,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
   const staticUrls = [
     { loc: `${origin}/`, priority: '1.0', changefreq: 'hourly' },
+    { loc: `${origin}/submit`, priority: '0.8', changefreq: 'weekly' },
+    { loc: `${origin}/setup`, priority: '0.8', changefreq: 'monthly' },
     { loc: `${origin}/?type=game`, priority: '0.9', changefreq: 'daily' },
     { loc: `${origin}/?type=mod`, priority: '0.9', changefreq: 'daily' },
     { loc: `${origin}/?type=txp`, priority: '0.9', changefreq: 'daily' },

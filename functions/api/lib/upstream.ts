@@ -147,7 +147,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache || !Array.isArray(cacheKeyPaths)) return;
 
-  const expandedUrls = new Set<string>();
+  const expandedUrls = new Set<string>([
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1'
+  ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
@@ -294,7 +296,7 @@ export async function syncAuthorContentDbPackages(
 ): Promise<any[]> {
   try {
     await ensureExtendedPackageColumns(db);
-    const cdbRes = await fetchWithFailover(`/packages/?author=${encodeURIComponent(username)}`);
+    const cdbRes = await fetchWithFailover(`/packages/?author=${encodeURIComponent(username)}&fmt=vcs`);
     if (!cdbRes.ok) return [];
     const cdbPackages = await cdbRes.json() as any[];
     if (!Array.isArray(cdbPackages)) return [];
@@ -322,6 +324,7 @@ export async function syncAuthorContentDbPackages(
           author_id = excluded.author_id,
           title = excluded.title,
           short_desc = excluded.short_desc,
+          repo_url = COALESCE(NULLIF(excluded.repo_url, ''), packages.repo_url),
           thumbnail_url = COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url),
           contentdb_downloads = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads),
           downloads_count = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads) + COALESCE(packages.luantihub_downloads, 0),
@@ -524,22 +527,424 @@ export function buildGitBranchArchiveUrl(
   repoUrl?: string | null,
   fallbackOwner?: string,
   fallbackRepo?: string,
-  branch = 'main',
+  branch = 'HEAD',
   _providerHint?: string
 ): string {
   const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
-  const safeBranch = encodeURIComponent(branch || 'main');
+  const rawBranch = (branch || 'HEAD').trim();
+  const isHead = rawBranch.toUpperCase() === 'HEAD';
+  const safeBranch = encodeURIComponent(rawBranch);
   if (!target) {
-    return `https://github.com/${encodeURIComponent(fallbackOwner || '')}/${encodeURIComponent(fallbackRepo || '')}/archive/refs/heads/${safeBranch}.zip`;
+    const encOwner = encodeURIComponent(fallbackOwner || '');
+    const encRepo = encodeURIComponent(fallbackRepo || '');
+    return isHead
+      ? `https://github.com/${encOwner}/${encRepo}/archive/HEAD.zip`
+      : `https://github.com/${encOwner}/${encRepo}/archive/refs/heads/${safeBranch}.zip`;
   }
   const { provider, host, owner, repo } = target;
   if (provider === 'codeberg') {
-    return `https://${host}/${owner}/${repo}/archive/${safeBranch}.zip`;
+    return `https://${host}/${owner}/${repo}/archive/${isHead ? 'HEAD' : safeBranch}.zip`;
   }
   if (provider === 'gitlab') {
-    return `https://${host}/${owner}/${repo}/-/archive/${safeBranch}/${repo}-${safeBranch}.zip`;
+    const projectPath = encodeURIComponent(`${owner}/${repo}`);
+    return isHead
+      ? `https://${host}/api/v4/projects/${projectPath}/repository/archive.zip`
+      : `https://${host}/api/v4/projects/${projectPath}/repository/archive.zip?sha=${safeBranch}`;
   }
-  return `https://github.com/${owner}/${repo}/archive/refs/heads/${safeBranch}.zip`;
+  return isHead
+    ? `https://github.com/${owner}/${repo}/archive/HEAD.zip`
+    : `https://github.com/${owner}/${repo}/archive/refs/heads/${safeBranch}.zip`;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function computeCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Zero-recompression ZIP normalizer for the Luanti C++ Engine (`pkgmgr.lua` / `extract_zip` / `get_base_folder`).
+ * - Verifies EOCD & Central Directory headers.
+ * - Locates the true Luanti package root inside the archive (`game.conf`, `modpack.conf`, `modpack.txt`,
+ *   `mod.conf`, `init.lua`, `texture_pack.conf`), unwrapping nested subdirectories automatically.
+ * - Detects multi-mod repositories (modpacks) missing `modpack.conf` and synthesizes a valid `modpack.conf`.
+ * - Detects texture packs missing `texture_pack.conf` and synthesizes a valid `texture_pack.conf`.
+ * - Rebases all file paths cleanly under `<sanitizedPackageName>/` and strips `.git/`, `.github/`, `.gitlab/` CI clutter.
+ * - Converts streaming data-descriptor Local File Headers (bit 3 `0x0008` used by GitHub/GitLab `git archive`)
+ *   into explicit pre-sized Local File Headers for maximum compatibility with Luanti's `minizip` extractor.
+ */
+export function normalizeLuantiPackageZip(
+  zipBytes: Uint8Array,
+  packageName: string,
+  packageType: string = 'mod'
+): Uint8Array {
+  if (!zipBytes || zipBytes.length < 22) return zipBytes;
+  if (zipBytes[0] !== 0x50 || zipBytes[1] !== 0x4b) return zipBytes;
+
+  const safePkgName = (packageName || 'mod')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '') || 'mod';
+
+  try {
+    const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
+
+    // 1. Locate End of Central Directory (EOCD) signature 0x06054b50
+    let eocdPos = -1;
+    const minEocdPos = Math.max(0, zipBytes.length - 65557);
+    for (let pos = zipBytes.length - 22; pos >= minEocdPos; pos--) {
+      if (view.getUint32(pos, true) === 0x06054b50) {
+        eocdPos = pos;
+        break;
+      }
+    }
+    if (eocdPos < 0) return zipBytes;
+
+    const totalEntries = view.getUint16(eocdPos + 10, true);
+    const cdSize = view.getUint32(eocdPos + 12, true);
+    const cdOffset = view.getUint32(eocdPos + 16, true);
+
+    // Bail out on ZIP64 or invalid offsets
+    if (totalEntries === 0xffff || cdOffset === 0xffffffff || cdOffset + cdSize > eocdPos) {
+      return zipBytes;
+    }
+
+    interface ParsedZipEntry {
+      path: string;
+      versionMadeBy: number;
+      versionNeeded: number;
+      flags: number;
+      compressionMethod: number;
+      dosTime: number;
+      dosDate: number;
+      crc32: number;
+      compressedSize: number;
+      uncompressedSize: number;
+      externalAttrs: number;
+      compressedData: Uint8Array;
+    }
+
+    const entries: ParsedZipEntry[] = [];
+    const decoder = new TextDecoder();
+    let ptr = cdOffset;
+
+    for (let i = 0; i < totalEntries; i++) {
+      if (ptr + 46 > eocdPos) return zipBytes;
+      if (view.getUint32(ptr, true) !== 0x02014b50) return zipBytes;
+
+      const versionMadeBy = view.getUint16(ptr + 4, true);
+      const versionNeeded = view.getUint16(ptr + 6, true);
+      const flags = view.getUint16(ptr + 8, true);
+      const compressionMethod = view.getUint16(ptr + 10, true);
+      const dosTime = view.getUint16(ptr + 12, true);
+      const dosDate = view.getUint16(ptr + 14, true);
+      const crc32 = view.getUint32(ptr + 16, true);
+      const compressedSize = view.getUint32(ptr + 20, true);
+      const uncompressedSize = view.getUint32(ptr + 24, true);
+      const fileNameLen = view.getUint16(ptr + 28, true);
+      const extraLen = view.getUint16(ptr + 30, true);
+      const commentLen = view.getUint16(ptr + 32, true);
+      const externalAttrs = view.getUint32(ptr + 38, true);
+      const localHeaderOffset = view.getUint32(ptr + 42, true);
+
+      if (compressionMethod !== 0 && compressionMethod !== 8) {
+        return zipBytes;
+      }
+
+      const rawNameBytes = zipBytes.subarray(ptr + 46, ptr + 46 + fileNameLen);
+      const normalizedPath = decoder.decode(rawNameBytes).replace(/\\/g, '/').replace(/^\/+/, '');
+      ptr += 46 + fileNameLen + extraLen + commentLen;
+
+      if (!normalizedPath || normalizedPath.endsWith('/')) {
+        continue;
+      }
+
+      if (localHeaderOffset + 30 > cdOffset) return zipBytes;
+      if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) return zipBytes;
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      const dataEnd = dataStart + compressedSize;
+      if (dataEnd > cdOffset) return zipBytes;
+
+      entries.push({
+        path: normalizedPath,
+        versionMadeBy,
+        versionNeeded,
+        flags,
+        compressionMethod,
+        dosTime,
+        dosDate,
+        crc32,
+        compressedSize,
+        uncompressedSize,
+        externalAttrs,
+        compressedData: zipBytes.subarray(dataStart, dataEnd)
+      });
+    }
+
+    if (entries.length === 0) return zipBytes;
+
+    // 2. Identify the Luanti package root directory prefix inside the ZIP
+    const ROOT_MARKERS = new Set([
+      'game.conf',
+      'modpack.conf',
+      'modpack.txt',
+      'mod.conf',
+      'init.lua',
+      'texture_pack.conf'
+    ]);
+
+    const markerDirs: Array<{ dir: string; depth: number; file: string }> = [];
+    for (const entry of entries) {
+      const lastSlash = entry.path.lastIndexOf('/');
+      const baseName = (lastSlash >= 0 ? entry.path.slice(lastSlash + 1) : entry.path).toLowerCase();
+      const dirPrefix = lastSlash >= 0 ? entry.path.slice(0, lastSlash + 1) : '';
+      if (ROOT_MARKERS.has(baseName)) {
+        const depth = dirPrefix ? dirPrefix.split('/').filter(Boolean).length : 0;
+        markerDirs.push({ dir: dirPrefix, depth, file: baseName });
+      }
+    }
+
+    let basePrefix = '';
+    let needsSynthesizedModpackConf = false;
+
+    if (markerDirs.length > 0) {
+      markerDirs.sort((a, b) => a.depth - b.depth);
+      const minDepth = markerDirs[0].depth;
+      const shallowestDirs = Array.from(new Set(markerDirs.filter(m => m.depth === minDepth).map(m => m.dir)));
+
+      if (shallowestDirs.length === 1) {
+        basePrefix = shallowestDirs[0];
+      } else if (minDepth >= 1) {
+        // Multiple sibling mod folders at the same depth (e.g. `repo-main/mod_a/init.lua`, `repo-main/mod_b/init.lua`) -> Modpack!
+        const firstParts = shallowestDirs[0].split('/').filter(Boolean);
+        const parentPrefix = firstParts.length > 1 ? firstParts.slice(0, -1).join('/') + '/' : '';
+        const allShareParent = shallowestDirs.every(d => d.startsWith(parentPrefix));
+        basePrefix = allShareParent ? parentPrefix : '';
+        needsSynthesizedModpackConf = true;
+      }
+    } else {
+      // No standard marker file found (e.g. texture pack without texture_pack.conf): find common single top-level directory
+      const topFolders = new Set<string>();
+      let hasRootFiles = false;
+      for (const entry of entries) {
+        const slashIdx = entry.path.indexOf('/');
+        if (slashIdx > 0) {
+          topFolders.add(entry.path.slice(0, slashIdx + 1));
+        } else {
+          hasRootFiles = true;
+        }
+      }
+      if (!hasRootFiles && topFolders.size === 1) {
+        basePrefix = Array.from(topFolders)[0];
+      }
+    }
+
+    // 3. Filter and rebase entries under `<safePkgName>/`
+    const encoder = new TextEncoder();
+    const rebasedEntries: Array<{
+      newPathBytes: Uint8Array;
+      versionMadeBy: number;
+      versionNeeded: number;
+      flags: number;
+      compressionMethod: number;
+      dosTime: number;
+      dosDate: number;
+      crc32: number;
+      compressedSize: number;
+      uncompressedSize: number;
+      externalAttrs: number;
+      compressedData: Uint8Array;
+    }> = [];
+
+    const existingRelativeFiles = new Set<string>();
+
+    for (const entry of entries) {
+      if (basePrefix && !entry.path.startsWith(basePrefix)) continue;
+      const relPath = (basePrefix ? entry.path.slice(basePrefix.length) : entry.path).replace(/^\/+/, '');
+      if (!relPath) continue;
+
+      const lowerRel = relPath.toLowerCase();
+      if (
+        lowerRel === '.git' ||
+        lowerRel.startsWith('.git/') ||
+        lowerRel.startsWith('.github/') ||
+        lowerRel.startsWith('.gitlab/') ||
+        lowerRel === '.gitignore' ||
+        lowerRel === '.gitattributes' ||
+        lowerRel === '.gitmodules' ||
+        lowerRel === '.luacheckrc'
+      ) {
+        continue;
+      }
+
+      existingRelativeFiles.add(lowerRel);
+      const finalPath = `${safePkgName}/${relPath}`;
+      rebasedEntries.push({
+        newPathBytes: encoder.encode(finalPath),
+        versionMadeBy: entry.versionMadeBy || 0x0314,
+        versionNeeded: Math.min(entry.versionNeeded || 20, 20),
+        // Clear bit 3 (0x0008 data descriptor) since sizes & CRC32 are written directly into the Local File Header
+        flags: (entry.flags & ~0x0008) | 0x0800,
+        compressionMethod: entry.compressionMethod,
+        dosTime: entry.dosTime,
+        dosDate: entry.dosDate,
+        crc32: entry.crc32,
+        compressedSize: entry.compressedSize,
+        uncompressedSize: entry.uncompressedSize,
+        externalAttrs: entry.externalAttrs || 0x81a40000,
+        compressedData: entry.compressedData
+      });
+    }
+
+    if (rebasedEntries.length === 0) return zipBytes;
+
+    // 4. Synthesize missing Luanti engine marker files when required by `pkgmgr.get_base_folder`
+    const addSynthesizedFile = (relFileName: string, contentText: string) => {
+      const dataBytes = encoder.encode(contentText);
+      const pathBytes = encoder.encode(`${safePkgName}/${relFileName}`);
+      rebasedEntries.unshift({
+        newPathBytes: pathBytes,
+        versionMadeBy: 0x0314,
+        versionNeeded: 20,
+        flags: 0x0800,
+        compressionMethod: 0, // Store
+        dosTime: 0,
+        dosDate: 0x5421,
+        crc32: computeCrc32(dataBytes),
+        compressedSize: dataBytes.length,
+        uncompressedSize: dataBytes.length,
+        externalAttrs: 0x81a40000, // -rw-r--r-- (0100644 << 16)
+        compressedData: dataBytes
+      });
+    };
+
+    if (
+      (needsSynthesizedModpackConf || packageType === 'modpack') &&
+      !existingRelativeFiles.has('modpack.conf') &&
+      !existingRelativeFiles.has('modpack.txt') &&
+      !existingRelativeFiles.has('init.lua')
+    ) {
+      addSynthesizedFile('modpack.conf', `name = ${safePkgName}\n`);
+    } else if (
+      packageType === 'txp' &&
+      !existingRelativeFiles.has('texture_pack.conf') &&
+      !existingRelativeFiles.has('mod.conf') &&
+      !existingRelativeFiles.has('init.lua') &&
+      !existingRelativeFiles.has('game.conf')
+    ) {
+      addSynthesizedFile('texture_pack.conf', `name = ${safePkgName}\n`);
+    } else if (
+      existingRelativeFiles.has('init.lua') &&
+      !existingRelativeFiles.has('mod.conf') &&
+      !existingRelativeFiles.has('modpack.conf') &&
+      !existingRelativeFiles.has('game.conf')
+    ) {
+      addSynthesizedFile('mod.conf', `name = ${safePkgName}\n`);
+    }
+
+    // Prepend explicit top-level `<safePkgName>/` directory entry (`drwxr-xr-x` / DOS directory bit 0x10)
+    rebasedEntries.unshift({
+      newPathBytes: encoder.encode(`${safePkgName}/`),
+      versionMadeBy: 0x0314,
+      versionNeeded: 20,
+      flags: 0x0800,
+      compressionMethod: 0,
+      dosTime: 0,
+      dosDate: 0x5421,
+      crc32: 0,
+      compressedSize: 0,
+      uncompressedSize: 0,
+      externalAttrs: 0x41ed0010,
+      compressedData: new Uint8Array(0)
+    });
+
+    // 5. Calculate exact output buffer size and assemble normalized ZIP
+    let localSectionSize = 0;
+    let cdSectionSize = 0;
+    for (const item of rebasedEntries) {
+      localSectionSize += 30 + item.newPathBytes.length + item.compressedSize;
+      cdSectionSize += 46 + item.newPathBytes.length;
+    }
+
+    const totalOutSize = localSectionSize + cdSectionSize + 22;
+    const outBuf = new Uint8Array(totalOutSize);
+    const outView = new DataView(outBuf.buffer);
+
+    let localOffset = 0;
+    const localOffsets: number[] = [];
+
+    for (const item of rebasedEntries) {
+      localOffsets.push(localOffset);
+      outView.setUint32(localOffset, 0x04034b50, true);
+      outView.setUint16(localOffset + 4, item.versionNeeded, true);
+      outView.setUint16(localOffset + 6, item.flags, true);
+      outView.setUint16(localOffset + 8, item.compressionMethod, true);
+      outView.setUint16(localOffset + 10, item.dosTime, true);
+      outView.setUint16(localOffset + 12, item.dosDate, true);
+      outView.setUint32(localOffset + 14, item.crc32, true);
+      outView.setUint32(localOffset + 18, item.compressedSize, true);
+      outView.setUint32(localOffset + 22, item.uncompressedSize, true);
+      outView.setUint16(localOffset + 26, item.newPathBytes.length, true);
+      outView.setUint16(localOffset + 28, 0, true); // extra field length = 0
+      outBuf.set(item.newPathBytes, localOffset + 30);
+      outBuf.set(item.compressedData, localOffset + 30 + item.newPathBytes.length);
+      localOffset += 30 + item.newPathBytes.length + item.compressedSize;
+    }
+
+    let cdWritePos = localOffset;
+    for (let i = 0; i < rebasedEntries.length; i++) {
+      const item = rebasedEntries[i];
+      outView.setUint32(cdWritePos, 0x02014b50, true);
+      outView.setUint16(cdWritePos + 4, item.versionMadeBy, true);
+      outView.setUint16(cdWritePos + 6, item.versionNeeded, true);
+      outView.setUint16(cdWritePos + 8, item.flags, true);
+      outView.setUint16(cdWritePos + 10, item.compressionMethod, true);
+      outView.setUint16(cdWritePos + 12, item.dosTime, true);
+      outView.setUint16(cdWritePos + 14, item.dosDate, true);
+      outView.setUint32(cdWritePos + 16, item.crc32, true);
+      outView.setUint32(cdWritePos + 20, item.compressedSize, true);
+      outView.setUint32(cdWritePos + 24, item.uncompressedSize, true);
+      outView.setUint16(cdWritePos + 28, item.newPathBytes.length, true);
+      outView.setUint16(cdWritePos + 30, 0, true); // extra length
+      outView.setUint16(cdWritePos + 32, 0, true); // comment length
+      outView.setUint16(cdWritePos + 34, 0, true); // disk number
+      outView.setUint16(cdWritePos + 36, 0, true); // internal attrs
+      outView.setUint32(cdWritePos + 38, item.externalAttrs, true);
+      outView.setUint32(cdWritePos + 42, localOffsets[i], true);
+      outBuf.set(item.newPathBytes, cdWritePos + 46);
+      cdWritePos += 46 + item.newPathBytes.length;
+    }
+
+    // Write End of Central Directory (EOCD)
+    outView.setUint32(cdWritePos, 0x06054b50, true);
+    outView.setUint16(cdWritePos + 4, 0, true);
+    outView.setUint16(cdWritePos + 6, 0, true);
+    outView.setUint16(cdWritePos + 8, rebasedEntries.length, true);
+    outView.setUint16(cdWritePos + 10, rebasedEntries.length, true);
+    outView.setUint32(cdWritePos + 12, cdSectionSize, true);
+    outView.setUint32(cdWritePos + 16, localOffset, true);
+    outView.setUint16(cdWritePos + 20, 0, true);
+
+    return outBuf;
+  } catch {
+    return zipBytes;
+  }
 }
 
 export function buildGitTagArchiveUrl(

@@ -148,8 +148,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
-    const toFetchUpstream = rawIds.filter(id => missingIds.has(id.toLowerCase())).slice(0, 16);
+    const toFetchUpstream = rawIds.filter(id => missingIds.has(id.toLowerCase())).slice(0, 24);
     if (toFetchUpstream.length > 0) {
+      const persistStatements: any[] = [];
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
@@ -162,8 +163,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (!detail) return;
 
           const existing = hydratedMap[lowerKey] || {};
-          const lic = detail.license || detail.media_license || existing.license || '';
-          const mediaLic = detail.media_license || detail.license || existing.media_license || '';
+          let lic = detail.license || detail.media_license || existing.license || '';
+          let mediaLic = detail.media_license || detail.license || existing.media_license || '';
           const detailTags = Array.isArray(detail.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : (existing.tags || []);
@@ -171,9 +172,43 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const lhDl = Number(existing.luantihub_downloads || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
           const minVer = detail.min_minetest_version || existing.min_minetest_version || '5.0.0';
+          const repoUrl = detail.repo || detail.repo_url || existing.repo_url || '';
+          let videoUrl = detail.video_url || existing.video_url || undefined;
 
+          if (!videoUrl && repoUrl) {
+            try {
+              const u = new URL(repoUrl);
+              const parts = u.pathname.split('/').filter(Boolean);
+              if (parts.length >= 2) {
+                const rOwner = parts[0];
+                const rName = parts[1].replace(/\.git$/i, '');
+                const rawCdbUrl = u.hostname.includes('codeberg.org')
+                  ? `https://codeberg.org/api/v1/repos/${rOwner}/${rName}/raw/.cdb.json`
+                  : u.hostname.includes('gitlab.com')
+                    ? `https://gitlab.com/${rOwner}/${rName}/-/raw/HEAD/.cdb.json`
+                    : `https://raw.githubusercontent.com/${rOwner}/${rName}/HEAD/.cdb.json`;
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), 1400);
+                const cdbRes = await fetch(rawCdbUrl, { signal: ctrl.signal }).catch(() => null);
+                clearTimeout(timer);
+                if (cdbRes && cdbRes.ok) {
+                  const cdbJson: any = await cdbRes.json().catch(() => null);
+                  if (cdbJson && typeof cdbJson === 'object') {
+                    const cdbVid = String(cdbJson.video_url || cdbJson.video || '').trim();
+                    if (cdbVid.startsWith('http')) videoUrl = cdbVid;
+                    if (!lic && cdbJson.license) lic = String(cdbJson.license).trim();
+                    if (!mediaLic && cdbJson.media_license) mediaLic = String(cdbJson.media_license).trim();
+                  }
+                }
+              }
+            } catch {
+              // Ignore raw .cdb.json probe failure
+            }
+          }
+
+          const canonicalId = `${detail.author || author}/${detail.name || name}`;
           hydratedMap[lowerKey] = {
-            id: `${detail.author || author}/${detail.name || name}`,
+            id: canonicalId,
             license: lic,
             media_license: mediaLic,
             min_minetest_version: minVer,
@@ -182,12 +217,67 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             downloads: totalDl,
             tags: detailTags.length > 0 ? detailTags : undefined,
             download_size: typeof detail.download_size === 'number' ? detail.download_size : undefined,
-            video_url: detail.video_url || existing.video_url || undefined,
+            video_url: videoUrl,
             video_thumbnail_url: detail.video_thumbnail_url || existing.video_thumbnail_url || undefined,
-            repo_url: detail.repo || detail.repo_url || existing.repo_url || undefined
+            repo_url: repoUrl || undefined
           };
+
+          if (env.DB && (lic || cdbDl > 0 || videoUrl)) {
+            const pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail.type) ? detail.type : 'mod';
+            persistStatements.push(
+              env.DB.prepare(`
+                INSERT INTO packages (
+                  id, author_name, name, title, type, short_desc, repo_url, provider,
+                  thumbnail_url, banner_url, license, media_license, min_minetest_version,
+                  tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
+                  media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
+                  min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
+                  tags = COALESCE(excluded.tags, packages.tags),
+                  contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
+                  downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+                  video_url = COALESCE(excluded.video_url, packages.video_url),
+                  video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
+                  repo_url = CASE WHEN COALESCE(packages.repo_url, '') = '' THEN excluded.repo_url ELSE packages.repo_url END
+              `).bind(
+                canonicalId,
+                String(detail.author || author).trim(),
+                String(detail.name || name).trim(),
+                String(detail.title || name).trim(),
+                pkgType,
+                detail.short_desc ? String(detail.short_desc).slice(0, 500) : null,
+                repoUrl,
+                detail.thumbnail || null,
+                detail.screenshots?.[0]?.url || detail.screenshots?.[0] || null,
+                lic,
+                mediaLic,
+                minVer,
+                detailTags.length > 0 ? JSON.stringify(detailTags) : null,
+                totalDl,
+                cdbDl,
+                videoUrl || null,
+                detail.video_thumbnail_url || null
+              )
+            );
+          }
         })
       );
+
+      if (env.DB && persistStatements.length > 0) {
+        try {
+          if (typeof env.DB.batch === 'function') {
+            await env.DB.batch(persistStatements);
+          } else {
+            for (const stmt of persistStatements) {
+              await stmt.run().catch(() => {});
+            }
+          }
+        } catch {
+          // Non-fatal persistence error
+        }
+      }
     }
   }
 

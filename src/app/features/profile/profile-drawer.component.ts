@@ -60,7 +60,7 @@ import {
         role="dialog"
         aria-modal="true"
         aria-labelledby="profile-drawer-title"
-        class="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex justify-end luanti-backdrop">
+        class="z-50 flex justify-end luanti-modal-backdrop">
 
         <div
           (click)="$event.stopPropagation()"

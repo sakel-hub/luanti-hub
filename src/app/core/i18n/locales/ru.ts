@@ -271,6 +271,7 @@ export const ru: TranslationDictionary = {
     savedSuccess: 'Профиль успешно обновлен!',
     unlinkBtn: 'Отвязать',
     signOut: 'Выйти',
+    cancel: 'Отмена',
     openReportsTitle: 'Открытые жалобы сообщества',
     moderationQueueTitle: 'Открытые жалобы сообщества',
     noOpenReports: 'Открытых жалоб нет. Реестр чист!',

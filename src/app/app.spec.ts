@@ -15,6 +15,7 @@ import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
+import { HeaderComponent } from './features/header/header.component';
 import { PwaService } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
@@ -1080,5 +1081,191 @@ description = Mob animation and spawning framework.
       packages: []
     });
     expect(comp.canDeleteReview(sampleReview)).toBe(true);
+  });
+
+  it('should support modpack.conf without false-positive broken_404 status and centralize video embed URL building', async () => {
+    const pkgService = TestBed.inject(PackageService) as any;
+    const i18n = TestBed.inject(TranslationService);
+
+    for (const locale of ['en', 'sk', 'de', 'es', 'fr', 'ru'] as const) {
+      i18n.setLocale(locale);
+      const val = i18n.translate('profile.cancel');
+      expect(val).toBeTruthy();
+      expect(val).not.toBe('profile.cancel');
+    }
+    i18n.setLocale('en');
+
+    // Centralized DRY video embed helper supports YouTube watch/shorts/live, youtu.be, PeerTube /w/, and Vimeo
+    expect(pkgService.buildVideoEmbedUrl('https://www.youtube.com/shorts/dQw4w9WgXcQ', { minimalControls: true }))
+      .toContain('youtube-nocookie.com/embed/dQw4w9WgXcQ');
+    expect(pkgService.buildVideoEmbedUrl('https://peertube.example/w/abc123xyz', { minimalControls: false }))
+      .toContain('https://peertube.example/videos/embed/abc123xyz?autoplay=1');
+    expect(pkgService.isDirectVideoUrl('https://cdn.example.com/preview.webm?v=1')).toBe(true);
+
+    // Simulate a modpack repo (like APercy/automobiles_pack) whose root has modpack.conf and README.md
+    pkgService.repoDirCache.set('github:apercy/automobiles_pack', [
+      { name: 'modpack.conf' },
+      { name: 'README.md' }
+    ]);
+    const modpackPkg = pkgService.normalizePackage({
+      id: 'APercy/automobiles_pack',
+      author: 'APercy',
+      name: 'automobiles_pack',
+      title: 'Automobiles Pack',
+      type: 'mod',
+      repo_url: 'https://github.com/APercy/automobiles_pack'
+    });
+    const meta = await pkgService.probeGitRepoMetadata(
+      modpackPkg,
+      'https://github.com/APercy/automobiles_pack',
+      false
+    );
+    expect(meta.gitRepoStatus).toBe('verified');
+    expect(meta.repoUrl).toBe('https://github.com/APercy/automobiles_pack');
+  });
+
+  it('should normalize Git and ContentDB .zip archives into Luanti Engine pkgmgr-compliant structure and resolve HEAD.zip urls', async () => {
+    const { buildGitBranchArchiveUrl, normalizeLuantiPackageZip } = await import('../../functions/api/lib/upstream');
+
+    expect(buildGitBranchArchiveUrl('https://github.com/sakel-hub/waysigns', 'SaKeL', 'waysigns', 'HEAD'))
+      .toBe('https://github.com/sakel-hub/waysigns/archive/HEAD.zip');
+    expect(buildGitBranchArchiveUrl('https://codeberg.org/sakel-hub/waysigns', 'SaKeL', 'waysigns', 'HEAD'))
+      .toBe('https://codeberg.org/sakel-hub/waysigns/archive/HEAD.zip');
+    expect(buildGitBranchArchiveUrl('https://gitlab.com/sakel-hub/waysigns', 'SaKeL', 'waysigns', 'HEAD'))
+      .toBe('https://gitlab.com/api/v4/projects/sakel-hub%2Fwaysigns/repository/archive.zip');
+
+    // Helper to build a minimal valid ZIP with arbitrary file paths and streaming bit 0x0008 set
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const buildTestZip = (files: Array<{ path: string; content: string }>, streamingFlags = true): Uint8Array => {
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let offset = 0;
+
+      for (const f of files) {
+        const nameBytes = encoder.encode(f.path);
+        const dataBytes = encoder.encode(f.content);
+        const localHeader = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lv = new DataView(localHeader.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);
+        lv.setUint16(6, streamingFlags ? 0x0008 : 0, true);
+        lv.setUint16(8, 0, true); // Store
+        lv.setUint32(14, 0x12345678, true);
+        lv.setUint32(18, streamingFlags ? 0 : dataBytes.length, true);
+        lv.setUint32(22, streamingFlags ? 0 : dataBytes.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        lv.setUint16(28, 0, true);
+        localHeader.set(nameBytes, 30);
+        localHeader.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(localHeader);
+
+        const cdHeader = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(cdHeader.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint16(8, streamingFlags ? 0x0008 : 0, true);
+        cv.setUint16(10, 0, true);
+        cv.setUint32(16, 0x12345678, true);
+        cv.setUint32(20, dataBytes.length, true);
+        cv.setUint32(24, dataBytes.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        cdHeader.set(nameBytes, 46);
+        cdParts.push(cdHeader);
+
+        offset += localHeader.length;
+      }
+
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, files.length, true);
+      ev.setUint16(10, files.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, offset, true);
+
+      const out = new Uint8Array(offset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const listZipPaths = (zip: Uint8Array): string[] => {
+      const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+      let eocdPos = -1;
+      for (let p = zip.length - 22; p >= 0; p--) {
+        if (v.getUint32(p, true) === 0x06054b50) {
+          eocdPos = p;
+          break;
+        }
+      }
+      const count = v.getUint16(eocdPos + 10, true);
+      let ptr = v.getUint32(eocdPos + 16, true);
+      const paths: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const nLen = v.getUint16(ptr + 28, true);
+        const eLen = v.getUint16(ptr + 30, true);
+        const cLen = v.getUint16(ptr + 32, true);
+        paths.push(decoder.decode(zip.subarray(ptr + 46, ptr + 46 + nLen)));
+        ptr += 46 + nLen + eLen + cLen;
+      }
+      return paths;
+    };
+
+    // 1. Test WaySigns-style Git archive with nested folder + CI clutter + missing mod.conf
+    const rawModZip = buildTestZip([
+      { path: 'waysigns-HEAD/.github/workflows/luacheck.yml', content: 'name: CI' },
+      { path: 'waysigns-HEAD/.gitignore', content: '*.swp' },
+      { path: 'waysigns-HEAD/init.lua', content: 'core.register_node("waysigns:sign", {})' },
+      { path: 'waysigns-HEAD/textures/waysigns_bg.png', content: 'PNG' }
+    ]);
+
+    const normalizedModZip = normalizeLuantiPackageZip(rawModZip, 'waysigns', 'mod');
+    const modPaths = listZipPaths(normalizedModZip);
+    expect(modPaths[0]).toBe('waysigns/');
+    expect(modPaths).toContain('waysigns/mod.conf');
+    expect(modPaths).toContain('waysigns/init.lua');
+    expect(modPaths).toContain('waysigns/textures/waysigns_bg.png');
+    expect(modPaths.some(p => p.includes('.github') || p.includes('.gitignore'))).toBe(false);
+
+    // Verify streaming bit 0x0008 is cleared in Local File Header so minizip always sees explicit sizes
+    const secondHeaderOffset = 30 + encoder.encode('waysigns/').length;
+    const secondHeaderView = new DataView(
+      normalizedModZip.buffer,
+      normalizedModZip.byteOffset + secondHeaderOffset,
+      normalizedModZip.byteLength - secondHeaderOffset
+    );
+    expect(secondHeaderView.getUint16(6, true) & 0x0008).toBe(0);
+    expect(secondHeaderView.getUint32(18, true)).toBeGreaterThan(0);
+
+    // 2. Test multi-mod Modpack archive missing modpack.conf
+    const rawModpackZip = buildTestZip([
+      { path: 'x_pack-master/mod_alpha/init.lua', content: '-- alpha' },
+      { path: 'x_pack-master/mod_beta/init.lua', content: '-- beta' }
+    ]);
+    const normalizedModpackZip = normalizeLuantiPackageZip(rawModpackZip, 'x_pack', 'mod');
+    const modpackPaths = listZipPaths(normalizedModpackZip);
+    expect(modpackPaths[0]).toBe('x_pack/');
+    expect(modpackPaths).toContain('x_pack/modpack.conf');
+    expect(modpackPaths).toContain('x_pack/mod_alpha/init.lua');
+    expect(modpackPaths).toContain('x_pack/mod_beta/init.lua');
+
+    // 3. Verify "Install App" buttons are hidden when PWA is already installed
+    const pwaService = TestBed.inject(PwaService);
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    pwaService.isInstalled.set(false);
+    headerFixture.detectChanges();
+    expect(headerFixture.nativeElement.textContent).toContain('Install App');
+
+    pwaService.isInstalled.set(true);
+    headerFixture.componentInstance.isMobileMenuOpen.set(true);
+    headerFixture.detectChanges();
+    expect(headerFixture.nativeElement.textContent).not.toContain('Install App');
   });
 });

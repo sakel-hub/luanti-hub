@@ -12,9 +12,9 @@ export class SeoService {
   private readonly doc = inject(DOCUMENT);
 
   private readonly defaultTitle =
-    'LuantiHub – Mods & Packages for Luanti (Minetest)';
+    'Luanti Hub (LuantiHub) – Mods & Packages for Luanti (Minetest)';
   private readonly defaultDesc =
-    'Discover, search, and download Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB with instant failover.';
+    'Luanti Hub (LuantiHub) is the open package registry and mod repository for Luanti (Minetest). Discover, search, and download mods, games, and texture packs directly from Git repositories and ContentDB with instant failover.';
   private readonly baseUrl = 'https://luanti-hub.pages.dev';
 
   updateForPackage(pkg: LuantiPackage): void {

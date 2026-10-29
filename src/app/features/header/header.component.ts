@@ -75,7 +75,7 @@ import {
     @if (isMobileMenuOpen()) {
       <div
         (click)="closeMobileMenu($event)"
-        class="lg:hidden fixed inset-0 z-30 bg-black/75 backdrop-blur-md luanti-backdrop cursor-pointer"
+        class="lg:hidden z-30 luanti-modal-backdrop cursor-pointer"
         aria-hidden="true">
       </div>
     }
@@ -89,7 +89,7 @@ import {
             type="button"
             (click)="onHomeClick()"
             class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer">
-            <img src="logo.svg" alt="LuantiHub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
+            <img src="/logo.svg" alt="Luanti Hub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
             <h1 class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap m-0 inline-block">
               Luanti<span class="text-sky-400">Hub</span>
             </h1>
@@ -201,16 +201,18 @@ import {
         <!-- Right: Actions, Language, Profile & Mobile Hamburger Toggle -->
         <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 justify-end">
 
-          <!-- Prominent "Install App" Button (md+) -->
-          <button
-            type="button"
-            (click)="pwaService.installPwa()"
-            [appTooltip]="'header.installAppTooltip' | translate"
-            [class]="pwaService.canInstall() ? 'glass-btn-sky text-white animate-pulse' : 'glass-btn text-sky-400'"
-            class="hidden md:flex h-9 px-3 rounded-lg text-xs font-bold items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
-            <svg lucideDownload class="w-4 h-4 flex-shrink-0"></svg>
-            <span class="whitespace-nowrap">{{ 'header.installApp' | translate }}</span>
-          </button>
+          <!-- Prominent "Install App" Button (md+, hidden when already installed or running in standalone PWA) -->
+          @if (!pwaService.isInstalled()) {
+            <button
+              type="button"
+              (click)="pwaService.installPwa()"
+              [appTooltip]="'header.installAppTooltip' | translate"
+              [class]="pwaService.canInstall() ? 'glass-btn-sky text-white animate-pulse' : 'glass-btn text-sky-400'"
+              class="hidden md:flex h-9 px-3 rounded-lg text-xs font-bold items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
+              <svg lucideDownload class="w-4 h-4 flex-shrink-0"></svg>
+              <span class="whitespace-nowrap">{{ 'header.installApp' | translate }}</span>
+            </button>
+          }
 
           <!-- Submit Mod Button (lg+) -->
           <button
@@ -457,7 +459,7 @@ import {
           class="lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto">
 
           <!-- Quick Actions Grid -->
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div [class]="pwaService.isInstalled() ? 'grid grid-cols-1 sm:grid-cols-2 gap-2' : 'grid grid-cols-1 sm:grid-cols-3 gap-2'">
             <button
               type="button"
               (click)="packageService.openSubmitModal(); isMobileMenuOpen.set(false)"
@@ -474,13 +476,15 @@ import {
               <span>{{ 'header.inGameSetup' | translate }}</span>
             </button>
 
-            <button
-              type="button"
-              (click)="pwaService.installPwa(); isMobileMenuOpen.set(false)"
-              class="px-3.5 py-2.5 rounded-xl glass-btn text-emerald-300 font-semibold text-xs flex items-center gap-2 cursor-pointer">
-              <svg lucideDownload class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
-              <span>{{ 'header.installApp' | translate }}</span>
-            </button>
+            @if (!pwaService.isInstalled()) {
+              <button
+                type="button"
+                (click)="pwaService.installPwa(); isMobileMenuOpen.set(false)"
+                class="px-3.5 py-2.5 rounded-xl glass-btn text-emerald-300 font-semibold text-xs flex items-center gap-2 cursor-pointer">
+                <svg lucideDownload class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+                <span>{{ 'header.installApp' | translate }}</span>
+              </button>
+            }
           </div>
 
           <!-- GitHub Issues & Feedback Quick Link (Mobile) -->

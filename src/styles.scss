@@ -600,6 +600,16 @@ select:disabled {
   will-change: opacity;
 }
 
+.luanti-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  animation: luantiBackdropIn 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity;
+}
+
 .luanti-dialog-panel {
   animation: luantiDialogIn 280ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
   will-change: transform, opacity;
@@ -619,7 +629,9 @@ select:disabled {
 }
 
 .is-closing .luanti-backdrop,
-.luanti-backdrop.is-closing {
+.luanti-backdrop.is-closing,
+.is-closing .luanti-modal-backdrop,
+.luanti-modal-backdrop.is-closing {
   animation: luantiBackdropOut 200ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
@@ -635,10 +647,12 @@ select:disabled {
 
 @media (prefers-reduced-motion: reduce) {
   .luanti-backdrop,
+  .luanti-modal-backdrop,
   .luanti-dialog-panel,
   .luanti-drawer-panel,
   .luanti-tab-enter,
   .is-closing .luanti-backdrop,
+  .is-closing .luanti-modal-backdrop,
   .is-closing .luanti-dialog-panel,
   .is-closing .luanti-drawer-panel {
     animation-duration: 1ms !important;

@@ -18,6 +18,7 @@ export interface NativeNotificationPayload {
 }
 
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
+const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
 @Injectable({
@@ -52,13 +53,37 @@ export class PwaService {
     return Notification.permission;
   }
 
-  private checkIfInstalled(): boolean {
+  private isStandaloneDisplayMode(): boolean {
     if (typeof window === 'undefined') return false;
     try {
-      const isStandaloneMedia = typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)')?.matches;
+      const mm = typeof window.matchMedia === 'function' ? window.matchMedia.bind(window) : null;
+      const isStandaloneMedia = Boolean(
+        mm &&
+        (mm('(display-mode: standalone)')?.matches ||
+         mm('(display-mode: window-controls-overlay)')?.matches ||
+         mm('(display-mode: minimal-ui)')?.matches ||
+         mm('(display-mode: fullscreen)')?.matches)
+      );
       const isNavigatorStandalone = (window.navigator as any)?.standalone === true;
-      const isAndroidReferrer = typeof document !== 'undefined' && document.referrer?.includes('android-app://');
+      const isAndroidReferrer = typeof document !== 'undefined' && Boolean(document.referrer?.includes('android-app://'));
       return Boolean(isStandaloneMedia || isNavigatorStandalone || isAndroidReferrer);
+    } catch {
+      return false;
+    }
+  }
+
+  private checkIfInstalled(): boolean {
+    if (typeof window === 'undefined') return false;
+    if (this.isStandaloneDisplayMode()) {
+      try {
+        localStorage.setItem(PWA_INSTALLED_STORAGE_KEY, '1');
+      } catch {
+        // ignore storage errors
+      }
+      return true;
+    }
+    try {
+      return localStorage.getItem(PWA_INSTALLED_STORAGE_KEY) === '1';
     } catch {
       return false;
     }
@@ -102,16 +127,53 @@ export class PwaService {
 
   private initInstallPrompt(): void {
     if (typeof window !== 'undefined') {
+      try {
+        if (typeof window.matchMedia === 'function') {
+          const standaloneMql = window.matchMedia('(display-mode: standalone)');
+          if (typeof standaloneMql?.addEventListener === 'function') {
+            standaloneMql.addEventListener('change', (e: MediaQueryListEvent) => {
+              if (e.matches) {
+                this.canInstall.set(false);
+                this.isInstalled.set(true);
+                try {
+                  localStorage.setItem(PWA_INSTALLED_STORAGE_KEY, '1');
+                } catch {
+                  // ignore
+                }
+              }
+            });
+          }
+        }
+      } catch {
+        // ignore matchMedia listener errors
+      }
+
       window.addEventListener('beforeinstallprompt', (e: Event) => {
         e.preventDefault();
+        if (this.isStandaloneDisplayMode()) {
+          this.isInstalled.set(true);
+          this.canInstall.set(false);
+          return;
+        }
         this.deferredPrompt = e;
+        this.isInstalled.set(false);
         this.canInstall.set(true);
+        try {
+          localStorage.removeItem(PWA_INSTALLED_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
       });
 
       window.addEventListener('appinstalled', () => {
         this.deferredPrompt = null;
         this.canInstall.set(false);
         this.isInstalled.set(true);
+        try {
+          localStorage.setItem(PWA_INSTALLED_STORAGE_KEY, '1');
+        } catch {
+          // ignore
+        }
         this.showToast('pwa.installSuccess');
       });
     }
@@ -225,10 +287,21 @@ export class PwaService {
 
     this.markNotificationTagSeen(payload.tag);
 
+    const origin = window.location?.origin || '';
+    const defaultAppIcon = `${origin}/icons/icon-192x192.png`;
+    const defaultAppBadge = `${origin}/icons/icon-72x72.png`;
+    const rawIcon = (payload.icon || '').trim();
+    const resolvedIcon =
+      !rawIcon || rawIcon === 'logo.svg' || rawIcon === '/logo.svg' || rawIcon.endsWith('/logo.svg')
+        ? defaultAppIcon
+        : rawIcon.startsWith('/')
+          ? `${origin}${rawIcon}`
+          : rawIcon;
+
     const options: NotificationOptions = {
       body: payload.body,
-      icon: payload.icon && payload.icon !== 'logo.svg' ? payload.icon : '/icons/icon-192x192.png',
-      badge: '/icons/icon-72x72.png',
+      icon: resolvedIcon,
+      badge: defaultAppBadge,
       tag: payload.tag,
       data: payload.data || {}
     };
@@ -285,6 +358,12 @@ export class PwaService {
       const { outcome } = await this.deferredPrompt.userChoice;
       if (outcome === 'accepted') {
         this.canInstall.set(false);
+        this.isInstalled.set(true);
+        try {
+          localStorage.setItem(PWA_INSTALLED_STORAGE_KEY, '1');
+        } catch {
+          // ignore
+        }
       }
     } catch (err) {
       console.warn('Install prompt error:', err);

@@ -271,6 +271,7 @@ export const de: TranslationDictionary = {
     savedSuccess: 'Profil erfolgreich aktualisiert!',
     unlinkBtn: 'Trennen',
     signOut: 'Abmelden',
+    cancel: 'Abbrechen',
     openReportsTitle: 'Offene Community-Meldungen',
     moderationQueueTitle: 'Offene Community-Meldungen',
     noOpenReports: 'Keine offenen Meldungen. Die Registry ist sauber!',

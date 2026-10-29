@@ -452,19 +452,30 @@ async function probeGitRepoConfAndLicense(
         }
 
         if (res.status === 404 && !cdbMeta) {
-          sawExplicit404 = true;
+          const isPrimaryInputRepo =
+            Boolean(normalizedInputUrl) &&
+            cand.repoUrl.toLowerCase() === normalizedInputUrl!.toLowerCase();
           const fallbackCtrl = new AbortController();
-          const fallbackTimer = setTimeout(() => fallbackCtrl.abort(), 1200);
+          const fallbackTimer = setTimeout(() => fallbackCtrl.abort(), 1400);
           try {
-            const initRes = await fetch(`${cand.base}/init.lua`, { signal: fallbackCtrl.signal });
+            const [modpackRes, initRes, readmeRes] = await Promise.all([
+              fetch(`${cand.base}/modpack.conf`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/init.lua`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/README.md`, { signal: fallbackCtrl.signal }).catch(() => null)
+            ]);
             clearTimeout(fallbackTimer);
-            if (initRes.ok) {
-              const initText = await initRes.text();
-              if (initText && !initText.trim().startsWith('<!DOCTYPE') && !initText.trim().startsWith('<html')) {
-                resolvedRepoUrl = cand.repoUrl;
-                gitRepoStatus = 'verified';
-                return true;
+            for (const fbRes of [modpackRes, initRes, readmeRes]) {
+              if (fbRes && fbRes.ok) {
+                const fbText = await fbRes.text().catch(() => '');
+                if (fbText && !fbText.trim().startsWith('<!DOCTYPE') && !fbText.trim().startsWith('<html')) {
+                  resolvedRepoUrl = cand.repoUrl;
+                  gitRepoStatus = 'verified';
+                  return true;
+                }
               }
+            }
+            if (isPrimaryInputRepo) {
+              sawExplicit404 = true;
             }
           } catch {
             clearTimeout(fallbackTimer);

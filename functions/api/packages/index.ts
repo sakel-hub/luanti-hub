@@ -95,6 +95,22 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     .filter(t => Boolean(t) && t !== 'all');
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
+  const noCache = url.searchParams.get('nocache') === '1';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1';
+
+  if (isBootBundle && !noCache && !q && types.length === 0 && !author) {
+    const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
+    if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
+      return new Response(JSON.stringify(cachedBoot), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=60, s-maxage=120, stale-while-revalidate=300',
+          'X-LuantiHub-Cache': 'HIT-EDGE'
+        }
+      });
+    }
+  }
 
   const upstreamParams = new URLSearchParams(url.searchParams);
   upstreamParams.delete('boot');
@@ -580,13 +596,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week,
       top10Today
     };
+
+    if (!noCache && !q && types.length === 0 && !author) {
+      await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 120);
+    }
   }
 
   return new Response(JSON.stringify(responsePayload), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache, no-store, must-revalidate'
+      'Cache-Control': isBootBundle && !noCache
+        ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
+        : 'no-cache, no-store, must-revalidate',
+      'X-LuantiHub-Cache': isBootBundle && !noCache ? 'MISS-EDGE' : 'BYPASS'
     }
   });
 }

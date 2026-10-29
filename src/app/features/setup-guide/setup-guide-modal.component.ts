@@ -32,7 +32,7 @@ import {
       role="dialog"
       aria-modal="true"
       aria-labelledby="setup-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 luanti-backdrop">
+      class="z-50 flex items-center justify-center p-4 luanti-modal-backdrop">
 
       <div
         (click)="$event.stopPropagation()"

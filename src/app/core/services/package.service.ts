@@ -97,6 +97,8 @@ export class PackageService {
   private contentDbOnline = false;
   private readonly repoDirCache = new Map<string, Array<{ name: string; download_url?: string }>>();
   private readonly repoDirPromiseCache = new Map<string, Promise<Array<{ name: string; download_url?: string }>>>();
+  private readonly repoExplicit404Cache = new Set<string>();
+  private readonly rawCdbCache = new Map<string, Promise<ReturnType<PackageService['parseCdbJsonText']>>>();
   private readonly discoveredReposCache = new Map<
     string,
     Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }>>
@@ -1348,9 +1350,8 @@ export class PackageService {
 
   // Fetch Live Packages from Backend API (Bundled Boot Payload: Catalog + Tags + Top 10 Week & Today in 1 call)
   async initCatalog(forceRefresh = false): Promise<void> {
+    let servedFromCache = false;
     try {
-      this._isLoading.set(true);
-
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
           const rawCached = sessionStorage.getItem('lh_boot_cache_v5');
@@ -1360,12 +1361,21 @@ export class PackageService {
               this.edgeApiAvailable = Boolean(parsed.edge);
               this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
               this.applyBootPayload(parsed.payload);
-              return;
+              this._isLoading.set(false);
+              servedFromCache = true;
+              // Fresh within 60s: skip network completely to preserve Cloudflare Worker & D1 quota
+              if (Date.now() - parsed.ts < 60_000) {
+                return;
+              }
             }
           }
         } catch {
           // Proceed to network fetch
         }
+      }
+
+      if (!servedFromCache) {
+        this._isLoading.set(true);
       }
 
       const apiUrl = typeof window !== 'undefined' && window.location?.origin
@@ -1376,7 +1386,7 @@ export class PackageService {
       try {
         response = await fetch(apiUrl, {
           headers: { 'Accept': 'application/json' },
-          cache: 'no-store'
+          ...(forceRefresh ? { cache: 'no-store' as RequestCache } : {})
         });
       } catch {
         response = null;
@@ -1475,7 +1485,9 @@ export class PackageService {
         }
       }
     } catch {
-      this._packages.set([]);
+      if (!servedFromCache) {
+        this._packages.set([]);
+      }
     } finally {
       this._isLoading.set(false);
     }
@@ -1537,7 +1549,19 @@ export class PackageService {
   }
 
   private drainHydrationQueue(): void {
-    const MAX_CONCURRENT = 8;
+    const MAX_CONCURRENT = 6;
+    if (this.edgeApiAvailable && this.hydrationQueue.length >= 2 && this.activeHydrationWorkers < MAX_CONCURRENT) {
+      const batch = this.hydrationQueue.splice(0, 24);
+      if (batch.length > 0) {
+        this.activeHydrationWorkers++;
+        this.hydratePackageBatch(batch).finally(() => {
+          this.activeHydrationWorkers--;
+          this.drainHydrationQueue();
+        });
+        return;
+      }
+    }
+
     while (this.activeHydrationWorkers < MAX_CONCURRENT && this.hydrationQueue.length > 0) {
       const nextPkg = this.hydrationQueue.shift();
       if (!nextPkg) break;
@@ -1546,6 +1570,90 @@ export class PackageService {
         this.activeHydrationWorkers--;
         this.drainHydrationQueue();
       });
+    }
+  }
+
+  private async hydratePackageBatch(batch: LuantiPackage[]): Promise<void> {
+    if (!batch || batch.length === 0) return;
+    const ids = batch.map(p => p.id || `${p.author}/${p.name}`).filter(Boolean);
+    const unresolved: LuantiPackage[] = [];
+    try {
+      const res = await fetch('/api/packages/hydrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const json = await res.json();
+        const hydratedMap: Record<string, any> = (json && typeof json.hydrated === 'object' && json.hydrated) || {};
+        const updatesByLowerId = new Map<string, Partial<LuantiPackage>>();
+
+        for (const pkg of batch) {
+          const lowerKey = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+          const h = hydratedMap[lowerKey];
+          if (!h || (!h.license && !(Number(h.downloads || 0) > 0))) {
+            unresolved.push(pkg);
+            continue;
+          }
+
+          const cdbDl = Math.max(Number(pkg.contentdb_downloads || 0), Number(h.contentdb_downloads || 0));
+          const lhDl = Math.max(Number(pkg.luantihub_downloads || 0), Number(h.luantihub_downloads || 0));
+          const totalDl = Math.max(Number(pkg.downloads || 0), Number(h.downloads || 0), cdbDl + lhDl);
+          const lic = h.license || h.media_license || pkg.license || '';
+          const mediaLic = h.media_license || h.license || pkg.media_license || '';
+          const tags = Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : pkg.tags;
+          const minVer = h.min_minetest_version || pkg.min_minetest_version || '5.0.0';
+          const sizeFormatted = h.file_size || this.formatDownloadSize(h.download_size) || pkg.file_size;
+          const resolvedVideo = this.extractEmbeddedVideo(
+            h.video_url || pkg.video_url,
+            h.video_thumbnail_url || pkg.video_thumbnail_url,
+            pkg.desc,
+            pkg.readme
+          );
+          const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
+
+          const patch: Partial<LuantiPackage> = {
+            license: lic,
+            media_license: mediaLic,
+            contentdb_downloads: cdbDl,
+            luantihub_downloads: lhDl,
+            downloads: totalDl,
+            tags,
+            min_minetest_version: minVer,
+            file_size: sizeFormatted,
+            video_url: resolvedVideo.video_url,
+            video_thumbnail_url: resolvedVideo.video_thumbnail_url,
+            repo_url: repoUrl
+          };
+
+          updatesByLowerId.set(lowerKey, patch);
+          const prevMeta = this.hydratedMetaCache.get(lowerKey) || {};
+          this.hydratedMetaCache.set(lowerKey, { ...prevMeta, ...patch });
+        }
+
+        if (updatesByLowerId.size > 0) {
+          this._packages.update(list =>
+            list.map(item => {
+              const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
+              const patch = updatesByLowerId.get(lowerKey);
+              if (!patch) return item;
+              const merged = { ...item, ...patch };
+              merged._searchBlob = this.buildSearchBlob(merged);
+              return merged;
+            })
+          );
+          this.scheduleHydratedMetaPersist();
+          this.scheduleBootCachePersist();
+        }
+      } else {
+        unresolved.push(...batch);
+      }
+    } catch {
+      unresolved.push(...batch);
+    }
+
+    if (unresolved.length > 0) {
+      await Promise.all(unresolved.map(pkg => this.loadPackageDetails(pkg, false)));
     }
   }
 
@@ -2039,7 +2147,6 @@ export class PackageService {
 
     let targetUrl =
       customDownloadUrl ||
-      (isGitPkg && preferredRelease?.download_url ? preferredRelease.download_url : '') ||
       `/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download`;
 
     // When running without Edge API (e.g. static mirror fallback or local ng serve without wrangler),
@@ -2052,10 +2159,18 @@ export class PackageService {
           const cleanRepo = (pkg.repo_url || `https://github.com/${resolvedAuthor}/${pkg.name}`)
             .replace(/\/$/, '')
             .replace(/\.git$/, '');
-          const branch = pkg.default_branch || 'main';
+          const branch = pkg.default_branch || 'HEAD';
           if (pkg.provider === 'gitlab' || cleanRepo.includes('gitlab.com')) {
-            const repoName = cleanRepo.split('/').pop() || pkg.name;
-            targetUrl = `${cleanRepo}/-/archive/${branch}/${repoName}-${branch}.zip`;
+            try {
+              const u = new URL(cleanRepo);
+              const projectPath = encodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, ''));
+              targetUrl = branch === 'HEAD'
+                ? `https://${u.host}/api/v4/projects/${projectPath}/repository/archive.zip`
+                : `https://${u.host}/api/v4/projects/${projectPath}/repository/archive.zip?sha=${encodeURIComponent(branch)}`;
+            } catch {
+              const repoName = cleanRepo.split('/').pop() || pkg.name;
+              targetUrl = `${cleanRepo}/-/archive/${branch}/${repoName}-${branch}.zip`;
+            }
           } else if (
             pkg.provider === 'codeberg' ||
             pkg.provider === 'mesehub' ||
@@ -2064,7 +2179,9 @@ export class PackageService {
           ) {
             targetUrl = `${cleanRepo}/archive/${branch}.zip`;
           } else {
-            targetUrl = `${cleanRepo}/archive/refs/heads/${branch}.zip`;
+            targetUrl = branch === 'HEAD'
+              ? `${cleanRepo}/archive/HEAD.zip`
+              : `${cleanRepo}/archive/refs/heads/${branch}.zip`;
           }
         }
       } else if (!this.edgeApiAvailable) {
@@ -2141,14 +2258,18 @@ export class PackageService {
                 name: String(item.name),
                 download_url: item.download_url ? String(item.download_url) : undefined
               }));
+            this.repoExplicit404Cache.delete(cacheKey);
             this.repoDirCache.set(cacheKey, listing);
             return listing;
           }
+        } else if (res.status === 404) {
+          this.repoExplicit404Cache.add(cacheKey);
+          this.repoDirCache.set(cacheKey, []);
+          return [];
         }
       } catch {
-        // Ignore network/CORS errors
+        // Ignore network/CORS errors (do not poison repoDirCache on transient 403 rate limits)
       }
-      this.repoDirCache.set(cacheKey, []);
       return [];
     })().finally(() => {
       this.repoDirPromiseCache.delete(cacheKey);
@@ -2386,13 +2507,131 @@ export class PackageService {
     }
 
     if (resolvedUrl && !resolvedThumb) {
-      const ytIdMatch = resolvedUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([A-Za-z0-9_-]{11})/i);
+      const ytIdMatch = resolvedUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([A-Za-z0-9_-]{11})/i);
       if (ytIdMatch && ytIdMatch[1]) {
         resolvedThumb = `https://i.ytimg.com/vi/${ytIdMatch[1]}/hqdefault.jpg`;
       }
     }
 
     return { video_url: resolvedUrl, video_thumbnail_url: resolvedThumb };
+  }
+
+  /**
+   * Shared DRY helper: returns true if `url` points to a direct HTML5 video file (`.mp4`, `.webm`, `.ogg`, `.ogv`).
+   */
+  isDirectVideoUrl(url?: string): boolean {
+    if (!url) return false;
+    const clean = url.split('?')[0].toLowerCase();
+    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+  }
+
+  /**
+   * Shared DRY helper: builds an embeddable iframe URL for YouTube (`/watch`, `/shorts/`, `/live/`, `/embed/`, `youtu.be`),
+   * PeerTube (`/videos/watch/`, `/w/`, `/videos/embed/`), and Vimeo.
+   */
+  buildVideoEmbedUrl(
+    rawUrl?: string,
+    options: { autoplay?: boolean; mute?: boolean; minimalControls?: boolean } = {}
+  ): string | null {
+    if (!rawUrl) return null;
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname.toLowerCase();
+      const autoplay = options.autoplay !== false ? '1' : '0';
+      const mute = options.mute ? '1' : '0';
+      const minimal = Boolean(options.minimalControls);
+
+      const extractYoutubeId = (): string | null => {
+        if (host === 'youtu.be') {
+          return u.pathname.split('/').filter(Boolean)[0] || null;
+        }
+        if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+          const v = u.searchParams.get('v');
+          if (v) return v;
+          const parts = u.pathname.split('/').filter(Boolean);
+          if (parts.length >= 2 && ['embed', 'shorts', 'live', 'v'].includes(parts[0].toLowerCase())) {
+            return parts[1];
+          }
+        }
+        return null;
+      };
+
+      const ytId = extractYoutubeId();
+      if (ytId) {
+        const enc = encodeURIComponent(ytId);
+        if (minimal) {
+          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}`;
+        }
+        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1`;
+      }
+
+      if (host.includes('vimeo.com')) {
+        const id = u.pathname.split('/').filter(Boolean).pop();
+        if (id && /^\d+$/.test(id)) {
+          if (minimal) {
+            return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0`;
+          }
+          return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}`;
+        }
+      }
+
+      if (u.pathname.includes('/videos/watch/') || u.pathname.startsWith('/w/') || u.pathname.includes('/videos/embed/')) {
+        const embedBase = u.pathname.startsWith('/w/')
+          ? `${u.origin}${u.pathname.replace(/^\/w\//, '/videos/embed/')}`
+          : rawUrl.replace('/videos/watch/', '/videos/embed/');
+        const sep = embedBase.includes('?') ? '&' : '?';
+        if (minimal) {
+          return `${embedBase}${sep}autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0`;
+        }
+        return `${embedBase}${sep}autoplay=${autoplay}${options.mute ? '&muted=1' : ''}`;
+      }
+
+      return minimal ? null : rawUrl;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fetches `.cdb.json` directly from static raw CDNs (`raw.githubusercontent.com`, `codeberg.org`, `gitlab.com`, `git.minetest.land`)
+   * without touching rate-limited GitHub REST APIs (`api.github.com`).
+   */
+  private fetchRawCdbJsonFromRepoUrl(repoUrl?: string): Promise<ReturnType<PackageService['parseCdbJsonText']>> {
+    const normalized = this.normalizeGitRepoUrl(repoUrl);
+    if (!normalized) return Promise.resolve(null);
+    const cacheKey = normalized.toLowerCase();
+    const cached = this.rawCdbCache.get(cacheKey);
+    if (cached) return cached;
+
+    const promise = (async () => {
+      try {
+        const u = new URL(normalized);
+        const parts = u.pathname.split('/').filter(Boolean);
+        if (parts.length < 2) return null;
+        const owner = parts[0];
+        const repo = parts[1].replace(/\.git$/i, '');
+        const host = u.hostname.toLowerCase();
+        const rawCdbUrl = host.includes('codeberg.org')
+          ? `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/.cdb.json`
+          : host.includes('git.minetest.land')
+            ? `https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw/.cdb.json`
+            : host.includes('gitlab.com')
+              ? `https://gitlab.com/${owner}/${repo}/-/raw/HEAD/.cdb.json`
+              : host.includes('github.com')
+                ? `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.cdb.json`
+                : null;
+        if (!rawCdbUrl) return null;
+        const res = await fetch(rawCdbUrl);
+        if (!res.ok) return null;
+        const text = await res.text();
+        return this.parseCdbJsonText(text);
+      } catch {
+        return null;
+      }
+    })();
+
+    this.rawCdbCache.set(cacheKey, promise);
+    return promise;
   }
 
   private detectSpdxFromLicenseText(raw: string): string | undefined {
@@ -2533,7 +2772,7 @@ export class PackageService {
     cdbMeta?: ReturnType<PackageService['parseCdbJsonText']>;
   }> {
     const normalizedInputUrl = this.normalizeGitRepoUrl(existingRepoUrl);
-    const confFiles = ['mod.conf', 'game.conf', 'texture_pack.conf'];
+    const confFiles = ['mod.conf', 'modpack.conf', 'modpack.txt', 'game.conf', 'texture_pack.conf'];
     const licenseFiles = ['license', 'license.txt', 'license.md', 'copying', 'copying.txt'];
 
     const deps: string[] = [];
@@ -2544,36 +2783,37 @@ export class PackageService {
     let resolvedRepoUrl: string | undefined;
     let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
     let cdbMeta: ReturnType<PackageService['parseCdbJsonText']> = null;
+    let sawExplicitRepo404 = false;
 
     const confirmedRepos = await this.discoverConfirmedRepos(pkg, normalizedInputUrl);
 
     for (const repo of confirmedRepos) {
+      const cacheKey = `${repo.forge}:${repo.fullName.toLowerCase()}`;
       const listing = await this.getRepoRootListing(repo.forge, repo.fullName);
+      if (this.repoExplicit404Cache.has(cacheKey)) {
+        sawExplicitRepo404 = true;
+      }
       const cdbEntry = listing.find(f => f.name.toLowerCase() === '.cdb.json');
       const confEntry = listing.find(f => confFiles.includes(f.name.toLowerCase()));
       const initLuaEntry = listing.find(f => f.name.toLowerCase() === 'init.lua');
       const dependsTxtEntry = listing.find(f => f.name.toLowerCase() === 'depends.txt');
 
-      if (listing.length === 0) {
+      if (listing.length > 0) {
+        resolvedRepoUrl = repo.repoUrl;
+        gitRepoStatus = 'verified';
+      } else {
         // Fallback when GitHub listing API is rate-limited: direct raw probe for .cdb.json
-        try {
-          const directCdbRes = await fetch(`${repo.rawBase}/.cdb.json`);
-          if (directCdbRes.ok) {
-            const directCdbText = await directCdbRes.text();
-            cdbMeta = this.parseCdbJsonText(directCdbText);
-            if (cdbMeta) {
-              resolvedRepoUrl = repo.repoUrl;
-              gitRepoStatus = 'verified';
-              if (cdbMeta.license && !license) license = cdbMeta.license;
-              if (cdbMeta.media_license && !mediaLicense) mediaLicense = cdbMeta.media_license;
-            }
-          }
-        } catch {
-          // Ignore
+        const directCdb = await this.fetchRawCdbJsonFromRepoUrl(repo.repoUrl);
+        if (directCdb) {
+          cdbMeta = directCdb;
+          resolvedRepoUrl = repo.repoUrl;
+          gitRepoStatus = 'verified';
+          if (cdbMeta.license && !license) license = cdbMeta.license;
+          if (cdbMeta.media_license && !mediaLicense) mediaLicense = cdbMeta.media_license;
         }
       }
 
-      if (!cdbMeta && !cdbEntry && !confEntry && !initLuaEntry && !dependsTxtEntry) {
+      if (!resolvedRepoUrl && !cdbMeta && !cdbEntry && !confEntry && !initLuaEntry && !dependsTxtEntry) {
         continue;
       }
 
@@ -2681,7 +2921,7 @@ export class PackageService {
       break;
     }
 
-    if (!resolvedRepoUrl && normalizedInputUrl) {
+    if (!resolvedRepoUrl && normalizedInputUrl && deepFetch && sawExplicitRepo404) {
       gitRepoStatus = 'broken_404';
     }
 
@@ -2953,15 +3193,46 @@ export class PackageService {
         let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
         let minVersion = data.min_minetest_version || pkg.min_minetest_version || '5.0.0';
 
-        // Probe Git repository metadata when opening full details OR when a package still lacks a license or video_url
-        if ((deepFetch || !resolvedLicense || !pkg.video_url) && (!hasBundledEdgeResponse || !data.video_url)) {
+        // Lightweight static raw CDN .cdb.json lookup when video_url or license is missing (never touches rate-limited GitHub REST API)
+        if ((!data.video_url && !pkg.video_url) || !resolvedLicense) {
+          const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl);
+          if (cdbRaw) {
+            gitRepoStatus = 'verified';
+            if (!resolvedLicense && (cdbRaw.license || cdbRaw.media_license)) {
+              resolvedLicense = cdbRaw.license || cdbRaw.media_license || '';
+            }
+            if (!resolvedMediaLicense && (cdbRaw.media_license || cdbRaw.license)) {
+              resolvedMediaLicense = cdbRaw.media_license || cdbRaw.license || '';
+            }
+            if ((!Array.isArray(data.tags) || data.tags.length === 0) && cdbRaw.tags) data.tags = cdbRaw.tags;
+            if (!data.dev_state && cdbRaw.dev_state) data.dev_state = cdbRaw.dev_state;
+            if (!data.video_url && cdbRaw.video_url) data.video_url = cdbRaw.video_url;
+            if (!data.donate_url && cdbRaw.donate_url) data.donate_url = cdbRaw.donate_url;
+            if (!data.issue_tracker && cdbRaw.issue_tracker) data.issue_tracker = cdbRaw.issue_tracker;
+            if (!data.forum_url && !data.forums && cdbRaw.forum_url) data.forum_url = cdbRaw.forum_url;
+            if (!data.translation_url && cdbRaw.translation_url) data.translation_url = cdbRaw.translation_url;
+            if (!data.website && cdbRaw.website) data.website = cdbRaw.website;
+            if ((!Array.isArray(data.content_warnings) || data.content_warnings.length === 0) && cdbRaw.content_warnings) {
+              data.content_warnings = cdbRaw.content_warnings;
+            }
+            if (!data.short_desc && !data.short_description && cdbRaw.short_description) {
+              data.short_description = cdbRaw.short_description;
+            }
+            if (!data.long_description && !data.desc && cdbRaw.long_description) {
+              data.long_description = cdbRaw.long_description;
+            }
+          }
+        }
+
+        // Probe Git repository metadata only when opening full details OR when a pure Git package still lacks a license
+        if ((deepFetch || (!resolvedLicense && isPureGitOnly)) && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
           if (gitMeta.gitRepoStatus === 'verified') {
             gitRepoStatus = 'verified';
             if (gitMeta.repoUrl) {
               repoUrl = gitMeta.repoUrl;
             }
-          } else if (gitMeta.gitRepoStatus === 'broken_404') {
+          } else if (gitMeta.gitRepoStatus === 'broken_404' && deepFetch) {
             gitRepoStatus = 'broken_404';
             const attempted = repoUrl || `https://github.com/${pkg.author}/${pkg.name}`;
             this.autoReportBrokenGitRepo(pkg, attempted);
@@ -3235,14 +3506,18 @@ export class PackageService {
                           ? `${(rawBytes / 1048576).toFixed(1)} MB`
                           : `${Math.max(1, Math.round(rawBytes / 1024))} KB`)
                       : pkg.file_size);
+                const rawRelUrl = String(rel.download_url || rel.url || '').trim();
+                const resolvedDownloadUrl = rawRelUrl
+                  ? (rawRelUrl.startsWith('http') || rawRelUrl.startsWith('/api/')
+                      ? rawRelUrl
+                      : `https://content.luanti.org${rawRelUrl.startsWith('/') ? rawRelUrl : '/' + rawRelUrl}`)
+                  : `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`;
                 return {
                   id: rel.id,
                   version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
                   tag_name: rel.tag_name || rel.commit || '',
                   commit_sha: rel.commit || rel.commit_sha || '',
-                  download_url: rel.url
-                    ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
-                    : (rel.download_url || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`),
+                  download_url: resolvedDownloadUrl,
                   file_size: relSize,
                   min_minetest_version: rel.min_minetest_version,
                   max_minetest_version: rel.max_minetest_version,
@@ -3309,18 +3584,27 @@ export class PackageService {
                   ? this.formatDownloadSize(Number(zipAsset.size))
                   : pkg.file_size;
 
+                const directReleaseUrl = zipAsset?.browser_download_url || (
+                  repo.forge === 'codeberg'
+                    ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                    : repo.forge === 'mesehub'
+                      ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                      : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`
+                );
+                const useEdgePackager =
+                  this.edgeApiAvailable &&
+                  typeof window !== 'undefined' &&
+                  !window.location.hostname.includes('localhost') &&
+                  window.location.hostname !== '127.0.0.1';
+
                 combined.push({
                   id: r.id || `rel-${idx + 1}`,
                   version: r.name || tagName,
                   tag_name: tagName,
                   commit_sha: r.target_commitish || '',
-                  download_url: zipAsset?.browser_download_url || (
-                    repo.forge === 'codeberg'
-                      ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                      : repo.forge === 'mesehub'
-                        ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                        : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`
-                  ),
+                  download_url: useEdgePackager
+                    ? `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?tag=${encodeURIComponent(tagName)}`
+                    : directReleaseUrl,
                   file_size: assetSizeFormatted,
                   released_at: r.published_at || r.created_at || ''
                 });
@@ -3344,16 +3628,25 @@ export class PackageService {
                 }
                 seenTags.add(lower);
 
+                const directTagUrl = repo.forge === 'codeberg'
+                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                  : repo.forge === 'mesehub'
+                    ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
+                    : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`;
+                const useEdgePackager =
+                  this.edgeApiAvailable &&
+                  typeof window !== 'undefined' &&
+                  !window.location.hostname.includes('localhost') &&
+                  window.location.hostname !== '127.0.0.1';
+
                 combined.push({
                   id: `tag-${idx + 1}`,
                   version: tagName,
                   tag_name: tagName,
                   commit_sha: t.commit?.sha || t.id || '',
-                  download_url: repo.forge === 'codeberg'
-                    ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                    : repo.forge === 'mesehub'
-                      ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                      : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`,
+                  download_url: useEdgePackager
+                    ? `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?tag=${encodeURIComponent(tagName)}`
+                    : directTagUrl,
                   file_size: pkg.file_size,
                   released_at: t.commit?.created || ''
                 });

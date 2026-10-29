@@ -288,9 +288,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   }
 
   isDirectVideo(url?: string): boolean {
-    if (!url) return false;
-    const clean = url.split('?')[0].toLowerCase();
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+    return this.packageService.isDirectVideoUrl(url);
   }
 
   private isDesktopHoverViewport(): boolean {
@@ -299,37 +297,11 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   }
 
   private buildHoverEmbedUrl(rawUrl: string): string | null {
-    try {
-      const u = new URL(rawUrl);
-      const host = u.hostname.toLowerCase();
-      const ytParams = 'autoplay=1&mute=1&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1';
-      if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-        const v = u.searchParams.get('v') || (u.pathname.startsWith('/embed/') ? u.pathname.split('/embed/')[1]?.split('/')[0] : null);
-        if (v) {
-          const encodedV = encodeURIComponent(v);
-          return `https://www.youtube-nocookie.com/embed/${encodedV}?${ytParams}&loop=1&playlist=${encodedV}`;
-        }
-      }
-      if (host === 'youtu.be') {
-        const id = u.pathname.split('/').filter(Boolean)[0];
-        if (id) {
-          const encodedId = encodeURIComponent(id);
-          return `https://www.youtube-nocookie.com/embed/${encodedId}?${ytParams}&loop=1&playlist=${encodedId}`;
-        }
-      }
-      if (host.includes('vimeo.com')) {
-        const id = u.pathname.split('/').filter(Boolean).pop();
-        if (id && /^\d+$/.test(id)) {
-          return `https://player.vimeo.com/video/${id}?autoplay=1&muted=1&background=1&controls=0&title=0&byline=0&portrait=0`;
-        }
-      }
-      if (u.pathname.includes('/videos/watch/')) {
-        return rawUrl.replace('/videos/watch/', '/videos/embed/') + (rawUrl.includes('?') ? '&autoplay=1&muted=1&controls=0&title=0&warningTitle=0&peertubeLink=0' : '?autoplay=1&muted=1&controls=0&title=0&warningTitle=0&peertubeLink=0');
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    return this.packageService.buildVideoEmbedUrl(rawUrl, {
+      autoplay: true,
+      mute: true,
+      minimalControls: true
+    });
   }
 
   onHoverIframeLoad(): void {

@@ -31,7 +31,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
       role="dialog"
       aria-modal="true"
       aria-labelledby="auth-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto luanti-backdrop">
+      class="z-50 flex items-center justify-center p-4 overflow-y-auto luanti-modal-backdrop">
 
       <div
         (click)="$event.stopPropagation()"

@@ -271,6 +271,7 @@ export const fr: TranslationDictionary = {
     savedSuccess: 'Profil mis à jour avec succès !',
     unlinkBtn: 'Délier',
     signOut: 'Déconnexion',
+    cancel: 'Annuler',
     openReportsTitle: 'Signalements de la Communauté en Attente',
     moderationQueueTitle: 'Signalements de la Communauté en Attente',
     noOpenReports: 'Aucun signalement en attente. Le registre est propre !',

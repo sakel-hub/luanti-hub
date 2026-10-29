@@ -648,7 +648,6 @@ export class AuthService {
           body,
           tag,
           category: 'moderation',
-          icon: alert.package_thumbnail || undefined,
           data: {
             targetTab: 'account',
             packageId: alert.package_id,
@@ -666,7 +665,6 @@ export class AuthService {
           body: `[${String(rep.reason || 'other').toUpperCase()}] ${rep.details || 'Requires moderator review.'}`,
           tag,
           category: 'admin_queue',
-          icon: rep.package_thumbnail || undefined,
           data: {
             targetTab: 'moderation',
             packageId: rep.package_id,

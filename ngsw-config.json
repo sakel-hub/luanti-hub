@@ -30,6 +30,18 @@
   ],
   "dataGroups": [
     {
+      "name": "luantihub-api",
+      "urls": [
+        "/api/packages/**"
+      ],
+      "cacheConfig": {
+        "maxSize": 250,
+        "maxAge": "2h",
+        "strategy": "freshness",
+        "timeout": "3s"
+      }
+    },
+    {
       "name": "packages-api",
       "urls": [
         "https://content.luanti.org/api/packages/**",
@@ -50,10 +62,13 @@
         "https://contentdb.milcho.org/storage/**",
         "https://raw.githubusercontent.com/**",
         "https://codeberg.org/**/raw/**",
-        "https://gitlab.com/**/raw/**"
+        "https://gitlab.com/**/raw/**",
+        "https://avatars.githubusercontent.com/**",
+        "https://codeberg.org/avatars/**",
+        "https://gitlab.com/uploads/**"
       ],
       "cacheConfig": {
-        "maxSize": 400,
+        "maxSize": 500,
         "maxAge": "7d",
         "strategy": "performance"
       }

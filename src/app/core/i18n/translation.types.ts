@@ -286,6 +286,7 @@ export interface TranslationDictionary {
     savedSuccess: string;
     unlinkBtn: string;
     signOut: string;
+    cancel: string;
     openReportsTitle: string;
     moderationQueueTitle: string;
     noOpenReports: string;

@@ -271,6 +271,7 @@ export const es: TranslationDictionary = {
     savedSuccess: '¡Perfil actualizado correctamente!',
     unlinkBtn: 'Desvincular',
     signOut: 'Cerrar Sesión',
+    cancel: 'Cancelar',
     openReportsTitle: 'Cola de Reportes de la Comunidad',
     moderationQueueTitle: 'Cola de Reportes de la Comunidad',
     noOpenReports: 'No hay reportes abiertos. ¡El registro está limpio!',
