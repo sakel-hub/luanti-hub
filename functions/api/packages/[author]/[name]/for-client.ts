@@ -259,7 +259,7 @@ export async function onRequestGet(context: { request: Request; params: { author
       video_url: d1Pkg.video_url || null,
       video_thumbnail_url: d1Pkg.video_thumbnail_url || null,
       dev_state: d1Pkg.dev_state || 'ACTIVELY_DEVELOPED',
-      download_size: d1Pkg.download_size ? formatByteSize(d1Pkg.download_size) || 'Archive' : (d1Pkg.file_size || 'Archive'),
+      download_size: d1Pkg.download_size ? formatByteSize(d1Pkg.download_size) : (d1Pkg.file_size || undefined),
       downloads: totalDl,
       contentdb_downloads: Number(d1Pkg.contentdb_downloads) || 0,
       luantihub_downloads: totalDl,

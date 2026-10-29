@@ -315,6 +315,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         aliases.push(aliasEntry);
       }
     }
+    // Provide author variant aliases (e.g. sakel/x_mobs for sakel-hub/x_mobs) so Luanti matches mods with author = SaKeL
+    if (canonicalAuthor.includes('-') || canonicalAuthor.includes('_')) {
+      const baseAuthor = canonicalAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      if (baseAuthor && baseAuthor.toLowerCase() !== canonicalAuthor.toLowerCase()) {
+        const baseAlias = `${baseAuthor}/${canonicalName}`;
+        if (!aliases.includes(baseAlias)) {
+          aliases.push(baseAlias);
+        }
+      }
+    }
 
     const parsedTags = parseJsonArray(p.tags);
     const isGitSource = p.provider !== 'contentdb' || parsedTags.includes('git');
