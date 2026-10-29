@@ -56,7 +56,16 @@ export async function onRequest(context: {
   request: Request;
   env: Env;
 }) {
-  const { author, name, release } = context.params;
+  const safeDecode = (val: string) => {
+    try {
+      return decodeURIComponent(val);
+    } catch {
+      return val;
+    }
+  };
+  const author = safeDecode(context.params.author || '');
+  const name = safeDecode(context.params.name || '');
+  const release = context.params.release ? safeDecode(context.params.release) : undefined;
   const packageId = `${author}/${name}`;
   const { env, request } = context;
 
@@ -219,13 +228,17 @@ export async function onRequest(context: {
   }
 
   let upstreamReleaseUrl = '';
+  let upstreamCommitSha = '';
   let effectiveRepoUrl = String(pkgRecord?.repo_url || '').trim();
   let effectiveType = String(pkgRecord?.type || 'mod').toLowerCase();
 
-  // Fetch ContentDB releases & for-client metadata (cached at Edge, with milcho.org JSON failover)
-  // to discover `repo_url`, release ID, and fallback `.zip` upload URLs when not already in D1
-  const [upstreamReleases, forClient] = await Promise.all([
+  // Fetch ContentDB releases, package metadata & for-client metadata (cached at Edge, with milcho.org JSON failover)
+  // to discover `repo_url`, release ID, commit SHA, and fallback `.zip` upload URLs when not already in D1
+  const [upstreamReleases, upstreamPkg, forClient] = await Promise.all([
     fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300).catch(() => null),
+    !effectiveRepoUrl
+      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600).catch(() => null)
+      : Promise.resolve(null),
     (!resolvedReleaseId || !effectiveRepoUrl)
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300).catch(() => null)
       : Promise.resolve(null)
@@ -239,6 +252,9 @@ export async function onRequest(context: {
       if (!resolvedReleaseId && matchedUpstreamRel.id) {
         resolvedReleaseId = String(matchedUpstreamRel.id);
       }
+      if (typeof matchedUpstreamRel.commit === 'string' && /^[0-9a-f]{7,40}$/i.test(matchedUpstreamRel.commit.trim())) {
+        upstreamCommitSha = matchedUpstreamRel.commit.trim();
+      }
       if (typeof matchedUpstreamRel.url === 'string' && matchedUpstreamRel.url.trim()) {
         const rawUrl = matchedUpstreamRel.url.trim();
         upstreamReleaseUrl = rawUrl.startsWith('http')
@@ -248,18 +264,73 @@ export async function onRequest(context: {
     }
   }
 
+  const normalizeRepoCandidate = (raw?: any): string => {
+    if (typeof raw !== 'string' || !raw.trim()) return '';
+    const trimmed = raw.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+    try {
+      const u = new URL(trimmed);
+      const parts = u.pathname.split('/').filter(Boolean);
+      if (u.hostname.toLowerCase().includes('notabug.org') && parts.length >= 2) {
+        return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1]}`;
+      }
+    } catch {
+      // Keep original
+    }
+    return trimmed;
+  };
+
+  if (!effectiveRepoUrl) {
+    effectiveRepoUrl =
+      normalizeRepoCandidate(upstreamPkg?.repo) ||
+      normalizeRepoCandidate(upstreamPkg?.repo_url) ||
+      normalizeRepoCandidate(forClient?.repo) ||
+      normalizeRepoCandidate(forClient?.repo_url) ||
+      normalizeRepoCandidate(forClient?.info_hypertext?.links?.repo) ||
+      normalizeRepoCandidate(forClient?.info_hypertext?.links?.git_repo);
+  }
+
+  if (!effectiveRepoUrl) {
+    const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600).catch(() => null);
+    if (Array.isArray(bulkCatalog)) {
+      const lowerA = effectiveAuthor.toLowerCase();
+      const lowerN = effectiveName.toLowerCase();
+      const found = bulkCatalog.find(
+        (item: any) =>
+          item &&
+          String(item.author || '').toLowerCase() === lowerA &&
+          String(item.name || '').toLowerCase() === lowerN
+      );
+      if (found) {
+        effectiveRepoUrl = normalizeRepoCandidate(found.repo || found.repo_url);
+        if (!resolvedReleaseId && found.release) {
+          resolvedReleaseId = String(found.release);
+        }
+        if (found.type && (!pkgRecord || !pkgRecord.type)) {
+          effectiveType = String(found.type).toLowerCase();
+        }
+      }
+    }
+  }
+
+  if (effectiveRepoUrl && env.DB && pkgRecord?.id) {
+    env.DB.prepare(`UPDATE packages SET repo_url = ? WHERE LOWER(id) = LOWER(?) AND COALESCE(repo_url, '') = ''`)
+      .bind(effectiveRepoUrl, pkgRecord.id)
+      .run()
+      .catch(() => {});
+  }
+
+  if (upstreamPkg) {
+    if (upstreamPkg.type && (!pkgRecord || !pkgRecord.type)) {
+      effectiveType = String(upstreamPkg.type).toLowerCase();
+    }
+    if (Array.isArray(upstreamPkg.provides) && upstreamPkg.provides.length > 1) {
+      effectiveType = 'modpack';
+    }
+  }
+
   if (forClient) {
     if (!resolvedReleaseId && forClient.release) {
       resolvedReleaseId = String(forClient.release);
-    }
-    if (!effectiveRepoUrl && typeof forClient.repo === 'string' && forClient.repo.trim()) {
-      effectiveRepoUrl = forClient.repo.trim();
-      if (env.DB && pkgRecord?.id) {
-        env.DB.prepare(`UPDATE packages SET repo_url = ? WHERE LOWER(id) = LOWER(?) AND COALESCE(repo_url, '') = ''`)
-          .bind(effectiveRepoUrl, pkgRecord.id)
-          .run()
-          .catch(() => {});
-      }
     }
     if (forClient.type && (!pkgRecord || !pkgRecord.type)) {
       effectiveType = String(forClient.type).toLowerCase();
@@ -365,6 +436,18 @@ export async function onRequest(context: {
 
     for (const r of d1Releases) {
       if (r?.download_url) addCandidate(r.download_url);
+    }
+
+    if (upstreamCommitSha) {
+      const target = parseGitRepoTarget(effectiveRepoUrl, effectiveAuthor, effectiveName);
+      if (target) {
+        if (target.provider === 'gitlab') {
+          const projectPath = encodeURIComponent(`${target.owner}/${target.repo}`);
+          addCandidate(`https://${target.host}/api/v4/projects/${projectPath}/repository/archive.zip?sha=${encodeURIComponent(upstreamCommitSha)}`);
+        } else {
+          addCandidate(`https://${target.host}/${target.owner}/${target.repo}/archive/${encodeURIComponent(upstreamCommitSha)}.zip`);
+        }
+      }
     }
 
     // Always include HEAD.zip (auto-resolves default branch whether `main`, `master`, or custom)

@@ -1267,5 +1267,10 @@ description = Mob animation and spawning framework.
     headerFixture.componentInstance.isMobileMenuOpen.set(true);
     headerFixture.detectChanges();
     expect(headerFixture.nativeElement.textContent).not.toContain('Install App');
+
+    // 4. Verify Cloudflare Pages _routes.json includes "/packages/*" so in-game Luanti client download URLs
+    // (/packages/:author/:name/releases/:release/download/) invoke the Edge Function instead of falling back to index.html
+    const routesConfig = (await import('../../public/_routes.json')).default;
+    expect(routesConfig.include).toContain('/packages/*');
   });
 });
