@@ -30,3 +30,14 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
 -- 4. Create indices for moderation_reports
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);
+
+-- 5. Create user_downloads table for personalized match scoring & history sync
+CREATE TABLE IF NOT EXISTS user_downloads (
+    user_id TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    download_count INTEGER NOT NULL DEFAULT 1,
+    last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, package_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
