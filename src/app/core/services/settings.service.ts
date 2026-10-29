@@ -109,6 +109,9 @@ export class SettingsService {
   async mergeServerFavorites(serverFavs?: string[]): Promise<void> {
     const localFavs = this.favorites();
     const validServerFavs = (serverFavs || []).filter(id => typeof id === 'string' && id.includes('/'));
+    const serverLowerSet = new Set(validServerFavs.map(id => id.toLowerCase()));
+    const hasUnsyncedLocal = localFavs.some(id => !serverLowerSet.has(id.toLowerCase()));
+
     const seen = new Set<string>();
     const combined: string[] = [];
     for (const id of [...localFavs, ...validServerFavs]) {
@@ -120,7 +123,8 @@ export class SettingsService {
     }
     this.favorites.set(combined);
 
-    if (combined.length > 0 && this.edgeApiAvailable()) {
+    // Only call POST /api/auth/favorites when the browser actually has unsynced local favorites not yet on the server
+    if (hasUnsyncedLocal && combined.length > 0 && this.edgeApiAvailable()) {
       try {
         const res = await fetch('/api/auth/favorites', {
           method: 'POST',

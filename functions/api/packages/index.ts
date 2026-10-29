@@ -1,7 +1,87 @@
-import { fetchUpstreamJsonCached, parseJsonArray, normalizeRepoKey } from '../lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  parseJsonArray,
+  normalizeRepoKey,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
+} from '../lib/upstream';
 
 interface Env {
   DB?: any;
+}
+
+const DEFAULT_CONTENTDB_TAGS = [
+  { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
+  { name: 'building', title: 'Building' },
+  { name: 'combat', title: 'Combat' },
+  { name: 'Crafting', title: 'Crafting' },
+  { name: 'decorative', title: 'Decorative' },
+  { name: 'environment', title: 'Environment' },
+  { name: 'gui', title: 'GUI' },
+  { name: 'hud', title: 'HUD' },
+  { name: 'inventory', title: 'Inventory' },
+  { name: 'magic', title: 'Magic' },
+  { name: 'mapgen', title: 'Mapgen' },
+  { name: 'mobs', title: 'Mobs / Animals / NPCs' },
+  { name: 'multiplayer', title: 'Multiplayer' },
+  { name: 'plants_and_farming', title: 'Plants and Farming' },
+  { name: 'player_effects', title: 'Player Effects' },
+  { name: 'pve', title: 'PvE' },
+  { name: 'pvp', title: 'PvP' },
+  { name: 'storage', title: 'Storage' },
+  { name: 'survival', title: 'Survival' },
+  { name: 'technology', title: 'Technology' },
+  { name: 'tools', title: 'Tools / Weapons' },
+  { name: 'transport', title: 'Transport' },
+  { name: 'world_maintenance', title: 'World Maintenance' }
+];
+
+function buildTop10FromCatalog(
+  mergedCatalog: any[],
+  velocityMap: Map<string, number>,
+  timeframe: 'today' | 'week'
+): any[] {
+  const catalogByLowerId = new Map<string, any>();
+  for (const item of mergedCatalog) {
+    if (item?.id) {
+      catalogByLowerId.set(String(item.id).toLowerCase(), item);
+    }
+  }
+
+  const top10: any[] = [];
+  const sortedVelocity = Array.from(velocityMap.entries())
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  for (const [lowerId, periodDownloads] of sortedVelocity) {
+    if (top10.length >= 10) break;
+    const match = catalogByLowerId.get(lowerId);
+    if (!match) continue;
+    top10.push({
+      ...match,
+      downloads: periodDownloads
+    });
+  }
+
+  if (top10.length < 10) {
+    const remaining = [...mergedCatalog].sort((a, b) => {
+      if (timeframe === 'today') {
+        const scoreA = (Number(a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50;
+        const scoreB = (Number(b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50;
+        return scoreB - scoreA;
+      }
+      return (Number(b.downloads) || 0) - (Number(a.downloads) || 0);
+    });
+
+    for (const item of remaining) {
+      if (top10.length >= 10) break;
+      const lowerId = String(item.id || `${item.author}/${item.name}`).toLowerCase();
+      if (top10.some(p => String(p.id).toLowerCase() === lowerId)) continue;
+      top10.push(item);
+    }
+  }
+
+  return top10;
 }
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
@@ -10,18 +90,47 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const q = (url.searchParams.get('q') || '').trim();
   const type = (url.searchParams.get('type') || '').trim();
   const author = (url.searchParams.get('author') || '').trim();
+  const isBootBundle = url.searchParams.get('boot') === '1';
+  const bypassCache = url.searchParams.get('nocache') === '1';
 
-  const upstreamPath = `/packages/${url.search}`;
+  const edgeCacheKey = `/__api_packages_v2${url.search || ''}`;
+  if (!bypassCache) {
+    const cachedPayload = await readEdgeCacheJson<any>(edgeCacheKey);
+    if (cachedPayload) {
+      return new Response(JSON.stringify(cachedPayload), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
+          'X-LuantiHub-Cache': 'HIT'
+        }
+      });
+    }
+  }
+
+  const upstreamParams = new URLSearchParams(url.searchParams);
+  upstreamParams.delete('boot');
+  upstreamParams.delete('nocache');
+  const upstreamQuery = upstreamParams.toString();
+  const upstreamPath = `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
   // 1. Fetch Upstream Packages (with Cloudflare Edge Cache + mirror failover)
   const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, 300)
     .then(list => Array.isArray(list) ? list : [])
     .catch(() => []);
 
+  const tagsPromise = isBootBundle
+    ? fetchUpstreamJsonCached<any[]>('/tags/', 3600).catch(() => null)
+    : Promise.resolve<any[] | null>(null);
+
   // 2. Fetch Decentralized Packages, Review Star Averages, AND Kill-Switch Blacklist from Cloudflare D1
   let d1Promise = Promise.resolve<any[]>([]);
   let blockedPromise = Promise.resolve<Set<string>>(new Set());
   let reviewRatingsPromise = Promise.resolve<Map<string, number>>(new Map());
+  let velocityPromise = Promise.resolve<{ today: Map<string, number>; week: Map<string, number> }>({
+    today: new Map(),
+    week: new Map()
+  });
 
   if (env.DB) {
     let query = `SELECT * FROM packages WHERE status = 'active'`;
@@ -67,13 +176,39 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         return map;
       })
       .catch(() => new Map<string, number>());
+
+    if (isBootBundle) {
+      velocityPromise = env.DB.prepare(`
+        SELECT
+          LOWER(package_id) as pkg_id,
+          SUM(CASE WHEN download_date = DATE('now') THEN downloads_count ELSE 0 END) as today_dl,
+          SUM(downloads_count) as week_dl
+        FROM package_daily_downloads
+        WHERE download_date >= DATE('now', '-7 days')
+        GROUP BY LOWER(package_id)
+      `).all()
+        .then((res: any) => {
+          const today = new Map<string, number>();
+          const week = new Map<string, number>();
+          for (const row of (res.results || [])) {
+            if (!row?.pkg_id) continue;
+            const k = String(row.pkg_id).toLowerCase();
+            if (Number(row.today_dl) > 0) today.set(k, Number(row.today_dl));
+            if (Number(row.week_dl) > 0) week.set(k, Number(row.week_dl));
+          }
+          return { today, week };
+        })
+        .catch(() => ({ today: new Map(), week: new Map() }));
+    }
   }
 
-  const [upstreamList, d1List, blockedIds, d1Ratings] = await Promise.all([
+  const [upstreamList, d1List, blockedIds, d1Ratings, rawTags, velocity] = await Promise.all([
     upstreamPromise,
     d1Promise,
     blockedPromise,
-    reviewRatingsPromise
+    reviewRatingsPromise,
+    tagsPromise,
+    velocityPromise
   ]);
 
   // 3. Build upstream ContentDB index by ID, normalized repo URL, and (name + title) to prevent duplicates
@@ -185,11 +320,40 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     });
   }
 
-  return new Response(JSON.stringify(merged), {
+  let responsePayload: any = merged;
+  if (isBootBundle) {
+    let tags = DEFAULT_CONTENTDB_TAGS;
+    if (Array.isArray(rawTags) && rawTags.length > 0) {
+      const normalizedTags = rawTags
+        .map((t: any) => ({
+          name: String(t.name || t.id || '').trim(),
+          title: String(t.title || t.name || '').trim()
+        }))
+        .filter((t) => Boolean(t.name && t.title));
+      if (normalizedTags.length > 0) {
+        tags = normalizedTags;
+      }
+    }
+
+    const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
+    const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
+
+    responsePayload = {
+      packages: merged,
+      tags,
+      top10Week,
+      top10Today
+    };
+  }
+
+  await writeEdgeCacheJson(edgeCacheKey, responsePayload, 300);
+
+  return new Response(JSON.stringify(responsePayload), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
+      'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
+      'X-LuantiHub-Cache': 'MISS'
     }
   });
 }

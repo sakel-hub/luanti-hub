@@ -1,4 +1,10 @@
-import { fetchUpstreamJsonCached, parseJsonArray, detectSpdxFromText } from '../../../lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  parseJsonArray,
+  detectSpdxFromText,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
+} from '../../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -518,13 +524,119 @@ async function probeGitRepoConfAndLicense(
   };
 }
 
-export async function onRequestGet(context: { params: { author: string; name: string }; env: Env }) {
+function buildNormalizedReleases(
+  author: string,
+  name: string,
+  d1Releases: any[],
+  upstreamReleases: any[] | null
+): any[] {
+  if (Array.isArray(d1Releases) && d1Releases.length > 0) {
+    return d1Releases.map((r: any) => ({
+      id: r.id,
+      version: r.version,
+      title: r.tag_name || r.version,
+      tag_name: r.tag_name || r.version,
+      commit_sha: r.commit_sha,
+      url: r.download_url,
+      download_url: r.download_url,
+      min_minetest_version: r.min_minetest_version,
+      max_minetest_version: r.max_minetest_version,
+      changelog: r.changelog,
+      release_date: r.released_at,
+      released_at: r.released_at
+    }));
+  }
+
+  if (Array.isArray(upstreamReleases) && upstreamReleases.length > 0) {
+    const encAuthor = encodeURIComponent(author);
+    const encName = encodeURIComponent(name);
+    return upstreamReleases.map((r: any) => {
+      const rawUrl = r.url || '';
+      const fullDownloadUrl = rawUrl.startsWith('http')
+        ? rawUrl
+        : rawUrl
+          ? `https://content.luanti.org${rawUrl}`
+          : `https://content.luanti.org/packages/${encAuthor}/${encName}/releases/${r.id}/download/`;
+
+      return {
+        id: r.id,
+        version: String(r.title || r.id || 'latest'),
+        title: String(r.title || r.id || 'Release'),
+        tag_name: String(r.title || r.id || 'latest'),
+        commit_sha: r.commit || '',
+        url: fullDownloadUrl,
+        download_url: fullDownloadUrl,
+        size: r.size || r.file_size || undefined,
+        min_minetest_version: r.min_minetest_version || r.min_protocol_version || undefined,
+        max_minetest_version: r.max_minetest_version || r.max_protocol_version || undefined,
+        released_at: r.release_date || new Date().toISOString()
+      };
+    });
+  }
+
+  return [];
+}
+
+function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null): any[] {
+  const normalizedOfficial = (Array.isArray(upstreamReviews) ? upstreamReviews : []).map((r: any, idx: number) => ({
+    id: `cdb_${r.id || idx}`,
+    source: 'contentdb',
+    rating: r.rating ? Math.min(5, Math.max(1, Number(r.rating))) : (r.recommends === false ? 1 : r.recommends === true ? 5 : 3),
+    title: r.title,
+    comment: r.comment || r.text || '',
+    created_at: r.created_at,
+    author: {
+      username: r.author || r.user?.username || 'contentdb_user',
+      display_name: r.author || r.user?.display_name || r.user?.username || 'Community Member',
+      avatar_url: `https://github.com/${r.author || r.user?.username || 'octocat'}.png`
+    }
+  }));
+
+  const normalizedLocal = (Array.isArray(d1Reviews) ? d1Reviews : []).map((r: any) => ({
+    id: `lh_${r.id}`,
+    source: 'luantihub',
+    rating: r.rating || 5,
+    title: r.title,
+    comment: r.comment,
+    created_at: r.created_at,
+    author: {
+      username: r.username,
+      display_name: r.display_name || r.username,
+      avatar_url: r.avatar_url || `https://github.com/${r.username}.png`
+    }
+  }));
+
+  return [...normalizedLocal, ...normalizedOfficial].sort(
+    (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+  );
+}
+
+export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
+  const reqUrl = context.request ? new URL(context.request.url) : null;
+  const bypassCache = reqUrl?.searchParams.get('nocache') === '1';
+  const edgeCacheKey = `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`;
 
-  // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews)
+  if (!bypassCache) {
+    const cachedDetail = await readEdgeCacheJson<any>(edgeCacheKey);
+    if (cachedDetail) {
+      return new Response(JSON.stringify(cachedDetail), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=120, s-maxage=300',
+          'X-LuantiHub-Cache': 'HIT'
+        }
+      });
+    }
+  }
+
+  // 1. Check Cloudflare D1 (including Instant Kill Switch status check + local D1 reviews & releases)
   let d1Pkg: any = null;
   let d1ReviewAvg: number | undefined;
+  let d1Releases: any[] = [];
+  let d1Reviews: any[] = [];
   if (context.env.DB) {
     d1Pkg = await context.env.DB.prepare(
       `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)`
@@ -542,25 +654,45 @@ export async function onRequestGet(context: { params: { author: string; name: st
     }
 
     try {
-      const revRow = await context.env.DB.prepare(
-        `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-      ).bind(pkgId).first();
-      if (revRow && Number(revRow.cnt) > 0 && revRow.avg_rating != null) {
-        d1ReviewAvg = Number(revRow.avg_rating);
+      const [revAvgRow, revRowsRes, relRowsRes] = await Promise.all([
+        context.env.DB.prepare(
+          `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(pkgId).first(),
+        context.env.DB.prepare(`
+          SELECT r.id, r.rating, r.title, r.comment, r.created_at,
+                 u.username, u.display_name, u.avatar_url
+          FROM reviews r
+          LEFT JOIN users u ON r.user_id = u.id
+          WHERE LOWER(r.package_id) = LOWER(?)
+          ORDER BY r.created_at DESC
+        `).bind(pkgId).all().catch(() => ({ results: [] })),
+        context.env.DB.prepare(
+          `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
+        ).bind(pkgId).all().catch(() => ({ results: [] }))
+      ]);
+
+      if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
+        d1ReviewAvg = Number(revAvgRow.avg_rating);
       }
+      d1Reviews = revRowsRes?.results || [];
+      d1Releases = relRowsRes?.results || [];
     } catch {
-      // Ignore if reviews query fails
+      // Ignore if reviews/releases query fails
     }
   }
 
-  // 2. Fetch upstream ContentDB detail, dependencies, and releases in parallel
+  // 2. Fetch upstream ContentDB detail, dependencies, releases, and reviews in parallel
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
-  let [upstreamData, depsPayload, releasesPayload] = await Promise.all([
+  let [upstreamData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
     fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 300),
     fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`, 600),
-    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300)
+    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
+    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
   ]);
+
+  const bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
+  const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload);
 
   // Fallback: If single-package endpoint is unavailable on mirror, resolve from cached bulk catalog (/packages/)
   if (!upstreamData) {
@@ -589,7 +721,7 @@ export async function onRequestGet(context: { params: { author: string; name: st
       if (sources.length === 0) sources.push('git');
 
       const readme = isGitPkg ? await fetchRepoReadmeCached(d1Pkg.repo_url) : undefined;
-      return new Response(JSON.stringify({
+      const pureGitPayload = {
         id: `${d1Pkg.author_name}/${d1Pkg.name}`,
         author: d1Pkg.author_name,
         name: d1Pkg.name,
@@ -615,12 +747,18 @@ export async function onRequestGet(context: { params: { author: string; name: st
         file_size: d1Pkg.file_size || undefined,
         status: d1Pkg.status || 'active',
         source: isGitPkg ? 'git' : 'official',
-        sources
-      }), {
+        sources,
+        releases_list: bundledReleases,
+        reviews_list: bundledReviews
+      };
+
+      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, 300);
+
+      return new Response(JSON.stringify(pureGitPayload), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=60, s-maxage=300'
+          'Cache-Control': 'public, max-age=120, s-maxage=300'
         }
       });
     }
@@ -764,14 +902,19 @@ export async function onRequestGet(context: { params: { author: string; name: st
     optional_dependencies: finalSoftDeps.length > 0 ? finalSoftDeps : d1SoftDeps,
     status: d1Pkg?.status || 'active',
     source: isRegisteredInGitCommunity ? 'git' : 'official',
-    sources
+    sources,
+    releases_list: bundledReleases,
+    reviews_list: bundledReviews
   };
+
+  await writeEdgeCacheJson(edgeCacheKey, enriched, 300);
 
   return new Response(JSON.stringify(enriched), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=60, s-maxage=300'
+      'Cache-Control': 'public, max-age=120, s-maxage=300',
+      'X-LuantiHub-Cache': 'MISS'
     }
   });
 }

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "include": [
+    "/api/*",
+    "/package/*",
+    "/sitemap.xml"
+  ],
+  "exclude": [
+    "/assets/*",
+    "/icons/*",
+    "/favicon.ico",
+    "/logo.svg",
+    "/manifest.webmanifest",
+    "/ngsw.json",
+    "/ngsw-worker.js",
+    "/safety-worker.js",
+    "/worker-basic.min.js",
+    "/robots.txt"
+  ]
+}

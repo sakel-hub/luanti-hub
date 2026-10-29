@@ -1,4 +1,4 @@
-import { fetchWithFailover } from '../../../lib/upstream';
+import { fetchWithFailover, invalidateEdgeCacheKeys } from '../../../lib/upstream';
 import { verifySessionToken, parseCookies } from '../../../auth/lib/session';
 
 interface Env {
@@ -122,6 +122,12 @@ export async function onRequestPost(context: { request: Request; params: { autho
       `).bind(roundedScore, packageId).run();
     }
   }
+
+  await invalidateEdgeCacheKeys([
+    '/__api_packages_v2',
+    '/__api_packages_v2?boot=1',
+    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+  ]);
 
   return Response.json({
     success: true,

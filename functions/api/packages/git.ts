@@ -1,6 +1,6 @@
 // Ingestion & Static Audit Endpoint for Decentralized Git Repositories (Codeberg, GitLab, GitHub, Gitea)
 import { verifySessionToken, parseCookies } from '../auth/lib/session';
-import { fetchUpstreamJsonCached, normalizeRepoKey, parseJsonArray } from '../lib/upstream';
+import { fetchUpstreamJsonCached, normalizeRepoKey, parseJsonArray, invalidateEdgeCacheKeys } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -761,6 +761,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         VALUES (?, 'latest', ?, 'HEAD', ?, ?)
       `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
     }
+
+    await invalidateEdgeCacheKeys([
+      '/__api_packages_v2',
+      '/__api_packages_v2?boot=1',
+      `/__api_pkg_detail_v2/${canonicalAuthor.toLowerCase()}/${technicalName.toLowerCase()}`
+    ]);
 
     return Response.json({
       success: true,

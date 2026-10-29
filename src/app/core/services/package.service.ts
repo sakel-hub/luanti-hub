@@ -81,6 +81,7 @@ export class PackageService {
   private readonly deepHydratedIds = new Set<string>();
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
+  private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
   private readonly reportedBrokenGitIds = new Set<string>();
   private readonly hydrationQueue: LuantiPackage[] = [];
   private activeHydrationWorkers = 0;
@@ -89,6 +90,12 @@ export class PackageService {
   private edgeApiAvailable = false;
   private contentDbOnline = false;
   private readonly repoDirCache = new Map<string, Array<{ name: string; download_url?: string }>>();
+  private readonly repoDirPromiseCache = new Map<string, Promise<Array<{ name: string; download_url?: string }>>>();
+  private readonly discoveredReposCache = new Map<
+    string,
+    Promise<Array<{ forge: 'github' | 'codeberg'; fullName: string; repoUrl: string; rawBase: string }>>
+  >();
+  private readonly inFlightDetailsCache = new Map<string, Promise<void>>();
 
   // Readonly Public Signals
   readonly packages = this._packages.asReadonly();
@@ -794,13 +801,76 @@ export class PackageService {
     }
   }
 
-  // Fetch Live Packages from Backend API (Cloudflare D1 + ContentDB + Milcho failover)
-  async initCatalog(): Promise<void> {
+  clearBootCache(): void {
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.removeItem('lh_boot_cache_v1');
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private applyBootPayload(payload: {
+    packages: any[];
+    tags?: any[];
+    top10Week?: any[];
+    top10Today?: any[];
+  }): void {
+    const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
+    const normalized = this.deduplicateCatalog(
+      rawPackages
+        .filter((item: any) => item && item.author && item.name && item.status !== 'delisted' && item.status !== 'flagged')
+        .map((item: any) => this.normalizePackage(item))
+    );
+
+    this._packages.set(normalized);
+    this.reconcileFavoritesWithCatalog(normalized);
+
+    if (Array.isArray(payload.tags) && payload.tags.length > 0) {
+      const parsedTags: ContentDbTag[] = payload.tags
+        .map((t: any) => ({
+          name: String(t.name || t.id || '').trim(),
+          title: String(t.title || t.name || '').trim()
+        }))
+        .filter(t => Boolean(t.name && t.title));
+      if (parsedTags.length > 0) {
+        this._availableTags.set(parsedTags);
+      }
+    }
+
+    if (Array.isArray(payload.top10Week) && payload.top10Week.length > 0) {
+      this._serverTop10Week.set(payload.top10Week.map(item => this.normalizePackage(item)));
+    }
+    if (Array.isArray(payload.top10Today) && payload.top10Today.length > 0) {
+      this._serverTop10Today.set(payload.top10Today.map(item => this.normalizePackage(item)));
+    }
+  }
+
+  // Fetch Live Packages from Backend API (Bundled Boot Payload: Catalog + Tags + Top 10 Week & Today in 1 call)
+  async initCatalog(forceRefresh = false): Promise<void> {
     try {
       this._isLoading.set(true);
 
+      if (!forceRefresh && typeof sessionStorage !== 'undefined') {
+        try {
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v1');
+          if (rawCached) {
+            const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
+            if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
+              this.edgeApiAvailable = Boolean(parsed.edge);
+              this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
+              this.applyBootPayload(parsed.payload);
+              return;
+            }
+          }
+        } catch {
+          // Proceed to network fetch
+        }
+      }
+
       const apiUrl = typeof window !== 'undefined' && window.location?.origin
-        ? `${window.location.origin}/api/packages/`
+        ? `${window.location.origin}/api/packages/?boot=1${forceRefresh ? '&nocache=1' : ''}`
         : 'https://contentdb.milcho.org/api/packages/';
 
       let response: Response | null = null;
@@ -842,17 +912,30 @@ export class PackageService {
 
       if (response && response.ok) {
         const data = await response.json();
-        if (Array.isArray(data)) {
-          const normalized = this.deduplicateCatalog(
-            data
-              .filter((item: any) => item && item.author && item.name && item.status !== 'delisted' && item.status !== 'flagged')
-              .map((item: any) => this.normalizePackage(item))
-          );
+        const bootPayload = Array.isArray(data)
+          ? { packages: data }
+          : (data && typeof data === 'object' && Array.isArray(data.packages) ? data : null);
 
-          this._packages.set(normalized);
-          this.reconcileFavoritesWithCatalog(normalized);
+        if (bootPayload) {
+          this.applyBootPayload(bootPayload);
 
-          if (this.edgeApiAvailable) {
+          try {
+            if (typeof sessionStorage !== 'undefined') {
+              sessionStorage.setItem(
+                'lh_boot_cache_v1',
+                JSON.stringify({
+                  ts: Date.now(),
+                  edge: this.edgeApiAvailable,
+                  payload: bootPayload
+                })
+              );
+            }
+          } catch {
+            // Ignore sessionStorage quota errors
+          }
+
+          // Only fetch tags/top10 separately if the endpoint returned a legacy unbundled array
+          if (this.edgeApiAvailable && Array.isArray(data)) {
             this.fetchAvailableTags();
             this.fetchTop10('week');
             this.fetchTop10('today');
@@ -1274,124 +1357,160 @@ export class PackageService {
     const cached = this.repoDirCache.get(cacheKey);
     if (cached) return cached;
 
+    const inFlight = this.repoDirPromiseCache.get(cacheKey);
+    if (inFlight) return inFlight;
+
     const apiUrl = forge === 'codeberg'
       ? `https://codeberg.org/api/v1/repos/${fullName}/contents`
       : `https://api.github.com/repos/${fullName}/contents`;
 
-    try {
-      const res = await fetch(apiUrl, { headers: { Accept: 'application/json' } });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          const listing = data
-            .filter((item: any) => item && item.name && item.type === 'file')
-            .map((item: any) => ({
-              name: String(item.name),
-              download_url: item.download_url ? String(item.download_url) : undefined
-            }));
-          this.repoDirCache.set(cacheKey, listing);
-          return listing;
+    const requestPromise = (async () => {
+      try {
+        const res = await fetch(apiUrl, { headers: { Accept: 'application/json' } });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            const listing = data
+              .filter((item: any) => item && item.name && item.type === 'file')
+              .map((item: any) => ({
+                name: String(item.name),
+                download_url: item.download_url ? String(item.download_url) : undefined
+              }));
+            this.repoDirCache.set(cacheKey, listing);
+            return listing;
+          }
         }
+      } catch {
+        // Ignore network/CORS errors
       }
-    } catch {
-      // Ignore network/CORS errors
-    }
-    this.repoDirCache.set(cacheKey, []);
-    return [];
+      this.repoDirCache.set(cacheKey, []);
+      return [];
+    })().finally(() => {
+      this.repoDirPromiseCache.delete(cacheKey);
+    });
+
+    this.repoDirPromiseCache.set(cacheKey, requestPromise);
+    return requestPromise;
   }
 
   /**
    * Discovers a package's Git repository across Codeberg and GitHub using Search APIs
    * (which always return 200 OK, never 404), prioritizing exact author/name matches.
+   * Deduplicated per package via `discoveredReposCache` and skips search APIs when
+   * `existingRepoUrl` already resolves to a valid repository.
    */
-  private async discoverConfirmedRepos(
+  private discoverConfirmedRepos(
     pkg: LuantiPackage,
     existingRepoUrl?: string
   ): Promise<Array<{ forge: 'github' | 'codeberg'; fullName: string; repoUrl: string; rawBase: string }>> {
-    const results: Array<{ forge: 'github' | 'codeberg'; fullName: string; repoUrl: string; rawBase: string }> = [];
-    const pushUnique = (forge: 'github' | 'codeberg', fullName: string, repoUrl: string, rawBase: string) => {
-      const key = `${forge}:${fullName.toLowerCase()}`;
-      if (!results.some(r => `${r.forge}:${r.fullName.toLowerCase()}` === key)) {
-        results.push({ forge, fullName, repoUrl, rawBase });
-      }
-    };
+    const pkgCacheKey = (pkg?.id || `${pkg?.author}/${pkg?.name}`).toLowerCase();
+    const existingPromise = this.discoveredReposCache.get(pkgCacheKey);
+    if (existingPromise) {
+      return existingPromise;
+    }
 
-    const normalized = this.normalizeGitRepoUrl(existingRepoUrl);
-    if (normalized) {
+    const promise = (async () => {
+      const results: Array<{ forge: 'github' | 'codeberg'; fullName: string; repoUrl: string; rawBase: string }> = [];
+      const pushUnique = (forge: 'github' | 'codeberg', fullName: string, repoUrl: string, rawBase: string) => {
+        const key = `${forge}:${fullName.toLowerCase()}`;
+        if (!results.some(r => `${r.forge}:${r.fullName.toLowerCase()}` === key)) {
+          results.push({ forge, fullName, repoUrl, rawBase });
+        }
+      };
+
+      const normalized = this.normalizeGitRepoUrl(existingRepoUrl || pkg?.repo_url);
+      if (normalized) {
+        try {
+          const u = new URL(normalized);
+          const parts = u.pathname.split('/').filter(Boolean);
+          if (parts.length >= 2) {
+            const host = u.hostname.toLowerCase();
+            const fullName = `${parts[0]}/${parts[1]}`;
+            if (host.includes('codeberg.org')) {
+              pushUnique('codeberg', fullName, `https://codeberg.org/${fullName}`, `https://codeberg.org/api/v1/repos/${fullName}/raw`);
+            } else if (host.includes('github.com')) {
+              pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
+            }
+          }
+        } catch {
+          // Proceed to search discovery
+        }
+      }
+
+      // If we already have an explicit repo URL and its root listing is non-empty, return immediately without hitting search APIs
+      if (results.length > 0) {
+        const listing = await this.getRepoRootListing(results[0].forge, results[0].fullName);
+        if (listing.length > 0) {
+          return results;
+        }
+      }
+
+      if (!pkg?.name) return results;
+      const targetName = pkg.name.toLowerCase();
+      const targetAuthor = (pkg.author || '').toLowerCase();
+
+      // 1. Search Codeberg Public API (always 200 OK, never 404)
       try {
-        const u = new URL(normalized);
-        const parts = u.pathname.split('/').filter(Boolean);
-        if (parts.length >= 2) {
-          const host = u.hostname.toLowerCase();
-          const fullName = `${parts[0]}/${parts[1]}`;
-          if (host.includes('codeberg.org')) {
-            pushUnique('codeberg', fullName, `https://codeberg.org/${fullName}`, `https://codeberg.org/api/v1/repos/${fullName}/raw`);
-          } else if (host.includes('github.com')) {
-            pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
+        const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(pkg.name)}&limit=8`);
+        if (cbRes.ok) {
+          const cbJson = await cbRes.json();
+          const repos: any[] = Array.isArray(cbJson?.data) ? cbJson.data : [];
+          const matching = repos
+            .filter(r => r && String(r.name || '').toLowerCase() === targetName && r.full_name)
+            .sort((a, b) => {
+              const aAuthor = String(a.owner?.login || a.owner?.username || '').toLowerCase() === targetAuthor ? 1 : 0;
+              const bAuthor = String(b.owner?.login || b.owner?.username || '').toLowerCase() === targetAuthor ? 1 : 0;
+              return bAuthor - aAuthor;
+            });
+          for (const r of matching) {
+            pushUnique(
+              'codeberg',
+              r.full_name,
+              r.html_url || `https://codeberg.org/${r.full_name}`,
+              `https://codeberg.org/api/v1/repos/${r.full_name}/raw`
+            );
           }
         }
       } catch {
-        // Proceed to search discovery
+        // Ignore Codeberg search error
       }
-    }
 
-    if (!pkg?.name) return results;
-    const targetName = pkg.name.toLowerCase();
-    const targetAuthor = (pkg.author || '').toLowerCase();
-
-    // 1. Search Codeberg Public API (always 200 OK, never 404)
-    try {
-      const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(pkg.name)}&limit=8`);
-      if (cbRes.ok) {
-        const cbJson = await cbRes.json();
-        const repos: any[] = Array.isArray(cbJson?.data) ? cbJson.data : [];
-        const matching = repos
-          .filter(r => r && String(r.name || '').toLowerCase() === targetName && r.full_name)
-          .sort((a, b) => {
-            const aAuthor = String(a.owner?.login || a.owner?.username || '').toLowerCase() === targetAuthor ? 1 : 0;
-            const bAuthor = String(b.owner?.login || b.owner?.username || '').toLowerCase() === targetAuthor ? 1 : 0;
-            return bAuthor - aAuthor;
-          });
-        for (const r of matching) {
-          pushUnique(
-            'codeberg',
-            r.full_name,
-            r.html_url || `https://codeberg.org/${r.full_name}`,
-            `https://codeberg.org/api/v1/repos/${r.full_name}/raw`
-          );
+      // 2. Search GitHub Public API only if Codeberg didn't find an exact author match
+      const foundExactCodeberg = results.some(
+        r => r.forge === 'codeberg' && r.fullName.toLowerCase() === `${targetAuthor}/${targetName}`
+      );
+      if (!foundExactCodeberg) {
+        try {
+          const ghRes = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(pkg.name)}+in:name&per_page=8`);
+          if (ghRes.ok) {
+            const ghJson = await ghRes.json();
+            const repos: any[] = Array.isArray(ghJson?.items) ? ghJson.items : [];
+            const matching = repos
+              .filter(r => r && String(r.name || '').toLowerCase() === targetName && r.full_name)
+              .sort((a, b) => {
+                const aAuthor = String(a.owner?.login || '').toLowerCase() === targetAuthor ? 1 : 0;
+                const bAuthor = String(b.owner?.login || '').toLowerCase() === targetAuthor ? 1 : 0;
+                return bAuthor - aAuthor;
+              });
+            for (const r of matching) {
+              pushUnique(
+                'github',
+                r.full_name,
+                r.html_url || `https://github.com/${r.full_name}`,
+                `https://raw.githubusercontent.com/${r.full_name}/HEAD`
+              );
+            }
+          }
+        } catch {
+          // Ignore GitHub search error
         }
       }
-    } catch {
-      // Ignore Codeberg search error
-    }
 
-    // 2. Search GitHub Public API (always 200 OK, never 404)
-    try {
-      const ghRes = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(pkg.name)}+in:name&per_page=8`);
-      if (ghRes.ok) {
-        const ghJson = await ghRes.json();
-        const repos: any[] = Array.isArray(ghJson?.items) ? ghJson.items : [];
-        const matching = repos
-          .filter(r => r && String(r.name || '').toLowerCase() === targetName && r.full_name)
-          .sort((a, b) => {
-            const aAuthor = String(a.owner?.login || '').toLowerCase() === targetAuthor ? 1 : 0;
-            const bAuthor = String(b.owner?.login || '').toLowerCase() === targetAuthor ? 1 : 0;
-            return bAuthor - aAuthor;
-          });
-        for (const r of matching) {
-          pushUnique(
-            'github',
-            r.full_name,
-            r.html_url || `https://github.com/${r.full_name}`,
-            `https://raw.githubusercontent.com/${r.full_name}/HEAD`
-          );
-        }
-      }
-    } catch {
-      // Ignore GitHub search error
-    }
+      return results;
+    })();
 
-    return results;
+    this.discoveredReposCache.set(pkgCacheKey, promise);
+    return promise;
   }
 
   private async fetchRawReadmeFromRepo(repoUrl?: string, pkg?: LuantiPackage): Promise<string | undefined> {
@@ -1619,231 +1738,278 @@ export class PackageService {
     if (deepFetch && this.deepHydratedIds.has(cacheKey)) {
       return;
     }
-    if (deepFetch) {
-      this._isLoadingDetails.set(true);
+
+    const inFlightKey = `${cacheKey}::${deepFetch ? 'deep' : 'light'}`;
+    const existingInFlight = this.inFlightDetailsCache.get(inFlightKey);
+    if (existingInFlight) {
+      return existingInFlight;
     }
-    try {
-      this.hydratedIds.add(cacheKey);
-      let data: any = {};
 
-      if (this.edgeApiAvailable) {
-        try {
-          const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`);
-          if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-            data = await res.json();
-          }
-        } catch {
-          // Fallback below
-        }
+    const work = (async () => {
+      if (deepFetch) {
+        this._isLoadingDetails.set(true);
       }
+      try {
+        this.hydratedIds.add(cacheKey);
+        let data: any = {};
 
-      if (
-        this.contentDbOnline &&
-        (!data ||
-          Object.keys(data).length === 0 ||
-          (!data.repo && !data.repo_url) ||
-          (data.downloads === undefined && data.downloads_count === undefined))
-      ) {
-        try {
-          const fallbackRes = await fetch(`https://content.luanti.org/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`);
-          if (fallbackRes.ok && (fallbackRes.headers.get('content-type') || '').includes('application/json')) {
-            const cdbData = await fallbackRes.json();
-            if (cdbData && typeof cdbData === 'object') {
-              data = {
-                ...cdbData,
-                ...data,
-                downloads: Math.max(
-                  Number(data.downloads ?? data.downloads_count ?? 0) || 0,
-                  Number(cdbData.downloads ?? cdbData.downloads_count ?? 0) || 0
-                ),
-                repo: data.repo || cdbData.repo,
-                repo_url: data.repo_url || cdbData.repo || cdbData.repo_url,
-                website: data.website || cdbData.website,
-                issue_tracker: data.issue_tracker || cdbData.issue_tracker,
-                forums: data.forums || cdbData.forums,
-                license: data.license || cdbData.license,
-                media_license: data.media_license || cdbData.media_license,
-                long_description: data.long_description || cdbData.long_description,
-                screenshots: (Array.isArray(data.screenshots) && data.screenshots.length > 0) ? data.screenshots : cdbData.screenshots
-              };
+        if (this.edgeApiAvailable) {
+          try {
+            const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`);
+            if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+              data = await res.json();
             }
+          } catch {
+            // Fallback below
           }
-        } catch {
-          // Proceed to Git repo metadata fallback
         }
-      }
 
-      let deps: string[] = Array.isArray(data.dependencies)
-        ? data.dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
-        : (Array.isArray(data.hard_dependencies)
-            ? data.hard_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
-            : []);
-      let optDeps: string[] = Array.isArray(data.optional_dependencies)
-        ? data.optional_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
-        : (Array.isArray(data.soft_dependencies)
-            ? data.soft_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
-            : []);
-
-      if (this.edgeApiAvailable && deepFetch && deps.length === 0 && optDeps.length === 0) {
-        try {
-          const depRes = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/dependencies/`);
-          if (depRes.ok && (depRes.headers.get('content-type') || '').includes('application/json')) {
-            const depData = await depRes.json();
-            const extractFromList = (list: any[]) => {
-              deps = Array.from(new Set(list.filter((d: any) => !d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
-              optDeps = Array.from(new Set(list.filter((d: any) => d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
-            };
-            if (Array.isArray(depData)) {
-              extractFromList(depData);
-            } else if (depData && typeof depData === 'object') {
-              const key = `${pkg.author}/${pkg.name}`;
-              const entry = depData[key] || depData[key.toLowerCase()] || Object.values(depData).find(v => Array.isArray(v));
-              if (Array.isArray(entry)) {
-                extractFromList(entry);
-              } else if (entry && typeof entry === 'object') {
-                if (Array.isArray((entry as any).dependencies)) deps = (entry as any).dependencies;
-                if (Array.isArray((entry as any).optional_dependencies)) optDeps = (entry as any).optional_dependencies;
+        if (
+          this.contentDbOnline &&
+          (!data ||
+            Object.keys(data).length === 0 ||
+            (!data.repo && !data.repo_url) ||
+            (data.downloads === undefined && data.downloads_count === undefined))
+        ) {
+          try {
+            const fallbackRes = await fetch(`https://content.luanti.org/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`);
+            if (fallbackRes.ok && (fallbackRes.headers.get('content-type') || '').includes('application/json')) {
+              const cdbData = await fallbackRes.json();
+              if (cdbData && typeof cdbData === 'object') {
+                data = {
+                  ...cdbData,
+                  ...data,
+                  downloads: Math.max(
+                    Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+                    Number(cdbData.downloads ?? cdbData.downloads_count ?? 0) || 0
+                  ),
+                  repo: data.repo || cdbData.repo,
+                  repo_url: data.repo_url || cdbData.repo || cdbData.repo_url,
+                  website: data.website || cdbData.website,
+                  issue_tracker: data.issue_tracker || cdbData.issue_tracker,
+                  forums: data.forums || cdbData.forums,
+                  license: data.license || cdbData.license,
+                  media_license: data.media_license || cdbData.media_license,
+                  long_description: data.long_description || cdbData.long_description,
+                  screenshots: (Array.isArray(data.screenshots) && data.screenshots.length > 0) ? data.screenshots : cdbData.screenshots
+                };
               }
             }
+          } catch {
+            // Proceed to Git repo metadata fallback
           }
-        } catch {
-          // Graceful ignore
         }
-      }
 
-      let repoUrl = this.normalizeGitRepoUrl(data.repo_url || data.repo || pkg.repo_url);
-      let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = data.git_repo_status || (repoUrl ? 'verified' : 'unverified');
-      let resolvedLicense = data.license || data.media_license || pkg.license || '';
-      let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
-      let minVersion = data.min_minetest_version || pkg.min_minetest_version;
+        let deps: string[] = Array.isArray(data.dependencies)
+          ? data.dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
+          : (Array.isArray(data.hard_dependencies)
+              ? data.hard_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
+              : []);
+        let optDeps: string[] = Array.isArray(data.optional_dependencies)
+          ? data.optional_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
+          : (Array.isArray(data.soft_dependencies)
+              ? data.soft_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
+              : []);
 
-      // Probe Git repository metadata when repoUrl is missing, when deepFetch is active (modal open),
-      // or when dependencies/license need fallback resolution
-      if (deepFetch || !repoUrl || !resolvedLicense || (deps.length === 0 && optDeps.length === 0)) {
-        const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
-        if (gitMeta.gitRepoStatus === 'verified') {
-          gitRepoStatus = 'verified';
-          if (gitMeta.repoUrl) {
+        const hasBundledEdgeResponse = Boolean(this.edgeApiAvailable && data && (data.git_repo_status || Array.isArray(data.reviews_list)));
+
+        // Populate in-memory reviews and releases caches directly from bundled response (eliminating 2 extra Worker calls)
+        if (Array.isArray(data.reviews_list)) {
+          this.reviewsCache.set(cacheKey, data.reviews_list);
+        }
+
+        if (Array.isArray(data.releases_list) && data.releases_list.length > 0) {
+          const mappedReleases: PackageRelease[] = data.releases_list.map((rel: any) => {
+            const rawBytes = Number(rel.size || rel.file_size || 0);
+            const relSize = typeof rel.file_size === 'string'
+              ? rel.file_size
+              : (rawBytes > 0
+                  ? (rawBytes >= 1048576
+                      ? `${(rawBytes / 1048576).toFixed(1)} MB`
+                      : `${Math.max(1, Math.round(rawBytes / 1024))} KB`)
+                  : pkg.file_size);
+            return {
+              id: rel.id,
+              version: rel.title || rel.version || `Release #${rel.id}`,
+              tag_name: rel.commit || rel.tag_name || '',
+              commit_sha: rel.commit || rel.commit_sha || '',
+              download_url: rel.url
+                ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
+                : (rel.download_url || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`),
+              file_size: relSize,
+              min_minetest_version: rel.min_minetest_version,
+              max_minetest_version: rel.max_minetest_version,
+              released_at: rel.release_date || rel.released_at || ''
+            };
+          });
+          this.releasesCache.set(cacheKey, mappedReleases);
+        }
+
+        if (!hasBundledEdgeResponse && this.edgeApiAvailable && deepFetch && deps.length === 0 && optDeps.length === 0) {
+          try {
+            const depRes = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/dependencies/`);
+            if (depRes.ok && (depRes.headers.get('content-type') || '').includes('application/json')) {
+              const depData = await depRes.json();
+              const extractFromList = (list: any[]) => {
+                deps = Array.from(new Set(list.filter((d: any) => !d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
+                optDeps = Array.from(new Set(list.filter((d: any) => d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
+              };
+              if (Array.isArray(depData)) {
+                extractFromList(depData);
+              } else if (depData && typeof depData === 'object') {
+                const key = `${pkg.author}/${pkg.name}`;
+                const entry = depData[key] || depData[key.toLowerCase()] || Object.values(depData).find(v => Array.isArray(v));
+                if (Array.isArray(entry)) {
+                  extractFromList(entry);
+                } else if (entry && typeof entry === 'object') {
+                  if (Array.isArray((entry as any).dependencies)) deps = (entry as any).dependencies;
+                  if (Array.isArray((entry as any).optional_dependencies)) optDeps = (entry as any).optional_dependencies;
+                }
+              }
+            }
+          } catch {
+            // Graceful ignore
+          }
+        }
+
+        let repoUrl = this.normalizeGitRepoUrl(data.repo_url || data.repo || pkg.repo_url);
+        let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = data.git_repo_status || (repoUrl ? 'verified' : 'unverified');
+        let resolvedLicense = data.license || data.media_license || pkg.license || '';
+        let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
+        let minVersion = data.min_minetest_version || pkg.min_minetest_version;
+
+        // Only probe Git repository metadata on the client when running without the bundled Edge API
+        if (deepFetch && !hasBundledEdgeResponse) {
+          const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
+          if (gitMeta.gitRepoStatus === 'verified') {
+            gitRepoStatus = 'verified';
+            if (gitMeta.repoUrl) {
+              repoUrl = gitMeta.repoUrl;
+            }
+          } else if (gitMeta.gitRepoStatus === 'broken_404') {
+            gitRepoStatus = 'broken_404';
+            const attempted = repoUrl || `https://github.com/${pkg.author}/${pkg.name}`;
+            this.autoReportBrokenGitRepo(pkg, attempted);
+          }
+          if (deps.length === 0 && gitMeta.deps.length > 0) {
+            deps = gitMeta.deps;
+          }
+          if (optDeps.length === 0 && gitMeta.optDeps.length > 0) {
+            optDeps = gitMeta.optDeps;
+          }
+          if (!resolvedLicense && (gitMeta.license || gitMeta.mediaLicense)) {
+            resolvedLicense = gitMeta.license || gitMeta.mediaLicense || '';
+          }
+          if (!resolvedMediaLicense && (gitMeta.mediaLicense || gitMeta.license)) {
+            resolvedMediaLicense = gitMeta.mediaLicense || gitMeta.license || '';
+          }
+          if (!repoUrl && gitMeta.repoUrl) {
             repoUrl = gitMeta.repoUrl;
           }
-        } else if (gitMeta.gitRepoStatus === 'broken_404' && deepFetch) {
-          gitRepoStatus = 'broken_404';
-          const attempted = repoUrl || `https://github.com/${pkg.author}/${pkg.name}`;
-          this.autoReportBrokenGitRepo(pkg, attempted);
+          if (!minVersion && gitMeta.minVersion) {
+            minVersion = gitMeta.minVersion;
+          }
         }
-        if (deps.length === 0 && gitMeta.deps.length > 0) {
-          deps = gitMeta.deps;
+
+        const sizeBytes = Number(data.file_size || 0);
+        const sizeFormatted = typeof data.file_size === 'string' && data.file_size.trim()
+          ? data.file_size
+          : (sizeBytes > 0
+              ? (sizeBytes >= 1048576
+                  ? `${(sizeBytes / 1048576).toFixed(1)} MB`
+                  : `${Math.max(1, Math.round(sizeBytes / 1024))} KB`)
+              : (pkg.file_size || this.estimateFallbackFileSize(pkg)));
+
+        const hasAuthoritativeDownloads = data.downloads !== undefined || data.downloads_count !== undefined;
+        const resolvedDownloads = hasAuthoritativeDownloads
+          ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
+          : Math.max(0, Number(pkg.downloads || 0));
+        const resolvedScore = this.computeStarRatingFromData(data, pkg.score || 0);
+
+        const rawTags = Array.isArray(data.tags)
+          ? data.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
+          : [];
+
+        const screenshots = Array.isArray(data.screenshots)
+          ? data.screenshots.map((s: any) => (typeof s === 'string' ? s : s?.url || '')).filter(Boolean)
+          : pkg.screenshots;
+
+        let readmeText: string | undefined = data.readme || pkg.readme;
+        if (deepFetch && !readmeText && !hasBundledEdgeResponse && gitRepoStatus !== 'broken_404') {
+          readmeText = await this.fetchRawReadmeFromRepo(repoUrl, pkg);
         }
-        if (optDeps.length === 0 && gitMeta.optDeps.length > 0) {
-          optDeps = gitMeta.optDeps;
+
+        const dataSources: PackageSource[] = Array.isArray(data.sources)
+          ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
+          : [];
+        const mergedSources = Array.from(
+          new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources])
+        );
+
+        const updatedFields: Partial<LuantiPackage> = {
+          license: resolvedLicense,
+          media_license: resolvedMediaLicense,
+          desc: data.desc || data.long_description?.body || (typeof data.long_description === 'string' ? data.long_description : pkg.desc),
+          readme: readmeText,
+          short_desc: data.short_desc || data.short_description || pkg.short_desc,
+          downloads: resolvedDownloads,
+          score: resolvedScore,
+          tags: rawTags.length > 0 ? rawTags : pkg.tags,
+          screenshots,
+          file_size: sizeFormatted,
+          release_id: data.release || data.release_id || pkg.release_id,
+          repo_url: repoUrl,
+          git_repo_status: gitRepoStatus,
+          website: data.website || pkg.website,
+          issue_tracker: data.issue_tracker || pkg.issue_tracker,
+          forums: data.forums
+            ? (String(data.forums).startsWith('http')
+                ? String(data.forums)
+                : `https://forum.luanti.org/viewtopic.php?t=${data.forums}`)
+            : pkg.forums,
+          min_minetest_version: minVersion,
+          max_minetest_version: data.max_minetest_version || pkg.max_minetest_version,
+          maintainers: Array.isArray(data.maintainers) ? data.maintainers : pkg.maintainers,
+          banner: (screenshots && screenshots[0]) || data.banner || pkg.banner,
+          dependencies: deps.length > 0 ? deps : (pkg.dependencies || []),
+          optional_dependencies: optDeps.length > 0 ? optDeps : (pkg.optional_dependencies || []),
+          sources: mergedSources
+        };
+
+        this._activePackage.update(current => {
+          if (current && (current.id === pkg.id || (current.author === pkg.author && current.name === pkg.name))) {
+            const merged = { ...current, ...updatedFields };
+            this.updateSeoMeta(merged);
+            return merged;
+          }
+          return current;
+        });
+
+        this._packages.update(list => list.map(item => {
+          if (item.id === pkg.id || (item.author === pkg.author && item.name === pkg.name)) {
+            const merged = { ...item, ...updatedFields };
+            merged._searchBlob = this.buildSearchBlob(merged);
+            return merged;
+          }
+          return item;
+        }));
+
+        if (deepFetch) {
+          this.deepHydratedIds.add(cacheKey);
         }
-        if (!resolvedLicense && (gitMeta.license || gitMeta.mediaLicense)) {
-          resolvedLicense = gitMeta.license || gitMeta.mediaLicense || '';
-        }
-        if (!resolvedMediaLicense && (gitMeta.mediaLicense || gitMeta.license)) {
-          resolvedMediaLicense = gitMeta.mediaLicense || gitMeta.license || '';
-        }
-        if (!repoUrl && gitMeta.repoUrl) {
-          repoUrl = gitMeta.repoUrl;
-        }
-        if (!minVersion && gitMeta.minVersion) {
-          minVersion = gitMeta.minVersion;
+      } catch (err) {
+        console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
+      } finally {
+        if (deepFetch) {
+          this._isLoadingDetails.set(false);
         }
       }
+    })().finally(() => {
+      this.inFlightDetailsCache.delete(inFlightKey);
+    });
 
-      const sizeBytes = Number(data.file_size || 0);
-      const sizeFormatted = typeof data.file_size === 'string' && data.file_size.trim()
-        ? data.file_size
-        : (sizeBytes > 0
-            ? (sizeBytes >= 1048576
-                ? `${(sizeBytes / 1048576).toFixed(1)} MB`
-                : `${Math.max(1, Math.round(sizeBytes / 1024))} KB`)
-            : (pkg.file_size || this.estimateFallbackFileSize(pkg)));
-
-      const hasAuthoritativeDownloads = data.downloads !== undefined || data.downloads_count !== undefined;
-      const resolvedDownloads = hasAuthoritativeDownloads
-        ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
-        : Math.max(0, Number(pkg.downloads || 0));
-      const resolvedScore = this.computeStarRatingFromData(data, pkg.score || 0);
-
-      const rawTags = Array.isArray(data.tags)
-        ? data.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
-        : [];
-
-      const screenshots = Array.isArray(data.screenshots)
-        ? data.screenshots.map((s: any) => (typeof s === 'string' ? s : s?.url || '')).filter(Boolean)
-        : pkg.screenshots;
-
-      let readmeText: string | undefined = data.readme || pkg.readme;
-      if (deepFetch && !readmeText && gitRepoStatus !== 'broken_404') {
-        readmeText = await this.fetchRawReadmeFromRepo(repoUrl, pkg);
-      }
-
-      const dataSources: PackageSource[] = Array.isArray(data.sources)
-        ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
-        : [];
-      const mergedSources = Array.from(
-        new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources])
-      );
-
-      const updatedFields: Partial<LuantiPackage> = {
-        license: resolvedLicense,
-        media_license: resolvedMediaLicense,
-        desc: data.desc || data.long_description?.body || (typeof data.long_description === 'string' ? data.long_description : pkg.desc),
-        readme: readmeText,
-        short_desc: data.short_desc || data.short_description || pkg.short_desc,
-        downloads: resolvedDownloads,
-        score: resolvedScore,
-        tags: rawTags.length > 0 ? rawTags : pkg.tags,
-        screenshots,
-        file_size: sizeFormatted,
-        release_id: data.release || data.release_id || pkg.release_id,
-        repo_url: repoUrl,
-        git_repo_status: gitRepoStatus,
-        website: data.website || pkg.website,
-        issue_tracker: data.issue_tracker || pkg.issue_tracker,
-        forums: data.forums
-          ? (String(data.forums).startsWith('http')
-              ? String(data.forums)
-              : `https://forum.luanti.org/viewtopic.php?t=${data.forums}`)
-          : pkg.forums,
-        min_minetest_version: minVersion,
-        max_minetest_version: data.max_minetest_version || pkg.max_minetest_version,
-        maintainers: Array.isArray(data.maintainers) ? data.maintainers : pkg.maintainers,
-        banner: (screenshots && screenshots[0]) || data.banner || pkg.banner,
-        dependencies: deps.length > 0 ? deps : (pkg.dependencies || []),
-        optional_dependencies: optDeps.length > 0 ? optDeps : (pkg.optional_dependencies || []),
-        sources: mergedSources
-      };
-
-      this._activePackage.update(current => {
-        if (current && (current.id === pkg.id || (current.author === pkg.author && current.name === pkg.name))) {
-          const merged = { ...current, ...updatedFields };
-          this.updateSeoMeta(merged);
-          return merged;
-        }
-        return current;
-      });
-
-      this._packages.update(list => list.map(item => {
-        if (item.id === pkg.id || (item.author === pkg.author && item.name === pkg.name)) {
-          const merged = { ...item, ...updatedFields };
-          merged._searchBlob = this.buildSearchBlob(merged);
-          return merged;
-        }
-        return item;
-      }));
-
-      if (deepFetch) {
-        this.deepHydratedIds.add(cacheKey);
-      }
-    } catch (err) {
-      console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
-    } finally {
-      if (deepFetch) {
-        this._isLoadingDetails.set(false);
-      }
-    }
+    this.inFlightDetailsCache.set(inFlightKey, work);
+    return work;
   }
 
   async fetchPackageReleases(pkg: LuantiPackage): Promise<PackageRelease[]> {
@@ -1852,100 +2018,112 @@ export class PackageService {
     if (cached) {
       return cached;
     }
-
-    if (this.edgeApiAvailable) {
-      try {
-        const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases`);
-        if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-          const data = await res.json();
-          if (Array.isArray(data) && data.length > 0) {
-            const mapped = data.map((rel: any) => {
-              const rawBytes = Number(rel.size || rel.file_size || 0);
-              const relSize = typeof rel.file_size === 'string'
-                ? rel.file_size
-                : (rawBytes > 0
-                    ? (rawBytes >= 1048576
-                        ? `${(rawBytes / 1048576).toFixed(1)} MB`
-                        : `${Math.max(1, Math.round(rawBytes / 1024))} KB`)
-                    : pkg.file_size);
-              return {
-                id: rel.id,
-                version: rel.title || rel.version || `Release #${rel.id}`,
-                tag_name: rel.commit || rel.tag_name || '',
-                commit_sha: rel.commit || rel.commit_sha || '',
-                download_url: rel.url
-                  ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
-                  : (rel.download_url || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`),
-                file_size: relSize,
-                min_minetest_version: rel.min_minetest_version,
-                max_minetest_version: rel.max_minetest_version,
-                released_at: rel.release_date || rel.released_at || ''
-              };
-            });
-            this.releasesCache.set(cacheKey, mapped);
-            return mapped;
-          }
-        }
-      } catch {
-        // Proceed to Git releases/tags auto-discovery
-      }
+    const inFlight = this.releasesPromiseCache.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
     }
 
-    // Fallback: Auto-detect GitHub / Codeberg Releases & Tags only on confirmed repositories (avoids 404s)
-    const confirmedRepos = await this.discoverConfirmedRepos(pkg, pkg.repo_url);
-    for (const repo of confirmedRepos) {
-      try {
-        const relApi = repo.forge === 'codeberg'
-          ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=8`
-          : `https://api.github.com/repos/${repo.fullName}/releases?per_page=8`;
-        const relRes = await fetch(relApi);
-        if (relRes.ok) {
-          const rels = await relRes.json();
-          if (Array.isArray(rels) && rels.length > 0) {
-            const mapped = rels.map((r: any, idx: number) => ({
-              id: r.id || idx + 1,
-              version: r.name || r.tag_name || `Release #${idx + 1}`,
-              tag_name: r.tag_name || '',
-              commit_sha: r.target_commitish || '',
-              download_url: repo.forge === 'codeberg'
-                ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(r.tag_name)}.zip`
-                : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(r.tag_name)}.zip`,
-              file_size: pkg.file_size,
-              released_at: r.published_at || r.created_at || ''
-            }));
-            this.releasesCache.set(cacheKey, mapped);
-            return mapped;
+    const promise = (async (): Promise<PackageRelease[]> => {
+      if (this.edgeApiAvailable) {
+        try {
+          const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases`);
+          if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+            const data = await res.json();
+            if (Array.isArray(data) && data.length > 0) {
+              const mapped = data.map((rel: any) => {
+                const rawBytes = Number(rel.size || rel.file_size || 0);
+                const relSize = typeof rel.file_size === 'string'
+                  ? rel.file_size
+                  : (rawBytes > 0
+                      ? (rawBytes >= 1048576
+                          ? `${(rawBytes / 1048576).toFixed(1)} MB`
+                          : `${Math.max(1, Math.round(rawBytes / 1024))} KB`)
+                      : pkg.file_size);
+                return {
+                  id: rel.id,
+                  version: rel.title || rel.version || `Release #${rel.id}`,
+                  tag_name: rel.commit || rel.tag_name || '',
+                  commit_sha: rel.commit || rel.commit_sha || '',
+                  download_url: rel.url
+                    ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
+                    : (rel.download_url || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`),
+                  file_size: relSize,
+                  min_minetest_version: rel.min_minetest_version,
+                  max_minetest_version: rel.max_minetest_version,
+                  released_at: rel.release_date || rel.released_at || ''
+                };
+              });
+              this.releasesCache.set(cacheKey, mapped);
+              return mapped;
+            }
           }
+        } catch {
+          // Proceed to Git releases/tags auto-discovery
         }
-
-        const tagsApi = repo.forge === 'codeberg'
-          ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=8`
-          : `https://api.github.com/repos/${repo.fullName}/tags?per_page=8`;
-        const tagsRes = await fetch(tagsApi);
-        if (tagsRes.ok) {
-          const tags = await tagsRes.json();
-          if (Array.isArray(tags) && tags.length > 0) {
-            const mapped = tags.map((t: any, idx: number) => ({
-              id: idx + 1,
-              version: t.name,
-              tag_name: t.name,
-              commit_sha: t.commit?.sha || t.id || '',
-              download_url: repo.forge === 'codeberg'
-                ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(t.name)}.zip`
-                : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(t.name)}.zip`,
-              file_size: pkg.file_size,
-              released_at: ''
-            }));
-            this.releasesCache.set(cacheKey, mapped);
-            return mapped;
-          }
-        }
-      } catch {
-        // Ignore discovery error and try next confirmed repo
       }
-    }
 
-    return [];
+      // Fallback: Auto-detect GitHub / Codeberg Releases & Tags only on confirmed repositories (avoids 404s)
+      const confirmedRepos = await this.discoverConfirmedRepos(pkg, pkg.repo_url);
+      for (const repo of confirmedRepos) {
+        try {
+          const relApi = repo.forge === 'codeberg'
+            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=8`
+            : `https://api.github.com/repos/${repo.fullName}/releases?per_page=8`;
+          const relRes = await fetch(relApi);
+          if (relRes.ok) {
+            const rels = await relRes.json();
+            if (Array.isArray(rels) && rels.length > 0) {
+              const mapped = rels.map((r: any, idx: number) => ({
+                id: r.id || idx + 1,
+                version: r.name || r.tag_name || `Release #${idx + 1}`,
+                tag_name: r.tag_name || '',
+                commit_sha: r.target_commitish || '',
+                download_url: repo.forge === 'codeberg'
+                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(r.tag_name)}.zip`
+                  : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(r.tag_name)}.zip`,
+                file_size: pkg.file_size,
+                released_at: r.published_at || r.created_at || ''
+              }));
+              this.releasesCache.set(cacheKey, mapped);
+              return mapped;
+            }
+          }
+
+          const tagsApi = repo.forge === 'codeberg'
+            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=8`
+            : `https://api.github.com/repos/${repo.fullName}/tags?per_page=8`;
+          const tagsRes = await fetch(tagsApi);
+          if (tagsRes.ok) {
+            const tags = await tagsRes.json();
+            if (Array.isArray(tags) && tags.length > 0) {
+              const mapped = tags.map((t: any, idx: number) => ({
+                id: idx + 1,
+                version: t.name,
+                tag_name: t.name,
+                commit_sha: t.commit?.sha || t.id || '',
+                download_url: repo.forge === 'codeberg'
+                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(t.name)}.zip`
+                  : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(t.name)}.zip`,
+                file_size: pkg.file_size,
+                released_at: ''
+              }));
+              this.releasesCache.set(cacheKey, mapped);
+              return mapped;
+            }
+          }
+        } catch {
+          // Ignore discovery error and try next confirmed repo
+        }
+      }
+
+      this.releasesCache.set(cacheKey, []);
+      return [];
+    })().finally(() => {
+      this.releasesPromiseCache.delete(cacheKey);
+    });
+
+    this.releasesPromiseCache.set(cacheKey, promise);
+    return promise;
   }
 
   openPackageModal(pkg: LuantiPackage, updateUrl = true): void {
@@ -2158,6 +2336,8 @@ export class PackageService {
           return { success: false, message: data.error || 'Failed to submit review.' };
         }
         this.reviewsCache.delete(cacheKey);
+        this.deepHydratedIds.delete(cacheKey);
+        this.clearBootCache();
         return { success: true, review: data.review };
       }
 
@@ -2216,6 +2396,7 @@ export class PackageService {
         }
 
         if (!payload.dryRun && result.package) {
+          this.clearBootCache();
           const normalized = this.normalizePackage(result.package);
           this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
         }
@@ -2272,16 +2453,22 @@ export class PackageService {
       }
 
       const targetId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+      this.deepHydratedIds.delete(targetId);
+      this.clearBootCache();
       if (action === 'delist' || action === 'flag') {
+        const nextStatus = action === 'delist' ? 'delisted' : 'flagged';
         this._packages.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
         if (this._activePackage()?.id.toLowerCase() === targetId) {
-          this.closePackageModal();
+          this._activePackage.update(curr => curr ? { ...curr, status: nextStatus } : null);
         }
       } else if (action === 'restore') {
-        await this.initCatalog();
+        if (this._activePackage()?.id.toLowerCase() === targetId) {
+          this._activePackage.update(curr => curr ? { ...curr, status: 'active' } : null);
+        }
+        await this.initCatalog(true);
       }
 
-      await this.authService.fetchModerationQueue();
+      await this.authService.fetchModerationQueue(true);
       this.pwaService.showToast(data.message || `Package ${action}ed.`);
       return { success: true, message: data.message };
     } catch (err: any) {

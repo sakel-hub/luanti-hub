@@ -1,5 +1,6 @@
 // Community Abuse Reporting & Instant Cloudflare D1 Kill Switch Endpoint
 import { verifySessionToken, parseCookies, checkIsAdmin } from '../../../auth/lib/session';
+import { invalidateEdgeCacheKeys } from '../../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -143,6 +144,12 @@ export async function onRequestPost(context: {
       WHERE LOWER(package_id) = LOWER(?) AND status = 'open'
     `).bind(currentUser?.username || 'admin', packageId).run();
   }
+
+  await invalidateEdgeCacheKeys([
+    '/__api_packages_v2',
+    '/__api_packages_v2?boot=1',
+    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+  ]);
 
   return Response.json({
     success: true,

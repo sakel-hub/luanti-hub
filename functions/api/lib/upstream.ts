@@ -85,6 +85,66 @@ export async function fetchUpstreamJsonCached<T = any>(
 }
 
 /**
+ * Reads a cached JSON response payload from Cloudflare's Edge Cache (`caches.default`).
+ */
+export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<T | null> {
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache) return null;
+  try {
+    const cacheReq = new Request(`https://cache.luantihub.internal${cacheKeyPath}`, { method: 'GET' });
+    const cached = await edgeCache.match(cacheReq);
+    if (cached) {
+      return await cached.json() as T;
+    }
+  } catch {
+    // Ignore cache read error
+  }
+  return null;
+}
+
+/**
+ * Writes a JSON response payload into Cloudflare's Edge Cache (`caches.default`) with a TTL.
+ */
+export async function writeEdgeCacheJson(
+  cacheKeyPath: string,
+  payload: any,
+  ttlSeconds = 300
+): Promise<void> {
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache) return;
+  try {
+    const cacheReq = new Request(`https://cache.luantihub.internal${cacheKeyPath}`, { method: 'GET' });
+    const cacheRes = new Response(JSON.stringify(payload), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
+      }
+    });
+    await edgeCache.put(cacheReq, cacheRes);
+  } catch {
+    // Ignore cache write error
+  }
+}
+
+/**
+ * Evicts one or more keys from Cloudflare's Edge Cache (`caches.default`) after a D1 mutation.
+ */
+export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<void> {
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache || !Array.isArray(cacheKeyPaths)) return;
+  await Promise.all(
+    cacheKeyPaths.map(async (p) => {
+      try {
+        const req = new Request(`https://cache.luantihub.internal${p}`, { method: 'GET' });
+        await edgeCache.delete(req);
+      } catch {
+        // Ignore individual delete error
+      }
+    })
+  );
+}
+
+/**
  * Safely parses a JSON array column or comma-separated string into string[]
  */
 export function parseJsonArray(val: any): string[] {
