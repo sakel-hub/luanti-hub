@@ -105,12 +105,44 @@ export class PwaService {
     }
   }
 
-  async checkForUpdate(interactive = true): Promise<boolean> {
-    if (!this.swUpdate?.isEnabled) {
-      if (interactive) {
-        this.showToast('pwa.upToDate');
-      }
+  /**
+   * Directly fetches `/ngsw.json` bypassing browser/CDN cache and checks if the deployed
+   * `main-*.js` bundle hash differs from the currently running script in the DOM.
+   */
+  private async checkManifestBundleChanged(): Promise<boolean> {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+    try {
+      const res = await fetch(`/ngsw.json?ngsw-cache-bust=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
+      });
+      if (!res.ok) return false;
+      const manifest = await res.json();
+      const appGroup = Array.isArray(manifest?.assetGroups)
+        ? manifest.assetGroups.find((g: any) => g.name === 'app')
+        : null;
+      const urls: string[] = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
+      const remoteMain = urls.find((u: string) => /\/main-[A-Za-z0-9]+\.js$/.test(u));
+      if (!remoteMain) return false;
+
+      const scripts = Array.from(document.querySelectorAll('script[src]'))
+        .map(s => s.getAttribute('src') || '');
+      const currentMain = scripts.find(src => /main-[A-Za-z0-9]+\.js/.test(src));
+      if (!currentMain) return false;
+
+      const remoteFilename = remoteMain.replace(/^\//, '');
+      const currentFilename = currentMain.split('/').pop() || '';
+      return Boolean(remoteFilename && currentFilename && remoteFilename !== currentFilename);
+    } catch {
       return false;
+    }
+  }
+
+  async checkForUpdate(interactive = true): Promise<boolean> {
+    // If an update was already detected (e.g. by the automatic visibilitychange check when focusing the tab),
+    // immediately report true instead of letting a second swUpdate.checkForUpdate() return false.
+    if (this.updateAvailable()) {
+      return true;
     }
 
     try {
@@ -118,7 +150,19 @@ export class PwaService {
         this.checkingForUpdate.set(true);
       }
 
-      const hasUpdate = await this.swUpdate.checkForUpdate();
+      let hasUpdate = false;
+      if (this.swUpdate?.isEnabled) {
+        try {
+          hasUpdate = await this.swUpdate.checkForUpdate();
+        } catch {
+          hasUpdate = false;
+        }
+      }
+
+      if (!hasUpdate) {
+        hasUpdate = await this.checkManifestBundleChanged();
+      }
+
       if (hasUpdate) {
         this.updateAvailable.set(true);
         this.statusMessage.set(null);
@@ -141,20 +185,16 @@ export class PwaService {
 
   async activateUpdate(): Promise<void> {
     if (!this.swUpdate?.isEnabled) {
-      if (typeof window !== 'undefined') {
-        window.location.reload();
-      }
+      await this.forceClearCacheAndReload();
       return;
     }
 
     try {
       await this.swUpdate.activateUpdate();
     } catch (err) {
-      console.warn('Could not activate update via SwUpdate, reloading directly:', err);
+      console.warn('Could not activate update via SwUpdate, clearing cache and reloading:', err);
     } finally {
-      if (typeof document !== 'undefined') {
-        document.location.reload();
-      }
+      await this.forceClearCacheAndReload();
     }
   }
 
