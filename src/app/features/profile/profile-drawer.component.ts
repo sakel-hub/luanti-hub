@@ -348,18 +348,7 @@ import {
                     class="w-full glass-input rounded-xl p-3 text-xs text-white focus:outline-none"></textarea>
                 </div>
 
-                <div class="flex items-center justify-between gap-3 pt-1">
-                  <label class="flex items-center gap-2 cursor-pointer text-slate-300 text-xs">
-                    <input
-                      type="checkbox"
-                      [ngModel]="settingsService.highContrast()"
-                      (ngModelChange)="settingsService.highContrast.set($event)"
-                      name="highContrast"
-                      class="rounded border-slate-700 bg-slate-900 text-sky-500"
-                    />
-                    <span>{{ 'profile.highContrast' | translate }}</span>
-                  </label>
-
+                <div class="flex justify-end pt-1">
                   <button
                     type="submit"
                     [disabled]="isSavingProfile()"

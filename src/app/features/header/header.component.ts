@@ -71,6 +71,15 @@ import {
     LucideMenu
   ],
   template: `
+    <!-- Reusable Standard Modal/Sidebar Backdrop Blur for Mobile Hamburger Menu -->
+    @if (isMobileMenuOpen()) {
+      <div
+        (click)="closeMobileMenu($event)"
+        class="lg:hidden fixed inset-0 z-30 bg-black/75 backdrop-blur-md luanti-backdrop cursor-pointer"
+        aria-hidden="true">
+      </div>
+    }
+
     <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header transition-colors duration-200">
       <div class="w-full px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 lg:gap-5">
 
@@ -598,6 +607,11 @@ export class HeaderComponent {
     this.isMobileMenuOpen.update(v => !v);
     this.isLanguageMenuOpen.set(false);
     this.isSettingsMenuOpen.set(false);
+  }
+
+  closeMobileMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isMobileMenuOpen.set(false);
   }
 
   toggleLanguageMenu(event?: MouseEvent): void {
