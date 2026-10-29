@@ -3,18 +3,16 @@
 -- Run with: npm run db:migrate:remote
 -- =============================================================================
 
--- 1. Add role column to users
-ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user' CHECK(role IN ('user', 'moderator', 'admin'));
+-- 1. Previously applied column migrations (commented out as SQLite rejects duplicate columns):
+-- ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user' CHECK(role IN ('user', 'moderator', 'admin'));
+-- ALTER TABLE packages ADD COLUMN tags TEXT;
+-- ALTER TABLE packages ADD COLUMN dependencies TEXT;
+-- ALTER TABLE packages ADD COLUMN optional_dependencies TEXT;
+-- ALTER TABLE packages ADD COLUMN min_minetest_version TEXT DEFAULT '5.0.0';
+-- ALTER TABLE packages ADD COLUMN status_reason TEXT;
+-- ALTER TABLE packages ADD COLUMN flagged_at DATETIME;
 
--- 2. Add extended metadata & Kill Switch reason/timestamp columns to packages
-ALTER TABLE packages ADD COLUMN tags TEXT;
-ALTER TABLE packages ADD COLUMN dependencies TEXT;
-ALTER TABLE packages ADD COLUMN optional_dependencies TEXT;
-ALTER TABLE packages ADD COLUMN min_minetest_version TEXT DEFAULT '5.0.0';
-ALTER TABLE packages ADD COLUMN status_reason TEXT;
-ALTER TABLE packages ADD COLUMN flagged_at DATETIME;
-
--- 3. Create Moderation & Abuse Reports Queue table
+-- 2. Create Moderation & Abuse Reports Queue table (Idempotent)
 CREATE TABLE IF NOT EXISTS moderation_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id TEXT NOT NULL,
@@ -27,11 +25,11 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 4. Create indices for moderation_reports
+-- 3. Create indices for moderation_reports
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);
 
--- 5. Create user_downloads table for personalized match scoring & history sync
+-- 4. Create user_downloads table for personalized match scoring & history sync (Idempotent)
 CREATE TABLE IF NOT EXISTS user_downloads (
     user_id TEXT NOT NULL,
     package_id TEXT NOT NULL,
