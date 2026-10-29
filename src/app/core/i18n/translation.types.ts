@@ -324,6 +324,7 @@ export interface TranslationDictionary {
     subtitle: string;
     repoUrlLabel: string;
     repoUrlPlaceholder: string;
+    repoUrlTooltip: string;
     repoUrlHint: string;
     providerLabel: string;
     branchLabel: string;
@@ -331,6 +332,7 @@ export interface TranslationDictionary {
     submittingBtn: string;
     submitting: string;
     runAuditBtn: string;
+    runAuditTooltip: string;
     auditingBtn: string;
     runningAudit: string;
     auditPassed: string;

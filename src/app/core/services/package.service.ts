@@ -2544,6 +2544,7 @@ export class PackageService {
     warrantiesAccepted: boolean;
     dryRun: boolean;
     tags?: string[];
+    auditToken?: string;
   }): Promise<{
     success: boolean;
     message?: string;

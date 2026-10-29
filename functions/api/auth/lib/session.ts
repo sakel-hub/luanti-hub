@@ -42,6 +42,44 @@ export async function verifySessionToken(token: string, secret: string = DEFAULT
   }
 }
 
+export async function createAuditProofToken(repoKey: string, secret: string = DEFAULT_SECRET): Promise<string> {
+  const payload = JSON.stringify({
+    repoKey: repoKey.trim().toLowerCase(),
+    exp: Date.now() + 15 * 60 * 1000 // 15 minutes
+  });
+  const enc = new TextEncoder();
+  const key = await getKey(secret);
+  const signature = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
+  const b64Payload = btoa(payload);
+  const b64Sig = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `${b64Payload}.${b64Sig}`;
+}
+
+export async function verifyAuditProofToken(
+  token: string | undefined,
+  expectedRepoKey: string,
+  secret: string = DEFAULT_SECRET
+): Promise<boolean> {
+  try {
+    if (!token) return false;
+    const [b64Payload, b64Sig] = token.split('.');
+    if (!b64Payload || !b64Sig) return false;
+
+    const payload = atob(b64Payload);
+    const data = JSON.parse(payload);
+    if (!data?.repoKey || data.repoKey !== expectedRepoKey.trim().toLowerCase()) return false;
+    if (!data?.exp || Date.now() > data.exp) return false;
+
+    const key = await getKey(secret);
+    const enc = new TextEncoder();
+    const sigBytes = Uint8Array.from(atob(b64Sig), c => c.charCodeAt(0));
+
+    return await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
+  } catch {
+    return false;
+  }
+}
+
 export function parseCookies(request: Request): Record<string, string> {
   const cookieHeader = request.headers.get('Cookie') || '';
   const cookies: Record<string, string> = {};

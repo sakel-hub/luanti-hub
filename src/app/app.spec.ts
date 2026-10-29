@@ -10,7 +10,9 @@ import { AuthService } from './core/services/auth.service';
 import { TranslationService } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
+import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { runLuacheckStaticAudit } from '../../functions/api/packages/git';
+import { createAuditProofToken, verifyAuditProofToken } from '../../functions/api/auth/lib/session';
 
 describe('App & Core Services', () => {
   beforeEach(async () => {
@@ -352,5 +354,36 @@ describe('App & Core Services', () => {
     expect(sessionStorage.getItem('lh_auth_cache_v2')).toBeNull();
     // Unverified handle sign-in must not grant verified repository ownership
     expect(authService.hasVerifiedProviderOwnership('codeberg', 'test_creator')).toBe(false);
+  });
+
+  it('should disable Publish until Pre-Flight Audit passes with a cryptographic auditToken', async () => {
+    const fixture = TestBed.createComponent(SubmitModalComponent);
+    const comp = fixture.componentInstance;
+
+    comp.repoUrl = 'https://codeberg.org/test_creator/my_mod';
+    comp.onUrlChange();
+    comp.warrantyOwnership = true;
+    comp.warrantyAssets = true;
+    comp.warrantyTakedown = true;
+
+    // Before running Pre-Flight Check, Publish must remain disabled
+    expect(comp.canPublish()).toBe(false);
+
+    // Even if ownership is verified, without a passing auditToken it stays disabled
+    const token = await createAuditProofToken('codeberg:test_creator/my_mod', 'test-secret');
+    expect(await verifyAuditProofToken(token, 'codeberg:test_creator/my_mod', 'test-secret')).toBe(true);
+    expect(await verifyAuditProofToken(token, 'codeberg:other_user/other_mod', 'test-secret')).toBe(false);
+
+    comp.auditReport.set({
+      valid: true,
+      auditToken: token,
+      ownershipVerified: true,
+      configFound: 'mod.conf',
+      luacheckPassed: true,
+      licenseValid: true,
+      diagnostics: []
+    });
+
+    expect(comp.canPublish()).toBe(true);
   });
 });

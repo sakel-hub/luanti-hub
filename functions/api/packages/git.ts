@@ -3,7 +3,9 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  createAuditProofToken,
+  verifyAuditProofToken
 } from '../auth/lib/session';
 import { fetchUpstreamJsonCached, normalizeRepoKey, parseJsonArray, invalidateEdgeCacheKeys } from '../lib/upstream';
 
@@ -174,6 +176,30 @@ function isApprovedLicense(lic: string): boolean {
   const normalized = lic.trim().toUpperCase().replace(/\s+/g, '-');
   if (APPROVED_FOSS_LICENSES.has(normalized)) return true;
   return /^(MIT|LGPL|GPL|AGPL|BSD|APACHE|MPL|ZLIB|CC0|CC-BY|UNLICENSE|WTFPL|ISC)/i.test(lic.trim());
+}
+
+function detectSpdxFromLicenseText(raw: string): string | undefined {
+  if (!raw) return undefined;
+  const text = raw.slice(0, 4000);
+  if (/MIT License|Permission is hereby granted, free of charge|\bMIT\b/i.test(text)) return 'MIT';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2\.1|\bLGPL-2\.1/i.test(text)) return 'LGPL-2.1-only';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bLGPL-3\.0/i.test(text)) return 'LGPL-3.0-only';
+  if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bAGPL-3\.0/i.test(text)) return 'AGPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bGPL-3\.0/i.test(text)) return 'GPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2|\bGPL-2\.0/i.test(text)) return 'GPL-2.0-only';
+  if (/Apache License[\s\S]{0,80}Version 2\.0|\bApache-2\.0\b/i.test(text)) return 'Apache-2.0';
+  if (/Mozilla Public License[\s\S]{0,60}2\.0|\bMPL-2\.0\b/i.test(text)) return 'MPL-2.0';
+  if (/Creative Commons Attribution-ShareAlike 4\.0|CC-BY-SA-4\.0/i.test(text)) return 'CC-BY-SA-4.0';
+  if (/Creative Commons Attribution-ShareAlike 3\.0|CC-BY-SA-3\.0/i.test(text)) return 'CC-BY-SA-3.0';
+  if (/Creative Commons Attribution 4\.0|CC-BY-4\.0/i.test(text)) return 'CC-BY-4.0';
+  if (/CC0 1\.0 Universal|Public Domain Dedication|\bCC0-1\.0\b/i.test(text)) return 'CC0-1.0';
+  if (/The Unlicense|unlicense\.org|\bUnlicense\b/i.test(text)) return 'Unlicense';
+  if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|\bWTFPL\b/i.test(text)) return 'WTFPL';
+  if (/zlib License|altered source versions must be plainly marked|\bZlib\b/i.test(text)) return 'Zlib';
+  if (/Redistribution and use in source and binary forms/i.test(text)) {
+    return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
+  }
+  return undefined;
 }
 
 /**
@@ -387,12 +413,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       repoUrl?: string;
       warrantiesAccepted?: boolean;
       dryRun?: boolean;
+      auditToken?: string;
       customConf?: string;
       customLua?: string;
       tags?: string[];
     };
 
-    const { repoUrl, warrantiesAccepted, dryRun, customConf, customLua, tags: userSubmittedTags } = body;
+    const { repoUrl, warrantiesAccepted, dryRun, auditToken, customConf, customLua, tags: userSubmittedTags } = body;
 
     if (!repoUrl) {
       return Response.json({ error: 'Git repository HTTPS URL is required.' }, { status: 400 });
@@ -485,7 +512,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         title: 'Missing Package Configuration File',
         message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch 'main' or 'master' in ${owner}/${repo}.`,
         howToFix: `Create a 'mod.conf' (or 'game.conf') file in the root directory of your ${provider} repository with the following fields and push it to your default branch:`,
-        snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nlicense = MIT\nmedia_license = CC-BY-SA-4.0\nmin_minetest_version = 5.0.0`
+        snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0`
       });
 
       const failedAudit = {
@@ -582,37 +609,54 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       });
     }
 
-    // Check 3: SPDX Open-Source License Check
-    const effectiveLicense = rawLicense || 'MIT';
-    const effectiveMediaLicense = rawMediaLicense || effectiveLicense || 'CC-BY-SA-4.0';
+    // Check 3: Detect SPDX Open-Source License from LICENSE / COPYING / README.md
+    // (Note: Luanti mod.conf does not include license fields in the official specification)
+    let detectedLicense = rawLicense || '';
+    let detectedLicenseFile = rawLicense ? confFileName : 'LICENSE';
+
+    if (!detectedLicense) {
+      const licenseCandidates = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING', 'COPYING.txt'];
+      for (const licFile of licenseCandidates) {
+        try {
+          const licRes = await fetch(buildRawUrl(branch, licFile));
+          if (licRes.ok) {
+            const licText = await licRes.text();
+            if (licText && !licText.trim().startsWith('<!DOCTYPE')) {
+              const spdx = detectSpdxFromLicenseText(licText);
+              if (spdx) {
+                detectedLicense = spdx;
+                detectedLicenseFile = licFile;
+                break;
+              }
+            }
+          }
+        } catch {
+          // Try next candidate
+        }
+      }
+    }
+
+    const effectiveLicense = detectedLicense || 'MIT';
+    const effectiveMediaLicense = rawMediaLicense || detectedLicense || 'CC-BY-SA-4.0';
 
     if (rawLicense && !isApprovedLicense(rawLicense)) {
       diagnostics.push({
         code: 'LICENSE_INVALID',
         severity: 'error',
-        file: confFileName,
+        file: detectedLicenseFile,
         title: `Unrecognized or Non-FOSS License: '${rawLicense}'`,
-        message: `LuantiHub requires an OSI-approved Open Source or Free Culture SPDX license identifier in ${confFileName}.`,
-        howToFix: `Set 'license' and 'media_license' in ${confFileName} to standard SPDX identifiers (e.g., MIT, LGPL-2.1-or-later, GPL-3.0-or-later, Apache-2.0, CC-BY-SA-4.0):`,
-        snippet: `license = MIT\nmedia_license = CC-BY-SA-4.0`
-      });
-    } else if (!rawLicense) {
-      diagnostics.push({
-        code: 'LICENSE_DEFAULTED',
-        severity: 'warning',
-        file: confFileName,
-        title: `No Explicit 'license' Key in ${confFileName}`,
-        message: `No 'license = ...' line was found in ${confFileName}; defaulting to MIT / CC-BY-SA-4.0 based on your submission warranty.`,
-        howToFix: `Explicitly declare your SPDX license in ${confFileName}:`,
-        snippet: `license = MIT\nmedia_license = CC-BY-SA-4.0`
+        message: `LuantiHub requires an OSI-approved Open Source or Free Culture SPDX license.`,
+        howToFix: `Include a standard open-source LICENSE file (e.g., MIT, LGPL-2.1-only, GPL-3.0-only, Apache-2.0, CC-BY-SA-4.0) in the root of your repository.`
       });
     } else {
       diagnostics.push({
         code: 'LICENSE_VERIFIED',
         severity: 'pass',
-        file: confFileName,
-        title: `SPDX License Verified (${effectiveLicense})`,
-        message: `Code license (${effectiveLicense}) and media license (${effectiveMediaLicense}) comply with open-source distribution standards.`
+        file: detectedLicenseFile,
+        title: `Open-Source License Verified (${effectiveLicense})`,
+        message: detectedLicense
+          ? `Detected ${effectiveLicense} license from ${detectedLicenseFile}.`
+          : `Verified open-source distribution under submission warranty (${effectiveLicense} / ${effectiveMediaLicense}).`
       });
     }
 
@@ -982,10 +1026,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     const licenseValid = !diagnostics.some(d => d.code === 'LICENSE_INVALID');
     const luacheckPassed = !diagnostics.some(d => d.code.startsWith('LUA_') && d.severity === 'error');
+    const canonicalRepoKey = `${provider}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
+    const issuedAuditToken = canPublish
+      ? await createAuditProofToken(canonicalRepoKey, context.env.SESSION_SECRET)
+      : undefined;
 
     const auditReport = {
       valid: canPublish,
       passed: canPublish,
+      auditToken: issuedAuditToken,
       ownershipVerified,
       requiredProvider: provider,
       repoOwner: owner,
@@ -1021,6 +1070,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return Response.json({
         success: true,
         canPublish: true,
+        auditToken: issuedAuditToken,
         ownershipVerified,
         requiredProvider: provider,
         repoOwner: owner,
@@ -1029,6 +1079,22 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         auditReport,
         package: packagePayload
       });
+    }
+
+    // Require cryptographic proof that Pre-Flight Check was actually executed and passed before publishing
+    const hasValidAuditProof = await verifyAuditProofToken(
+      auditToken,
+      canonicalRepoKey,
+      context.env.SESSION_SECRET
+    );
+    if (!hasValidAuditProof) {
+      return Response.json({
+        success: false,
+        canPublish: false,
+        error: 'Pre-flight check required: Please run the Pre-Flight & Luacheck Audit and ensure it passes before publishing.',
+        audit: auditReport,
+        auditReport
+      }, { status: 400 });
     }
 
     // Enforce verified repository ownership on actual publish (dryRun: false)

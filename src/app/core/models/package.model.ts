@@ -116,6 +116,7 @@ export interface GitAuditDiagnostic {
 
 export interface GitAuditReport {
   valid: boolean;
+  auditToken?: string;
   ownershipVerified?: boolean;
   requiredProvider?: GitProvider;
   repoOwner?: string;

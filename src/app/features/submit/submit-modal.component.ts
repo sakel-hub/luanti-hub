@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { GitAuditReport, GitProvider } from '../../core/models/package.model';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucidePlus,
@@ -15,7 +16,8 @@ import {
   LucideTerminal,
   LucideLoader2,
   LucideTag,
-  LucideKeyRound
+  LucideKeyRound,
+  LucideAlertCircle
 } from '@lucide/angular';
 
 @Component({
@@ -25,6 +27,7 @@ import {
   imports: [
     CommonModule,
     FormsModule,
+    TooltipDirective,
     TranslatePipe,
     LucidePlus,
     LucideX,
@@ -35,7 +38,8 @@ import {
     LucideTerminal,
     LucideLoader2,
     LucideTag,
-    LucideKeyRound
+    LucideKeyRound,
+    LucideAlertCircle
   ],
   template: `
     <div
@@ -79,9 +83,23 @@ import {
 
           <!-- Git URL Input + Run Audit Button -->
           <div class="space-y-1.5">
-            <label for="git-url" class="block text-xs font-semibold text-slate-300">
-              {{ 'submit.repoUrlLabel' | translate }} <span class="text-rose-400">*</span>
-            </label>
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-1.5">
+                <label for="git-url" class="block text-xs font-semibold text-slate-300">
+                  {{ 'submit.repoUrlLabel' | translate }} <span class="text-rose-400">*</span>
+                </label>
+                <span
+                  tabindex="0"
+                  [appTooltip]="'submit.repoUrlTooltip' | translate"
+                  [attr.aria-label]="'submit.repoUrlTooltip' | translate"
+                  class="inline-flex items-center justify-center w-4 h-4 rounded-full glass-pill text-amber-300 hover:text-white transition cursor-help">
+                  <svg lucideAlertCircle class="w-3 h-3"></svg>
+                </span>
+              </div>
+              <span class="text-[10px] font-mono text-slate-400 hidden sm:inline">
+                Codeberg · GitLab · GitHub
+              </span>
+            </div>
             <div class="flex flex-col sm:flex-row gap-2">
               <input
                 id="git-url"
@@ -91,18 +109,20 @@ import {
                 name="repoUrl"
                 required
                 [placeholder]="'submit.repoUrlPlaceholder' | translate"
+                [appTooltip]="'submit.repoUrlTooltip' | translate"
                 class="flex-1 glass-input rounded-xl px-4 py-2.5 text-xs sm:text-sm text-white placeholder-slate-500 focus:outline-none font-mono transition"
               />
               <button
                 type="button"
                 (click)="onRunAudit()"
                 [disabled]="isAuditing() || !repoUrl.trim()"
-                class="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-black text-xs flex items-center justify-center gap-2 transition whitespace-nowrap shadow cursor-pointer">
+                [appTooltip]="'submit.runAuditTooltip' | translate"
+                class="px-4 py-2.5 rounded-xl glass-btn-amber disabled:opacity-50 font-black text-xs flex items-center justify-center gap-2 hover:scale-[1.02] transition whitespace-nowrap cursor-pointer">
                 @if (isAuditing()) {
-                  <svg lucideLoader2 class="w-4 h-4 text-slate-950 animate-spin"></svg>
+                  <svg lucideLoader2 class="w-4 h-4 text-amber-300 animate-spin"></svg>
                   <span>{{ 'submit.runningAudit' | translate }}</span>
                 } @else {
-                  <svg lucideTerminal class="w-4 h-4"></svg>
+                  <svg lucideTerminal class="w-4 h-4 text-amber-300 flex-shrink-0"></svg>
                   <span>{{ 'submit.runAuditBtn' | translate }}</span>
                 }
               </button>
@@ -268,7 +288,8 @@ import {
                     type="text"
                     [(ngModel)]="verifyUsername"
                     name="verifyUsername"
-                    [placeholder]="target.provider + ' username (e.g. ' + target.owner + ')'"
+                    [placeholder]="target.owner"
+                    [appTooltip]="target.provider + ' username (e.g. ' + target.owner + ')'"
                     autocomplete="username"
                     class="sm:col-span-4 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                   />
@@ -276,7 +297,8 @@ import {
                     type="password"
                     [(ngModel)]="verifyToken"
                     name="verifyToken"
-                    [placeholder]="'Read-only ' + (target.provider | uppercase) + ' Personal Access Token'"
+                    placeholder="Personal Access Token"
+                    [appTooltip]="'Read-only ' + (target.provider | uppercase) + ' Personal Access Token (verified once on server, never stored)'"
                     autocomplete="off"
                     class="sm:col-span-5 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                   />
@@ -284,12 +306,12 @@ import {
                     type="button"
                     (click)="onVerifyOwnershipInline()"
                     [disabled]="isVerifyingOwner() || !verifyToken.trim()"
-                    class="sm:col-span-3 px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+                    class="sm:col-span-3 px-3 py-2 rounded-xl glass-btn-primary disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
                     @if (isVerifyingOwner()) {
-                      <svg lucideLoader2 class="w-3.5 h-3.5 animate-spin"></svg>
+                      <svg lucideLoader2 class="w-3.5 h-3.5 text-sky-300 animate-spin"></svg>
                       <span>Verifying...</span>
                     } @else {
-                      <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                      <svg lucideShieldCheck class="w-3.5 h-3.5 text-sky-300"></svg>
                       <span>Verify Owner</span>
                     }
                   </button>
@@ -321,7 +343,7 @@ import {
               }
             </div>
             <p class="text-[11px] text-slate-400">
-              Select up to 5 ContentDB-compatible tags (or define <code class="text-sky-300 font-mono">tags = ...</code> in your <code class="text-sky-300 font-mono">mod.conf</code>).
+              Select up to 5 ContentDB-compatible tags to categorize your package in the catalog.
             </p>
             <div class="flex items-center gap-1.5 flex-wrap max-h-32 overflow-y-auto pr-1 pt-0.5">
               @for (tag of packageService.availableTags(); track tag.name) {
@@ -526,13 +548,15 @@ export class SubmitModalComponent {
   }
 
   canPublish(): boolean {
+    const report = this.auditReport();
     return Boolean(
       this.repoUrl.trim() &&
       this.warrantyOwnership &&
       this.warrantyAssets &&
       this.warrantyTakedown &&
       this.isOwnershipVerified() &&
-      (!this.auditReport() || this.auditReport()?.valid)
+      report?.valid &&
+      report?.auditToken
     );
   }
 
@@ -567,7 +591,8 @@ export class SubmitModalComponent {
   }
 
   async onPublish(): Promise<void> {
-    if (!this.canPublish()) return;
+    const report = this.auditReport();
+    if (!this.canPublish() || !report?.auditToken) return;
 
     this.isSubmitting.set(true);
     this.statusMessage.set(null);
@@ -576,7 +601,8 @@ export class SubmitModalComponent {
       repoUrl: this.repoUrl.trim(),
       warrantiesAccepted: true,
       dryRun: false,
-      tags: this.selectedTags()
+      tags: this.selectedTags(),
+      auditToken: report.auditToken
     });
 
     this.isSubmitting.set(false);
