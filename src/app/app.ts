@@ -60,6 +60,8 @@ export class App {
   readonly isClosingLegalModal = signal(false);
 
   private pkgCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private savedScrollY = 0;
+  private wasModalOpen = false;
 
   constructor() {
     // Smooth enter + exit transitions for Package Detail Modal
@@ -88,9 +90,9 @@ export class App {
     this.bindAnimatedOverlay(() => this.authService.isProfileDrawerOpen(), this.renderProfileDrawer, this.isClosingProfileDrawer, 220);
     this.bindAnimatedOverlay(() => this.packageService.isLegalModalOpen(), this.renderLegalModal, this.isClosingLegalModal, 200);
 
-    // Lock background body scroll whenever a modal or drawer is open
+    // Lock background scroll whenever a modal or drawer is open while preserving scroll position
     effect(() => {
-      if (typeof document === 'undefined') return;
+      if (typeof document === 'undefined' || typeof window === 'undefined') return;
       const anyModalOpen = Boolean(
         this.packageService.activePackage() ||
         this.packageService.isSubmitModalOpen() ||
@@ -99,7 +101,23 @@ export class App {
         this.authService.isAuthModalOpen() ||
         this.authService.isProfileDrawerOpen()
       );
-      document.body.style.overflow = anyModalOpen ? 'hidden' : '';
+      if (anyModalOpen && !this.wasModalOpen) {
+        this.savedScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+        this.wasModalOpen = true;
+        document.documentElement.style.overflow = 'hidden';
+        document.body.style.overflow = 'hidden';
+        if (this.savedScrollY > 0 && window.scrollY !== this.savedScrollY) {
+          window.scrollTo({ top: this.savedScrollY, behavior: 'instant' as ScrollBehavior });
+        }
+      } else if (!anyModalOpen && this.wasModalOpen) {
+        const restoreY = this.savedScrollY;
+        this.wasModalOpen = false;
+        document.documentElement.style.overflow = '';
+        document.body.style.overflow = '';
+        if (restoreY > 0 && window.scrollY !== restoreY) {
+          window.scrollTo({ top: restoreY, behavior: 'instant' as ScrollBehavior });
+        }
+      }
     });
   }
 

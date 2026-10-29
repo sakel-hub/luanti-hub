@@ -2126,13 +2126,23 @@ export class PackageService {
     return promise;
   }
 
+  private navigatePreservingScroll(commands: any[]): void {
+    if (!this.router) return;
+    const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
+    this.router.navigate(commands, {
+      queryParams: this.buildActiveQueryParams()
+    }).then(() => {
+      if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+        window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+      }
+    });
+  }
+
   openPackageModal(pkg: LuantiPackage, updateUrl = true): void {
     this._activePackage.set(pkg);
     this.updateSeoMeta(pkg);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/package', pkg.author, pkg.name], {
-        queryParams: this.buildActiveQueryParams()
-      });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/package', pkg.author, pkg.name]);
     }
     this.loadPackageDetails(pkg, true);
   }
@@ -2175,53 +2185,53 @@ export class PackageService {
   closePackageModal(updateUrl = true): void {
     this._activePackage.set(null);
     this.seoService?.resetToHome();
-    if (updateUrl && this.router) {
-      this.router.navigate(['/'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
     }
   }
 
   openSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(true);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/submit'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/submit']);
     }
   }
 
   closeSubmitModal(updateUrl = true): void {
     this._isSubmitModalOpen.set(false);
     this.seoService?.resetToHome();
-    if (updateUrl && this.router) {
-      this.router.navigate(['/'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
     }
   }
 
   openSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(true);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/setup'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/setup']);
     }
   }
 
   closeSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(false);
     this.seoService?.resetToHome();
-    if (updateUrl && this.router) {
-      this.router.navigate(['/'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
     }
   }
 
   openLegalModal(updateUrl = true): void {
     this._isLegalModalOpen.set(true);
-    if (updateUrl && this.router) {
-      this.router.navigate(['/legal'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/legal']);
     }
   }
 
   closeLegalModal(updateUrl = true): void {
     this._isLegalModalOpen.set(false);
     this.seoService?.resetToHome();
-    if (updateUrl && this.router) {
-      this.router.navigate(['/'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
     }
   }
 
@@ -2231,8 +2241,8 @@ export class PackageService {
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
     this.seoService?.resetToHome();
-    if (updateUrl && this.router) {
-      this.router.navigate(['/'], { queryParams: this.buildActiveQueryParams() });
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
     }
   }
 

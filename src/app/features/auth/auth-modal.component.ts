@@ -262,7 +262,7 @@ export class AuthModalComponent {
     if (this.handleInput.trim()) {
       await this.onDirectSignIn();
     } else {
-      this.handleInputEl?.nativeElement?.focus();
+      this.handleInputEl?.nativeElement?.focus({ preventScroll: true });
     }
   }
 

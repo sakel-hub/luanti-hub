@@ -1,18 +1,23 @@
 import { TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { provideRouter, RouteReuseStrategy } from '@angular/router';
 import { App } from './app';
+import { CatalogRouteReuseStrategy } from './app.config';
 import { routes } from './app.routes';
 import { PackageService } from './core/services/package.service';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
 import { TranslationService } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
+import { CatalogComponent } from './features/catalog/catalog.component';
 
 describe('App & Core Services', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [App, Top10RowComponent],
-      providers: [provideRouter(routes)]
+      providers: [
+        provideRouter(routes),
+        { provide: RouteReuseStrategy, useClass: CatalogRouteReuseStrategy }
+      ]
     }).compileComponents();
   });
 
@@ -252,5 +257,16 @@ describe('App & Core Services', () => {
     expect(merged.dependencies).toContain('default');
     expect(merged.sources).toContain('official');
     expect(merged.sources).toContain('git');
+  });
+
+  it('should reuse CatalogComponent across modal routes so scroll position is preserved', () => {
+    const strategy = TestBed.inject(RouteReuseStrategy);
+    const homeSnap = { component: CatalogComponent, routeConfig: routes[0] } as any;
+    const pkgSnap = { component: CatalogComponent, routeConfig: routes[1] } as any;
+    const submitSnap = { component: CatalogComponent, routeConfig: routes[2] } as any;
+
+    expect(strategy.shouldReuseRoute(pkgSnap, homeSnap)).toBe(true);
+    expect(strategy.shouldReuseRoute(homeSnap, pkgSnap)).toBe(true);
+    expect(strategy.shouldReuseRoute(submitSnap, homeSnap)).toBe(true);
   });
 });
