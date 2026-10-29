@@ -351,7 +351,6 @@ export const de: TranslationDictionary = {
     inGameSetup: 'In-Game Luanti Konfiguration',
     upstreamMirror: 'ContentDB Mirror API',
     engineSite: 'Offizielle Luanti-Website',
-    dmca: 'DMCA / Missbrauch melden',
     legalTerms: 'Rechtliches, AGB & Safe Harbor',
     termsPrivacy: 'Rechtliches, AGB & Safe Harbor',
     legalModalTitle: 'Rechtliche Hinweise, DMCA Safe Harbor & Datenschutz',

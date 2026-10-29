@@ -505,7 +505,6 @@ import {
               class="px-3.5 py-2 rounded-xl glass-btn hover:border-rose-500/40 hover:text-rose-300 text-slate-300 text-xs font-semibold transition cursor-pointer">
               {{ 'profile.signOut' | translate }}
             </button>
-            <span class="text-[10px] text-slate-500 font-medium">LuantiHub Creator ID</span>
           </div>
 
         </div>

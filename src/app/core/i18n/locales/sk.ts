@@ -351,7 +351,6 @@ export const sk: TranslationDictionary = {
     inGameSetup: 'Nastavenie v Luanti',
     upstreamMirror: 'ContentDB Mirror API',
     engineSite: 'Oficiálny Web Luanti',
-    dmca: 'DMCA / Nahlásiť Zneužitie',
     legalTerms: 'Právne Informácie & Safe Harbor',
     termsPrivacy: 'Právne Informácie & Safe Harbor',
     legalModalTitle: 'Právne Podmienky, DMCA Safe Harbor & Súkromie',

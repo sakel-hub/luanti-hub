@@ -366,7 +366,6 @@ export interface TranslationDictionary {
     inGameSetup: string;
     upstreamMirror: string;
     engineSite: string;
-    dmca: string;
     legalTerms: string;
     termsPrivacy: string;
     legalModalTitle: string;
