@@ -254,10 +254,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  // 3. Build upstream ContentDB index by ID, normalized repo URL, and (name + title) to prevent duplicates
+  // 3. Build upstream ContentDB index by ID, normalized repo URL, (name + title), and unambiguous (name + type) to prevent duplicates
   const upstreamById = new Map<string, any>();
   const upstreamByRepo = new Map<string, any>();
   const upstreamByNameTitle = new Map<string, any>();
+  const upstreamByNameTypeCount = new Map<string, number>();
+  const upstreamByNameType = new Map<string, any>();
 
   for (const item of upstreamList) {
     if (!item || !item.author || !item.name) continue;
@@ -267,6 +269,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (rKey) upstreamByRepo.set(rKey, item);
     const ntKey = `${String(item.name).toLowerCase()}::${String(item.title || '').trim().toLowerCase()}`;
     upstreamByNameTitle.set(ntKey, item);
+    const nameTypeKey = `${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
+    upstreamByNameTypeCount.set(nameTypeKey, (upstreamByNameTypeCount.get(nameTypeKey) || 0) + 1);
+    upstreamByNameType.set(nameTypeKey, item);
   }
 
   // 4. Format D1 packages into standard ContentDB-compatible schema (merging with upstream ContentDB if present)
@@ -279,10 +284,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const pRepoKey = normalizeRepoKey(p.repo_url);
     const pNameTitleKey = `${String(p.name || '').toLowerCase()}::${String(p.title || '').trim().toLowerCase()}`;
+    const pNameTypeKey = `${String(p.name || '').toLowerCase()}::${String(p.type || 'mod').toLowerCase()}`;
     const matchedUpstream =
       upstreamById.get(d1Key) ||
       (pRepoKey ? upstreamByRepo.get(pRepoKey) : undefined) ||
-      upstreamByNameTitle.get(pNameTitleKey);
+      upstreamByNameTitle.get(pNameTitleKey) ||
+      (upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined);
 
     const canonicalAuthor = matchedUpstream?.author || p.author_name;
     const canonicalName = matchedUpstream?.name || p.name;
@@ -418,23 +425,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
     const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
 
-    // Pre-hydrate licenses & tags on the server for top carousel packages missing license in D1 (cached 1h at Cloudflare Edge + saved to D1)
+    // Pre-hydrate licenses, tags & ContentDB downloads on the server for top carousel & Git Community packages (cached 1h at Cloudflare Edge + saved to D1)
     const carouselPool: any[] = [];
     const pushPool = (items: any[]) => {
       for (const it of items) {
-        if (it && !it.license && it.author && it.name && !carouselPool.some(x => x.id === it.id)) {
+        if (
+          it &&
+          it.author &&
+          it.name &&
+          (!it.license || (it.sources?.includes('official') && !(Number(it.contentdb_downloads || 0) > 0))) &&
+          !carouselPool.some(x => x.id === it.id)
+        ) {
           carouselPool.push(it);
         }
       }
     };
     const byDownloadsDesc = [...merged].sort((a, b) => (Number(b.downloads) || 0) - (Number(a.downloads) || 0));
+    pushPool(merged.filter(p => p.sources?.includes('git')));
     pushPool(top10Today);
     pushPool(top10Week);
     pushPool(byDownloadsDesc.filter(p => p.type === 'game').slice(0, 24));
     pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 24));
     pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 24));
 
-    const batchToHydrate = carouselPool.slice(0, 24);
+    const batchToHydrate = carouselPool.slice(0, 32);
     if (batchToHydrate.length > 0) {
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
@@ -443,8 +457,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             3600
           ).catch(() => null);
           if (!detail) return;
-          const resolvedLic = detail.license || detail.media_license || '';
-          const resolvedMediaLic = detail.media_license || detail.license || '';
+          const resolvedLic = detail.license || detail.media_license || pkg.license || '';
+          const resolvedMediaLic = detail.media_license || detail.license || pkg.media_license || '';
           const detailTags = Array.isArray(detail.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
@@ -455,13 +469,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
           }
+          if (typeof detail.downloads === 'number' && detail.downloads > 0) {
+            pkg.contentdb_downloads = Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads);
+            pkg.downloads = Math.max(
+              Number(pkg.downloads || 0),
+              pkg.contentdb_downloads + Number(pkg.luantihub_downloads || 0)
+            );
+          }
           if (detail.video_url && !pkg.video_url) {
             pkg.video_url = detail.video_url;
           }
           if (detail.video_thumbnail_url && !pkg.video_thumbnail_url) {
             pkg.video_thumbnail_url = detail.video_thumbnail_url;
           }
-          if (env.DB && resolvedLic) {
+          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0)) {
             env.DB.prepare(`
               INSERT INTO packages (
                 id, author_name, name, title, type, short_desc, repo_url, provider,
@@ -486,12 +507,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               pkg.banner || null,
               resolvedLic,
               resolvedMediaLic,
-              detailTags.length > 0 ? JSON.stringify(detailTags) : null,
+              pkg.tags?.length > 0 ? JSON.stringify(pkg.tags) : null,
               Number(pkg.downloads || 0),
               Number(pkg.contentdb_downloads || 0),
               Number(pkg.luantihub_downloads || 0),
               pkg.video_url || null,
               pkg.video_thumbnail_url || null
+            ).run().catch(() => {});
+
+            // Also keep any existing D1 Git row with the same technical name & type in sync if its author_name differed from ContentDB
+            env.DB.prepare(`
+              UPDATE packages
+              SET contentdb_downloads = MAX(contentdb_downloads, ?),
+                  downloads_count = MAX(downloads_count, ? + COALESCE(luantihub_downloads, 0)),
+                  license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END
+              WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?)
+            `).bind(
+              Number(pkg.contentdb_downloads || 0),
+              Number(pkg.contentdb_downloads || 0),
+              resolvedLic,
+              pkg.name,
+              ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod'
             ).run().catch(() => {});
           }
         })

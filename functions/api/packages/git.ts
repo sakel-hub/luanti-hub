@@ -955,11 +955,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const submittedRepoKey = normalizeRepoKey(repoUrl);
     let matchedContentDbPkg: any = null;
     try {
-      const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/', 600);
+      const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600);
       if (Array.isArray(bulkCatalog)) {
         const lowerOwner = owner.toLowerCase();
         const lowerName = technicalName.toLowerCase();
         const lowerTitle = title.trim().toLowerCase();
+        const lowerType = String(packageType || 'mod').toLowerCase();
         matchedContentDbPkg = bulkCatalog.find((item: any) => {
           if (!item || !item.author || !item.name) return false;
           const itemAuthor = String(item.author).toLowerCase();
@@ -971,6 +972,28 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (itemName === lowerName && itemTitle && itemTitle === lowerTitle) return true;
           return false;
         }) || null;
+
+        if (!matchedContentDbPkg) {
+          const sameNameType = bulkCatalog.filter(
+            (item: any) =>
+              item &&
+              String(item.name || '').toLowerCase() === lowerName &&
+              String(item.type || 'mod').toLowerCase() === lowerType
+          );
+          if (sameNameType.length === 1) {
+            matchedContentDbPkg = sameNameType[0];
+          }
+        }
+
+        if (matchedContentDbPkg?.author && matchedContentDbPkg?.name && !(Number(matchedContentDbPkg.downloads) > 0)) {
+          const cdbDetail = await fetchUpstreamJsonCached<any>(
+            `/packages/${encodeURIComponent(matchedContentDbPkg.author)}/${encodeURIComponent(matchedContentDbPkg.name)}/`,
+            600
+          ).catch(() => null);
+          if (cdbDetail) {
+            matchedContentDbPkg = { ...matchedContentDbPkg, ...cdbDetail };
+          }
+        }
       }
     } catch {
       matchedContentDbPkg = null;
@@ -1030,8 +1053,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const resolvedBanner = hasScreenshot
       ? screenshotUrl
       : (matchedContentDbPkg?.thumbnail ? String(matchedContentDbPkg.thumbnail).replace('thumbnail.png', 'shot-0.png') : resolvedThumbnail);
-    const resolvedDownloads = Math.max(
+    const resolvedCdbDownloads = Math.max(
       Number(matchedContentDbPkg?.downloads) || 0,
+      Number(existingD1Pkg?.contentdb_downloads) || 0
+    );
+    const resolvedLhDownloads = Number(existingD1Pkg?.luantihub_downloads) || 0;
+    const resolvedDownloads = Math.max(
+      resolvedCdbDownloads + resolvedLhDownloads,
       Number(existingD1Pkg?.downloads_count) || 0
     );
     const sources: Array<'official' | 'git'> = isAlsoOnContentDb ? ['official', 'git'] : ['git'];
@@ -1048,6 +1076,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       thumbnail: resolvedThumbnail,
       banner: resolvedBanner,
       score: Number(existingD1Pkg?.score) || 0,
+      contentdb_downloads: resolvedCdbDownloads,
+      luantihub_downloads: resolvedLhDownloads,
       downloads: resolvedDownloads,
       license: effectiveLicense,
       media_license: effectiveMediaLicense,
@@ -1194,10 +1224,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
-          downloads_count, score, license, media_license, tags, dependencies, optional_dependencies,
+          downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
           min_minetest_version, status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(id) DO UPDATE SET
           title = excluded.title,
           short_desc = excluded.short_desc,
@@ -1207,6 +1237,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           default_branch = excluded.default_branch,
           thumbnail_url = excluded.thumbnail_url,
           banner_url = excluded.banner_url,
+          contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
           downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
           score = excluded.score,
           license = excluded.license,
@@ -1231,6 +1262,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         resolvedThumbnail,
         resolvedBanner,
         resolvedDownloads,
+        resolvedCdbDownloads,
         actualReviewScore,
         effectiveLicense,
         effectiveMediaLicense,

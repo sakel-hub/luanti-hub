@@ -686,7 +686,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const noCache = reqUrl?.searchParams.get('nocache') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v2/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
@@ -729,18 +729,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const effectivePkgId = d1Pkg?.id || pkgId;
 
     // Fast path for ?lite=1 when D1 already holds hydrated ContentDB downloads & license
-    if (
-      isLite &&
-      d1Pkg &&
-      d1Pkg.license &&
-      (Number(d1Pkg.contentdb_downloads || 0) > 0 || d1Pkg.provider !== 'contentdb')
-    ) {
+    const d1TagsFast = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const isGitFast = Boolean(d1Pkg && (d1Pkg.provider !== 'contentdb' || d1TagsFast.includes('git')));
+    const isOfficialFast = Boolean(
+      d1Pkg && (d1Pkg.provider === 'contentdb' || Number(d1Pkg.contentdb_downloads || 0) > 0 || d1TagsFast.includes('contentdb'))
+    );
+    const hasHydratedDownloads =
+      Number(d1Pkg?.contentdb_downloads || 0) > 0 ||
+      (!isOfficialFast && Number(d1Pkg?.downloads_count || 0) > 0);
+
+    if (isLite && d1Pkg && d1Pkg.license && hasHydratedDownloads) {
       const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
       const lhDl = Number(d1Pkg.luantihub_downloads || 0);
       const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
-      const d1TagsFast = parseJsonArray(d1Pkg.tags);
-      const isGitFast = d1Pkg.provider !== 'contentdb' || d1TagsFast.includes('git');
-      const isOfficialFast = d1Pkg.provider === 'contentdb' || cdbDl > 0 || d1TagsFast.includes('contentdb');
       const fastSources: Array<'official' | 'git'> = [];
       if (isOfficialFast) fastSources.push('official');
       if (isGitFast) fastSources.push('git');
@@ -901,18 +902,54 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     upstreamData = { ...forClientData, ...upstreamData, download_size: forClientData.download_size ?? upstreamData.download_size };
   }
 
-  // Fallback: If single-package endpoint is unavailable on mirror, resolve from cached bulk catalog (/packages/)
+  // Fallback: If single-package endpoint is unavailable on mirror or author differs from ContentDB (e.g. Git username vs ContentDB username), resolve from cached bulk catalog
   if (!upstreamData) {
-    const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/', 600);
+    const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600);
     if (Array.isArray(bulkCatalog)) {
       const lowerAuthor = author.toLowerCase();
       const lowerName = name.toLowerCase();
+      const lowerTitle = String(d1Pkg?.title || '').trim().toLowerCase();
+      const lowerType = String(d1Pkg?.type || 'mod').toLowerCase();
+      const d1RepoUrl = String(d1Pkg?.repo_url || '').toLowerCase().replace(/\.git$/i, '').replace(/\/+$/, '');
+
       upstreamData = bulkCatalog.find(
         (item: any) =>
           item &&
           String(item.author || '').toLowerCase() === lowerAuthor &&
           String(item.name || '').toLowerCase() === lowerName
       ) || null;
+
+      if (!upstreamData) {
+        const sameNameItems = bulkCatalog.filter(
+          (item: any) => item && String(item.name || '').toLowerCase() === lowerName
+        );
+        const matchedCandidate =
+          sameNameItems.find((item: any) => {
+            const itemRepo = String(item.repo || item.repo_url || '').toLowerCase().replace(/\.git$/i, '').replace(/\/+$/, '');
+            if (d1RepoUrl && itemRepo && itemRepo === d1RepoUrl) return true;
+            const itemTitle = String(item.title || '').trim().toLowerCase();
+            if (lowerTitle && itemTitle && itemTitle === lowerTitle) return true;
+            return false;
+          }) ||
+          (sameNameItems.length === 1 && String(sameNameItems[0].type || 'mod').toLowerCase() === lowerType
+            ? sameNameItems[0]
+            : null);
+
+        if (matchedCandidate && matchedCandidate.author && matchedCandidate.name) {
+          const encCdbAuthor = encodeURIComponent(matchedCandidate.author);
+          const encCdbName = encodeURIComponent(matchedCandidate.name);
+          const [altDetail, altForClient] = await Promise.all([
+            fetchUpstreamJsonCached<any>(`/packages/${encCdbAuthor}/${encCdbName}/`, 600),
+            fetchUpstreamJsonCached<any>(`/packages/${encCdbAuthor}/${encCdbName}/for-client/?formspec_version=8`, 600)
+          ]);
+          forClientData = altForClient || forClientData;
+          upstreamData = {
+            ...matchedCandidate,
+            ...(altForClient || {}),
+            ...(altDetail || {})
+          };
+        }
+      }
     }
   }
 

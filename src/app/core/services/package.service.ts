@@ -785,23 +785,32 @@ export class PackageService {
 
   /**
    * Deduplicates a catalog list by case-insensitive ID, normalized Git repo URL,
-   * or identical technical `name` + `title`, merging dual-source packages cleanly.
+   * identical technical `name` + `title`, or unambiguous `name` + `type`, merging dual-source packages cleanly.
    */
   private deduplicateCatalog(list: LuantiPackage[]): LuantiPackage[] {
     const result: LuantiPackage[] = [];
     const byId = new Map<string, number>();
     const byRepo = new Map<string, number>();
     const byNameTitle = new Map<string, number>();
+    const byNameType = new Map<string, number>();
+    const nameTypeCounts = new Map<string, number>();
+
+    for (const pkg of list) {
+      const ntKey = `${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      nameTypeCounts.set(ntKey, (nameTypeCounts.get(ntKey) || 0) + 1);
+    }
 
     for (const pkg of list) {
       const idKey = pkg.id.toLowerCase();
       const repoKey = this.normalizeRepoComparisonKey(pkg.repo_url);
       const nameTitleKey = `${pkg.name.toLowerCase()}::${(pkg.title || '').trim().toLowerCase()}`;
+      const nameTypeKey = `${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
 
       const matchIdx =
         byId.get(idKey) ??
         (repoKey ? byRepo.get(repoKey) : undefined) ??
-        byNameTitle.get(nameTitleKey);
+        byNameTitle.get(nameTitleKey) ??
+        ((nameTypeCounts.get(nameTypeKey) || 0) <= 2 ? byNameType.get(nameTypeKey) : undefined);
 
       if (matchIdx !== undefined) {
         const merged = this.mergeDualSourcePackage(result[matchIdx], pkg);
@@ -811,12 +820,14 @@ export class PackageService {
         const mergedRepoKey = this.normalizeRepoComparisonKey(merged.repo_url);
         if (mergedRepoKey) byRepo.set(mergedRepoKey, matchIdx);
         byNameTitle.set(`${merged.name.toLowerCase()}::${(merged.title || '').trim().toLowerCase()}`, matchIdx);
+        byNameType.set(`${merged.name.toLowerCase()}::${(merged.type || 'mod').toLowerCase()}`, matchIdx);
       } else {
         const idx = result.length;
         result.push(pkg);
         byId.set(idKey, idx);
         if (repoKey) byRepo.set(repoKey, idx);
         byNameTitle.set(nameTitleKey, idx);
+        byNameType.set(nameTypeKey, idx);
       }
     }
 
@@ -998,6 +1009,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v1');
         sessionStorage.removeItem('lh_boot_cache_v2');
         sessionStorage.removeItem('lh_boot_cache_v3');
+        sessionStorage.removeItem('lh_boot_cache_v4');
       }
     } catch {
       // Ignore storage errors
@@ -1071,10 +1083,10 @@ export class PackageService {
     }
     this.bootCacheSyncTimer = setTimeout(() => {
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v3');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v4');
         const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
         sessionStorage.setItem(
-          'lh_boot_cache_v3',
+          'lh_boot_cache_v4',
           JSON.stringify({
             ts: existingTs,
             edge: this.edgeApiAvailable,
@@ -1099,7 +1111,7 @@ export class PackageService {
 
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v3');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v4');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -1200,7 +1212,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v3',
+                'lh_boot_cache_v4',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -2377,10 +2389,13 @@ export class PackageService {
           data.file_size = undefined;
         }
 
-        // Only query ContentDB directly from the browser when the Edge API is unavailable or failed
+        // Query ContentDB directly from the browser when the Edge API is unavailable/failed OR returned 0 downloads for a ContentDB-linked package
         const needsUpstreamDetail =
-          !edgeResolved &&
-          (!data || Object.keys(data).length === 0 || (!data.license && !data.downloads));
+          !edgeResolved ||
+          !data ||
+          Object.keys(data).length === 0 ||
+          !data.license ||
+          !(Number(data.downloads ?? data.downloads_count ?? 0) > 0);
 
         if (!isPureGitOnly && needsUpstreamDetail) {
           try {

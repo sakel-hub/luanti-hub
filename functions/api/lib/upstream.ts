@@ -3,8 +3,10 @@ const PRIMARY_UPSTREAM = 'https://content.luanti.org/api';
 const MIRROR_UPSTREAM = 'https://contentdb.milcho.org/api';
 
 export async function fetchWithFailover(path: string, options: RequestInit = {}): Promise<Response> {
+  // Endpoints like /scores/ or ?fmt=vcs do not exist on the static milcho.org mirror, so give primary ContentDB more time (7500ms)
+  const isPrimaryOnlyEndpoint = path.startsWith('/scores') || path.includes('fmt=vcs');
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5s fast timeout
+  const timeoutId = setTimeout(() => controller.abort(), isPrimaryOnlyEndpoint ? 7500 : 3500);
 
   const defaultHeaders = {
     'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)',
