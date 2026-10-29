@@ -30,11 +30,11 @@ import {
       role="dialog"
       aria-modal="true"
       aria-labelledby="setup-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
+      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 luanti-backdrop">
 
       <div
         (click)="$event.stopPropagation()"
-        class="w-full max-w-xl glass-modal rounded-3xl p-6 sm:p-8 space-y-6 animate-in zoom-in-95 duration-200">
+        class="w-full max-w-xl glass-modal rounded-3xl p-6 sm:p-8 space-y-6 luanti-dialog-panel">
 
         <!-- Header -->
         <div class="flex items-center justify-between border-b border-white/10 pb-4">

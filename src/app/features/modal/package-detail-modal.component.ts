@@ -79,37 +79,44 @@ import {
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-package-title"
-        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
+        class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 overflow-y-auto luanti-backdrop">
 
         <div
           (click)="$event.stopPropagation()"
-          class="relative w-full max-w-4xl max-h-screen sm:max-h-[92vh] glass-modal rounded-none sm:rounded-3xl overflow-y-auto flex flex-col animate-in zoom-in-95 duration-200 my-auto">
+          class="relative w-full max-w-4xl max-h-screen sm:max-h-[92vh] glass-modal rounded-none sm:rounded-3xl overflow-hidden flex flex-col luanti-dialog-panel my-auto">
 
-          <!-- Admin / Author Instant Kill Switch Control Bar -->
-          @if (canModerate()) {
-            <div class="px-5 py-2.5 bg-rose-950/85 border-b border-rose-500/30 flex items-center justify-between gap-3 flex-wrap text-xs">
-              <div class="flex items-center gap-2 text-rose-200 font-bold">
-                <svg lucideShieldAlert class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
-                <span>{{ 'modal.adminModeration' | translate }}</span>
+          <div class="overflow-y-auto flex-1 flex flex-col">
+
+            <!-- Admin / Author Moderation Control Bar (Mutually Exclusive: Delist when active, Restore when delisted) -->
+            @if (canModerate()) {
+              <div
+                [class]="isPackageDelisted() ? 'bg-amber-950/75 border-amber-500/30 text-amber-200' : 'bg-rose-950/75 border-rose-500/30 text-rose-200'"
+                class="px-5 py-2.5 backdrop-blur-md border-b flex items-center justify-between gap-3 flex-wrap text-xs flex-shrink-0">
+                <div class="flex items-center gap-2 font-bold">
+                  <svg lucideShieldAlert class="w-4 h-4 flex-shrink-0" [class]="isPackageDelisted() ? 'text-amber-400' : 'text-rose-400'"></svg>
+                  <span>{{ 'modal.adminModeration' | translate }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  @if (isPackageDelisted()) {
+                    <button
+                      type="button"
+                      (click)="onKillSwitch('restore')"
+                      [disabled]="isModerating()"
+                      class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-black text-[11px] transition shadow cursor-pointer">
+                      {{ 'modal.killSwitchRestore' | translate }}
+                    </button>
+                  } @else {
+                    <button
+                      type="button"
+                      (click)="onKillSwitch('delist')"
+                      [disabled]="isModerating()"
+                      class="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-[11px] transition shadow cursor-pointer">
+                      {{ 'modal.killSwitchDelist' | translate }}
+                    </button>
+                  }
+                </div>
               </div>
-              <div class="flex items-center gap-2">
-                <button
-                  type="button"
-                  (click)="onKillSwitch('delist')"
-                  [disabled]="isModerating()"
-                  class="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-[11px] transition shadow cursor-pointer">
-                  {{ 'modal.killSwitchDelist' | translate }}
-                </button>
-                <button
-                  type="button"
-                  (click)="onKillSwitch('restore')"
-                  [disabled]="isModerating()"
-                  class="px-2.5 py-1 rounded-lg glass-btn disabled:opacity-50 text-emerald-300 font-bold text-[11px] transition cursor-pointer">
-                  {{ 'modal.killSwitchRestore' | translate }}
-                </button>
-              </div>
-            </div>
-          }
+            }
 
           <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio for HD Screenshots) -->
           <div class="relative w-full aspect-video min-h-[240px] max-h-[504px] bg-slate-950 flex-shrink-0 overflow-hidden">
@@ -254,7 +261,7 @@ import {
 
           <!-- Inline Community Report Form -->
           @if (isReportOpen()) {
-            <form (ngSubmit)="onSubmitReport()" class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/30 backdrop-blur-md space-y-3 text-xs">
+            <form (ngSubmit)="onSubmitReport()" class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/30 backdrop-blur-md space-y-3 text-xs luanti-tab-enter">
               <div class="flex items-center justify-between">
                 <h3 class="font-bold text-rose-300 flex items-center gap-1.5">
                   <svg lucideFlag class="w-4 h-4 text-rose-400"></svg>
@@ -673,7 +680,7 @@ import {
 
               <!-- Reviews Content (Always shows interactive Rate & Review box!) -->
               @if (activeTab() === 'reviews') {
-                <div class="pt-4 space-y-4">
+                <div class="pt-4 space-y-4 luanti-tab-enter">
                   <div class="p-4 rounded-2xl glass-panel space-y-3">
                     <div class="flex items-center justify-between flex-wrap gap-2">
                       <div>
@@ -788,7 +795,7 @@ import {
 
               <!-- Releases Content -->
               @if (activeTab() === 'releases') {
-                <div class="pt-4 space-y-2.5">
+                <div class="pt-4 space-y-2.5 luanti-tab-enter">
                   @if (releases().length === 0) {
                     <div class="p-4 rounded-2xl glass-panel flex items-center justify-between text-xs">
                       <div>
@@ -840,7 +847,7 @@ import {
 
               <!-- Compliance Content -->
               @if (activeTab() === 'compliance') {
-                <div class="pt-4 space-y-3 text-xs text-slate-300 leading-relaxed">
+                <div class="pt-4 space-y-3 text-xs text-slate-300 leading-relaxed luanti-tab-enter">
                   <div class="flex items-start gap-2.5 p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-300">
                     <svg lucideShieldCheck class="w-5 h-5 flex-shrink-0 mt-0.5 text-emerald-400"></svg>
                     <span>{{ 'modal.spdxNotice' | translate }}</span>
@@ -851,6 +858,8 @@ import {
                 </div>
               }
             </div>
+
+          </div>
 
           </div>
 
@@ -896,6 +905,16 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
     return user.identities.some(
       id => Boolean(id.verified) && id.username.toLowerCase() === lowerAuthor
     );
+  });
+
+  readonly isPackageDelisted = computed(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return false;
+    if (pkg.status === 'delisted' || pkg.status === 'flagged') return true;
+    const targetId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    return this.authService
+      .delistedPackages()
+      .some(d => (d.id || `${d.author}/${d.name}`).toLowerCase() === targetId);
   });
 
   private parseSafeMarkdown(markdownText: string): SafeHtml {
@@ -968,17 +987,27 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
     return this.package.banner || this.package.thumbnail || 'logo.svg';
   }
 
+  private loadedPackageKey = '';
+
   ngOnInit(): void {
-    this.loadExtraData();
+    this.ensureExtraDataLoaded();
   }
 
   ngOnChanges(): void {
-    this.activeBannerUrl.set(null);
-    this.loadExtraData();
+    this.ensureExtraDataLoaded();
   }
 
-  private loadExtraData(): void {
+  private async ensureExtraDataLoaded(): Promise<void> {
     if (!this.package) return;
+    const key = (this.package.id || `${this.package.author}/${this.package.name}`).toLowerCase();
+    if (this.loadedPackageKey === key) return;
+    this.loadedPackageKey = key;
+    this.activeBannerUrl.set(null);
+
+    // Wait for bundled package details first (which populates reviewsCache & releasesCache in 1 request)
+    await this.packageService.loadPackageDetails(this.package, true);
+    if (this.loadedPackageKey !== key) return;
+
     this.packageService.fetchReviews(this.package).then(res => this.reviews.set(res));
     this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
   }

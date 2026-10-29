@@ -40,11 +40,11 @@ import {
       role="dialog"
       aria-modal="true"
       aria-labelledby="submit-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
+      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto luanti-backdrop">
 
       <div
         (click)="$event.stopPropagation()"
-        class="w-full max-w-2xl max-h-[92vh] overflow-y-auto glass-modal rounded-3xl p-5 sm:p-7 space-y-5 animate-in zoom-in-95 duration-200 my-auto">
+        class="w-full max-w-2xl max-h-[92vh] overflow-y-auto glass-modal rounded-3xl p-5 sm:p-7 space-y-5 luanti-dialog-panel my-auto">
 
         <!-- Header -->
         <div class="flex items-center justify-between border-b border-white/10 pb-4">

@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, HostListener, effect } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, WritableSignal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { HeaderComponent } from './features/header/header.component';
@@ -10,6 +10,7 @@ import { ProfileDrawerComponent } from './features/profile/profile-drawer.compon
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
+import { LuantiPackage } from './core/models/package.model';
 import { TranslatePipe } from './core/i18n/translate.pipe';
 import { LucideX, LucideShieldCheck, LucideCheck } from '@lucide/angular';
 
@@ -39,7 +40,54 @@ export class App {
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
 
+  // Animated enter/exit state for all dialogs & drawers
+  readonly displayedPackage = signal<LuantiPackage | null>(null);
+  readonly isClosingPackageModal = signal(false);
+
+  readonly renderSubmitModal = signal(false);
+  readonly isClosingSubmitModal = signal(false);
+
+  readonly renderSetupModal = signal(false);
+  readonly isClosingSetupModal = signal(false);
+
+  readonly renderAuthModal = signal(false);
+  readonly isClosingAuthModal = signal(false);
+
+  readonly renderProfileDrawer = signal(false);
+  readonly isClosingProfileDrawer = signal(false);
+
+  readonly renderLegalModal = signal(false);
+  readonly isClosingLegalModal = signal(false);
+
+  private pkgCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor() {
+    // Smooth enter + exit transitions for Package Detail Modal
+    effect(() => {
+      const pkg = this.packageService.activePackage();
+      if (pkg) {
+        if (this.pkgCloseTimer) {
+          clearTimeout(this.pkgCloseTimer);
+          this.pkgCloseTimer = null;
+        }
+        this.isClosingPackageModal.set(false);
+        this.displayedPackage.set(pkg);
+      } else if (this.displayedPackage() && !this.isClosingPackageModal()) {
+        this.isClosingPackageModal.set(true);
+        this.pkgCloseTimer = setTimeout(() => {
+          this.displayedPackage.set(null);
+          this.isClosingPackageModal.set(false);
+          this.pkgCloseTimer = null;
+        }, 200);
+      }
+    });
+
+    this.bindAnimatedOverlay(() => this.packageService.isSubmitModalOpen(), this.renderSubmitModal, this.isClosingSubmitModal, 200);
+    this.bindAnimatedOverlay(() => this.packageService.isSetupModalOpen(), this.renderSetupModal, this.isClosingSetupModal, 200);
+    this.bindAnimatedOverlay(() => this.authService.isAuthModalOpen(), this.renderAuthModal, this.isClosingAuthModal, 200);
+    this.bindAnimatedOverlay(() => this.authService.isProfileDrawerOpen(), this.renderProfileDrawer, this.isClosingProfileDrawer, 220);
+    this.bindAnimatedOverlay(() => this.packageService.isLegalModalOpen(), this.renderLegalModal, this.isClosingLegalModal, 200);
+
     // Lock background body scroll whenever a modal or drawer is open
     effect(() => {
       if (typeof document === 'undefined') return;
@@ -52,6 +100,33 @@ export class App {
         this.authService.isProfileDrawerOpen()
       );
       document.body.style.overflow = anyModalOpen ? 'hidden' : '';
+    });
+  }
+
+  private bindAnimatedOverlay(
+    source: () => boolean,
+    rendered: WritableSignal<boolean>,
+    closing: WritableSignal<boolean>,
+    durationMs: number
+  ): void {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    effect(() => {
+      const isOpen = source();
+      if (isOpen) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        closing.set(false);
+        rendered.set(true);
+      } else if (rendered() && !closing()) {
+        closing.set(true);
+        timer = setTimeout(() => {
+          rendered.set(false);
+          closing.set(false);
+          timer = null;
+        }, durationMs);
+      }
     });
   }
 

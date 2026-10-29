@@ -20,7 +20,7 @@
     <div
       role="status"
       aria-live="polite"
-      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 glass-dropdown text-white rounded-xl flex items-center gap-2.5 text-xs font-semibold animate-in fade-in slide-in-from-bottom-4 duration-200">
+      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 glass-dropdown text-white rounded-xl flex items-center gap-2.5 text-xs font-semibold luanti-dialog-panel">
       <svg lucideCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
       <span>{{ msgKey | translate }}</span>
     </div>
@@ -30,7 +30,7 @@
   @if (pwaService.updateAvailable()) {
     <div
       role="alert"
-      class="fixed bottom-6 right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 animate-in slide-in-from-bottom duration-300">
+      class="fixed bottom-6 right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 luanti-dialog-panel">
       <div class="text-xs font-medium">
         <p class="font-bold">{{ 'pwa.updateAvailable' | translate }}</p>
         <p class="text-sky-100">{{ 'pwa.updateDesc' | translate }}</p>
@@ -44,38 +44,42 @@
     </div>
   }
 
-  <!-- Modals & Drawers -->
-  @if (packageService.activePackage(); as pkg) {
-    <app-package-detail-modal [package]="pkg"></app-package-detail-modal>
+  <!-- Modals & Drawers (With Unified Enter & Exit Motion) -->
+  @if (displayedPackage(); as pkg) {
+    <app-package-detail-modal
+      [package]="pkg"
+      [class.is-closing]="isClosingPackageModal()">
+    </app-package-detail-modal>
   }
 
-  @if (packageService.isSubmitModalOpen()) {
-    <app-submit-modal></app-submit-modal>
+  @if (renderSubmitModal()) {
+    <app-submit-modal [class.is-closing]="isClosingSubmitModal()"></app-submit-modal>
   }
 
-  @if (packageService.isSetupModalOpen()) {
-    <app-setup-guide-modal></app-setup-guide-modal>
+  @if (renderSetupModal()) {
+    <app-setup-guide-modal [class.is-closing]="isClosingSetupModal()"></app-setup-guide-modal>
   }
 
-  @if (authService.isAuthModalOpen()) {
-    <app-auth-modal></app-auth-modal>
+  @if (renderAuthModal()) {
+    <app-auth-modal [class.is-closing]="isClosingAuthModal()"></app-auth-modal>
   }
 
-  @if (authService.isProfileDrawerOpen()) {
-    <app-profile-drawer></app-profile-drawer>
+  @if (renderProfileDrawer()) {
+    <app-profile-drawer [class.is-closing]="isClosingProfileDrawer()"></app-profile-drawer>
   }
 
   <!-- Official Legal, DMCA & Safe Harbor Modal (/legal) -->
-  @if (packageService.isLegalModalOpen()) {
+  @if (renderLegalModal()) {
     <div
       (click)="packageService.closeLegalModal()"
       role="dialog"
       aria-modal="true"
       aria-labelledby="legal-modal-title"
-      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+      [class.is-closing]="isClosingLegalModal()"
+      class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto luanti-backdrop">
       <div
         (click)="$event.stopPropagation()"
-        class="w-full max-w-2xl glass-modal rounded-3xl p-6 sm:p-8 space-y-5 animate-in zoom-in-95 duration-200 my-auto text-xs text-slate-300 leading-relaxed">
+        class="w-full max-w-2xl glass-modal rounded-3xl p-6 sm:p-8 space-y-5 luanti-dialog-panel my-auto text-xs text-slate-300 leading-relaxed">
         <div class="flex items-center justify-between border-b border-white/10 pb-4">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center text-emerald-400">
