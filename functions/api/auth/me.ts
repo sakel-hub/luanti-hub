@@ -13,20 +13,34 @@ interface Env {
   SESSION_SECRET?: string;
   ADMIN_USERS?: string;
   ADMIN_SECRET?: string;
+  CODEBERG_CLIENT_ID?: string;
+  GITLAB_CLIENT_ID?: string;
+  GITHUB_CLIENT_ID?: string;
+  CONTENTDB_CLIENT_ID?: string;
+}
+
+function getConfiguredOAuthProviders(env: Env): Record<string, boolean> {
+  return {
+    codeberg: Boolean(env.CODEBERG_CLIENT_ID && env.CODEBERG_CLIENT_ID.trim()),
+    gitlab: Boolean(env.GITLAB_CLIENT_ID && env.GITLAB_CLIENT_ID.trim()),
+    github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_ID.trim()),
+    contentdb: Boolean(env.CONTENTDB_CLIENT_ID && env.CONTENTDB_CLIENT_ID.trim())
+  };
 }
 
 // GET /api/auth/me: Fetch current authenticated user profile, linked identities, packages, favorites & admin status
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
+  const oauthProviders = getConfiguredOAuthProviders(context.env);
 
   if (!sessionToken) {
-    return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
   if (!userId || !context.env.DB) {
-    return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   try {
@@ -36,7 +50,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ).bind(userId).first();
 
     if (!user) {
-      return Response.json({ user: null }, { headers: { 'Cache-Control': 'no-store' } });
+      return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     // 2. Fetch Linked Identities (Codeberg, GitLab, GitHub, ContentDB)
@@ -100,12 +114,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         identities,
         packages: packagesRes.results || [],
         favorites
-      }
+      },
+      oauthProviders
     }, {
       headers: { 'Cache-Control': 'no-store' }
     });
   } catch (err: any) {
-    return Response.json({ user: null, error: err.message }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({ user: null, oauthProviders, error: err.message }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
   }
 }
 
