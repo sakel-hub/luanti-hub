@@ -133,16 +133,6 @@ import {
                         {{ 'modal.killSwitchDelist' | translate }}
                       </button>
                     }
-                    @if (isGitSubmittedPackage()) {
-                      <button
-                        type="button"
-                        (click)="toggleConfirmRemove()"
-                        [disabled]="isModerating()"
-                        class="px-3 py-1.5 rounded-xl glass-btn border-rose-400/40 text-rose-200 hover:text-white disabled:opacity-50 font-bold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
-                        <svg lucideTrash2 class="w-3.5 h-3.5 text-rose-400"></svg>
-                        <span>Remove Package</span>
-                      </button>
-                    }
                   </div>
                 </div>
               </div>
