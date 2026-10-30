@@ -6,6 +6,7 @@ import {
   signal,
   ElementRef,
   ViewChild,
+  HostListener,
   OnChanges,
   OnDestroy
 } from '@angular/core';
@@ -24,8 +25,12 @@ import {
   LucideHeart,
   LucideChevronDown,
   LucideDownload,
-  LucideUser
+  LucideUser,
+  LucideMaximize2
 } from '@lucide/angular';
+
+export const HOVER_VIDEO_INTENT_MS = 180;
+export const HOVER_EMBED_FALLBACK_READY_MS = 320;
 
 @Component({
   selector: 'app-package-card',
@@ -43,7 +48,8 @@ import {
     LucideHeart,
     LucideChevronDown,
     LucideDownload,
-    LucideUser
+    LucideUser,
+    LucideMaximize2
   ],
   template: `
     <div
@@ -72,7 +78,7 @@ import {
           class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
         />
 
-        <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute Toggle & Obstruction-Free Crop) -->
+        <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute & Enlarge Controls + Obstruction-Free Crop) -->
         @if (isHoverVideoActive() && package.video_url) {
           <div class="absolute inset-0 z-10 bg-black overflow-hidden animate-fade-in">
             @if (isDirectVideo(package.video_url)) {
@@ -81,10 +87,12 @@ import {
                 [src]="package.video_url"
                 [poster]="package.video_thumbnail_url || package.banner || package.thumbnail"
                 [muted]="isHoverMuted()"
+                preload="auto"
                 autoplay
                 loop
                 playsinline
                 disablePictureInPicture
+                (timeupdate)="onDirectVideoTimeUpdate()"
                 controlsList="nodownload nofullscreen noremoteplayback"
                 class="w-full h-full object-cover pointer-events-none">
               </video>
@@ -107,33 +115,45 @@ import {
                 appImgFallback
                 alt=""
                 aria-hidden="true"
-                [class]="'absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-500 ' + (isEmbedVideoReady() ? 'opacity-0' : 'opacity-100')"
+                [class]="'absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-200 ' + (isEmbedVideoReady() ? 'opacity-0' : 'opacity-100')"
               />
             }
 
             <!-- Subtle edge vignette to mask any residual player chrome -->
             <div class="absolute inset-0 bg-gradient-to-b from-slate-950/35 via-transparent to-slate-950/50 pointer-events-none"></div>
 
-            <!-- Floating Mute / Unmute Toggle Button -->
-            <button
-              type="button"
-              (click)="toggleHoverMute($event)"
-              [attr.aria-label]="(isHoverMuted() ? 'card.unmuteVideo' : 'card.muteVideo') | translate"
-              class="absolute bottom-2 right-2 z-20 w-7 h-7 rounded-xl glass-btn text-slate-100 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer shadow-lg">
-              @if (isHoverMuted()) {
-                <svg class="w-3.5 h-3.5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                  <line x1="23" y1="9" x2="17" y2="15"></line>
-                  <line x1="17" y1="9" x2="23" y2="15"></line>
-                </svg>
-              } @else {
-                <svg class="w-3.5 h-3.5 text-sky-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-                </svg>
-              }
-            </button>
+            <!-- Floating Enlarge & Mute/Unmute Action Buttons -->
+            <div class="absolute bottom-2 right-2 z-20 flex items-center gap-1.5">
+              <button
+                type="button"
+                (click)="enlargeHoverVideo($event)"
+                [appTooltip]="'card.enlargeVideo' | translate"
+                [attr.aria-label]="'card.enlargeVideo' | translate"
+                class="w-7 h-7 rounded-xl glass-btn text-slate-100 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer shadow-lg">
+                <svg lucideMaximize2 class="w-3.5 h-3.5"></svg>
+              </button>
+
+              <button
+                type="button"
+                (click)="toggleHoverMute($event)"
+                [appTooltip]="(isHoverMuted() ? 'card.unmuteVideo' : 'card.muteVideo') | translate"
+                [attr.aria-label]="(isHoverMuted() ? 'card.unmuteVideo' : 'card.muteVideo') | translate"
+                class="w-7 h-7 rounded-xl glass-btn text-slate-100 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer shadow-lg">
+                @if (isHoverMuted()) {
+                  <svg class="w-3.5 h-3.5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <line x1="23" y1="9" x2="17" y2="15"></line>
+                    <line x1="17" y1="9" x2="23" y2="15"></line>
+                  </svg>
+                } @else {
+                  <svg class="w-3.5 h-3.5 text-sky-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                  </svg>
+                }
+              </button>
+            </div>
           </div>
         }
 
@@ -282,10 +302,15 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   private hoverIntentTimer: any = null;
   private embedReadyTimer: any = null;
+  private isPointerHovering = false;
+  currentHoverSeconds = 0;
 
   ngOnChanges(): void {
     if (this.package && (!this.package.license || !this.package.downloads)) {
       this.packageService.ensurePackageHydrated(this.package);
+    }
+    if (this.package?.video_url && this.isDesktopHoverViewport()) {
+      this.packageService.warmUpVideoPreview(this.package.video_url, this.package.video_thumbnail_url, false);
     }
   }
 
@@ -318,7 +343,35 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     });
   }
 
+  private markEmbedVideoReady(): void {
+    if (this.embedReadyTimer) {
+      clearTimeout(this.embedReadyTimer);
+      this.embedReadyTimer = null;
+    }
+    if (this.isHoverVideoActive() && !this.isEmbedVideoReady()) {
+      this.isEmbedVideoReady.set(true);
+    }
+  }
+
+  onDirectVideoTimeUpdate(): void {
+    const videoEl = this.hoverVideoRef?.nativeElement;
+    if (videoEl && Number.isFinite(videoEl.currentTime) && videoEl.currentTime > 0) {
+      this.currentHoverSeconds = videoEl.currentTime;
+    }
+  }
+
   onHoverIframeLoad(): void {
+    const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
+    if (iframeWin) {
+      try {
+        iframeWin.postMessage(JSON.stringify({ event: 'listening' }), '*');
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'play' }), '*');
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'playProgress' }), '*');
+      } catch {
+        // Ignore cross-origin postMessage restrictions
+      }
+    }
+
     if (this.embedReadyTimer) {
       clearTimeout(this.embedReadyTimer);
     }
@@ -327,27 +380,86 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       if (this.isHoverVideoActive()) {
         this.isEmbedVideoReady.set(true);
       }
-    }, 680);
+    }, HOVER_EMBED_FALLBACK_READY_MS);
+  }
+
+  @HostListener('window:message', ['$event'])
+  onWindowMessage(event: MessageEvent): void {
+    if (!this.isHoverVideoActive()) return;
+    const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
+    if (iframeWin && event.source && event.source !== window && event.source !== iframeWin) {
+      return;
+    }
+    try {
+      const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+      if (!data || typeof data !== 'object') return;
+
+      // YouTube IFrame API events (onStateChange / infoDelivery)
+      if (data.event === 'onStateChange' && Number(data.info) === 1) {
+        this.markEmbedVideoReady();
+        return;
+      }
+      if (data.event === 'infoDelivery' && data.info && typeof data.info === 'object') {
+        if (typeof data.info.currentTime === 'number' && data.info.currentTime > 0) {
+          this.currentHoverSeconds = data.info.currentTime;
+        }
+        if (Number(data.info.playerState) === 1 || Number(data.info.currentTime) > 0.05) {
+          this.markEmbedVideoReady();
+        }
+        return;
+      }
+
+      // Vimeo player events (play / playProgress)
+      if (data.event === 'play' || data.event === 'playProgress') {
+        if (typeof data.data?.seconds === 'number' && data.data.seconds > 0) {
+          this.currentHoverSeconds = data.data.seconds;
+        }
+        this.markEmbedVideoReady();
+      }
+    } catch {
+      // Ignore non-JSON messages
+    }
   }
 
   onCardMouseEnter(): void {
-    this.packageService.ensurePackageHydrated(this.package);
+    this.isPointerHovering = true;
+    this.packageService.ensurePackageHydrated(this.package, true);
     if (!this.isDesktopHoverViewport()) return;
+
+    // Zero-delay T=0ms pre-warming (preconnect, video thumbnail, and direct MP4/WebM preload)
+    if (this.package?.video_url) {
+      this.packageService.warmUpVideoPreview(this.package.video_url, this.package.video_thumbnail_url, true);
+    }
+
+    // Start package detail hydration immediately at T=0ms in parallel with hover-intent timer
+    const preloadDetailsPromise = (!this.package?.video_url && this.package)
+      ? this.packageService.loadPackageDetails(this.package, false)
+      : null;
 
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
     }
     this.hoverIntentTimer = setTimeout(async () => {
       this.hoverIntentTimer = null;
+      if (!this.isPointerHovering) return;
+
       let rawUrl = this.package?.video_url;
       if (!rawUrl && this.package) {
-        await this.packageService.loadPackageDetails(this.package, false);
+        if (preloadDetailsPromise) {
+          await preloadDetailsPromise;
+        } else {
+          await this.packageService.loadPackageDetails(this.package, false);
+        }
+        if (!this.isPointerHovering) return;
         const hydrated = this.packageService.packages().find(
           p => p.id.toLowerCase() === this.package.id.toLowerCase()
         );
         rawUrl = hydrated?.video_url || this.package?.video_url;
       }
-      if (!rawUrl) return;
+      if (!rawUrl || !this.isPointerHovering) return;
+
+      this.packageService.warmUpVideoPreview(rawUrl, this.package?.video_thumbnail_url, true);
+      this.currentHoverSeconds = 0;
       this.isHoverMuted.set(true);
       this.isEmbedVideoReady.set(false);
       if (!this.isDirectVideo(rawUrl)) {
@@ -358,7 +470,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
         this.hoverEmbedSafeUrl.set(null);
       }
       this.isHoverVideoActive.set(true);
-    }, 380);
+    }, HOVER_VIDEO_INTENT_MS);
   }
 
   onCardMouseLeave(): void {
@@ -366,6 +478,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   }
 
   private clearHoverVideo(): void {
+    this.isPointerHovering = false;
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
       this.hoverIntentTimer = null;
@@ -374,12 +487,25 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       clearTimeout(this.embedReadyTimer);
       this.embedReadyTimer = null;
     }
+    this.currentHoverSeconds = 0;
     if (this.isHoverVideoActive()) {
       this.isHoverVideoActive.set(false);
       this.isEmbedVideoReady.set(false);
       this.hoverEmbedSafeUrl.set(null);
       this.isHoverMuted.set(true);
     }
+  }
+
+  enlargeHoverVideo(event: MouseEvent): void {
+    event.stopPropagation();
+    const videoEl = this.hoverVideoRef?.nativeElement;
+    const startSec =
+      videoEl && Number.isFinite(videoEl.currentTime) && videoEl.currentTime > 0
+        ? Math.floor(videoEl.currentTime)
+        : Math.floor(this.currentHoverSeconds || 0);
+    const targetPkg = this.package;
+    this.clearHoverVideo();
+    this.packageService.openVideoTheater(targetPkg, startSec);
   }
 
   toggleHoverMute(event: MouseEvent): void {

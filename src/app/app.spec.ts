@@ -1899,4 +1899,116 @@ description = Mob animation and spawning framework.
     expect(pkgService.activePackage()).toBeNull();
     expect(pkgService.searchQuery()).toBe('SaKeL');
   });
+
+  it('should pre-warm hover video origins/preload, reveal embed curtain on postMessage playback, and enlarge into Cinema Video Theater at current timestamp', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const translationService = TestBed.inject(TranslationService);
+
+    for (const locale of ['en', 'sk', 'de', 'fr', 'es', 'ru'] as const) {
+      translationService.setLocale(locale);
+      expect(translationService.translate('card.enlargeVideo')).not.toBe('card.enlargeVideo');
+      expect(translationService.translate('card.viewPackageDetails')).not.toBe('card.viewPackageDetails');
+    }
+    translationService.setLocale('en');
+
+    // Verify startSeconds support across YouTube, Vimeo, and PeerTube
+    const ytStart = pkgService.buildVideoEmbedUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ', {
+      autoplay: true,
+      mute: false,
+      minimalControls: false,
+      startSeconds: 14.8
+    });
+    expect(ytStart).toContain('&start=14');
+
+    const vimeoStart = pkgService.buildVideoEmbedUrl('https://vimeo.com/123456789', {
+      autoplay: true,
+      mute: false,
+      minimalControls: false,
+      startSeconds: 22
+    });
+    expect(vimeoStart).toContain('#t=22s');
+
+    const peertubeStart = pkgService.buildVideoEmbedUrl('https://diode.zone/videos/watch/abc-123', {
+      autoplay: true,
+      mute: false,
+      minimalControls: false,
+      startSeconds: 9
+    });
+    expect(peertubeStart).toContain('&start=9s');
+
+    // Verify warmUpVideoPreview deduplicates preconnect and direct video preload links
+    pkgService.warmUpVideoPreview('https://cdn.example.org/demo/trailer.mp4', 'https://cdn.example.org/demo/poster.jpg', true);
+    pkgService.warmUpVideoPreview('https://cdn.example.org/demo/trailer.mp4', 'https://cdn.example.org/demo/poster.jpg', true);
+    const preconnectLinks = document.head.querySelectorAll('link[rel="preconnect"][href="https://cdn.example.org"]');
+    const preloadLinks = document.head.querySelectorAll('link[rel="preload"][as="video"][href="https://cdn.example.org/demo/trailer.mp4"]');
+    expect(preconnectLinks.length).toBe(1);
+    expect(preloadLinks.length).toBe(1);
+
+    // Mock desktop hover media query
+    const origMatchMedia = window.matchMedia;
+    (window as any).matchMedia = (q: string) => ({
+      matches: q.includes('hover: hover'),
+      media: q,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false
+    });
+
+    try {
+      const videoPkg = (pkgService as any).normalizePackage({
+        id: 'SaKeL/voxel_cinema',
+        author: 'SaKeL',
+        name: 'voxel_cinema',
+        title: 'Voxel Cinema Mod',
+        type: 'mod',
+        source: 'official',
+        sources: ['official'],
+        downloads: 5000,
+        license: 'MIT',
+        video_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        video_thumbnail_url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg'
+      });
+
+      const cardFixture = TestBed.createComponent(PackageCardComponent);
+      const cardComp = cardFixture.componentInstance;
+      cardComp.package = videoPkg;
+      cardFixture.detectChanges();
+
+      cardComp.onCardMouseEnter();
+      await new Promise(resolve => setTimeout(resolve, 210));
+      cardFixture.detectChanges();
+
+      expect(cardComp.isHoverVideoActive()).toBe(true);
+      expect(cardComp.isEmbedVideoReady()).toBe(false);
+
+      // Simulate YouTube IFrame API infoDelivery postMessage indicating playback at 14.7s
+      cardComp.onWindowMessage(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            event: 'infoDelivery',
+            info: { playerState: 1, currentTime: 14.7 }
+          })
+        })
+      );
+      expect(cardComp.isEmbedVideoReady()).toBe(true);
+      expect(cardComp.currentHoverSeconds).toBeCloseTo(14.7, 1);
+
+      // Click Enlarge Video button -> stops card hover video & opens Cinema Video Theater at 14s
+      cardComp.enlargeHoverVideo(new MouseEvent('click'));
+      expect(cardComp.isHoverVideoActive()).toBe(false);
+      expect(pkgService.activeVideoTheater()?.pkg.id).toBe('SaKeL/voxel_cinema');
+      expect(pkgService.activeVideoTheater()?.startSeconds).toBe(14);
+
+      // Transition from Video Theater to full Package Details Modal
+      pkgService.openPackageFromVideoTheater();
+      expect(pkgService.activeVideoTheater()).toBeNull();
+      expect(pkgService.activePackage()?.id).toBe('SaKeL/voxel_cinema');
+      pkgService.closePackageModal(false);
+    } finally {
+      window.matchMedia = origMatchMedia;
+    }
+  });
 });

@@ -78,6 +78,7 @@ export class PackageService {
   private readonly _activeAuthorUsername = signal<string | null>(null);
   private readonly _activeAuthorProfile = signal<PublicAuthorProfile | null>(null);
   private readonly _isLoadingAuthorProfile = signal<boolean>(false);
+  private readonly _activeVideoTheater = signal<{ pkg: LuantiPackage; startSeconds: number } | null>(null);
 
   private searchDebounceTimer: any = null;
   private bootCacheSyncTimer: any = null;
@@ -131,6 +132,7 @@ export class PackageService {
   readonly activeAuthorUsername = this._activeAuthorUsername.asReadonly();
   readonly activeAuthorProfile = this._activeAuthorProfile.asReadonly();
   readonly isLoadingAuthorProfile = this._isLoadingAuthorProfile.asReadonly();
+  readonly activeVideoTheater = this._activeVideoTheater.asReadonly();
 
   // True whenever any search or filter is active (switches Home view to Filtered Grid)
   readonly hasActiveFilters = computed<boolean>(() => {
@@ -1898,6 +1900,7 @@ export class PackageService {
     this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
+    this._activeVideoTheater.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
@@ -1931,6 +1934,7 @@ export class PackageService {
     this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
+    this._activeVideoTheater.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
@@ -2716,7 +2720,7 @@ export class PackageService {
    */
   buildVideoEmbedUrl(
     rawUrl?: string,
-    options: { autoplay?: boolean; mute?: boolean; minimalControls?: boolean } = {}
+    options: { autoplay?: boolean; mute?: boolean; minimalControls?: boolean; startSeconds?: number } = {}
   ): string | null {
     if (!rawUrl) return null;
     try {
@@ -2725,6 +2729,9 @@ export class PackageService {
       const autoplay = options.autoplay !== false ? '1' : '0';
       const mute = options.mute ? '1' : '0';
       const minimal = Boolean(options.minimalControls);
+      const startSec = Number.isFinite(options.startSeconds) && (options.startSeconds || 0) > 0
+        ? Math.floor(Number(options.startSeconds))
+        : 0;
 
       const extractYoutubeId = (): string | null => {
         if (host === 'youtu.be') {
@@ -2744,19 +2751,21 @@ export class PackageService {
       const ytId = extractYoutubeId();
       if (ytId) {
         const enc = encodeURIComponent(ytId);
+        const startParam = startSec > 0 ? `&start=${startSec}` : '';
         if (minimal) {
-          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}`;
+          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}${startParam}`;
         }
-        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1`;
+        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1${startParam}`;
       }
 
       if (host.includes('vimeo.com')) {
         const id = u.pathname.split('/').filter(Boolean).pop();
         if (id && /^\d+$/.test(id)) {
+          const vimeoHash = startSec > 0 ? `#t=${startSec}s` : '';
           if (minimal) {
-            return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0`;
+            return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0${vimeoHash}`;
           }
-          return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}`;
+          return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${vimeoHash}`;
         }
       }
 
@@ -2765,15 +2774,83 @@ export class PackageService {
           ? `${u.origin}${u.pathname.replace(/^\/w\//, '/videos/embed/')}`
           : rawUrl.replace('/videos/watch/', '/videos/embed/');
         const sep = embedBase.includes('?') ? '&' : '?';
+        const startParam = startSec > 0 ? `&start=${startSec}s` : '';
         if (minimal) {
-          return `${embedBase}${sep}autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0`;
+          return `${embedBase}${sep}autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0${startParam}`;
         }
-        return `${embedBase}${sep}autoplay=${autoplay}${options.mute ? '&muted=1' : ''}`;
+        return `${embedBase}${sep}autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${startParam}`;
       }
 
       return minimal ? null : rawUrl;
     } catch {
       return null;
+    }
+  }
+
+  private readonly warmedVideoOrigins = new Set<string>();
+  private readonly preloadedDirectVideos = new Set<string>();
+  private readonly preloadedVideoThumbs = new Set<string>();
+
+  /**
+   * Pre-warms DNS/TCP/TLS connections (`<link rel="preconnect">`) for a package's video host,
+   * preloads its video thumbnail image, and (when `eagerDirectPreload` is true on `mouseenter`)
+   * injects a `<link rel="preload" as="video" fetchpriority="low">` for direct `.mp4`/`.webm` URLs.
+   */
+  warmUpVideoPreview(rawVideoUrl?: string, videoThumbUrl?: string, eagerDirectPreload = false): void {
+    if (typeof document === 'undefined' || !document.head) return;
+
+    if (videoThumbUrl && /^https?:\/\//i.test(videoThumbUrl) && !this.preloadedVideoThumbs.has(videoThumbUrl)) {
+      if (this.preloadedVideoThumbs.size < 40) {
+        this.preloadedVideoThumbs.add(videoThumbUrl);
+        try {
+          const img = new Image();
+          img.decoding = 'async';
+          img.src = videoThumbUrl;
+        } catch {
+          // Ignore image preload errors
+        }
+      }
+    }
+
+    if (!rawVideoUrl) return;
+    try {
+      const u = new URL(rawVideoUrl);
+      const host = u.hostname.toLowerCase();
+      const originsToWarm: string[] = [];
+
+      if (host === 'youtu.be' || host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+        originsToWarm.push('https://www.youtube-nocookie.com', 'https://i.ytimg.com', 'https://www.google.com');
+      } else if (host.includes('vimeo.com')) {
+        originsToWarm.push('https://player.vimeo.com', 'https://f.vimeocdn.com');
+      } else if (u.origin && /^https?:\/\//i.test(u.origin)) {
+        originsToWarm.push(u.origin);
+      }
+
+      for (const origin of originsToWarm) {
+        const lowerOrigin = origin.toLowerCase();
+        if (this.warmedVideoOrigins.has(lowerOrigin)) continue;
+        this.warmedVideoOrigins.add(lowerOrigin);
+        const link = document.createElement('link');
+        link.rel = 'preconnect';
+        link.href = origin;
+        link.crossOrigin = 'anonymous';
+        document.head.appendChild(link);
+      }
+
+      if (eagerDirectPreload && this.isDirectVideoUrl(rawVideoUrl)) {
+        const cleanHref = u.href;
+        if (!this.preloadedDirectVideos.has(cleanHref) && this.preloadedDirectVideos.size < 8) {
+          this.preloadedDirectVideos.add(cleanHref);
+          const preloadLink = document.createElement('link');
+          preloadLink.setAttribute('rel', 'preload');
+          preloadLink.setAttribute('as', 'video');
+          preloadLink.setAttribute('href', cleanHref);
+          preloadLink.setAttribute('fetchpriority', 'low');
+          document.head.appendChild(preloadLink);
+        }
+      }
+    } catch {
+      // Ignore invalid video URL
     }
   }
 
@@ -4342,6 +4419,24 @@ export class PackageService {
     }
   }
 
+  openVideoTheater(pkg: LuantiPackage, startSeconds = 0): void {
+    if (!pkg || !pkg.video_url) return;
+    const cleanSec = Number.isFinite(startSeconds) && startSeconds > 0 ? Math.floor(startSeconds) : 0;
+    this._activeVideoTheater.set({ pkg, startSeconds: cleanSec });
+  }
+
+  closeVideoTheater(): void {
+    this._activeVideoTheater.set(null);
+  }
+
+  openPackageFromVideoTheater(): void {
+    const current = this._activeVideoTheater();
+    this._activeVideoTheater.set(null);
+    if (current?.pkg) {
+      this.openPackageModal(current.pkg, true);
+    }
+  }
+
   closeAllModals(updateUrl = true): void {
     this.modalOpenRequestSeq++;
     this.pendingRoutePackage = null;
@@ -4350,6 +4445,7 @@ export class PackageService {
     this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
+    this._activeVideoTheater.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);

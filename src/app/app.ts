@@ -1,6 +1,7 @@
-import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, WritableSignal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, computed, WritableSignal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { HeaderComponent } from './features/header/header.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
@@ -13,7 +14,7 @@ import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
 import { LuantiPackage } from './core/models/package.model';
 import { TranslatePipe } from './core/i18n/translate.pipe';
-import { LucideX, LucideShieldCheck, LucideCheck } from '@lucide/angular';
+import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } from '@lucide/angular';
 
 @Component({
   selector: 'app-root',
@@ -32,7 +33,9 @@ import { LucideX, LucideShieldCheck, LucideCheck } from '@lucide/angular';
     AuthorDrawerComponent,
     LucideX,
     LucideShieldCheck,
-    LucideCheck
+    LucideCheck,
+    LucideDownload,
+    LucideInfo
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
@@ -41,10 +44,28 @@ export class App {
   readonly packageService = inject(PackageService);
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
+  private readonly sanitizer = inject(DomSanitizer);
 
   // Animated enter/exit state for all dialogs & drawers
   readonly displayedPackage = signal<LuantiPackage | null>(null);
   readonly isClosingPackageModal = signal(false);
+
+  readonly displayedVideoTheater = signal<{ pkg: LuantiPackage; startSeconds: number } | null>(null);
+  readonly isClosingVideoTheater = signal(false);
+
+  readonly theaterSafeEmbedUrl = computed<SafeResourceUrl | null>(() => {
+    const state = this.displayedVideoTheater();
+    const rawUrl = state?.pkg?.video_url;
+    if (!rawUrl || this.packageService.isDirectVideoUrl(rawUrl)) return null;
+    const embedUrl = this.packageService.buildVideoEmbedUrl(rawUrl, {
+      autoplay: true,
+      mute: false,
+      minimalControls: false,
+      startSeconds: state.startSeconds
+    });
+    if (!embedUrl) return null;
+    return this.sanitizer.bypassSecurityTrustResourceUrl(embedUrl);
+  });
 
   readonly renderSubmitModal = signal(false);
   readonly isClosingSubmitModal = signal(false);
@@ -65,6 +86,7 @@ export class App {
   readonly isClosingLegalModal = signal(false);
 
   private pkgCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private videoTheaterCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private savedScrollY = 0;
   private wasModalOpen = false;
 
@@ -89,6 +111,26 @@ export class App {
       }
     });
 
+    // Smooth enter + exit transitions for Cinema Video Theater Dialog
+    effect(() => {
+      const vt = this.packageService.activeVideoTheater();
+      if (vt) {
+        if (this.videoTheaterCloseTimer) {
+          clearTimeout(this.videoTheaterCloseTimer);
+          this.videoTheaterCloseTimer = null;
+        }
+        this.isClosingVideoTheater.set(false);
+        this.displayedVideoTheater.set(vt);
+      } else if (this.displayedVideoTheater() && !this.isClosingVideoTheater()) {
+        this.isClosingVideoTheater.set(true);
+        this.videoTheaterCloseTimer = setTimeout(() => {
+          this.displayedVideoTheater.set(null);
+          this.isClosingVideoTheater.set(false);
+          this.videoTheaterCloseTimer = null;
+        }, 200);
+      }
+    });
+
     this.bindAnimatedOverlay(() => this.packageService.isSubmitModalOpen(), this.renderSubmitModal, this.isClosingSubmitModal, 200);
     this.bindAnimatedOverlay(() => this.packageService.isSetupModalOpen(), this.renderSetupModal, this.isClosingSetupModal, 200);
     this.bindAnimatedOverlay(() => this.authService.isAuthModalOpen(), this.renderAuthModal, this.isClosingAuthModal, 200);
@@ -101,6 +143,7 @@ export class App {
       if (typeof document === 'undefined' || typeof window === 'undefined') return;
       const anyModalOpen = Boolean(
         this.packageService.activePackage() ||
+        this.packageService.activeVideoTheater() ||
         this.packageService.activeAuthorUsername() ||
         this.packageService.isSubmitModalOpen() ||
         this.packageService.isSetupModalOpen() ||
@@ -155,6 +198,18 @@ export class App {
     });
   }
 
+  onTheaterVideoLoadedMetadata(event: Event, startSeconds: number): void {
+    if (!startSeconds || startSeconds <= 0) return;
+    const videoEl = event.target as HTMLVideoElement | null;
+    if (videoEl && Number.isFinite(startSeconds)) {
+      try {
+        videoEl.currentTime = startSeconds;
+      } catch {
+        // Ignore seek errors before stream is seekable
+      }
+    }
+  }
+
   // Keyboard Shortcuts: '/' to search, 'Escape' to close modals
   @HostListener('window:keydown', ['$event'])
   handleKeyDown(event: KeyboardEvent): void {
@@ -163,7 +218,9 @@ export class App {
       event.preventDefault();
       document.getElementById('main-search-input')?.focus();
     } else if (event.key === 'Escape') {
-      if (this.authService.isAuthModalOpen()) {
+      if (this.packageService.activeVideoTheater()) {
+        this.packageService.closeVideoTheater();
+      } else if (this.authService.isAuthModalOpen()) {
         this.authService.closeAuthModal();
       } else if (this.authService.isProfileDrawerOpen()) {
         this.authService.closeProfileDrawer();

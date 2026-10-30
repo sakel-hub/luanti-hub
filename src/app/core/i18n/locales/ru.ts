@@ -112,7 +112,9 @@ export const ru: TranslationDictionary = {
     gitSourceTooltip: 'Пакет напрямую из Git-репозитория',
     clickToOpen: 'Нажмите для просмотра деталей и скачивания .zip',
     muteVideo: 'Выключить звук',
-    unmuteVideo: 'Включить звук'
+    unmuteVideo: 'Включить звук',
+    enlargeVideo: 'Увеличить видео',
+    viewPackageDetails: 'Подробнее о пакете'
   },
   modal: {
     close: 'Закрыть (Esc)',

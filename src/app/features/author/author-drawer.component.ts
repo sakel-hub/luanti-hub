@@ -29,6 +29,7 @@ import {
   LucideShare2,
   LucideExternalLink,
   LucideUser,
+  LucideSearch,
   LucideSlidersHorizontal,
   LucideChevronLeft,
   LucideChevronRight,
@@ -57,6 +58,7 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
     LucideShare2,
     LucideExternalLink,
     LucideUser,
+    LucideSearch,
     LucideSlidersHorizontal,
     LucideChevronLeft,
     LucideChevronRight,
@@ -160,9 +162,9 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
                 <button
                   type="button"
                   (click)="filterCatalogByAuthor()"
-                  class="px-2.5 py-1 rounded-lg glass-btn text-slate-200 hover:text-white text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer">
+                  class="px-2.5 py-1 rounded-lg glass-btn text-slate-200 hover:text-white text-[11px] font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                  <svg lucideSearch class="w-3 h-3 text-sky-400"></svg>
                   <span>{{ 'author.filterAllCatalog' | translate }}</span>
-                  <svg lucideExternalLink class="w-3 h-3 text-sky-400"></svg>
                 </button>
               </div>
             </div>

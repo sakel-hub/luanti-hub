@@ -446,6 +446,19 @@ import {
                                     </svg>
                                     <span>{{ 'modal.videoPreview' | translate }}</span>
                                   </span>
+                                  <button
+                                    type="button"
+                                    (click)="enlargeModalVideo($event)"
+                                    [appTooltip]="'card.enlargeVideo' | translate"
+                                    [attr.aria-label]="'card.enlargeVideo' | translate"
+                                    class="absolute top-3 right-3 p-2 rounded-xl glass-btn text-slate-200 hover:text-white opacity-85 group-hover:opacity-100 transition cursor-pointer z-20">
+                                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                      <polyline points="15 3 21 3 21 9"></polyline>
+                                      <polyline points="9 21 3 21 3 15"></polyline>
+                                      <line x1="21" y1="3" x2="14" y2="10"></line>
+                                      <line x1="3" y1="21" x2="10" y2="14"></line>
+                                    </svg>
+                                  </button>
                                 </div>
                               }
                             } @else {
@@ -1907,6 +1920,15 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
 
   playModalVideo(): void {
     this.isVideoPlaying.set(true);
+  }
+
+  enlargeModalVideo(event?: Event): void {
+    if (event) event.stopPropagation();
+    this.isVideoPlaying.set(false);
+    const pkg = this.packageService.activePackage() || this.package;
+    if (pkg) {
+      this.packageService.openVideoTheater(pkg, 0);
+    }
   }
 
   private scrollActiveThumbnailIntoView(idx: number): void {

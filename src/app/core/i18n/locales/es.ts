@@ -112,7 +112,9 @@ export const es: TranslationDictionary = {
     gitSourceTooltip: 'Paquete indexado directamente desde repositorio Git',
     clickToOpen: 'Haz clic para ver detalles y descargar el archivo .zip',
     muteVideo: 'Silenciar video',
-    unmuteVideo: 'Activar sonido'
+    unmuteVideo: 'Activar sonido',
+    enlargeVideo: 'Ampliar video',
+    viewPackageDetails: 'Ver detalles del paquete'
   },
   modal: {
     close: 'Cerrar (Esc)',

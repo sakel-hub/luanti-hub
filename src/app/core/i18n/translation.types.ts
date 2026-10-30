@@ -128,6 +128,8 @@ export interface TranslationDictionary {
     clickToOpen: string;
     muteVideo: string;
     unmuteVideo: string;
+    enlargeVideo: string;
+    viewPackageDetails: string;
   };
   modal: {
     close: string;

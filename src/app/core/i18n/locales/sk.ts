@@ -112,7 +112,9 @@ export const sk: TranslationDictionary = {
     gitSourceTooltip: 'Balíček indexovaný priamo z Git repozitára',
     clickToOpen: 'Kliknite pre zobrazenie detailov a stiahnutie .zip',
     muteVideo: 'Stlmiť zvuk videa',
-    unmuteVideo: 'Zapnúť zvuk videa'
+    unmuteVideo: 'Zapnúť zvuk videa',
+    enlargeVideo: 'Zväčšiť video',
+    viewPackageDetails: 'Zobraziť detaily balíčka'
   },
   modal: {
     close: 'Zavrieť okno (Esc)',
