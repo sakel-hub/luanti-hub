@@ -381,12 +381,6 @@ select:disabled {
    Mobile Scroll Performance & Offscreen Containment Optimizations
    ========================================================================== */
 
-/* Automatically defer offscreen swimlanes to eliminate initial paint & layout overhead */
-.luanti-swimlane-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 380px;
-}
-
 /* Disable expensive nested multi-pass backdrop-filters on scrolling cards & inner pills for mobile GPUs */
 @media (max-width: 768px), (hover: none) and (pointer: coarse) {
   .glass-card,

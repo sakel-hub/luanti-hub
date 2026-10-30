@@ -362,7 +362,6 @@ import {
 
         <!-- Swimlane 1: Trending Engine Mods -->
         <app-package-carousel
-          class="luanti-swimlane-row block"
           icon="flame"
           [title]="'carousel.trending' | translate"
           [infoTooltip]="'carousel.infoTrending' | translate"
@@ -371,11 +370,10 @@ import {
         </app-package-carousel>
 
         <!-- Netflix Featured Row 1: Top 10 Packages (Today) -->
-        <app-top10-row class="luanti-swimlane-row block" timeframe="today"></app-top10-row>
+        <app-top10-row timeframe="today"></app-top10-row>
 
         <!-- Swimlane 2: Standalone Voxel Games -->
         <app-package-carousel
-          class="luanti-swimlane-row block"
           icon="gamepad"
           [title]="'carousel.standaloneGames' | translate"
           [infoTooltip]="'carousel.infoGames' | translate"
@@ -386,7 +384,6 @@ import {
         <!-- Swimlane 3: Community Git Packages (Only shows real Git Community submissions, or a clean CTA when none submitted yet) -->
         @if (packageService.decentralizedGitPackages().length > 0) {
           <app-package-carousel
-            class="luanti-swimlane-row block"
             icon="git"
             [title]="'carousel.freshGit' | translate"
             [infoTooltip]="'carousel.infoGit' | translate"
@@ -394,7 +391,7 @@ import {
             (viewAll)="packageService.selectPrimaryNavTab('git')">
           </app-package-carousel>
         } @else {
-          <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 luanti-swimlane-row block">
+          <section class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
             <div class="p-5 sm:p-6 rounded-2xl glass-panel flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div class="flex items-start sm:items-center gap-3.5">
                 <div class="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-400/30 flex items-center justify-center text-amber-400 flex-shrink-0">
@@ -432,7 +429,6 @@ import {
 
         <!-- Swimlane 4: High-Tech Automation & Machinery (Interleaved before Top 10 This Week) -->
         <app-package-carousel
-          class="luanti-swimlane-row block"
           icon="cpu"
           [title]="'carousel.automation' | translate"
           [infoTooltip]="'carousel.infoAutomation' | translate"
@@ -441,11 +437,10 @@ import {
         </app-package-carousel>
 
         <!-- Netflix Featured Row 2: Top 10 Packages (This Week) -->
-        <app-top10-row class="luanti-swimlane-row block" timeframe="week"></app-top10-row>
+        <app-top10-row timeframe="week"></app-top10-row>
 
         <!-- Swimlane 5: High-Definition Texture Packs -->
         <app-package-carousel
-          class="luanti-swimlane-row block"
           icon="palette"
           [title]="'carousel.texturePacks' | translate"
           [infoTooltip]="'carousel.infoTextures' | translate"
