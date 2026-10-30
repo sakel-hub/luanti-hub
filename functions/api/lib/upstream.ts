@@ -3,13 +3,16 @@ const PRIMARY_UPSTREAM = 'https://content.luanti.org/api';
 const MIRROR_UPSTREAM = 'https://contentdb.milcho.org/api';
 
 export async function fetchWithFailover(path: string, options: RequestInit = {}): Promise<Response> {
-  // Endpoints like /scores/ or ?fmt=vcs do not exist on the static milcho.org mirror, so give primary ContentDB more time (7500ms)
-  const isPrimaryOnlyEndpoint = path.startsWith('/scores') || path.includes('fmt=vcs');
+  // Primary ContentDB (https://content.luanti.org/api) is online and serves as our primary source of truth.
+  // Give bulk endpoints (/scores/, ?fmt=vcs) 7500ms and standard endpoints 5500ms before failing over to the mirror.
+  const isBulkEndpoint = path.startsWith('/scores') || path.includes('fmt=vcs') || path === '/packages/' || path.startsWith('/packages/?');
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), isPrimaryOnlyEndpoint ? 7500 : 3500);
+  const timeoutId = setTimeout(() => controller.abort(), isBulkEndpoint ? 7500 : 5500);
 
+  // Use a transparent Web User-Agent so ContentDB does not mistake automated proxy fetches
+  // for in-game Luanti client views (which would trigger PackageDailyStats.notify_view DB writes on ContentDB).
   const defaultHeaders = {
-    'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)',
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)',
     'Accept': 'application/json'
   };
 
@@ -25,10 +28,16 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
 
     clearTimeout(timeoutId);
     if (res.ok) return res;
+    // If primary ContentDB is online and returns a 4xx (e.g. 404 Not Found), do NOT retry the mirror
+    // (retrying the static mirror on a genuine 404 only adds latency and duplicate 404s).
+    if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+      return res;
+    }
     throw new Error(`Primary returned HTTP ${res.status}`);
   } catch {
     clearTimeout(timeoutId);
-    // Automatic Failover to milcho.org mirror (rewrite single-package detail routes to /for-client/ which the static mirror caches)
+    // Automatic Failover to milcho.org mirror ONLY when primary ContentDB is offline, times out, or returns 5xx/429
+    // (rewrite single-package detail routes to /for-client/ which the static mirror caches)
     const mirrorPath = /^\/packages\/[^/?#]+\/[^/?#]+\/?$/.test(path)
       ? `${path.replace(/\/+$/, '')}/for-client/?formspec_version=8`
       : path;
@@ -40,6 +49,50 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
       }
     });
   }
+}
+
+/**
+ * Normalizes a ContentDB `PackageReview.as_dict()` entry from `GET /api/packages/<author>/<name>/reviews/`
+ * (see `luanti-org/contentdb` `app/models/threads.py:202-225` and `app/flatpages/help/api.md:382-427`).
+ */
+export function normalizeContentDbReviewItem(r: any, idx = 0, packageId?: string): any {
+  const rawUsername = String(r?.user?.username || r?.author || r?.username || 'contentdb_user').trim();
+  const rawDisplayName = String(r?.user?.display_name || r?.user?.username || r?.author || rawUsername || 'Community Member').trim();
+  const threadId = r?.thread?.id || r?.id || `${rawUsername}_${r?.created_at || idx}`;
+  const rawRating = Number(r?.rating);
+  const rating = Number.isFinite(rawRating) && rawRating >= 1 && rawRating <= 5
+    ? Math.round(rawRating)
+    : (r?.is_positive === false || r?.recommends === false ? 1 : r?.is_positive === true || r?.recommends === true ? 5 : 3);
+  const isPositive = typeof r?.is_positive === 'boolean'
+    ? r.is_positive
+    : (typeof r?.recommends === 'boolean' ? r.recommends : rating > 3);
+  const votes = r?.votes && typeof r.votes === 'object'
+    ? {
+        helpful: Math.max(0, Number(r.votes.helpful) || 0),
+        unhelpful: Math.max(0, Number(r.votes.unhelpful) || 0)
+      }
+    : undefined;
+  const rawThreadUrl = typeof r?.thread?.url === 'string' && r.thread.url.trim()
+    ? (r.thread.url.startsWith('http') ? r.thread.url.trim() : `https://content.luanti.org${r.thread.url.startsWith('/') ? '' : '/'}${r.thread.url.trim()}`)
+    : (typeof r?.thread?.id === 'number' ? `https://content.luanti.org/threads/${r.thread.id}/` : undefined);
+
+  return {
+    id: `cdb_${threadId}`,
+    ...(packageId ? { package_id: packageId } : {}),
+    source: 'contentdb',
+    rating,
+    is_positive: isPositive,
+    title: r?.title || undefined,
+    comment: r?.comment || r?.text || '',
+    created_at: r?.created_at || new Date().toISOString(),
+    votes,
+    thread_url: rawThreadUrl,
+    author: {
+      username: rawUsername,
+      display_name: rawDisplayName,
+      avatar_url: 'logo.svg'
+    }
+  };
 }
 
 /**
@@ -155,7 +208,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
-    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v[23]\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
+    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v[234]\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
     if (pkgDetailMatch) {
       const a = encodeURIComponent(pkgDetailMatch[1].toLowerCase());
       const n = encodeURIComponent(pkgDetailMatch[2].toLowerCase());
@@ -166,6 +219,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/lite/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/lite/${a}/${n}`);
     }
   }
 
@@ -1214,6 +1269,8 @@ export interface CdbJsonMetadata {
   short_description?: string;
   long_description?: string;
   dev_state?: string;
+  ai_disclosure?: string;
+  ai_disclosures: string[];
   tags: string[];
   content_warnings: string[];
   license?: string;
@@ -1229,8 +1286,80 @@ export interface CdbJsonMetadata {
 }
 
 /**
+ * Parses a Luanti `.conf` file (`mod.conf`, `game.conf`, `modpack.conf`, `texture_pack.conf`)
+ * following `luanti-org/contentdb` `app/tasks/luanticheck/config.py` rules, including
+ * multiline `"""..."""` string values and `#` comments.
+ */
+export function parseLuantiConf(confText: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!confText || typeof confText !== 'string') return result;
+
+  const lines = confText.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    i++;
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+
+    const key = trimmed.slice(0, eqIdx).trim().toLowerCase();
+    if (!key) continue;
+
+    let val = trimmed.slice(eqIdx + 1).trim();
+    if (val.startsWith('"""')) {
+      const afterOpen = val.slice(3);
+      const closeSameLine = afterOpen.indexOf('"""');
+      if (closeSameLine !== -1) {
+        result[key] = afterOpen.slice(0, closeSameLine).trim();
+      } else {
+        const chunks: string[] = [afterOpen];
+        while (i < lines.length) {
+          const nextLine = lines[i++];
+          const closeIdx = nextLine.indexOf('"""');
+          if (closeIdx !== -1) {
+            chunks.push(nextLine.slice(0, closeIdx));
+            break;
+          }
+          chunks.push(nextLine);
+        }
+        result[key] = chunks.join('\n').trim();
+      }
+      continue;
+    }
+
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1).trim();
+    }
+    result[key] = val;
+  }
+
+  return result;
+}
+
+/**
+ * Computes `short_description` from a `.conf` or `description.txt` description string
+ * using `luanti-org/contentdb` `app/tasks/luanticheck/tree.py:234-241` rules.
+ */
+export function computeConfShortDescription(description?: string): string | undefined {
+  if (!description || typeof description !== 'string') return undefined;
+  const clean = description.replace(/\s+/g, ' ').trim();
+  if (!clean) return undefined;
+  if (clean.length <= 200) return clean;
+  const firstSentenceIdx = clean.indexOf('.');
+  if (firstSentenceIdx > 0 && firstSentenceIdx < 200) {
+    return clean.slice(0, firstSentenceIdx).trim();
+  }
+  return clean.slice(0, 200).trim();
+}
+
+/**
  * Parses a Luanti ContentDB `.cdb.json` file (https://content.luanti.org/help/cdb_json/)
  * from a raw JSON string or object into normalized package metadata.
+ * Supports all ContentDB `app/domain/packages.py` `ALLOWED_FIELDS` and `ALIASES`
+ * (`short_desc`, `desc`, `issueTracker`, `forums`, `ai_disclosure`).
  */
 export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
   if (!raw) return null;
@@ -1259,7 +1388,7 @@ export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
   const rawType = str(obj.type)?.toLowerCase();
   if (rawType === 'mod') normalizedType = 'mod';
   else if (rawType === 'game') normalizedType = 'game';
-  else if (rawType === 'txp' || rawType === 'texture_pack') normalizedType = 'txp';
+  else if (rawType === 'txp' || rawType === 'texture_pack' || rawType === 'texture-pack') normalizedType = 'txp';
   else if (rawType === 'modpack') normalizedType = 'modpack';
 
   const rawForum = obj.forums ?? obj.forum_url;
@@ -1283,27 +1412,428 @@ export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
   const tags = parseStringArray(obj.tags).map(t => t.toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean);
   const contentWarnings = parseStringArray(obj.content_warnings);
   const screenshots = parseStringArray(obj.screenshots);
+  const aiDisclosures = Array.isArray(obj.ai_disclosures)
+    ? parseStringArray(obj.ai_disclosures)
+    : (str(obj.ai_disclosure) ? [str(obj.ai_disclosure)!] : []);
+
+  let license = str(obj.license);
+  const mediaLicense = str(obj.media_license);
+  // ContentDB `app/domain/packages.py:92-93`: for TXP, if `license` is omitted, default to `media_license`
+  if (normalizedType === 'txp' && !license && mediaLicense) {
+    license = mediaLicense;
+  }
 
   return {
     type: normalizedType,
     name: str(obj.name),
     title: str(obj.title),
     short_description: str(obj.short_description) || str(obj.short_desc),
-    long_description: str(obj.long_description) || str(obj.long_desc),
+    long_description: str(obj.long_description) || str(obj.long_desc) || str(obj.desc),
     dev_state: str(obj.dev_state),
+    ai_disclosure: str(obj.ai_disclosure) || aiDisclosures[0],
+    ai_disclosures: aiDisclosures,
     tags,
     content_warnings: contentWarnings,
-    license: str(obj.license),
-    media_license: str(obj.media_license),
+    license,
+    media_license: mediaLicense || license,
     repo: str(obj.repo) || str(obj.repo_url),
     website: str(obj.website),
-    issue_tracker: str(obj.issue_tracker),
+    issue_tracker: str(obj.issue_tracker) || str(obj.issueTracker),
     forum_url: forumUrl,
     video_url: str(obj.video_url),
     donate_url: str(obj.donate_url),
     translation_url: str(obj.translation_url),
     screenshots
   };
+}
+
+export interface GitRepoScanResult {
+  repoUrl?: string;
+  rawBaseUrl?: string;
+  gitRepoStatus: 'verified' | 'broken_404' | 'unverified';
+  detectedType?: 'mod' | 'game' | 'txp' | 'modpack';
+  title?: string;
+  shortDesc?: string;
+  longDesc?: string;
+  license?: string;
+  mediaLicense?: string;
+  hardDeps: string[];
+  softDeps: string[];
+  minVersion?: string;
+  maxVersion?: string;
+  supportedGames: string[];
+  unsupportedGames: string[];
+  cdbMeta?: CdbJsonMetadata | null;
+}
+
+function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
+  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
+  const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  try {
+    const u = new URL(trimmed);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (u.hostname.toLowerCase().includes('notabug.org') && parts.length >= 2) {
+      return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1]}`;
+    }
+  } catch {
+    // Keep original if URL parsing fails
+  }
+  return trimmed;
+}
+
+/**
+ * Agnostic server-side Git repository scanner modeled after `luanti-org/contentdb`
+ * (`app/tasks/luanticheck/tree.py` & `app/tasks/importtasks.py`).
+ * Scans `.conf` (`mod.conf`, `game.conf`, `modpack.conf`, `texture_pack.conf`),
+ * `.cdb.json`, legacy `description.txt` / `depends.txt`, and `LICENSE` files on the Worker,
+ * and caches the result in Cloudflare Edge Cache (`caches.default`) for 6 hours (`21600s`)
+ * to preserve Worker subrequest and D1 quotas and eliminate browser 404s.
+ */
+export async function scanGitRepoMetadataCached(
+  author: string,
+  name: string,
+  pkgType = 'mod',
+  existingRepoUrl?: string,
+  ttlSeconds = 21600
+): Promise<GitRepoScanResult> {
+  const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
+  const cacheKey = `/__git_repo_scan_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
+  if (cached && cached.gitRepoStatus) {
+    return cached;
+  }
+
+  let owner = author;
+  let repo = name;
+  let host = '';
+
+  if (normalizedInputUrl) {
+    try {
+      const u = new URL(normalizedInputUrl);
+      const parts = u.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        host = u.hostname.toLowerCase();
+        owner = parts[0];
+        repo = parts[1];
+      }
+    } catch {
+      // Fallback to author/name
+    }
+  }
+
+  const confFile =
+    pkgType === 'game'
+      ? 'game.conf'
+      : pkgType === 'txp'
+        ? 'texture_pack.conf'
+        : pkgType === 'modpack'
+          ? 'modpack.conf'
+          : 'mod.conf';
+  const lowerOwner = owner.toLowerCase();
+
+  const rawBaseCandidates: Array<{ base: string; repoUrl: string }> = [];
+  const pushCandidate = (base: string, repoUrl: string) => {
+    if (!rawBaseCandidates.some(c => c.base === base)) {
+      rawBaseCandidates.push({ base, repoUrl });
+    }
+  };
+
+  if (host.includes('codeberg.org')) {
+    pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
+    pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
+  } else if (host.includes('minetest.land')) {
+    pushCandidate(`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw`, `https://git.minetest.land/${owner}/${repo}`);
+    pushCandidate(`https://git.minetest.land/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://git.minetest.land/${lowerOwner}/${repo}`);
+  } else if (host.includes('gitlab.com')) {
+    pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
+  } else if (host.includes('github.com')) {
+    pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
+  }
+
+  // Always include multi-forge fallbacks (GitHub HEAD, Codeberg v1 API raw, GitLab HEAD)
+  pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
+  pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
+  pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
+  pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
+
+  const hardDeps: string[] = [];
+  const softDeps: string[] = [];
+  let supportedGames: string[] = [];
+  let unsupportedGames: string[] = [];
+  let detectedType: 'mod' | 'game' | 'txp' | 'modpack' | undefined;
+  let title: string | undefined;
+  let shortDesc: string | undefined;
+  let longDesc: string | undefined;
+  let license: string | undefined;
+  let mediaLicense: string | undefined;
+  let minVersion: string | undefined;
+  let maxVersion: string | undefined;
+  let resolvedRepoUrl: string | undefined;
+  let resolvedRawBaseUrl: string | undefined;
+  let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
+  let sawExplicit404 = false;
+  let cdbMeta: CdbJsonMetadata | null = null;
+
+  const cleanDep = (s: string): string =>
+    s
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/\?$/, '')
+      .split(/\s+#/)[0]
+      .trim();
+
+  const tryCandidates = async (candidates: Array<{ base: string; repoUrl: string }>): Promise<boolean> => {
+    for (const cand of candidates) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1600);
+      try {
+        const [res, cdbRes] = await Promise.all([
+          fetch(`${cand.base}/${confFile}`, { signal: controller.signal }),
+          fetch(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null)
+        ]);
+        clearTimeout(timer);
+
+        if (cdbRes && cdbRes.ok) {
+          const cdbText = await cdbRes.text().catch(() => '');
+          const parsedCdb = parseCdbJsonMetadata(cdbText);
+          if (parsedCdb) {
+            cdbMeta = parsedCdb;
+            resolvedRepoUrl = cand.repoUrl;
+            resolvedRawBaseUrl = cand.base;
+            gitRepoStatus = 'verified';
+            if (parsedCdb.type) detectedType = parsedCdb.type;
+            if (parsedCdb.title) title = parsedCdb.title;
+            if (parsedCdb.short_description) shortDesc = parsedCdb.short_description;
+            if (parsedCdb.long_description) longDesc = parsedCdb.long_description;
+            if (parsedCdb.license) license = parsedCdb.license;
+            if (parsedCdb.media_license) mediaLicense = parsedCdb.media_license;
+          }
+        }
+
+        if (res.status === 404 && !cdbMeta) {
+          const isPrimaryInputRepo =
+            Boolean(normalizedInputUrl) &&
+            cand.repoUrl.toLowerCase() === normalizedInputUrl!.toLowerCase();
+          const fallbackCtrl = new AbortController();
+          const fallbackTimer = setTimeout(() => fallbackCtrl.abort(), 1400);
+          try {
+            const [modpackRes, initRes, readmeRes, descTxtRes, depsTxtRes] = await Promise.all([
+              fetch(`${cand.base}/modpack.conf`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/init.lua`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/README.md`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/description.txt`, { signal: fallbackCtrl.signal }).catch(() => null),
+              fetch(`${cand.base}/depends.txt`, { signal: fallbackCtrl.signal }).catch(() => null)
+            ]);
+            clearTimeout(fallbackTimer);
+
+            if (depsTxtRes && depsTxtRes.ok) {
+              const depsTxt = await depsTxtRes.text().catch(() => '');
+              if (depsTxt && !depsTxt.trim().startsWith('<!DOCTYPE') && !depsTxt.trim().startsWith('<html')) {
+                for (const rawLine of depsTxt.split(/\r?\n/)) {
+                  const line = rawLine.trim();
+                  if (!line || line.startsWith('#')) continue;
+                  if (line.endsWith('?')) {
+                    const cleaned = cleanDep(line.slice(0, -1));
+                    if (cleaned) softDeps.push(cleaned);
+                  } else {
+                    const cleaned = cleanDep(line);
+                    if (cleaned) hardDeps.push(cleaned);
+                  }
+                }
+              }
+            }
+
+            if (descTxtRes && descTxtRes.ok) {
+              const descTxt = await descTxtRes.text().catch(() => '');
+              if (descTxt && !descTxt.trim().startsWith('<!DOCTYPE') && !descTxt.trim().startsWith('<html')) {
+                shortDesc = shortDesc || computeConfShortDescription(descTxt);
+              }
+            }
+
+            for (const fbRes of [modpackRes, initRes, readmeRes]) {
+              if (fbRes && fbRes.ok) {
+                const fbText = await fbRes.text().catch(() => '');
+                if (fbText && !fbText.trim().startsWith('<!DOCTYPE') && !fbText.trim().startsWith('<html')) {
+                  resolvedRepoUrl = cand.repoUrl;
+                  resolvedRawBaseUrl = cand.base;
+                  gitRepoStatus = 'verified';
+                  return true;
+                }
+              }
+            }
+            if (isPrimaryInputRepo) {
+              sawExplicit404 = true;
+            }
+          } catch {
+            clearTimeout(fallbackTimer);
+          }
+          continue;
+        }
+
+        if (res.ok) {
+          const confText = await res.text();
+          if (confText && !confText.trim().startsWith('<!DOCTYPE') && !confText.trim().startsWith('<html')) {
+            resolvedRepoUrl = cand.repoUrl;
+            resolvedRawBaseUrl = cand.base;
+            gitRepoStatus = 'verified';
+            const confMap = parseLuantiConf(confText);
+
+            const depStr = confMap['depends'] || '';
+            const optStr = confMap['optional_depends'] || '';
+            if (depStr) {
+              depStr.split(',').map(cleanDep).filter(Boolean).forEach(d => hardDeps.push(d));
+            }
+            if (optStr) {
+              optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => softDeps.push(d));
+            }
+
+            if (confMap['supported_games']) {
+              supportedGames = confMap['supported_games'].split(',').map(cleanDep).filter(Boolean);
+            }
+            if (confMap['unsupported_games']) {
+              unsupportedGames = confMap['unsupported_games'].split(',').map(cleanDep).filter(Boolean);
+            }
+
+            // ContentDB `tree.py:225-241`: game.conf uses `name` as `title` if `title` is not set
+            const confTitle =
+              confMap['title'] ||
+              (pkgType === 'game' ? confMap['name'] : undefined) ||
+              (confMap['name']
+                ? confMap['name'].replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+                : undefined);
+            title = cdbMeta?.title || confTitle || title;
+
+            const confDesc = confMap['description'];
+            const computedShort = computeConfShortDescription(confDesc);
+            shortDesc = cdbMeta?.short_description || computedShort || shortDesc;
+            if (!longDesc && confDesc && computedShort && confDesc.length > computedShort.length) {
+              longDesc = confDesc;
+            }
+
+            // `.cdb.json` overlays `.conf` (matching `importtasks.py:64-79`)
+            license = cdbMeta?.license || confMap['license'] || license || undefined;
+            mediaLicense = cdbMeta?.media_license || confMap['media_license'] || mediaLicense || undefined;
+            minVersion = confMap['min_minetest_version'] || undefined;
+            maxVersion = confMap['max_minetest_version'] || undefined;
+
+            if ((pkgType === 'txp' || detectedType === 'txp') && !license && mediaLicense) {
+              license = mediaLicense;
+            }
+
+            if (!license) {
+              for (const licFile of ['LICENSE', 'LICENSE.txt', 'LICENSE.md']) {
+                try {
+                  const licRes = await fetch(`${cand.base}/${licFile}`);
+                  if (licRes.ok) {
+                    const licText = await licRes.text();
+                    const detected = detectSpdxFromText(licText);
+                    if (detected) {
+                      license = detected;
+                      break;
+                    }
+                  }
+                } catch {
+                  // Ignore
+                }
+              }
+            }
+            return true;
+          }
+        }
+        if (cdbMeta) {
+          return true;
+        }
+      } catch {
+        clearTimeout(timer);
+      }
+    }
+    return false;
+  };
+
+  const foundDirect = await tryCandidates(rawBaseCandidates);
+
+  // Dynamic Codeberg & GitHub search discovery ONLY when no explicit repo_url was provided
+  // and restricted strictly to repositories owned by the package author.
+  if (!foundDirect && !normalizedInputUrl && name) {
+    const searchCandidates: Array<{ base: string; repoUrl: string }> = [];
+    const targetName = name.toLowerCase();
+    const targetAuthor = author.toLowerCase();
+
+    try {
+      const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(name)}&limit=8`, {
+        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
+      });
+      if (cbRes.ok) {
+        const cbJson: any = await cbRes.json();
+        const cbRepos: any[] = Array.isArray(cbJson?.data) ? cbJson.data : [];
+        for (const r of cbRepos) {
+          const rOwner = String(r?.owner?.login || r?.owner?.username || '').toLowerCase();
+          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
+            searchCandidates.push({
+              base: `https://codeberg.org/api/v1/repos/${r.full_name}/raw`,
+              repoUrl: r.html_url || `https://codeberg.org/${r.full_name}`
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    try {
+      const ghRes = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(name)}+in:name&per_page=5`, {
+        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
+      });
+      if (ghRes.ok) {
+        const ghJson: any = await ghRes.json();
+        const ghRepos: any[] = Array.isArray(ghJson?.items) ? ghJson.items : [];
+        for (const r of ghRepos) {
+          const rOwner = String(r?.owner?.login || '').toLowerCase();
+          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
+            searchCandidates.push({
+              base: `https://raw.githubusercontent.com/${r.full_name}/HEAD`,
+              repoUrl: r.html_url || `https://github.com/${r.full_name}`
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    if (searchCandidates.length > 0) {
+      await tryCandidates(searchCandidates);
+    }
+  }
+
+  if (!resolvedRepoUrl && sawExplicit404 && normalizedInputUrl) {
+    gitRepoStatus = 'broken_404';
+  }
+
+  const scanResult: GitRepoScanResult = {
+    repoUrl: resolvedRepoUrl || normalizedInputUrl,
+    rawBaseUrl: resolvedRawBaseUrl,
+    gitRepoStatus,
+    detectedType,
+    title,
+    shortDesc,
+    longDesc,
+    license,
+    mediaLicense: mediaLicense || license,
+    hardDeps: Array.from(new Set(hardDeps)),
+    softDeps: Array.from(new Set(softDeps)),
+    minVersion,
+    maxVersion,
+    supportedGames,
+    unsupportedGames,
+    cdbMeta
+  };
+
+  if (ttlSeconds > 0 && scanResult.gitRepoStatus !== 'unverified') {
+    await writeEdgeCacheJson(cacheKey, scanResult, ttlSeconds);
+  }
+
+  return scanResult;
 }
 
 /**

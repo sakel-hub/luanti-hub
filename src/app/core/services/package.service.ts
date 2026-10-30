@@ -10,7 +10,8 @@ import {
   SortOption,
   GitAuditReport,
   ContentDbTag,
-  PublicAuthorProfile
+  PublicAuthorProfile,
+  UserIdentity
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
@@ -100,7 +101,7 @@ export class PackageService {
 
   // Runtime circuit-breakers to avoid 404/503 network storms in local dev or during ContentDB outages
   private edgeApiAvailable = false;
-  private contentDbOnline = false;
+  private contentDbOnline = true;
   private readonly repoDirCache = new Map<string, Array<{ name: string; download_url?: string }>>();
   private readonly repoDirPromiseCache = new Map<string, Promise<Array<{ name: string; download_url?: string }>>>();
   private readonly repoExplicit404Cache = new Set<string>();
@@ -1543,7 +1544,7 @@ export class PackageService {
 
       const apiUrl = typeof window !== 'undefined' && window.location?.origin
         ? `${window.location.origin}/api/packages/?boot=1${forceRefresh ? '&nocache=1' : ''}`
-        : 'https://contentdb.milcho.org/api/packages/?fmt=vcs';
+        : 'https://content.luanti.org/api/packages/?fmt=vcs';
 
       let response: Response | null = null;
       try {
@@ -1564,21 +1565,22 @@ export class PackageService {
         this.edgeApiAvailable = false;
         this.settingsService.edgeApiAvailable.set(false);
         try {
-          response = await fetch('https://contentdb.milcho.org/api/packages/?fmt=vcs', {
+          response = await fetch('https://content.luanti.org/api/packages/?fmt=vcs', {
             headers: { 'Accept': 'application/json' }
           });
+          if (response && response.ok) {
+            this.contentDbOnline = true;
+          }
         } catch {
           response = null;
         }
 
         if (!response || !response.ok) {
+          this.contentDbOnline = false;
           try {
-            response = await fetch('https://content.luanti.org/api/packages/?fmt=vcs', {
+            response = await fetch('https://contentdb.milcho.org/api/packages/?fmt=vcs', {
               headers: { 'Accept': 'application/json' }
             });
-            if (response && response.ok) {
-              this.contentDbOnline = true;
-            }
           } catch {
             response = null;
           }
@@ -1754,7 +1756,7 @@ export class PackageService {
         for (const pkg of batch) {
           const lowerKey = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
           const h = hydratedMap[lowerKey];
-          if (!h || (!h.license && !(Number(h.downloads || 0) > 0))) {
+          if (!h) {
             unresolved.push(pkg);
             continue;
           }
@@ -2616,9 +2618,8 @@ export class PackageService {
 
   /**
    * Fetches an upstream ContentDB JSON endpoint with automatic fallback to `contentdb.milcho.org` mirror.
-   * On localhost dev server (`ng serve`), tries `/cdb-api` and `/mirror-api` proxy routes first to avoid browser CORS blocks.
-   * For single-package detail routes (`/packages/:author/:name/` without `/for-client/`), prefers `content.luanti.org` (`/cdb-api`)
-   * because the static mirror only caches `/for-client/`.
+   * Always prioritizes official `content.luanti.org/api` (`/cdb-api` on localhost) first, and only falls back
+   * to `contentdb.milcho.org/api` (`/mirror-api`) if the primary ContentDB request fails.
    */
   private async fetchUpstreamWithMirrorFallback(subpath: string): Promise<any | null> {
     let cleanPath = subpath.startsWith('/') ? subpath : `/${subpath}`;
@@ -2638,17 +2639,33 @@ export class PackageService {
 
     const bases = isLocalhost
       ? ((this.contentDbOnline || preferOfficialDetail)
-          ? ['/cdb-api', '/mirror-api', ...remoteBases]
-          : ['/mirror-api', '/cdb-api', ...remoteBases])
+          ? ['/cdb-api', '/mirror-api']
+          : ['/mirror-api', '/cdb-api'])
       : remoteBases;
 
+    const isSinglePkgDetail = /^\/packages\/[^/?#]+\/[^/?#]+\/?$/.test(cleanPath);
+
     for (const base of bases) {
+      const isMirrorBase = base.includes('milcho.org') || base === '/mirror-api';
+      // The static milcho.org mirror only caches `/for-client/` for single-package routes
+      const targetPath = isMirrorBase && isSinglePkgDetail
+        ? `${cleanPath.replace(/\/+$/, '')}/for-client/?formspec_version=8`
+        : cleanPath;
       try {
-        const res = await fetch(`${base}${cleanPath}`, {
+        const res = await fetch(`${base}${targetPath}`, {
           headers: { Accept: 'application/json' }
         });
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          if (!isMirrorBase) {
+            this.contentDbOnline = true;
+          }
           return await res.json();
+        }
+        // If primary ContentDB is online and authoritatively returns 404 Not Found,
+        // do NOT retry the mirror with the same non-existent package/route (avoids duplicate 404s in DevTools).
+        if (!isMirrorBase && res.status === 404) {
+          this.contentDbOnline = true;
+          return null;
         }
       } catch {
         // Try next upstream base
@@ -3256,13 +3273,8 @@ export class PackageService {
           try {
             if (!deepFetch) {
               // Fast single-request tile hydration: 1 call to /packages/:author/:name/ returns license, tags, downloads, min_minetest_version & video
+              // (`fetchUpstreamWithMirrorFallback` automatically rewrites to `/for-client/?formspec_version=8` if falling back to the mirror)
               let pkgDetailData = await this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`);
-              if (!pkgDetailData || !pkgDetailData.license) {
-                const forClientFallback = await this.fetchUpstreamWithMirrorFallback(
-                  `/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`
-                );
-                pkgDetailData = { ...(forClientFallback || {}), ...(pkgDetailData || {}) };
-              }
               if ((!pkgDetailData || Object.keys(pkgDetailData).length === 0) && this.edgeApiAvailable) {
                 const res = await fetch(`/api/packages/${encAuthor}/${encName}/?lite=1`).catch(() => null);
                 if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
@@ -3289,25 +3301,23 @@ export class PackageService {
                 };
               }
             } else {
-              const [forClientData, pkgDetailData, depsUpstreamData] = await Promise.all([
-                this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`),
+              // Note: Do NOT pass `?only_hard=0` to `/dependencies/` because Python Flask treats any non-empty string `"0"` as truthy!
+              const [pkgDetailData, depsUpstreamData] = await Promise.all([
                 needsUpstreamDetail
                   ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`)
                   : Promise.resolve(null),
                 deepFetch && !Array.isArray(data?.dependencies)
-                  ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`)
+                  ? this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/dependencies/`)
                   : Promise.resolve(null)
               ]);
 
-              const resolvedDlSize = forClientData?.download_size ?? pkgDetailData?.download_size ?? data?.download_size;
+              const resolvedDlSize = pkgDetailData?.download_size ?? data?.download_size;
               const upstreamLongDesc =
                 this.extractLongDescription(pkgDetailData?.long_description) ||
-                this.extractLongDescription(forClientData?.long_description) ||
                 this.extractLongDescription(depsUpstreamData?.long_description) ||
                 this.extractLongDescription(data?.long_description);
 
               const combinedUpstream = {
-                ...(forClientData || {}),
                 ...(pkgDetailData || {}),
                 download_size: resolvedDlSize,
                 long_description: upstreamLongDesc
@@ -3336,11 +3346,13 @@ export class PackageService {
                   dev_state: data?.dev_state || combinedUpstream.dev_state,
                   provides: (Array.isArray(data?.provides) && data.provides.length > 0) ? data.provides : combinedUpstream.provides,
                   content_warnings: (Array.isArray(data?.content_warnings) && data.content_warnings.length > 0) ? data.content_warnings : combinedUpstream.content_warnings,
-                  ai_disclosures: (Array.isArray(data?.ai_disclosures) && data.ai_disclosures.length > 0) ? data.ai_disclosures : combinedUpstream.ai_disclosures,
+                  ai_disclosures: (Array.isArray(data?.ai_disclosures) && data.ai_disclosures.length > 0)
+                    ? data.ai_disclosures
+                    : (combinedUpstream.ai_disclosures || (combinedUpstream.ai_disclosure ? [combinedUpstream.ai_disclosure] : undefined)),
                   maintainers: (Array.isArray(data?.maintainers) && data.maintainers.length > 0) ? data.maintainers : combinedUpstream.maintainers,
                   reviews: data?.reviews || combinedUpstream.reviews,
                   created_at: data?.created_at || combinedUpstream.created_at,
-                  updated_at: data?.updated_at || combinedUpstream.updated_at,
+                  updated_at: data?.updated_at || combinedUpstream.updated_at || combinedUpstream.approved_at,
                   license: data?.license || combinedUpstream.license,
                   media_license: data?.media_license || combinedUpstream.media_license,
                   long_description: upstreamLongDesc || data?.long_description,
@@ -3354,9 +3366,14 @@ export class PackageService {
 
               if (depsUpstreamData && (!Array.isArray(data.dependencies) || data.dependencies.length === 0)) {
                 const key = `${pkg.author}/${pkg.name}`;
-                const depList = Array.isArray(depsUpstreamData)
+                const lowerKey = key.toLowerCase();
+                let depList: any = Array.isArray(depsUpstreamData)
                   ? depsUpstreamData
-                  : (depsUpstreamData[key] || depsUpstreamData[key.toLowerCase()] || Object.values(depsUpstreamData).find(v => Array.isArray(v)));
+                  : (depsUpstreamData[key] || depsUpstreamData[lowerKey]);
+                if (!Array.isArray(depList) && depsUpstreamData && typeof depsUpstreamData === 'object') {
+                  const ciKey = Object.keys(depsUpstreamData).find(k => k.toLowerCase() === lowerKey);
+                  depList = ciKey ? depsUpstreamData[ciKey] : Object.values(depsUpstreamData).find(v => Array.isArray(v));
+                }
                 if (Array.isArray(depList)) {
                   data.dependencies = Array.from(new Set(depList.filter((d: any) => !d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
                   data.optional_dependencies = Array.from(new Set(depList.filter((d: any) => d.is_optional).map((d: any) => d.package || d.name).filter(Boolean)));
@@ -3388,9 +3405,17 @@ export class PackageService {
 
         const hasBundledEdgeResponse = Boolean(this.edgeApiAvailable && data && (data.git_repo_status || Array.isArray(data.reviews_list)));
 
-        // Populate in-memory reviews and releases caches directly from bundled response (eliminating 2 extra Worker calls)
-        if (Array.isArray(data.reviews_list)) {
-          this.reviewsCache.set(cacheKey, data.reviews_list);
+        // Populate in-memory reviews and releases caches directly from bundled response
+        if (Array.isArray(data.reviews_list) && data.reviews_list.length > 0) {
+          const normalizedBundled = this.normalizeContentDbReviews(data.reviews_list, pkg.id);
+          const hasCdbReviewsInBundled = normalizedBundled.some(r => r.source === 'contentdb' && r.author.username !== 'contentdb_user');
+          const rawCdbCounts = data.review_thread_counts || (data.reviews && !Array.isArray(data.reviews) && typeof data.reviews === 'object' ? data.reviews : pkg.review_thread_counts);
+          const expectedCdbTotal = rawCdbCounts
+            ? (Number(rawCdbCounts.positive || 0) + Number(rawCdbCounts.neutral || 0) + Number(rawCdbCounts.negative || 0))
+            : 0;
+          if (hasCdbReviewsInBundled || expectedCdbTotal === 0 || isPureGitOnly) {
+            this.reviewsCache.set(cacheKey, normalizedBundled);
+          }
         }
 
         if (Array.isArray(data.releases_list) && data.releases_list.length > 0) {
@@ -3399,17 +3424,30 @@ export class PackageService {
             const relSize = this.formatDownloadSize(rel.file_size) ||
               this.formatDownloadSize(rawBytes) ||
               sizeFormatted;
+            const rawMinVer = rel.min_minetest_version && typeof rel.min_minetest_version === 'object'
+              ? rel.min_minetest_version.name
+              : rel.min_minetest_version;
+            const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
+              ? rel.max_minetest_version.name
+              : rel.max_minetest_version;
+            const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim()
+              ? rel.release_notes.trim()
+              : (typeof rel.changelog === 'string' && rel.changelog.trim() ? rel.changelog.trim() : undefined);
             return {
               id: rel.id,
               version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
               tag_name: rel.tag_name || rel.commit || '',
               commit_sha: rel.commit || rel.commit_sha || '',
               download_url: rel.url
-                ? (rel.url.startsWith('http') ? rel.url : `https://content.luanti.org${rel.url}`)
+                ? (rel.url.startsWith('http') || rel.url.startsWith('/api/') ? rel.url : `https://content.luanti.org${rel.url}`)
                 : (rel.download_url || `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`),
               file_size: relSize,
-              min_minetest_version: rel.min_minetest_version,
-              max_minetest_version: rel.max_minetest_version,
+              downloads: typeof rel.downloads === 'number' ? rel.downloads : undefined,
+              release_notes: rawNotes,
+              changelog: rawNotes,
+              sha256: typeof rel.sha256 === 'string' && rel.sha256.trim() ? rel.sha256.trim() : undefined,
+              min_minetest_version: rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined,
+              max_minetest_version: rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined,
               released_at: rel.release_date || rel.released_at || ''
             };
           });
@@ -3453,10 +3491,15 @@ export class PackageService {
         let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = data.git_repo_status || (repoUrl ? 'verified' : 'unverified');
         let resolvedLicense = data.license || data.media_license || pkg.license || '';
         let resolvedMediaLicense = data.media_license || data.license || pkg.media_license || '';
-        let minVersion = data.min_minetest_version || pkg.min_minetest_version || '5.0.0';
+        const rawMinVerVal = data.min_minetest_version && typeof data.min_minetest_version === 'object'
+          ? data.min_minetest_version.name
+          : data.min_minetest_version;
+        let minVersion = (rawMinVerVal && String(rawMinVerVal).toLowerCase() !== 'none' ? String(rawMinVerVal) : '') || pkg.min_minetest_version || '5.0.0';
 
-        // Lightweight static raw CDN .cdb.json lookup when video_url or license is missing (never touches rate-limited GitHub REST API)
-        if ((!data.video_url && !pkg.video_url) || !resolvedLicense) {
+        // Only probe static raw `.cdb.json` when a pure Git package still lacks a license
+        // (ContentDB's `/api/packages/:author/:name/` already parses `.cdb.json` and `mod.conf`, so probing `.cdb.json`
+        // for every package without a `video_url` caused red 404 errors in Chrome DevTools for 95%+ of repositories).
+        if (!resolvedLicense && isPureGitOnly && repoUrl) {
           const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl);
           if (cdbRaw) {
             gitRepoStatus = 'verified';
@@ -3586,7 +3629,7 @@ export class PackageService {
         const warningsList = this.parseArrayField(data.content_warnings)
           .map((w: any) => (typeof w === 'string' ? w : w?.name || w?.title || ''))
           .filter(Boolean);
-        const aiList = this.parseArrayField(data.ai_disclosures)
+        const aiList = this.parseArrayField(data.ai_disclosures ?? data.ai_disclosure)
           .map((a: any) => (typeof a === 'string' ? a : a?.name || a?.title || ''))
           .filter(Boolean);
         const maintainersList = this.parseArrayField(data.maintainers)
@@ -3613,6 +3656,22 @@ export class PackageService {
           extractedLongDesc,
           readmeText
         );
+
+        const rawGameSupport = Array.isArray(data.game_support) ? data.game_support : [];
+        const gameSupport = rawGameSupport
+          .filter((gs: any) => gs && gs.game && gs.supports !== false)
+          .map((gs: any) => ({
+            supports: Boolean(gs.supports ?? true),
+            confidence: typeof gs.confidence === 'number' ? gs.confidence : undefined,
+            game: {
+              id: `${gs.game.author}/${gs.game.name}`,
+              author: String(gs.game.author || ''),
+              name: String(gs.game.name || ''),
+              title: String(gs.game.title || gs.game.name || ''),
+              thumbnail: gs.game.thumbnail || undefined,
+              short_description: gs.game.short_description || gs.game.short_desc || undefined
+            }
+          }));
 
         const updatedFields: Partial<LuantiPackage> = {
           license: resolvedLicense,
@@ -3645,6 +3704,8 @@ export class PackageService {
           ai_disclosures: aiList.length > 0 ? aiList : pkg.ai_disclosures,
           maintainers: maintainersList.length > 0 ? maintainersList : pkg.maintainers,
           review_thread_counts: reviewThreadCounts,
+          supports_all_games: typeof data.supports_all_games === 'boolean' ? data.supports_all_games : pkg.supports_all_games,
+          game_support: gameSupport.length > 0 ? gameSupport : pkg.game_support,
           created_at: data.created_at || pkg.created_at,
           updated_at: data.updated_at || pkg.updated_at,
           min_minetest_version: minVersion,
@@ -3774,6 +3835,15 @@ export class PackageService {
                       ? rawRelUrl
                       : `https://content.luanti.org${rawRelUrl.startsWith('/') ? rawRelUrl : '/' + rawRelUrl}`)
                   : `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`;
+                const rawMinVer = rel.min_minetest_version && typeof rel.min_minetest_version === 'object'
+                  ? rel.min_minetest_version.name
+                  : rel.min_minetest_version;
+                const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
+                  ? rel.max_minetest_version.name
+                  : rel.max_minetest_version;
+                const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim()
+                  ? rel.release_notes.trim()
+                  : (typeof rel.changelog === 'string' && rel.changelog.trim() ? rel.changelog.trim() : undefined);
                 return {
                   id: rel.id,
                   version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
@@ -3781,8 +3851,12 @@ export class PackageService {
                   commit_sha: rel.commit || rel.commit_sha || '',
                   download_url: resolvedDownloadUrl,
                   file_size: relSize,
-                  min_minetest_version: rel.min_minetest_version,
-                  max_minetest_version: rel.max_minetest_version,
+                  downloads: typeof rel.downloads === 'number' ? rel.downloads : undefined,
+                  release_notes: rawNotes,
+                  changelog: rawNotes,
+                  sha256: typeof rel.sha256 === 'string' && rel.sha256.trim() ? rel.sha256.trim() : undefined,
+                  min_minetest_version: rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined,
+                  max_minetest_version: rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined,
                   released_at: rel.release_date || rel.released_at || ''
                 };
               });
@@ -3795,6 +3869,52 @@ export class PackageService {
               }
               edgeFallbackBranchReleases = mapped;
             }
+          }
+        } catch {
+          // Proceed to ContentDB / Git releases fallback
+        }
+      }
+
+      // Check official ContentDB `/packages/:author/:name/releases/` before hitting Git forge REST APIs
+      const isOfficialPkg = pkg.source === 'official' || pkg.sources?.includes('official') || !pkg.provider || pkg.provider === 'contentdb';
+      if (isOfficialPkg) {
+        try {
+          const cdbRels = await this.fetchUpstreamWithMirrorFallback(
+            `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases/`
+          );
+          if (Array.isArray(cdbRels) && cdbRels.length > 0) {
+            const mappedCdbRels: PackageRelease[] = cdbRels.map((rel: any) => {
+              const rawBytes = Number(rel.size || rel.file_size || 0);
+              const relSize = this.formatDownloadSize(rawBytes) || pkg.file_size;
+              const rawRelUrl = String(rel.url || '').trim();
+              const resolvedDownloadUrl = rawRelUrl
+                ? (rawRelUrl.startsWith('http') ? rawRelUrl : `https://content.luanti.org${rawRelUrl.startsWith('/') ? rawRelUrl : '/' + rawRelUrl}`)
+                : `https://content.luanti.org/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases/${rel.id}/download/`;
+              const rawMinVer = rel.min_minetest_version && typeof rel.min_minetest_version === 'object'
+                ? rel.min_minetest_version.name
+                : rel.min_minetest_version;
+              const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
+                ? rel.max_minetest_version.name
+                : rel.max_minetest_version;
+              const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim() ? rel.release_notes.trim() : undefined;
+              return {
+                id: rel.id,
+                version: String(rel.title || rel.name || rel.id || 'Release'),
+                tag_name: String(rel.title || rel.name || rel.id || ''),
+                commit_sha: rel.commit || '',
+                download_url: resolvedDownloadUrl,
+                file_size: relSize,
+                downloads: typeof rel.downloads === 'number' ? rel.downloads : undefined,
+                release_notes: rawNotes,
+                changelog: rawNotes,
+                sha256: typeof rel.sha256 === 'string' && rel.sha256.trim() ? rel.sha256.trim() : undefined,
+                min_minetest_version: rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined,
+                max_minetest_version: rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined,
+                released_at: rel.release_date || ''
+              };
+            });
+            this.releasesCache.set(cacheKey, mappedCdbRels);
+            return mappedCdbRels;
           }
         } catch {
           // Proceed to Git releases/tags auto-discovery
@@ -4111,7 +4231,7 @@ export class PackageService {
       title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
       type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
       short_desc: '',
-      thumbnail: `https://content.luanti.org/thumbnails/1/${encodeURIComponent(author)}/${encodeURIComponent(name)}.png`
+      thumbnail: 'logo.svg'
     };
     const initialPkg = this.normalizePackage(
       matchesSeed ? { ...baseInitial, ...edgeSeed } : baseInitial
@@ -4126,34 +4246,32 @@ export class PackageService {
     try {
       const encAuthor = encodeURIComponent(author);
       const encName = encodeURIComponent(name);
-      const endpoints = [
-        `/api/packages/${encAuthor}/${encName}/`,
-        `https://contentdb.milcho.org/api/packages/${encAuthor}/${encName}/`,
-        `https://content.luanti.org/api/packages/${encAuthor}/${encName}/`
-      ];
-
-      for (const endpoint of endpoints) {
+      let item: any = null;
+      if (this.edgeApiAvailable) {
         try {
-          const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+          const res = await fetch(`/api/packages/${encAuthor}/${encName}/`, { headers: { Accept: 'application/json' } });
           if (reqSeq !== this.modalOpenRequestSeq || (!this.pendingRoutePackage && !this._activePackage())) {
             return;
           }
           if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-            const item = await res.json();
-            if (reqSeq !== this.modalOpenRequestSeq || (!this.pendingRoutePackage && !this._activePackage())) {
-              return;
-            }
-            if (item && (item.name || item.title)) {
-              const pkg = this.normalizePackage(item);
-              this._activePackage.set(pkg);
-              this.updateSeoMeta(pkg);
-              this.loadPackageDetails(pkg, true);
-              return;
-            }
+            item = await res.json();
           }
         } catch {
-          // Try next endpoint or wait for applyBootPayload() to resolve pendingRoutePackage
+          // Fall back to fetchUpstreamWithMirrorFallback below
         }
+      }
+      if (!item || (!item.name && !item.title)) {
+        item = await this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`);
+      }
+      if (reqSeq !== this.modalOpenRequestSeq || (!this.pendingRoutePackage && !this._activePackage())) {
+        return;
+      }
+      if (item && (item.name || item.title)) {
+        const pkg = this.normalizePackage(item);
+        this._activePackage.set(pkg);
+        this.updateSeoMeta(pkg);
+        this.loadPackageDetails(pkg, true);
+        return;
       }
     } catch {
       // Fallback handled when initCatalog() completes and checks pendingRoutePackage
@@ -4241,7 +4359,7 @@ export class PackageService {
       ? {
           username: currentUser.username,
           display_name: currentUser.display_name || currentUser.username,
-          avatar_url: currentUser.avatar_url || `https://github.com/${currentUser.username}.png`,
+          avatar_url: currentUser.avatar_url || '',
           bio: currentUser.bio || '',
           created_at: currentUser.created_at,
           is_registered: true,
@@ -4252,7 +4370,7 @@ export class PackageService {
       : this.authorProfileCache.get(lower) || {
           username: clean,
           display_name: clean,
-          avatar_url: `https://github.com/${clean}.png`,
+          avatar_url: '',
           bio: '',
           is_registered: false,
           identities: [],
@@ -4278,36 +4396,104 @@ export class PackageService {
 
     this._isLoadingAuthorProfile.set(true);
     try {
-      const res = await fetch(`/api/authors/${encodeURIComponent(clean)}`, {
-        headers: { Accept: 'application/json' }
-      });
-      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-        const data = await res.json();
-        if (data?.author && this._activeAuthorUsername()?.toLowerCase() === lower) {
-          const latestPkgs = this.getAuthorPackages(clean);
-          const latestDonate = latestPkgs.find(p => p.donate_url)?.donate_url || initialProfile.donate_url;
-          const latestOfficial = latestPkgs.some(p => p.sources?.includes('official') || p.source === 'official');
-          const mergedProfile: PublicAuthorProfile = {
-            username: data.author.username || clean,
-            display_name: data.author.display_name || data.author.username || clean,
-            avatar_url: data.author.avatar_url || initialProfile.avatar_url,
-            bio: data.author.bio || '',
-            created_at: data.author.created_at,
-            is_registered: Boolean(data.author.is_registered),
-            identities: Array.isArray(data.author.identities) ? data.author.identities : [],
-            donate_url: latestDonate,
-            contentdb_url: (latestOfficial || hasOfficial)
-              ? `https://content.luanti.org/users/${encodeURIComponent(canonicalCdbAuthor)}/`
-              : undefined
-          };
-          this.authorProfileCache.set(lower, mergedProfile);
-          this._activeAuthorProfile.set(mergedProfile);
-          this.seoService?.updateStaticRoute(
-            `${mergedProfile.display_name} (@${mergedProfile.username})`,
-            mergedProfile.bio || `Browse Luanti mods, games, and texture packs by ${mergedProfile.display_name} on Luanti Hub.`,
-            `/author/${encodeURIComponent(clean)}`
-          );
+      const [edgeAuthorRes, cdbUser] = await Promise.all([
+        fetch(`/api/authors/${encodeURIComponent(clean)}`, {
+          headers: { Accept: 'application/json' }
+        }).catch(() => null),
+        this.fetchUpstreamWithMirrorFallback(`/users/${encodeURIComponent(canonicalCdbAuthor)}/`)
+      ]);
+
+      let apiAuthor: any = null;
+      if (edgeAuthorRes && edgeAuthorRes.ok && (edgeAuthorRes.headers.get('content-type') || '').includes('application/json')) {
+        const data = await edgeAuthorRes.json().catch(() => null);
+        apiAuthor = data?.author || null;
+      }
+
+      if ((apiAuthor || cdbUser) && this._activeAuthorUsername()?.toLowerCase() === lower) {
+        const latestPkgs = this.getAuthorPackages(clean);
+        const latestDonate =
+          cdbUser?.donate_url ||
+          apiAuthor?.donate_url ||
+          latestPkgs.find(p => p.donate_url)?.donate_url ||
+          initialProfile.donate_url;
+        const latestOfficial = Boolean(
+          cdbUser?.username ||
+          latestPkgs.some(p => p.sources?.includes('official') || p.source === 'official')
+        );
+
+        const mergedIdentities: UserIdentity[] = Array.isArray(apiAuthor?.identities)
+          ? [...apiAuthor.identities]
+          : [];
+        const seenKeys = new Set<string>(
+          mergedIdentities.map(i => `${String(i.provider).toLowerCase()}:${String(i.username).toLowerCase()}`)
+        );
+        if (cdbUser?.connections?.github) {
+          const ghUser = String(cdbUser.connections.github);
+          const key = `github:${ghUser.toLowerCase()}`;
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            mergedIdentities.push({
+              provider: 'github',
+              username: ghUser,
+              profile_url: `https://github.com/${ghUser}`,
+              avatar_url: `https://github.com/${ghUser}.png`,
+              verified: true
+            });
+          }
         }
+        if (cdbUser?.connections?.forums) {
+          const forumUser = String(cdbUser.connections.forums);
+          const key = `forums:${forumUser.toLowerCase()}`;
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            mergedIdentities.push({
+              provider: 'forums',
+              username: forumUser,
+              profile_url: `https://forum.luanti.org/memberlist.php?mode=viewprofile&un=${encodeURIComponent(forumUser)}`,
+              verified: true
+            });
+          }
+        }
+
+        const cdbPicUrl = cdbUser?.profile_pic_url
+          ? (String(cdbUser.profile_pic_url).startsWith('http')
+              ? String(cdbUser.profile_pic_url)
+              : `https://content.luanti.org${String(cdbUser.profile_pic_url).startsWith('/') ? '' : '/'}${cdbUser.profile_pic_url}`)
+          : undefined;
+        const ghIdentity = mergedIdentities.find(i => String(i.provider).toLowerCase() === 'github');
+        // Never use an unverified `https://github.com/<username>.png` guess when the user has no GitHub connection
+        const rawApiAvatar = apiAuthor?.avatar_url && !String(apiAuthor.avatar_url).includes(`github.com/${clean}.png`)
+          ? apiAuthor.avatar_url
+          : (ghIdentity ? apiAuthor?.avatar_url : '');
+        const resolvedAvatar =
+          cdbPicUrl ||
+          rawApiAvatar ||
+          mergedIdentities.find(i => i.avatar_url)?.avatar_url ||
+          (ghIdentity ? `https://github.com/${ghIdentity.username}.png` : '');
+
+        const mergedProfile: PublicAuthorProfile = {
+          username: apiAuthor?.username || cdbUser?.username || clean,
+          display_name: cdbUser?.display_name || apiAuthor?.display_name || apiAuthor?.username || cdbUser?.username || clean,
+          avatar_url: resolvedAvatar,
+          bio: apiAuthor?.bio || '',
+          rank: cdbUser?.rank || apiAuthor?.rank || undefined,
+          website_url: cdbUser?.website_url || apiAuthor?.website_url || undefined,
+          forums_username: cdbUser?.connections?.forums || apiAuthor?.forums_username || undefined,
+          created_at: apiAuthor?.created_at,
+          is_registered: Boolean(apiAuthor?.is_registered),
+          identities: mergedIdentities,
+          donate_url: latestDonate,
+          contentdb_url: cdbUser?.links?.profile || ((latestOfficial || hasOfficial)
+            ? `https://content.luanti.org/users/${encodeURIComponent(cdbUser?.username || canonicalCdbAuthor)}/`
+            : undefined)
+        };
+        this.authorProfileCache.set(lower, mergedProfile);
+        this._activeAuthorProfile.set(mergedProfile);
+        this.seoService?.updateStaticRoute(
+          `${mergedProfile.display_name} (@${mergedProfile.username})`,
+          mergedProfile.bio || `Browse Luanti mods, games, and texture packs by ${mergedProfile.display_name} on Luanti Hub.`,
+          `/author/${encodeURIComponent(clean)}`
+        );
       }
     } catch {
       // Keep local catalog-derived profile
@@ -4516,11 +4702,60 @@ export class PackageService {
     this.scheduleBootCachePersist();
   }
 
-  // Fetch Live Reviews from Backend API (Mixed ContentDB + D1) with in-memory caching
+  private normalizeContentDbReviews(rawReviews: any[], packageId: string): CommunityReview[] {
+    if (!Array.isArray(rawReviews)) return [];
+    return rawReviews.map((r: any, idx: number) => {
+      const rawUsername = String(r?.user?.username || r?.author?.username || r?.author || r?.username || 'contentdb_user').trim();
+      const rawDisplayName = String(
+        r?.user?.display_name || r?.author?.display_name || r?.user?.username || r?.author || rawUsername || 'Community Member'
+      ).trim();
+      const threadId = r?.thread?.id || r?.id || `${rawUsername}_${r?.created_at || idx}`;
+      const rawRating = Number(r?.rating);
+      const rating = Number.isFinite(rawRating) && rawRating >= 1 && rawRating <= 5
+        ? Math.round(rawRating)
+        : (r?.is_positive === false || r?.recommends === false ? 1 : r?.is_positive === true || r?.recommends === true ? 5 : 3);
+      const isPositive = typeof r?.is_positive === 'boolean'
+        ? r.is_positive
+        : (typeof r?.recommends === 'boolean' ? r.recommends : rating > 3);
+      const votes = r?.votes && typeof r.votes === 'object'
+        ? {
+            helpful: Math.max(0, Number(r.votes.helpful) || 0),
+            unhelpful: Math.max(0, Number(r.votes.unhelpful) || 0)
+          }
+        : undefined;
+      const rawThreadUrl = typeof r?.thread_url === 'string' && r.thread_url.trim()
+        ? r.thread_url.trim()
+        : (typeof r?.thread?.url === 'string' && r.thread.url.trim()
+            ? (r.thread.url.startsWith('http') ? r.thread.url.trim() : `https://content.luanti.org${r.thread.url.startsWith('/') ? '' : '/'}${r.thread.url.trim()}`)
+            : (typeof r?.thread?.id === 'number' ? `https://content.luanti.org/threads/${r.thread.id}/` : undefined));
+      const cleanId = String(threadId).startsWith('cdb') || String(threadId).startsWith('lh_')
+        ? String(threadId)
+        : `cdb_${threadId}`;
+      return {
+        id: cleanId,
+        package_id: r?.package_id || packageId,
+        source: (r?.source === 'luantihub' ? 'luantihub' : 'contentdb') as 'contentdb' | 'luantihub',
+        rating,
+        is_positive: isPositive,
+        title: r?.title || undefined,
+        comment: r?.comment || r?.text || '',
+        created_at: r?.created_at || new Date().toISOString(),
+        votes,
+        thread_url: rawThreadUrl,
+        author: {
+          username: rawUsername,
+          display_name: rawDisplayName,
+          avatar_url: r?.source === 'luantihub' && r?.author?.avatar_url ? r.author.avatar_url : 'logo.svg'
+        }
+      };
+    });
+  }
+
+  // Fetch Live Reviews from Backend API (Mixed ContentDB + D1) with in-memory caching & ContentDB `/reviews/` fallback
   async fetchReviews(pkg: LuantiPackage, forceRefresh = false): Promise<CommunityReview[]> {
     const cacheKey = pkg.id.toLowerCase();
     const cached = this.reviewsCache.get(cacheKey);
-    if (cached && !forceRefresh) {
+    if (cached && cached.length > 0 && !forceRefresh) {
       this.applyReviewAverageToPackage(pkg, cached);
       return cached;
     }
@@ -4528,46 +4763,54 @@ export class PackageService {
     if (!this.edgeApiAvailable && !this.contentDbOnline) {
       return cached || [];
     }
+
+    const encAuthor = encodeURIComponent(pkg.author);
+    const encName = encodeURIComponent(pkg.name);
+    const isOfficialPkg =
+      pkg.source === 'official' ||
+      pkg.sources?.includes('official') ||
+      !pkg.provider ||
+      pkg.provider === 'contentdb';
+
     try {
-      let res: Response | null = null;
+      let edgeReviews: CommunityReview[] = [];
       if (this.edgeApiAvailable) {
-        res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
+        const res = await fetch(`/api/packages/${encAuthor}/${encName}/reviews`, {
           cache: 'no-store'
-        });
-      }
-      if ((!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) && this.contentDbOnline) {
-        res = await fetch(`https://content.luanti.org/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews/`);
-        if (res.ok) {
-          const upstreamReviews = await res.json();
-          if (Array.isArray(upstreamReviews)) {
-            const mapped = upstreamReviews.map((r: any, idx: number) => ({
-              id: `cdb-${r.id || idx}`,
-              package_id: pkg.id,
-              source: 'contentdb' as const,
-              rating: r.rating ? Math.min(5, Math.max(1, Number(r.rating))) : (r.recommends === false ? 1 : r.recommends === true ? 5 : 3),
-              title: r.title || undefined,
-              comment: r.comment || r.text || '',
-              created_at: r.created_at || new Date().toISOString(),
-              author: {
-                username: r.author || r.username || 'Community Member',
-                display_name: r.author || r.username || 'Community Member',
-                avatar_url: 'logo.svg'
-              }
-            }));
-            this.reviewsCache.set(cacheKey, mapped);
-            this.applyReviewAverageToPackage(pkg, mapped);
-            return mapped;
+        }).catch(() => null);
+        if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          const data = await res.json().catch(() => null);
+          if (Array.isArray(data)) {
+            edgeReviews = this.normalizeContentDbReviews(data, pkg.id);
           }
         }
-        return cached || [];
       }
-      if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          this.reviewsCache.set(cacheKey, data);
-          this.applyReviewAverageToPackage(pkg, data);
-          return data;
+
+      const hasOfficialInEdge = edgeReviews.some(
+        r => r.source === 'contentdb' && r.author.username !== 'contentdb_user'
+      );
+      // If Edge returned no valid ContentDB reviews (e.g. on localhost when Edge worker cached empty or hit the mirror),
+      // fetch `/packages/:author/:name/reviews/` directly via `fetchUpstreamWithMirrorFallback` (`/cdb-api` on localhost).
+      if (!hasOfficialInEdge && isOfficialPkg && this.contentDbOnline) {
+        const upstreamReviews = await this.fetchUpstreamWithMirrorFallback(
+          `/packages/${encAuthor}/${encName}/reviews/`
+        );
+        if (Array.isArray(upstreamReviews) && upstreamReviews.length > 0) {
+          const mappedOfficial = this.normalizeContentDbReviews(upstreamReviews, pkg.id);
+          const localOnly = edgeReviews.filter(r => r.source === 'luantihub');
+          const merged = [...localOnly, ...mappedOfficial].sort(
+            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+          this.reviewsCache.set(cacheKey, merged);
+          this.applyReviewAverageToPackage(pkg, merged);
+          return merged;
         }
+      }
+
+      if (edgeReviews.length > 0) {
+        this.reviewsCache.set(cacheKey, edgeReviews);
+        this.applyReviewAverageToPackage(pkg, edgeReviews);
+        return edgeReviews;
       }
     } catch (err) {
       console.warn('Could not fetch reviews:', err);
@@ -4816,6 +5059,7 @@ export class PackageService {
     message?: string;
     audit?: GitAuditReport;
     package?: LuantiPackage;
+    pendingModeration?: boolean;
   }> {
     try {
       const res = await fetch('/api/packages/git', {
@@ -4836,23 +5080,31 @@ export class PackageService {
           };
         }
 
+        const isPendingModeration = Boolean(result.pendingModeration || result.status === 'flagged');
+
         if (!payload.dryRun && result.package) {
           this.clearBootCache();
-          const normalized = this.normalizePackage(result.package);
-          this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
-          this.pwaService.checkAndNotifyNewGitPackages([normalized], {
-            forceNotifyIds: [normalized.id],
-            isBaselineSeedAllowed: false
-          });
+          if (!isPendingModeration) {
+            const normalized = this.normalizePackage(result.package);
+            this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
+            this.pwaService.checkAndNotifyNewGitPackages([normalized], {
+              forceNotifyIds: [normalized.id],
+              isBaselineSeedAllowed: false
+            });
+          }
           this.authService.clearAuthCache();
           this.authService.initAuth(true);
+          if (this.authService.isAdmin()) {
+            this.authService.fetchModerationQueue(true);
+          }
         }
 
         return {
           success: true,
           message: result.message,
           audit: resolvedAudit,
-          package: result.package
+          package: result.package,
+          pendingModeration: isPendingModeration
         };
       }
 

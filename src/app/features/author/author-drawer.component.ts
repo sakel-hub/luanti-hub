@@ -82,7 +82,7 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
           <div class="sticky -top-4 sm:-top-6 z-20 -mx-4 sm:-mx-6 px-4 sm:px-6 pt-4 sm:pt-5 pb-3.5 bg-slate-950/85 backdrop-blur-xl border-b border-white/10 flex items-start justify-between gap-3">
             <div class="flex items-center gap-3 sm:gap-3.5 min-w-0">
               <div class="relative flex-shrink-0">
-                @if (!avatarFailed()) {
+                @if (author.avatar_url && !avatarFailed()) {
                   <img
                     [src]="author.avatar_url"
                     [alt]="author.username"
@@ -111,6 +111,11 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
                   @if (author.is_registered) {
                     <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
                       {{ 'author.verifiedCreator' | translate }}
+                    </span>
+                  }
+                  @if (author.rank && author.rank !== 'MEMBER' && author.rank !== 'NEW_MEMBER') {
+                    <span class="glass-badge glass-badge-purple font-bold text-[10px]">
+                      {{ author.rank.replace('_', ' ') }}
                     </span>
                   }
                 </div>
@@ -173,8 +178,8 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
               {{ author.bio || ('author.noBioFallback' | translate) }}
             </p>
 
-            <!-- Verified Forges, ContentDB Link & Support Creator CTA -->
-            @if (author.identities.length > 0 || author.contentdb_url || author.donate_url) {
+            <!-- Verified Forges, ContentDB Link, Website & Support Creator CTA -->
+            @if (author.identities.length > 0 || author.contentdb_url || author.website_url || author.donate_url) {
               <div class="pt-2 border-t border-white/10 flex items-center gap-1.5 flex-wrap">
                 @for (id of author.identities; track id.provider + ':' + id.username) {
                   <a
@@ -196,6 +201,18 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
                     class="px-2.5 py-1 rounded-xl glass-pill text-slate-200 hover:text-white hover:border-sky-400/50 text-[11px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer">
                     <svg lucideGlobe class="w-3 h-3 text-sky-400"></svg>
                     <span>ContentDB</span>
+                    <svg lucideExternalLink class="w-2.5 h-2.5 text-slate-400"></svg>
+                  </a>
+                }
+
+                @if (author.website_url) {
+                  <a
+                    [href]="author.website_url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="px-2.5 py-1 rounded-xl glass-pill text-slate-200 hover:text-white hover:border-sky-400/50 text-[11px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer">
+                    <svg lucideGlobe class="w-3 h-3 text-emerald-400"></svg>
+                    <span>Website</span>
                     <svg lucideExternalLink class="w-2.5 h-2.5 text-slate-400"></svg>
                   </a>
                 }
@@ -708,6 +725,8 @@ export class AuthorDrawerComponent {
         return `https://gitlab.com/${encodeURIComponent(id.username)}`;
       case 'contentdb':
         return `https://content.luanti.org/users/${encodeURIComponent(id.username)}/`;
+      case 'forums':
+        return `https://forum.luanti.org/memberlist.php?mode=viewprofile&un=${encodeURIComponent(id.username)}`;
       default:
         return `https://github.com/${encodeURIComponent(id.username)}`;
     }

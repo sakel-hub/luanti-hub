@@ -1,7 +1,9 @@
 import {
   fetchUpstreamJsonCached,
   parseJsonArray,
-  ensureExtendedPackageColumns
+  ensureExtendedPackageColumns,
+  scanGitRepoMetadataCached,
+  extractEmbeddedVideo
 } from '../lib/upstream';
 
 interface Env {
@@ -151,62 +153,64 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const toFetchUpstream = rawIds.filter(id => missingIds.has(id.toLowerCase())).slice(0, 24);
     if (toFetchUpstream.length > 0) {
       const persistStatements: any[] = [];
+      let repoScanBudget = 6; // Cap server-side Git repo scans per batch to preserve Worker subrequest quota
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
           if (!author || !name) return;
           const lowerKey = rawId.toLowerCase();
+          const existing = hydratedMap[lowerKey] || {};
           const detail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
             3600
           ).catch(() => null);
-          if (!detail) return;
 
-          const existing = hydratedMap[lowerKey] || {};
-          let lic = detail.license || detail.media_license || existing.license || '';
-          let mediaLic = detail.media_license || detail.license || existing.media_license || '';
-          const detailTags = Array.isArray(detail.tags)
+          let lic = detail?.license || detail?.media_license || existing.license || '';
+          let mediaLic = detail?.media_license || detail?.license || existing.media_license || '';
+          let detailTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : (existing.tags || []);
-          const cdbDl = Math.max(Number(existing.contentdb_downloads || 0), Number(detail.downloads || 0));
+          const cdbDl = Math.max(Number(existing.contentdb_downloads || 0), Number(detail?.downloads || 0));
           const lhDl = Number(existing.luantihub_downloads || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
-          const minVer = detail.min_minetest_version || existing.min_minetest_version || '5.0.0';
-          const repoUrl = detail.repo || detail.repo_url || existing.repo_url || '';
-          let videoUrl = detail.video_url || existing.video_url || undefined;
+          const rawMinVer = detail?.min_minetest_version && typeof detail.min_minetest_version === 'object'
+            ? detail.min_minetest_version.name
+            : detail?.min_minetest_version;
+          let minVer = (rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : '') || existing.min_minetest_version || '5.0.0';
+          let repoUrl = detail?.repo || detail?.repo_url || existing.repo_url || '';
+          let videoUrl = detail?.video_url || existing.video_url || undefined;
+          let videoThumbUrl = detail?.video_thumbnail_url || existing.video_thumbnail_url || undefined;
+          let shortDesc = detail?.short_desc || detail?.short_description || undefined;
+          let title = detail?.title || name;
+          let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
-          if (!videoUrl && repoUrl) {
-            try {
-              const u = new URL(repoUrl);
-              const parts = u.pathname.split('/').filter(Boolean);
-              if (parts.length >= 2) {
-                const rOwner = parts[0];
-                const rName = parts[1].replace(/\.git$/i, '');
-                const rawCdbUrl = u.hostname.includes('codeberg.org')
-                  ? `https://codeberg.org/api/v1/repos/${rOwner}/${rName}/raw/.cdb.json`
-                  : u.hostname.includes('gitlab.com')
-                    ? `https://gitlab.com/${rOwner}/${rName}/-/raw/HEAD/.cdb.json`
-                    : `https://raw.githubusercontent.com/${rOwner}/${rName}/HEAD/.cdb.json`;
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 1400);
-                const cdbRes = await fetch(rawCdbUrl, { signal: ctrl.signal }).catch(() => null);
-                clearTimeout(timer);
-                if (cdbRes && cdbRes.ok) {
-                  const cdbJson: any = await cdbRes.json().catch(() => null);
-                  if (cdbJson && typeof cdbJson === 'object') {
-                    const cdbVid = String(cdbJson.video_url || cdbJson.video || '').trim();
-                    if (cdbVid.startsWith('http')) videoUrl = cdbVid;
-                    if (!lic && cdbJson.license) lic = String(cdbJson.license).trim();
-                    if (!mediaLic && cdbJson.media_license) mediaLic = String(cdbJson.media_license).trim();
-                  }
-                }
+          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE) when ContentDB is offline,
+          // package is Git-only, or license / video_url is missing. Cached for 6h at Cloudflare Edge.
+          if ((!detail || !lic || (!videoUrl && repoUrl)) && repoScanBudget > 0) {
+            repoScanBudget--;
+            const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
+            if (gitScan && gitScan.gitRepoStatus === 'verified') {
+              lic = lic || gitScan.license || gitScan.mediaLicense || '';
+              mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
+              repoUrl = repoUrl || gitScan.repoUrl || '';
+              minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
+              shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
+              title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
+              if (gitScan.detectedType) pkgType = gitScan.detectedType;
+              if (gitScan.cdbMeta?.tags?.length) {
+                detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
               }
-            } catch {
-              // Ignore raw .cdb.json probe failure
+              if (!videoUrl && gitScan.cdbMeta?.video_url) {
+                const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
+                videoUrl = extractedVid.video_url;
+                videoThumbUrl = extractedVid.video_thumbnail_url || videoThumbUrl;
+              }
             }
           }
 
-          const canonicalId = `${detail.author || author}/${detail.name || name}`;
+          if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
+
+          const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
           hydratedMap[lowerKey] = {
             id: canonicalId,
             license: lic,
@@ -216,14 +220,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             luantihub_downloads: lhDl,
             downloads: totalDl,
             tags: detailTags.length > 0 ? detailTags : undefined,
-            download_size: typeof detail.download_size === 'number' ? detail.download_size : undefined,
+            download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
             video_url: videoUrl,
-            video_thumbnail_url: detail.video_thumbnail_url || existing.video_thumbnail_url || undefined,
+            video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined
           };
 
-          if (env.DB && (lic || cdbDl > 0 || videoUrl)) {
-            const pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail.type) ? detail.type : 'mod';
+          if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0)) {
             persistStatements.push(
               env.DB.prepare(`
                 INSERT INTO packages (
@@ -243,14 +246,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                   repo_url = CASE WHEN COALESCE(packages.repo_url, '') = '' THEN excluded.repo_url ELSE packages.repo_url END
               `).bind(
                 canonicalId,
-                String(detail.author || author).trim(),
-                String(detail.name || name).trim(),
-                String(detail.title || name).trim(),
+                String(detail?.author || author).trim(),
+                String(detail?.name || name).trim(),
+                String(title).trim(),
                 pkgType,
-                detail.short_desc ? String(detail.short_desc).slice(0, 500) : null,
+                shortDesc ? String(shortDesc).slice(0, 500) : null,
                 repoUrl,
-                detail.thumbnail || null,
-                detail.screenshots?.[0]?.url || detail.screenshots?.[0] || null,
+                detail?.thumbnail || null,
+                detail?.screenshots?.[0]?.url || detail?.screenshots?.[0] || null,
                 lic,
                 mediaLic,
                 minVer,
@@ -258,7 +261,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 totalDl,
                 cdbDl,
                 videoUrl || null,
-                detail.video_thumbnail_url || null
+                videoThumbUrl || null
               )
             );
           }

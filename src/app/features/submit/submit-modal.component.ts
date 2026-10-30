@@ -424,7 +424,7 @@ import {
           <!-- Status / Error Message -->
           @if (statusMessage()) {
             <div
-              [class]="statusSuccess() ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-rose-950/60 text-rose-400 border-rose-800'"
+              [class]="statusPendingModeration() ? 'bg-amber-950/60 text-amber-300 border-amber-700' : (statusSuccess() ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800' : 'bg-rose-950/60 text-rose-400 border-rose-800')"
               class="p-3 rounded-xl border text-xs leading-relaxed">
               {{ statusMessage() }}
             </div>
@@ -479,6 +479,7 @@ export class SubmitModalComponent {
   readonly auditReport = signal<GitAuditReport | null>(null);
   readonly statusMessage = signal<string | null>(null);
   readonly statusSuccess = signal(false);
+  readonly statusPendingModeration = signal(false);
   readonly copiedCode = signal<string | null>(null);
   readonly selectedTags = signal<string[]>([]);
   private readonly repoUrlSignal = signal('');
@@ -540,6 +541,7 @@ export class SubmitModalComponent {
     this.repoUrlSignal.set(this.repoUrl);
     this.auditReport.set(null);
     this.statusMessage.set(null);
+    this.statusPendingModeration.set(false);
     this.verifyOwnerMessage.set(null);
     const target = this.parsedRepoTarget();
     if (target && !this.verifyUsername.trim()) {
@@ -602,6 +604,7 @@ export class SubmitModalComponent {
     if (!this.repoUrl.trim()) return;
     this.isAuditing.set(true);
     this.statusMessage.set(null);
+    this.statusPendingModeration.set(false);
 
     const res = await this.packageService.auditOrSubmitGitPackage({
       repoUrl: this.repoUrl.trim(),
@@ -626,6 +629,7 @@ export class SubmitModalComponent {
 
     this.isSubmitting.set(true);
     this.statusMessage.set(null);
+    this.statusPendingModeration.set(false);
 
     const res = await this.packageService.auditOrSubmitGitPackage({
       repoUrl: this.repoUrl.trim(),
@@ -642,11 +646,19 @@ export class SubmitModalComponent {
     }
 
     if (res.success) {
-      this.statusSuccess.set(true);
-      this.statusMessage.set(res.message || 'Package successfully audited and indexed! It is now live in the catalog.');
-      setTimeout(() => {
-        this.packageService.closeSubmitModal();
-      }, 1500);
+      if (res.pendingModeration) {
+        this.statusPendingModeration.set(true);
+        this.statusSuccess.set(false);
+        this.statusMessage.set(
+          res.message || 'Package submitted and held in the administrator moderation queue for content safety review.'
+        );
+      } else {
+        this.statusSuccess.set(true);
+        this.statusMessage.set(res.message || 'Package successfully audited and indexed! It is now live in the catalog.');
+        setTimeout(() => {
+          this.packageService.closeSubmitModal();
+        }, 1500);
+      }
     } else {
       this.statusSuccess.set(false);
       this.statusMessage.set(res.message || 'Pre-flight audit found blocking issues. Please fix the errors above and try again.');

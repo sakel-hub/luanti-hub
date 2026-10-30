@@ -34,42 +34,103 @@ export async function onRequestGet(context: { params: { author: string; name: st
     ).bind(effectivePkgId).all();
 
     d1Releases = releases.results || [];
-    const hasTaggedD1Releases = d1Releases.some(
-      (r: any) => r && r.commit_sha !== 'HEAD' && r.version !== 'latest'
-    );
-
-    if (hasTaggedD1Releases) {
-      return new Response(JSON.stringify(d1Releases.map((r: any) => {
-        const tag = String(r.tag_name || r.version || '').trim();
-        const packagedUrl = tag
-          ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?tag=${encodeURIComponent(tag)}`
-          : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
-        return {
-          id: r.id,
-          version: tag,
-          title: tag,
-          tag_name: tag,
-          commit_sha: r.commit_sha,
-          url: packagedUrl,
-          download_url: packagedUrl,
-          upstream_url: r.download_url,
-          min_minetest_version: r.min_minetest_version,
-          max_minetest_version: r.max_minetest_version,
-          changelog: r.changelog,
-          release_date: r.released_at,
-          released_at: r.released_at
-        };
-      })), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'no-cache'
-        }
-      });
-    }
   }
 
-  // 2. Discover Releases & Tags from GitHub, Codeberg, or GitLab API FIRST when a Git repository is known
+  // 2. Query official ContentDB `/api/packages/<author>/<name>/releases/` first when available
+  // (`PackageRelease.as_dict()` provides size, downloads, release_notes, sha256, commit, min/max_minetest_version)
+  const isPureGitOnly = Boolean(d1Pkg && d1Pkg.provider && d1Pkg.provider !== 'contentdb');
+  const data = isPureGitOnly
+    ? null
+    : await fetchUpstreamJsonCached<any[]>(
+        `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/`,
+        300
+      );
+
+  if (Array.isArray(data) && data.length > 0) {
+    const normalized = data.map((r: any) => {
+      const rawUrl = r.url || '';
+      const fullDownloadUrl = rawUrl.startsWith('http')
+        ? rawUrl
+        : rawUrl
+          ? `https://content.luanti.org${rawUrl}`
+          : `https://content.luanti.org/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/${r.id}/download/`;
+      const packagedUrl = r.id
+        ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?release=${encodeURIComponent(String(r.id))}`
+        : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
+
+      const rawMinVer = r.min_minetest_version && typeof r.min_minetest_version === 'object'
+        ? r.min_minetest_version.name
+        : r.min_minetest_version;
+      const rawMaxVer = r.max_minetest_version && typeof r.max_minetest_version === 'object'
+        ? r.max_minetest_version.name
+        : r.max_minetest_version;
+
+      return {
+        id: r.id,
+        version: String(r.title || r.name || r.id || 'latest'),
+        title: String(r.title || r.name || r.id || 'Release'),
+        tag_name: String(r.title || r.name || r.id || 'latest'),
+        commit_sha: r.commit || '',
+        url: packagedUrl,
+        download_url: packagedUrl,
+        upstream_url: fullDownloadUrl,
+        size: typeof r.size === 'number' && r.size > 0 ? r.size : (r.file_size || undefined),
+        downloads: typeof r.downloads === 'number' ? r.downloads : undefined,
+        release_notes: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        changelog: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        sha256: typeof r.sha256 === 'string' && r.sha256.trim() ? r.sha256.trim() : undefined,
+        min_minetest_version: (rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined) || r.min_protocol_version || undefined,
+        max_minetest_version: (rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined) || r.max_protocol_version || undefined,
+        release_date: r.release_date || undefined,
+        released_at: r.release_date || new Date().toISOString()
+      };
+    });
+
+    return new Response(JSON.stringify(normalized), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=120, s-maxage=600'
+      }
+    });
+  }
+
+  // 3. Check cached D1 tagged releases for pure Git packages (or when ContentDB is offline)
+  const hasTaggedD1Releases = d1Releases.some(
+    (r: any) => r && r.commit_sha !== 'HEAD' && r.version !== 'latest'
+  );
+  if (hasTaggedD1Releases) {
+    return new Response(JSON.stringify(d1Releases.map((r: any) => {
+      const tag = String(r.tag_name || r.version || '').trim();
+      const packagedUrl = tag
+        ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?tag=${encodeURIComponent(tag)}`
+        : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
+      return {
+        id: r.id,
+        version: tag,
+        title: tag,
+        tag_name: tag,
+        commit_sha: r.commit_sha,
+        url: packagedUrl,
+        download_url: packagedUrl,
+        upstream_url: r.download_url,
+        min_minetest_version: r.min_minetest_version,
+        max_minetest_version: r.max_minetest_version,
+        changelog: r.changelog,
+        release_notes: r.changelog || undefined,
+        release_date: r.released_at,
+        released_at: r.released_at
+      };
+    })), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache'
+      }
+    });
+  }
+
+  // 4. Discover Releases & Tags from GitHub, Codeberg, or GitLab API when a Git repository is known
   if (d1Pkg?.repo_url) {
     const discoveredGitReleases = await fetchGitRepoReleasesAndTags(
       d1Pkg.repo_url,
@@ -125,49 +186,6 @@ export async function onRequestGet(context: { params: { author: string; name: st
         }
       });
     }
-  }
-
-  // 3. Fallback to upstream ContentDB / milcho.org
-  const data = await fetchUpstreamJsonCached<any[]>(
-    `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/`,
-    300
-  );
-
-  if (Array.isArray(data) && data.length > 0) {
-    const normalized = data.map((r: any) => {
-      const rawUrl = r.url || '';
-      const fullDownloadUrl = rawUrl.startsWith('http')
-        ? rawUrl
-        : rawUrl
-          ? `https://content.luanti.org${rawUrl}`
-          : `https://content.luanti.org/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/${r.id}/download/`;
-      const packagedUrl = r.id
-        ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?release=${encodeURIComponent(String(r.id))}`
-        : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
-
-      return {
-        id: r.id,
-        version: String(r.title || r.id || 'latest'),
-        title: String(r.title || r.id || 'Release'),
-        tag_name: String(r.title || r.id || 'latest'),
-        commit_sha: r.commit || '',
-        url: packagedUrl,
-        download_url: packagedUrl,
-        upstream_url: fullDownloadUrl,
-        size: r.size || r.file_size || undefined,
-        min_minetest_version: r.min_minetest_version || r.min_protocol_version || undefined,
-        max_minetest_version: r.max_minetest_version || r.max_protocol_version || undefined,
-        released_at: r.release_date || new Date().toISOString()
-      };
-    });
-
-    return new Response(JSON.stringify(normalized), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=120, s-maxage=600'
-      }
-    });
   }
 
   // 4. Fallback: Discover Git releases/tags by author/name when D1 had no explicit repo_url

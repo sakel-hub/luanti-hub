@@ -1,4 +1,5 @@
 import {
+  fetchUpstreamJsonCached,
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../lib/upstream';
@@ -19,7 +20,7 @@ export async function onRequestGet(context: {
 
   const lowerUsername = rawUsername.toLowerCase();
   const baseHandle = lowerUsername.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-  const cacheKey = `/__api_author_profile_v1/${encodeURIComponent(lowerUsername)}`;
+  const cacheKey = `/__api_author_profile_v2/${encodeURIComponent(lowerUsername)}`;
   const url = new URL(context.request.url);
   const noCache = url.searchParams.get('nocache') === '1';
 
@@ -36,15 +37,49 @@ export async function onRequestGet(context: {
     }
   }
 
+  // Query ContentDB User API (`GET /api/users/<username>/`) in parallel with D1 lookup
+  const cdbUserPromise = fetchUpstreamJsonCached<any>(
+    `/users/${encodeURIComponent(rawUsername)}/`,
+    600
+  ).catch(() => null);
+
   if (!context.env.DB) {
+    const cdbUser = await cdbUserPromise;
+    const cdbAvatar = cdbUser?.profile_pic_url
+      ? (String(cdbUser.profile_pic_url).startsWith('http')
+          ? String(cdbUser.profile_pic_url)
+          : `https://content.luanti.org${String(cdbUser.profile_pic_url).startsWith('/') ? '' : '/'}${cdbUser.profile_pic_url}`)
+      : (cdbUser?.connections?.github ? `https://github.com/${cdbUser.connections.github}.png` : '');
+    const cdbIdentities: any[] = [];
+    if (cdbUser?.connections?.github) {
+      cdbIdentities.push({
+        provider: 'github',
+        username: String(cdbUser.connections.github),
+        profile_url: `https://github.com/${cdbUser.connections.github}`,
+        verified: true
+      });
+    }
+    if (cdbUser?.connections?.forums) {
+      cdbIdentities.push({
+        provider: 'forums',
+        username: String(cdbUser.connections.forums),
+        profile_url: `https://forum.luanti.org/memberlist.php?mode=viewprofile&un=${encodeURIComponent(String(cdbUser.connections.forums))}`,
+        verified: true
+      });
+    }
     return Response.json({
       author: {
-        username: rawUsername,
-        display_name: rawUsername,
-        avatar_url: `https://github.com/${rawUsername}.png`,
+        username: cdbUser?.username || rawUsername,
+        display_name: cdbUser?.display_name || cdbUser?.username || rawUsername,
+        avatar_url: cdbAvatar,
         bio: '',
+        rank: cdbUser?.rank || undefined,
+        website_url: cdbUser?.website_url || undefined,
+        donate_url: cdbUser?.donate_url || undefined,
+        forums_username: cdbUser?.connections?.forums || undefined,
+        contentdb_url: cdbUser?.links?.profile || (cdbUser?.username ? `https://content.luanti.org/users/${encodeURIComponent(cdbUser.username)}/` : undefined),
         is_registered: false,
-        identities: []
+        identities: cdbIdentities
       }
     });
   }
@@ -81,7 +116,8 @@ export async function onRequestGet(context: {
       `).bind(baseHandle).first();
     }
 
-    let identities: Array<{
+    const seen = new Set<string>();
+    const identities: Array<{
       provider: string;
       username: string;
       profile_url?: string;
@@ -97,7 +133,6 @@ export async function onRequestGet(context: {
         ORDER BY created_at ASC
       `).bind(userRow.id).all();
 
-      const seen = new Set<string>();
       for (const row of (idRes.results || [])) {
         if (!row?.provider || !row?.username) continue;
         const k = `${String(row.provider).toLowerCase()}:${String(row.username).toLowerCase()}`;
@@ -113,15 +148,58 @@ export async function onRequestGet(context: {
       }
     }
 
+    const cdbUser = await cdbUserPromise;
+    if (cdbUser?.connections?.github) {
+      const ghHandle = String(cdbUser.connections.github);
+      const k = `github:${ghHandle.toLowerCase()}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        identities.push({
+          provider: 'github',
+          username: ghHandle,
+          profile_url: `https://github.com/${ghHandle}`,
+          avatar_url: `https://github.com/${ghHandle}.png`,
+          verified: true
+        });
+      }
+    }
+    if (cdbUser?.connections?.forums) {
+      const forumHandle = String(cdbUser.connections.forums);
+      const k = `forums:${forumHandle.toLowerCase()}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        identities.push({
+          provider: 'forums',
+          username: forumHandle,
+          profile_url: `https://forum.luanti.org/memberlist.php?mode=viewprofile&un=${encodeURIComponent(forumHandle)}`,
+          verified: true
+        });
+      }
+    }
+
+    const cdbProfilePic = cdbUser?.profile_pic_url
+      ? (String(cdbUser.profile_pic_url).startsWith('http')
+          ? String(cdbUser.profile_pic_url)
+          : `https://content.luanti.org${String(cdbUser.profile_pic_url).startsWith('/') ? '' : '/'}${cdbUser.profile_pic_url}`)
+      : undefined;
+    const githubIdentity = identities.find(i => i.provider.toLowerCase() === 'github');
+    const resolvedAvatarUrl =
+      userRow?.avatar_url ||
+      cdbProfilePic ||
+      identities.find(i => i.avatar_url)?.avatar_url ||
+      (githubIdentity ? `https://github.com/${githubIdentity.username}.png` : '');
+
     const payload = {
       author: {
-        username: userRow?.username || rawUsername,
-        display_name: userRow?.display_name || userRow?.username || rawUsername,
-        avatar_url:
-          userRow?.avatar_url ||
-          identities.find(i => i.avatar_url)?.avatar_url ||
-          `https://github.com/${userRow?.username || rawUsername}.png`,
+        username: userRow?.username || cdbUser?.username || rawUsername,
+        display_name: userRow?.display_name || cdbUser?.display_name || userRow?.username || cdbUser?.username || rawUsername,
+        avatar_url: resolvedAvatarUrl,
         bio: userRow?.bio || '',
+        rank: cdbUser?.rank || undefined,
+        website_url: cdbUser?.website_url || undefined,
+        donate_url: cdbUser?.donate_url || undefined,
+        forums_username: cdbUser?.connections?.forums || undefined,
+        contentdb_url: cdbUser?.links?.profile || (cdbUser?.username ? `https://content.luanti.org/users/${encodeURIComponent(cdbUser.username)}/` : undefined),
         created_at: userRow?.created_at || undefined,
         is_registered: Boolean(userRow?.id),
         identities
@@ -142,7 +220,7 @@ export async function onRequestGet(context: {
         author: {
           username: rawUsername,
           display_name: rawUsername,
-          avatar_url: `https://github.com/${rawUsername}.png`,
+          avatar_url: '',
           bio: '',
           is_registered: false,
           identities: []

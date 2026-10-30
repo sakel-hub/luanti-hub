@@ -18,11 +18,19 @@ export async function onRequestGet(context: {
     ? new URL(context.request.url)
     : new URL(`https://luanti-hub.pages.dev/api/packages/${encAuthor}/${encName}/dependencies/`);
   const forwardParams = new URLSearchParams(reqUrl.searchParams);
-  if (!forwardParams.has('only_hard')) {
-    forwardParams.set('only_hard', '0');
+  const onlyHard =
+    forwardParams.get('only_hard') === '1' ||
+    forwardParams.get('only_hard')?.toLowerCase() === 'true';
+  // IMPORTANT: ContentDB's Flask endpoint (`resolve_package_deps`) checks `if only_hard and dep.optional: continue`
+  // where `only_hard = request.args.get("only_hard")`. In Python, ANY non-empty string (including "0" or "false")
+  // is truthy! Therefore `only_hard` MUST be deleted unless `only_hard=1` is explicitly requested.
+  if (onlyHard) {
+    forwardParams.set('only_hard', '1');
+  } else {
+    forwardParams.delete('only_hard');
   }
-  const onlyHard = forwardParams.get('only_hard') === '1';
-  const querySuffix = `?${forwardParams.toString()}`;
+  const queryStr = forwardParams.toString();
+  const querySuffix = queryStr ? `?${queryStr}` : '';
 
   const data = await fetchUpstreamJsonCached<any>(
     `/packages/${encAuthor}/${encName}/dependencies/${querySuffix}`,

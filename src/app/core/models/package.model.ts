@@ -1,6 +1,6 @@
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
-export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'custom';
+export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'forums' | 'custom';
 export type SortOption = 'downloads' | 'score' | 'updated' | 'title';
 
 export interface ContentDbTag {
@@ -52,6 +52,19 @@ export interface LuantiPackage {
     neutral: number;
     negative: number;
   };
+  supports_all_games?: boolean;
+  game_support?: Array<{
+    supports: boolean;
+    confidence?: number;
+    game: {
+      id: string;
+      author: string;
+      name: string;
+      title: string;
+      thumbnail?: string;
+      short_description?: string;
+    };
+  }>;
   min_minetest_version?: string;
   max_minetest_version?: string;
   featured?: boolean;
@@ -76,6 +89,9 @@ export interface PackageRelease {
   download_url: string;
   file_size?: string;
   size?: number | string;
+  downloads?: number;
+  release_notes?: string;
+  sha256?: string;
   min_minetest_version?: string;
   max_minetest_version?: string;
   changelog?: string;
@@ -87,9 +103,15 @@ export interface CommunityReview {
   package_id: string;
   source: 'contentdb' | 'luantihub';
   rating: number; // 1 to 5
+  is_positive?: boolean;
   title?: string;
   comment: string;
   created_at: string;
+  votes?: {
+    helpful: number;
+    unhelpful: number;
+  };
+  thread_url?: string;
   author: {
     username: string;
     display_name?: string;
@@ -110,6 +132,9 @@ export interface PublicAuthorProfile {
   display_name: string;
   avatar_url: string;
   bio: string;
+  rank?: string;
+  website_url?: string;
+  forums_username?: string;
   created_at?: string;
   is_registered?: boolean;
   identities: UserIdentity[];
@@ -159,6 +184,7 @@ export interface GitAuditReport {
   configFound: string | null;
   luacheckPassed: boolean;
   licenseValid: boolean;
+  contentSafetyHold?: boolean;
   diagnostics: GitAuditDiagnostic[];
   metadata?: {
     author: string;

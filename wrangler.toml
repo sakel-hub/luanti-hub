@@ -9,3 +9,7 @@ pages_build_output_dir = "dist/luanti-hub/browser"
 binding = "DB"
 database_name = "luanti-registry-db"
 database_id = "4facd457-15a0-453d-bc77-d3493b9eae04"
+
+# Cloudflare Workers AI Binding (Free Tier: 10,000 Neurons/day; used on final package publish with static fallback)
+[ai]
+binding = "AI"

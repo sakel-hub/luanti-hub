@@ -1,6 +1,6 @@
 // Admin & Author Moderation Queue, Communication, Pagination & 404 Live Re-Check Endpoint
 import { verifySessionToken, parseCookies, checkIsAdmin } from '../auth/lib/session';
-import { ensureModerationColumns, fetchUpstreamJsonCached } from '../lib/upstream';
+import { ensureModerationColumns, fetchUpstreamJsonCached, invalidateEdgeCacheKeys } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -513,10 +513,42 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     reportRow.id
   ).run();
 
+  // If an admin dismisses an Automated Content Safety Hold report (false positive),
+  // automatically approve and publish the held package (`status = 'active'`)!
+  let packageApprovedAndPublished = false;
+  if (isAdmin && nextStatus === 'dismissed' && reportRow.package_id) {
+    const pkgId = String(reportRow.package_id);
+    const approveRes = await env.DB.prepare(`
+      UPDATE packages
+      SET status = 'active',
+          status_reason = NULL,
+          flagged_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE LOWER(id) = LOWER(?)
+        AND status = 'flagged'
+        AND (status_reason LIKE '[ADMIN] Automated Content Safety%' OR ? = 'system-content-guard')
+    `).bind(pkgId, String(reportRow.reporter_user_id || '')).run().catch(() => null);
+
+    if (Number(approveRes?.meta?.changes || 0) > 0) {
+      packageApprovedAndPublished = true;
+      const [pkgAuthor, pkgName] = pkgId.split('/');
+      await invalidateEdgeCacheKeys([
+        '/__api_packages_v2',
+        '/__api_packages_v2?boot=1',
+        ...(pkgAuthor && pkgName
+          ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
+          : [])
+      ]);
+    }
+  }
+
   return Response.json({
     success: true,
     status: nextStatus,
+    packageApproved: packageApprovedAndPublished,
     resolution_note: formattedNote.slice(0, 2000),
-    message: `Report #${reportRow.id} marked as ${nextStatus}.`
+    message: packageApprovedAndPublished
+      ? `Report #${reportRow.id} dismissed and package '${reportRow.package_id}' approved for the public catalog.`
+      : `Report #${reportRow.id} marked as ${nextStatus}.`
   });
 }

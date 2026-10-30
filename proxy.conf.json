@@ -6,7 +6,7 @@
     "logLevel": "info",
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
     }
   },
   "/mirror-api": {
@@ -18,7 +18,7 @@
     },
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
     }
   },
   "/cdb-api": {
@@ -30,7 +30,7 @@
     },
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
     }
   }
 }

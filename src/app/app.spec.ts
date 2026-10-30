@@ -2255,4 +2255,480 @@ description = Mob animation and spawning framework.
     expect(footerRow.className).toContain('min-h-[28px]');
     expect(footerRow.className).not.toContain('overflow-hidden');
   });
+
+  it('should prevent false positives on legitimate Luanti mods while catching severe violations, auto-tagging warnings, and optimizing Workers AI checks with quota fallback', async () => {
+    const {
+      evaluateRepositoryContentSafetyStatic,
+      evaluateRepositoryContentSafety
+    } = await import('../../functions/api/lib/content-safety');
+
+    // 1. Legitimate Luanti RPG / Farming / Mining mod should have ZERO false positives
+    const benignModResult = evaluateRepositoryContentSafetyStatic({
+      repoOwner: 'RealBadAngel',
+      repoName: 'farming_and_dungeons',
+      confFileName: 'mod.conf',
+      rawConfig: 'name = farming_and_dungeons\ntitle = Blood Moon Dungeons & Farming\ndescription = Adds default:hoe_steel, farming:weed, flower_pot, strip_mining, bloodstone, bloodwood, and assassin cockpit quests.',
+      title: 'Blood Moon Dungeons & Farming',
+      shortDesc: 'Adds default:hoe_steel, farming:weed, flower_pot, strip_mining, bloodstone, bloodwood, and assassin cockpit quests.',
+      readmeMarkdown: '# Blood Moon Dungeons\nFight zombie and skeleton bosses with sword and gun in PvP arenas! Uses minetest.register_on_dieplayer and damage_groups = {fleshy = 10}.',
+      luaSource: `
+        minetest.register_on_dieplayer(function(player)
+          minetest.chat_send_all(player:get_player_name() .. " was killed by a zombie!")
+        end)
+        minetest.register_tool("farming:hoe_diamond", {
+          description = "Diamond Hoe",
+          damage_groups = { fleshy = 4 }
+        })
+      `,
+      rootFileNames: ['mod.conf', 'README.md', 'init.lua', 'blood_moon_sky.png', 'assassin_armor.png']
+    });
+    expect(benignModResult.holdForAdminReview).toBe(false);
+    expect(benignModResult.matches.length).toBe(0);
+    expect(benignModResult.autoContentWarnings.length).toBe(0);
+
+    // 2. Tier B advisory themes (blood particles, beer tavern, casino slots) auto-attach content_warnings without holding package
+    const advisoryModResult = evaluateRepositoryContentSafetyStatic({
+      repoOwner: 'author1',
+      repoName: 'tavern_and_arena',
+      confFileName: 'mod.conf',
+      rawConfig: 'name = tavern_and_arena\ndescription = Brew beer and whiskey in the tavern, play roulette at the casino, and enable blood_splatter on corpse entities.',
+      title: 'Tavern and Arena',
+      shortDesc: 'Brew beer and whiskey in the tavern, play roulette at the casino, and enable blood_splatter on corpse entities.',
+      rootFileNames: ['mod.conf', 'init.lua', 'blood_particles.png']
+    });
+    expect(advisoryModResult.holdForAdminReview).toBe(false);
+    expect(advisoryModResult.autoContentWarnings).toContain('violence_and_gore');
+    expect(advisoryModResult.autoContentWarnings).toContain('drugs_and_alcohol');
+    expect(advisoryModResult.autoContentWarnings).toContain('gambling');
+
+    // 3. Tier A severe violations (NSFW, extreme sadistic gore, hate speech) trigger holdForAdminReview
+    const nsfwAndGoreResult = evaluateRepositoryContentSafetyStatic({
+      repoOwner: 'badactor',
+      repoName: 'extreme_mod',
+      confFileName: 'mod.conf',
+      rawConfig: 'name = extreme_mod\ndescription = Explicit hentai textures and realistic dismemberment torture mechanics.',
+      title: 'Extreme Mod',
+      shortDesc: 'Explicit hentai textures and realistic dismemberment torture mechanics.',
+      rootFileNames: ['mod.conf', 'init.lua', 'nude_skin.png']
+    });
+    expect(nsfwAndGoreResult.holdForAdminReview).toBe(true);
+    expect(nsfwAndGoreResult.categories).toContain('sexual_nsfw');
+    expect(nsfwAndGoreResult.categories).toContain('extreme_gore_violence');
+
+    // 4. Workers AI optimization: AI is NOT called when runAiCheck is false (dryRun = true)
+    let aiCallCount = 0;
+    const mockAiSafe = {
+      run: async () => {
+        aiCallCount++;
+        return { response: 'safe' };
+      }
+    };
+    const dryRunEval = await evaluateRepositoryContentSafety(
+      {
+        repoOwner: 'builder',
+        repoName: 'clean_mod',
+        confFileName: 'mod.conf',
+        rawConfig: 'name = clean_mod\ndescription = Simple decorative blocks.',
+        title: 'Clean Mod',
+        shortDesc: 'Simple decorative blocks.'
+      },
+      { aiBinding: mockAiSafe, runAiCheck: false }
+    );
+    expect(aiCallCount).toBe(0);
+    expect(dryRunEval.aiChecked).toBe(false);
+    expect(dryRunEval.holdForAdminReview).toBe(false);
+
+    // 5. Workers AI runs on publish (runAiCheck = true) and flags contextual unsafe S12 (Sexual Content)
+    const mockAiUnsafe = {
+      run: async () => {
+        aiCallCount++;
+        return { response: 'unsafe\nS12' };
+      }
+    };
+    const publishUnsafeEval = await evaluateRepositoryContentSafety(
+      {
+        repoOwner: 'author2',
+        repoName: 'bedroom_roleplay_mod',
+        confFileName: 'mod.conf',
+        rawConfig: 'name = bedroom_roleplay_mod\ndescription = Adult bedroom roleplay animations.',
+        title: 'Bedroom Roleplay Mod',
+        shortDesc: 'Adult bedroom roleplay animations.'
+      },
+      { aiBinding: mockAiUnsafe, runAiCheck: true }
+    );
+    expect(aiCallCount).toBe(1);
+    expect(publishUnsafeEval.aiChecked).toBe(true);
+    expect(publishUnsafeEval.holdForAdminReview).toBe(true);
+    expect(publishUnsafeEval.categories).toContain('sexual_nsfw');
+
+    // 6. Workers AI ignores S1 (Violent Crimes) alone unless paired with extreme gore or child/sexual/hate/suicide codes
+    const mockAiGenericCombat = {
+      run: async () => ({ response: 'unsafe\nS1' })
+    };
+    const combatEval = await evaluateRepositoryContentSafety(
+      {
+        repoOwner: 'warrior',
+        repoName: 'dungeon_combat',
+        confFileName: 'mod.conf',
+        rawConfig: 'name = dungeon_combat\ndescription = Fight monsters with swords in dungeons.',
+        title: 'Dungeon Combat',
+        shortDesc: 'Fight monsters with swords in dungeons.'
+      },
+      { aiBinding: mockAiGenericCombat, runAiCheck: true }
+    );
+    expect(combatEval.aiChecked).toBe(true);
+    expect(combatEval.holdForAdminReview).toBe(false);
+
+    // 7. Workers AI quota exhaustion / network error gracefully falls back to static scanner
+    const mockAiQuotaExhausted = {
+      run: async () => {
+        throw new Error('Cloudflare Workers AI daily free tier neuron quota exceeded');
+      }
+    };
+    const fallbackEval = await evaluateRepositoryContentSafety(
+      {
+        repoOwner: 'builder',
+        repoName: 'clean_mod',
+        confFileName: 'mod.conf',
+        rawConfig: 'name = clean_mod\ndescription = A clean voxel building mod.',
+        title: 'Clean Mod',
+        shortDesc: 'A clean voxel building mod.'
+      },
+      { aiBinding: mockAiQuotaExhausted, runAiCheck: true }
+    );
+    expect(fallbackEval.aiChecked).toBe(false);
+    expect(fallbackEval.aiFallbackUsed).toBe(true);
+    expect(fallbackEval.holdForAdminReview).toBe(false);
+  });
+
+  it('should prioritize official content.luanti.org API first and only fall back to contentdb.milcho.org mirror on failure', async () => {
+    const pkgService = TestBed.inject(PackageService) as any;
+    expect(pkgService.contentDbOnline).toBe(true);
+
+    const calledUrls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calledUrls.push(url);
+      if (url.includes('content.luanti.org/api/packages/Rubenwardy/awards/') || url.includes('/cdb-api/packages/Rubenwardy/awards/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Rubenwardy',
+            name: 'awards',
+            title: 'Awards',
+            license: 'LGPL-2.1-only',
+            ai_disclosure: 'NO_AI',
+            downloads: 95000
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const data = await pkgService.fetchUpstreamWithMirrorFallback('/packages/Rubenwardy/awards/');
+      expect(data).toBeTruthy();
+      expect(data.title).toBe('Awards');
+      expect(data.ai_disclosure).toBe('NO_AI');
+      // First call must be to primary ContentDB (/cdb-api or content.luanti.org), NOT mirror
+      expect(calledUrls.length).toBe(1);
+      expect(calledUrls[0].includes('milcho.org') || calledUrls[0].includes('/mirror-api')).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should normalize ContentDB reviews schema (user.username, votes, thread), enrich author profiles via /users/<username>/ without 404 avatar guesses, and avoid duplicate mirror 404s', async () => {
+    const pkgService = TestBed.inject(PackageService) as any;
+
+    const calledUrls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calledUrls.push(url);
+
+      // 1. Authoritative 404 on primary ContentDB should NOT retry the mirror
+      if (url.includes('/packages/nonexistent/missing_mod/')) {
+        return new Response(JSON.stringify({ error: 'Not found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // 2. Edge /api/packages/Rubenwardy/awards/reviews returns empty array (simulating stale edge or mirror cache)
+      if (url.includes('/api/packages/Rubenwardy/awards/reviews')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // 3. ContentDB /packages/Rubenwardy/awards/reviews/ returns official PackageReview.as_dict() schema
+      if (url.includes('/packages/Rubenwardy/awards/reviews/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              is_positive: true,
+              rating: 5,
+              user: {
+                username: 'voxel_fan',
+                display_name: 'Voxel Fan'
+              },
+              created_at: '2026-02-15T12:00:00.000Z',
+              votes: {
+                helpful: 7,
+                unhelpful: 1
+              },
+              title: 'Awesome achievements system',
+              comment: 'Works great on our multiplayer server!',
+              thread: {
+                id: 9876,
+                url: 'https://content.luanti.org/threads/9876/'
+              }
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // 4. ContentDB /users/ForumOnlyCreator/ returns a user with no GitHub connection
+      if (url.includes('/users/ForumOnlyCreator/')) {
+        return new Response(
+          JSON.stringify({
+            username: 'ForumOnlyCreator',
+            display_name: 'Forum Creator',
+            rank: 'EDITOR',
+            profile_pic_url: null,
+            website_url: 'https://example.org',
+            donate_url: 'https://liberapay.com/ForumOnlyCreator',
+            connections: {
+              github: null,
+              forums: 'ForumOnlyCreator'
+            },
+            links: {
+              api_packages: '/api/packages/?author=ForumOnlyCreator',
+              profile: 'https://content.luanti.org/users/ForumOnlyCreator/'
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (url.includes('/api/authors/ForumOnlyCreator')) {
+        return new Response(
+          JSON.stringify({
+            author: {
+              username: 'ForumOnlyCreator',
+              display_name: 'ForumOnlyCreator',
+              avatar_url: 'https://github.com/ForumOnlyCreator.png',
+              bio: '',
+              is_registered: false,
+              identities: []
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // A: Authoritative 404 on primary ContentDB stops immediately without retrying mirror
+      const missingRes = await pkgService.fetchUpstreamWithMirrorFallback('/packages/nonexistent/missing_mod/');
+      expect(missingRes).toBeNull();
+      const missingCalls = calledUrls.filter(u => u.includes('/packages/nonexistent/missing_mod/'));
+      expect(missingCalls.length).toBe(1);
+
+      // B: Reviews fallback & PackageReview.as_dict() mapping
+      const awardsPkg = pkgService.normalizePackage({
+        id: 'Rubenwardy/awards',
+        author: 'Rubenwardy',
+        name: 'awards',
+        title: 'Awards',
+        type: 'mod',
+        source: 'official'
+      });
+      const reviews = await pkgService.fetchReviews(awardsPkg, true);
+      expect(reviews.length).toBe(1);
+      expect(reviews[0].id).toBe('cdb_9876');
+      expect(reviews[0].author.username).toBe('voxel_fan');
+      expect(reviews[0].author.display_name).toBe('Voxel Fan');
+      expect(reviews[0].author.avatar_url).toBe('logo.svg');
+      expect(reviews[0].rating).toBe(5);
+      expect(reviews[0].is_positive).toBe(true);
+      expect(reviews[0].votes?.helpful).toBe(7);
+      expect(reviews[0].thread_url).toBe('https://content.luanti.org/threads/9876/');
+
+      // C: Author drawer enrichment via ContentDB /users/<username>/ without unverified github.com/<username>.png 404
+      await pkgService.openAuthorDrawer('ForumOnlyCreator', false);
+      const profile = pkgService.activeAuthorProfile();
+      expect(profile).toBeTruthy();
+      expect(profile.display_name).toBe('Forum Creator');
+      expect(profile.rank).toBe('EDITOR');
+      expect(profile.website_url).toBe('https://example.org');
+      expect(profile.donate_url).toBe('https://liberapay.com/ForumOnlyCreator');
+      expect(profile.avatar_url).toBe('');
+      expect(profile.identities.some((i: any) => i.provider === 'forums' && i.username === 'ForumOnlyCreator')).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should support agnostic server-side luanticheck .conf / .cdb.json scanning and render distinct Luanti Hub vs. ContentDB review badges', async () => {
+    const {
+      parseLuantiConf,
+      computeConfShortDescription,
+      parseCdbJsonMetadata,
+      scanGitRepoMetadataCached
+    } = await import('../../functions/api/lib/upstream');
+
+    // 1. Verify luanticheck multiline .conf parsing & short_description truncation
+    const confParsed = parseLuantiConf(`
+# Sample mod.conf
+name = super_quests
+title = Super Quests
+description = """
+An immersive questing framework for Luanti servers.
+Supports branching dialogues, custom HUD indicators, and party objectives.
+"""
+depends = default, farming
+optional_depends = awards?, unified_inventory
+min_minetest_version = 5.8.0
+supported_games = minetest_game, voxelibre
+`);
+    expect(confParsed['name']).toBe('super_quests');
+    expect(confParsed['title']).toBe('Super Quests');
+    expect(confParsed['description']).toContain('An immersive questing framework for Luanti servers.');
+    expect(confParsed['description']).toContain('Supports branching dialogues');
+    expect(confParsed['min_minetest_version']).toBe('5.8.0');
+
+    const longDesc =
+      'First sentence summary of this mod. ' +
+      'This second sentence makes the total description length exceed two hundred characters so that ContentDB tree.py truncates it right at the first sentence boundary instead of mid-word.';
+    expect(computeConfShortDescription(longDesc)).toBe('First sentence summary of this mod');
+
+    // 2. Verify .cdb.json ALIASES (short_desc, desc, issueTracker, forums, ai_disclosure) & TXP license fallback
+    const cdbParsed = parseCdbJsonMetadata({
+      type: 'TXP',
+      name: 'pixel_sky',
+      title: 'Pixel Sky',
+      short_desc: 'Crisp 16x skybox and voxel textures',
+      desc: 'Full long description from desc alias',
+      media_license: 'CC-BY-SA-4.0',
+      issueTracker: 'https://codeberg.org/author/pixel_sky/issues',
+      forums: 29876,
+      ai_disclosure: 'NONE',
+      tags: ['16px', 'gui']
+    });
+    expect(cdbParsed).toBeTruthy();
+    expect(cdbParsed?.type).toBe('txp');
+    expect(cdbParsed?.license).toBe('CC-BY-SA-4.0');
+    expect(cdbParsed?.media_license).toBe('CC-BY-SA-4.0');
+    expect(cdbParsed?.short_description).toBe('Crisp 16x skybox and voxel textures');
+    expect(cdbParsed?.long_description).toBe('Full long description from desc alias');
+    expect(cdbParsed?.issue_tracker).toBe('https://codeberg.org/author/pixel_sky/issues');
+    expect(cdbParsed?.forum_url).toBe('https://forum.luanti.org/viewtopic.php?t=29876');
+    expect(cdbParsed?.ai_disclosures).toEqual(['NONE']);
+
+    // 3. Verify server-side scanGitRepoMetadataCached overlays .cdb.json onto .conf
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('raw.githubusercontent.com/AgileCreator/agnostic_mod/HEAD/mod.conf')) {
+        return new Response(
+          `name = agnostic_mod\ntitle = Agnostic Mod\ndescription = Mod from conf\ndepends = default\noptional_depends = mesecons\nlicense = MIT\nmin_minetest_version = 5.7.0`,
+          { status: 200 }
+        );
+      }
+      if (url.includes('raw.githubusercontent.com/AgileCreator/agnostic_mod/HEAD/.cdb.json')) {
+        return new Response(
+          JSON.stringify({
+            short_desc: 'Overlaid short description from .cdb.json',
+            video_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            tags: ['tools', 'survival']
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const scanRes = await scanGitRepoMetadataCached(
+        'AgileCreator',
+        'agnostic_mod',
+        'mod',
+        'https://github.com/AgileCreator/agnostic_mod',
+        0
+      );
+      expect(scanRes.gitRepoStatus).toBe('verified');
+      expect(scanRes.title).toBe('Agnostic Mod');
+      expect(scanRes.shortDesc).toBe('Overlaid short description from .cdb.json');
+      expect(scanRes.license).toBe('MIT');
+      expect(scanRes.hardDeps).toEqual(['default']);
+      expect(scanRes.softDeps).toEqual(['mesecons']);
+      expect(scanRes.minVersion).toBe('5.7.0');
+      expect(scanRes.cdbMeta?.video_url).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+      expect(scanRes.cdbMeta?.tags).toEqual(['tools', 'survival']);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. Verify PackageDetailModalComponent distinguishes Luanti Hub vs. ContentDB reviews with counts and logos
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    const pkgService = TestBed.inject(PackageService) as any;
+    const samplePkg = pkgService.normalizePackage({
+      id: 'AgileCreator/agnostic_mod',
+      author: 'AgileCreator',
+      name: 'agnostic_mod',
+      title: 'Agnostic Mod',
+      type: 'mod',
+      source: 'official'
+    });
+    modalComp.package = samplePkg;
+    modalComp.reviews.set([
+      {
+        id: 'lh_1',
+        package_id: 'AgileCreator/agnostic_mod',
+        source: 'luantihub',
+        rating: 5,
+        title: 'Awesome on Luanti Hub',
+        comment: 'Works great on our server!',
+        created_at: '2026-10-30T10:00:00Z',
+        author: {
+          username: 'hub_reviewer',
+          display_name: 'Hub Reviewer',
+          avatar_url: 'logo.svg'
+        }
+      },
+      {
+        id: 'cdb_42',
+        package_id: 'AgileCreator/agnostic_mod',
+        source: 'contentdb',
+        rating: 5,
+        is_positive: true,
+        comment: 'Classic ContentDB review!',
+        created_at: '2026-10-29T10:00:00Z',
+        votes: { helpful: 4, unhelpful: 0 },
+        thread_url: 'https://content.luanti.org/threads/42/',
+        author: {
+          username: 'cdb_reviewer',
+          display_name: 'CDB Reviewer',
+          avatar_url: 'logo.svg'
+        }
+      }
+    ]);
+    modalFixture.detectChanges();
+
+    expect(modalComp.luantiHubReviewsCount()).toBe(1);
+    expect(modalComp.contentDbReviewsCount()).toBe(1);
+
+    const modalHtml = (modalFixture.nativeElement as HTMLElement).innerHTML;
+    expect(modalHtml).toContain('Luanti Hub (1)');
+    expect(modalHtml).toContain('ContentDB (1)');
+    expect(modalHtml).toContain('Recommended');
+  });
 });

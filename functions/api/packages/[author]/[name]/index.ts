@@ -14,7 +14,10 @@ import {
   ensureModerationColumns,
   autoResolveBrokenRepoReport,
   parseCdbJsonMetadata,
-  CdbJsonMetadata
+  CdbJsonMetadata,
+  scanGitRepoMetadataCached,
+  GitRepoScanResult,
+  normalizeContentDbReviewItem
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -62,6 +65,24 @@ function formatByteSize(val: any): string | undefined {
   if (typeof val === 'string') {
     const trimmed = val.trim();
     if (trimmed && /[a-zA-Z]/.test(trimmed) && trimmed !== '2 KB') return trimmed;
+  }
+  return undefined;
+}
+
+/**
+ * Normalizes ContentDB `min_minetest_version` / `max_minetest_version` fields, which
+ * `PackageRelease.as_dict()` returns as `{ name: "5.4", protocol_version: 39, is_dev: false }`
+ * and `/for-client/` returns as `"5.4"`.
+ */
+function extractEngineVersionString(val: any): string | undefined {
+  if (!val) return undefined;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    return trimmed && trimmed.toLowerCase() !== 'none' ? trimmed : undefined;
+  }
+  if (typeof val === 'object' && typeof val.name === 'string') {
+    const trimmed = val.name.trim();
+    return trimmed && trimmed.toLowerCase() !== 'none' ? trimmed : undefined;
   }
   return undefined;
 }
@@ -134,8 +155,14 @@ function extractDependencies(
       if (Array.isArray(exact)) {
         list = exact;
       } else {
-        const firstArray = Object.values(depsPayload).find((v) => Array.isArray(v)) as any[] | undefined;
-        if (firstArray) list = firstArray;
+        const lowerKey = pkgKey.toLowerCase();
+        const ciMatchKey = Object.keys(depsPayload).find((k) => k.toLowerCase() === lowerKey);
+        if (ciMatchKey && Array.isArray(depsPayload[ciMatchKey])) {
+          list = depsPayload[ciMatchKey];
+        } else {
+          const firstArray = Object.values(depsPayload).find((v) => Array.isArray(v)) as any[] | undefined;
+          if (firstArray) list = firstArray;
+        }
       }
     }
     for (const dep of list) {
@@ -362,269 +389,8 @@ async function probeGitRepoConfAndLicense(
   name: string,
   pkgType = 'mod',
   existingRepoUrl?: string
-): Promise<{
-  repoUrl?: string;
-  gitRepoStatus: 'verified' | 'broken_404' | 'unverified';
-  license?: string;
-  mediaLicense?: string;
-  hardDeps: string[];
-  softDeps: string[];
-  minVersion?: string;
-  cdbMeta?: CdbJsonMetadata | null;
-}> {
-  const normalizedInputUrl = normalizeDefunctGitHost(existingRepoUrl);
-  let owner = author;
-  let repo = name;
-  let host = '';
-
-  if (normalizedInputUrl) {
-    try {
-      const u = new URL(normalizedInputUrl);
-      const parts = u.pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) {
-        host = u.hostname.toLowerCase();
-        owner = parts[0];
-        repo = parts[1];
-      }
-    } catch {
-      // Fallback to author/name
-    }
-  }
-
-  const confFile = pkgType === 'game' ? 'game.conf' : pkgType === 'txp' ? 'texture_pack.conf' : 'mod.conf';
-  const lowerOwner = owner.toLowerCase();
-
-  const rawBaseCandidates: Array<{ base: string; repoUrl: string }> = [];
-  const pushCandidate = (base: string, repoUrl: string) => {
-    if (!rawBaseCandidates.some(c => c.base === base)) {
-      rawBaseCandidates.push({ base, repoUrl });
-    }
-  };
-
-  if (host.includes('codeberg.org')) {
-    pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
-    pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
-  } else if (host.includes('minetest.land')) {
-    pushCandidate(`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw`, `https://git.minetest.land/${owner}/${repo}`);
-    pushCandidate(`https://git.minetest.land/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://git.minetest.land/${lowerOwner}/${repo}`);
-  } else if (host.includes('gitlab.com')) {
-    pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
-  } else if (host.includes('github.com')) {
-    pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
-  }
-
-  // Always include multi-forge fallbacks (GitHub HEAD, Codeberg v1 API raw, GitLab HEAD)
-  pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
-  pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
-  pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
-  pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
-
-  const hardDeps: string[] = [];
-  const softDeps: string[] = [];
-  let license: string | undefined;
-  let mediaLicense: string | undefined;
-  let minVersion: string | undefined;
-  let resolvedRepoUrl: string | undefined;
-  let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
-  let sawExplicit404 = false;
-  let cdbMeta: CdbJsonMetadata | null = null;
-
-  const tryCandidates = async (candidates: Array<{ base: string; repoUrl: string }>): Promise<boolean> => {
-    for (const cand of candidates) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1600);
-      try {
-        const [res, cdbRes] = await Promise.all([
-          fetch(`${cand.base}/${confFile}`, { signal: controller.signal }),
-          fetch(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null)
-        ]);
-        clearTimeout(timer);
-
-        if (cdbRes && cdbRes.ok) {
-          const cdbText = await cdbRes.text().catch(() => '');
-          const parsedCdb = parseCdbJsonMetadata(cdbText);
-          if (parsedCdb) {
-            cdbMeta = parsedCdb;
-            resolvedRepoUrl = cand.repoUrl;
-            gitRepoStatus = 'verified';
-            if (parsedCdb.license) license = parsedCdb.license;
-            if (parsedCdb.media_license) mediaLicense = parsedCdb.media_license;
-          }
-        }
-
-        if (res.status === 404 && !cdbMeta) {
-          const isPrimaryInputRepo =
-            Boolean(normalizedInputUrl) &&
-            cand.repoUrl.toLowerCase() === normalizedInputUrl!.toLowerCase();
-          const fallbackCtrl = new AbortController();
-          const fallbackTimer = setTimeout(() => fallbackCtrl.abort(), 1400);
-          try {
-            const [modpackRes, initRes, readmeRes] = await Promise.all([
-              fetch(`${cand.base}/modpack.conf`, { signal: fallbackCtrl.signal }).catch(() => null),
-              fetch(`${cand.base}/init.lua`, { signal: fallbackCtrl.signal }).catch(() => null),
-              fetch(`${cand.base}/README.md`, { signal: fallbackCtrl.signal }).catch(() => null)
-            ]);
-            clearTimeout(fallbackTimer);
-            for (const fbRes of [modpackRes, initRes, readmeRes]) {
-              if (fbRes && fbRes.ok) {
-                const fbText = await fbRes.text().catch(() => '');
-                if (fbText && !fbText.trim().startsWith('<!DOCTYPE') && !fbText.trim().startsWith('<html')) {
-                  resolvedRepoUrl = cand.repoUrl;
-                  gitRepoStatus = 'verified';
-                  return true;
-                }
-              }
-            }
-            if (isPrimaryInputRepo) {
-              sawExplicit404 = true;
-            }
-          } catch {
-            clearTimeout(fallbackTimer);
-          }
-          continue;
-        }
-        if (res.ok) {
-          const confText = await res.text();
-          if (confText && !confText.trim().startsWith('<!DOCTYPE') && !confText.trim().startsWith('<html')) {
-            resolvedRepoUrl = cand.repoUrl;
-            gitRepoStatus = 'verified';
-            const getVal = (key: string): string => {
-              for (const rawLine of confText.split(/\r?\n/)) {
-                const line = rawLine.trim();
-                if (!line || line.startsWith('#')) continue;
-                const eqIdx = line.indexOf('=');
-                if (eqIdx === -1) continue;
-                const k = line.slice(0, eqIdx).trim();
-                if (k.toLowerCase() === key.toLowerCase()) {
-                  let val = line.slice(eqIdx + 1).trim();
-                  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                    val = val.slice(1, -1).trim();
-                  }
-                  return val;
-                }
-              }
-              return '';
-            };
-            const cleanDep = (s: string): string => {
-              return s
-                .trim()
-                .replace(/^["']|["']$/g, '')
-                .replace(/\?$/, '')
-                .split(/\s+#/)[0]
-                .trim();
-            };
-            const depStr = getVal('depends');
-            const optStr = getVal('optional_depends');
-            if (depStr) {
-              depStr.split(',').map(cleanDep).filter(Boolean).forEach(d => hardDeps.push(d));
-            }
-            if (optStr) {
-              optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => softDeps.push(d));
-            }
-            license = getVal('license') || license || undefined;
-            mediaLicense = getVal('media_license') || mediaLicense || undefined;
-            minVersion = getVal('min_minetest_version') || undefined;
-
-            if (!license) {
-              for (const licFile of ['LICENSE', 'LICENSE.txt', 'LICENSE.md']) {
-                try {
-                  const licRes = await fetch(`${cand.base}/${licFile}`);
-                  if (licRes.ok) {
-                    const licText = await licRes.text();
-                    const detected = detectSpdxFromText(licText);
-                    if (detected) {
-                      license = detected;
-                      break;
-                    }
-                  }
-                } catch {
-                  // Ignore
-                }
-              }
-            }
-            return true;
-          }
-        }
-        if (cdbMeta) {
-          return true;
-        }
-      } catch {
-        clearTimeout(timer);
-      }
-    }
-    return false;
-  };
-
-  const foundDirect = await tryCandidates(rawBaseCandidates);
-
-  // Dynamic Codeberg & GitHub search discovery ONLY when no explicit repo_url was provided
-  // and restricted strictly to repositories owned by the package author.
-  if (!foundDirect && !normalizedInputUrl && name) {
-    const searchCandidates: Array<{ base: string; repoUrl: string }> = [];
-    const targetName = name.toLowerCase();
-    const targetAuthor = author.toLowerCase();
-
-    try {
-      const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(name)}&limit=8`, {
-        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
-      });
-      if (cbRes.ok) {
-        const cbJson: any = await cbRes.json();
-        const cbRepos: any[] = Array.isArray(cbJson?.data) ? cbJson.data : [];
-        for (const r of cbRepos) {
-          const rOwner = String(r?.owner?.login || r?.owner?.username || '').toLowerCase();
-          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
-            searchCandidates.push({
-              base: `https://codeberg.org/api/v1/repos/${r.full_name}/raw`,
-              repoUrl: r.html_url || `https://codeberg.org/${r.full_name}`
-            });
-          }
-        }
-      }
-    } catch {
-      // Ignore
-    }
-
-    try {
-      const ghRes = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(name)}+in:name&per_page=5`, {
-        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
-      });
-      if (ghRes.ok) {
-        const ghJson: any = await ghRes.json();
-        const ghRepos: any[] = Array.isArray(ghJson?.items) ? ghJson.items : [];
-        for (const r of ghRepos) {
-          const rOwner = String(r?.owner?.login || '').toLowerCase();
-          if (r && String(r.name || '').toLowerCase() === targetName && rOwner === targetAuthor && r.full_name) {
-            searchCandidates.push({
-              base: `https://raw.githubusercontent.com/${r.full_name}/HEAD`,
-              repoUrl: r.html_url || `https://github.com/${r.full_name}`
-            });
-          }
-        }
-      }
-    } catch {
-      // Ignore
-    }
-
-    if (searchCandidates.length > 0) {
-      await tryCandidates(searchCandidates);
-    }
-  }
-
-  if (!resolvedRepoUrl && sawExplicit404 && normalizedInputUrl) {
-    gitRepoStatus = 'broken_404';
-  }
-
-  return {
-    repoUrl: resolvedRepoUrl || normalizedInputUrl,
-    gitRepoStatus,
-    license,
-    mediaLicense,
-    hardDeps,
-    softDeps,
-    minVersion,
-    cdbMeta
-  };
+): Promise<GitRepoScanResult> {
+  return scanGitRepoMetadataCached(author, name, pkgType, existingRepoUrl, 21600);
 }
 
 function buildNormalizedReleases(
@@ -633,25 +399,6 @@ function buildNormalizedReleases(
   d1Releases: any[],
   upstreamReleases: any[] | null
 ): any[] {
-  if (Array.isArray(d1Releases) && d1Releases.length > 0) {
-    return d1Releases.map((r: any) => ({
-      id: r.id,
-      version: r.tag_name || r.version,
-      title: r.title || r.tag_name || r.version,
-      tag_name: r.tag_name || r.version,
-      commit_sha: r.commit_sha,
-      url: r.download_url || r.url,
-      download_url: r.download_url || r.url,
-      size: r.size || r.file_size || undefined,
-      file_size: typeof r.file_size === 'string' ? r.file_size : (Number(r.size) > 0 ? formatByteSize(Number(r.size)) : undefined),
-      min_minetest_version: r.min_minetest_version,
-      max_minetest_version: r.max_minetest_version,
-      changelog: r.changelog,
-      release_date: r.released_at || r.release_date,
-      released_at: r.released_at || r.release_date
-    }));
-  }
-
   if (Array.isArray(upstreamReleases) && upstreamReleases.length > 0) {
     const encAuthor = encodeURIComponent(author);
     const encName = encodeURIComponent(name);
@@ -666,41 +413,57 @@ function buildNormalizedReleases(
 
       return {
         id: r.id,
-        version: String(r.title || r.id || 'latest'),
-        title: String(r.title || r.id || 'Release'),
-        tag_name: String(r.title || r.id || 'latest'),
+        version: String(r.title || r.name || r.id || 'latest'),
+        title: String(r.title || r.name || r.id || 'Release'),
+        tag_name: String(r.title || r.name || r.id || 'latest'),
         commit_sha: r.commit || '',
         url: fullDownloadUrl,
         download_url: fullDownloadUrl,
         size: rawBytes > 0 ? rawBytes : undefined,
         file_size: rawBytes > 0 ? formatByteSize(rawBytes) : undefined,
-        min_minetest_version: r.min_minetest_version || r.min_protocol_version || undefined,
-        max_minetest_version: r.max_minetest_version || r.max_protocol_version || undefined,
+        downloads: typeof r.downloads === 'number' ? r.downloads : undefined,
+        release_notes: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        changelog: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        sha256: typeof r.sha256 === 'string' && r.sha256.trim() ? r.sha256.trim() : undefined,
+        min_minetest_version: extractEngineVersionString(r.min_minetest_version) || r.min_protocol_version || undefined,
+        max_minetest_version: extractEngineVersionString(r.max_minetest_version) || r.max_protocol_version || undefined,
+        release_date: r.release_date || undefined,
         released_at: r.release_date || new Date().toISOString()
       };
     });
   }
 
+  if (Array.isArray(d1Releases) && d1Releases.length > 0) {
+    return d1Releases.map((r: any) => ({
+      id: r.id,
+      version: r.tag_name || r.version,
+      title: r.title || r.tag_name || r.version,
+      tag_name: r.tag_name || r.version,
+      commit_sha: r.commit_sha,
+      url: r.download_url || r.url,
+      download_url: r.download_url || r.url,
+      size: r.size || r.file_size || undefined,
+      file_size: typeof r.file_size === 'string' ? r.file_size : (Number(r.size) > 0 ? formatByteSize(Number(r.size)) : undefined),
+      min_minetest_version: r.min_minetest_version,
+      max_minetest_version: r.max_minetest_version,
+      changelog: r.changelog,
+      release_notes: r.changelog || undefined,
+      release_date: r.released_at || r.release_date,
+      released_at: r.released_at || r.release_date
+    }));
+  }
+
   return [];
 }
 
-function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null): any[] {
-  const normalizedOfficial = (Array.isArray(upstreamReviews) ? upstreamReviews : []).map((r: any, idx: number) => ({
-    id: `cdb_${r.id || idx}`,
-    source: 'contentdb',
-    rating: r.rating ? Math.min(5, Math.max(1, Number(r.rating))) : (r.recommends === false ? 1 : r.recommends === true ? 5 : 3),
-    title: r.title,
-    comment: r.comment || r.text || '',
-    created_at: r.created_at,
-    author: {
-      username: r.author || r.user?.username || 'contentdb_user',
-      display_name: r.author || r.user?.display_name || r.user?.username || 'Community Member',
-      avatar_url: `https://github.com/${r.author || r.user?.username || 'octocat'}.png`
-    }
-  }));
+function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null, packageId?: string): any[] {
+  const normalizedOfficial = (Array.isArray(upstreamReviews) ? upstreamReviews : []).map((r: any, idx: number) =>
+    normalizeContentDbReviewItem(r, idx, packageId)
+  );
 
   const normalizedLocal = (Array.isArray(d1Reviews) ? d1Reviews : []).map((r: any) => ({
     id: `lh_${r.id}`,
+    ...(packageId ? { package_id: packageId } : {}),
     source: 'luantihub',
     rating: r.rating || 5,
     title: r.title,
@@ -724,28 +487,47 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const noCache = reqUrl?.searchParams.get('nocache') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v3/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v4/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
     if (cachedEdge) {
       // Always merge fresh D1 reviews on full detail requests so newly posted or moderated reviews appear immediately on refresh
-      if (!isLite && context.env.DB) {
+      if (!isLite) {
         try {
-          const freshLocalRevRes = await context.env.DB.prepare(`
-            SELECT r.id, r.rating, r.title, r.comment, r.created_at,
-                   u.username, u.display_name, u.avatar_url
-            FROM reviews r
-            LEFT JOIN users u ON r.user_id = u.id
-            WHERE LOWER(r.package_id) = LOWER(?)
-            ORDER BY r.created_at DESC
-          `).bind(pkgId).all().catch(() => ({ results: [] }));
-          const freshLocalReviews = freshLocalRevRes?.results || [];
-          const existingOfficialOnly = Array.isArray(cachedEdge.reviews_list)
+          let freshLocalReviews: any[] = [];
+          if (context.env.DB) {
+            const freshLocalRevRes = await context.env.DB.prepare(`
+              SELECT r.id, r.rating, r.title, r.comment, r.created_at,
+                     u.username, u.display_name, u.avatar_url
+              FROM reviews r
+              LEFT JOIN users u ON r.user_id = u.id
+              WHERE LOWER(r.package_id) = LOWER(?)
+              ORDER BY r.created_at DESC
+            `).bind(pkgId).all().catch(() => ({ results: [] }));
+            freshLocalReviews = freshLocalRevRes?.results || [];
+          }
+          let existingOfficialOnly = Array.isArray(cachedEdge.reviews_list)
             ? cachedEdge.reviews_list.filter((r: any) => r && r.source === 'contentdb')
             : [];
+          const expectedCdbCount =
+            Number(cachedEdge.review_thread_counts?.positive || 0) +
+            Number(cachedEdge.review_thread_counts?.neutral || 0) +
+            Number(cachedEdge.review_thread_counts?.negative || 0);
+          if (existingOfficialOnly.length === 0 && expectedCdbCount > 0) {
+            const liveOfficial = await fetchUpstreamJsonCached<any[]>(
+              `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/reviews/`,
+              300
+            ).catch(() => null);
+            if (Array.isArray(liveOfficial) && liveOfficial.length > 0) {
+              existingOfficialOnly = liveOfficial.map((r: any, idx: number) =>
+                normalizeContentDbReviewItem(r, idx, pkgId)
+              );
+            }
+          }
           const normalizedFreshLocal = freshLocalReviews.map((r: any) => ({
             id: `lh_${r.id}`,
+            package_id: pkgId,
             source: 'luantihub',
             rating: Number(r.rating) || 5,
             title: r.title || undefined,
@@ -923,16 +705,22 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
-  // 2. Fetch upstream ContentDB detail, for-client, dependencies, releases, and reviews in parallel
+  // 2. Fetch upstream ContentDB detail, dependencies, releases, and reviews in parallel.
+  // Note: ContentDB's `GET /api/packages/:author/:name/` (`Package.as_dict()`) already returns full metadata
+  // (license, media_license, downloads, score, screenshots, tags, provides, maintainers, content_warnings,
+  // ai_disclosure, forum_url, video_url, donate_url, issue_tracker, translation_url, long_description in clean Markdown).
+  // Furthermore, `fetchWithFailover('/packages/:author/:name/')` automatically rewrites to `/for-client/?formspec_version=8`
+  // if `content.luanti.org` fails and it has to fall back to `contentdb.milcho.org`!
+  // Also note: on `/dependencies/`, do NOT pass `?only_hard=0` because Python Flask treats any non-empty string `"0"` as truthy!
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
-  let [upstreamData, forClientData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
+  let [upstreamData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
     fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600),
-    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 600),
-    isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/?only_hard=0`, 600),
+    isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/`, 600),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
   ]);
+  let forClientData: any = null;
 
   // Ensure Git tags/releases are discovered before falling back to a default branch ('HEAD') row
   const hasRealTaggedD1Releases = d1Releases.some(
@@ -993,8 +781,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
-  const bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
-  const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload);
+  let bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
+  const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload, pkgId);
 
   // Merge forClientData into upstreamData if single-package endpoint is missing or partial
   if (!upstreamData && forClientData) {
@@ -1039,14 +827,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         if (matchedCandidate && matchedCandidate.author && matchedCandidate.name) {
           const encCdbAuthor = encodeURIComponent(matchedCandidate.author);
           const encCdbName = encodeURIComponent(matchedCandidate.name);
-          const [altDetail, altForClient] = await Promise.all([
-            fetchUpstreamJsonCached<any>(`/packages/${encCdbAuthor}/${encCdbName}/`, 600),
-            fetchUpstreamJsonCached<any>(`/packages/${encCdbAuthor}/${encCdbName}/for-client/?formspec_version=8`, 600)
-          ]);
-          forClientData = altForClient || forClientData;
+          const altDetail = await fetchUpstreamJsonCached<any>(`/packages/${encCdbAuthor}/${encCdbName}/`, 600);
           upstreamData = {
             ...matchedCandidate,
-            ...(altForClient || {}),
             ...(altDetail || {})
           };
         }
@@ -1054,105 +837,183 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
-  // 3. If it is a pure Git package in D1 (not present on ContentDB), return D1 metadata enriched with README
+  // 3. Agnostic Resolution (Pure Git package OR when both ContentDB & Mirror APIs are offline):
+  // Resolve directly from D1 + Server-side Git Repository Scanner (.conf + .cdb.json + README + Git Releases)
   if (!upstreamData) {
-    if (d1Pkg) {
-      const d1Tags = parseJsonArray(d1Pkg.tags);
-      const isGitPkg = d1Pkg.provider !== 'contentdb' || d1Tags.includes('git');
-      const isAlsoOfficial = d1Pkg.provider === 'contentdb' || d1Tags.includes('contentdb');
+    const d1Tags = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const d1HardDeps = d1Pkg ? parseJsonArray(d1Pkg.dependencies) : [];
+    const d1SoftDeps = d1Pkg ? parseJsonArray(d1Pkg.optional_dependencies) : [];
+    const needsAgnosticRepoScan =
+      !d1Pkg ||
+      !d1Pkg.license ||
+      !d1Pkg.short_desc ||
+      d1HardDeps.length === 0 ||
+      (!isLite && !d1Pkg.video_url && Boolean(d1Pkg.repo_url));
+
+    const gitScan = needsAgnosticRepoScan
+      ? await probeGitRepoConfAndLicense(
+          d1Pkg?.author_name || author,
+          d1Pkg?.name || name,
+          d1Pkg?.type || 'mod',
+          d1Pkg?.repo_url
+        )
+      : null;
+
+    if (d1Pkg || (gitScan && gitScan.gitRepoStatus === 'verified')) {
+      const resolvedAuthor = d1Pkg?.author_name || author;
+      const resolvedName = d1Pkg?.name || gitScan?.cdbMeta?.name || name;
+      const resolvedType = gitScan?.detectedType || d1Pkg?.type || 'mod';
+      const resolvedRepo = gitScan?.repoUrl || d1Pkg?.repo_url || '';
+      const isGitPkg = !d1Pkg || d1Pkg.provider !== 'contentdb' || d1Tags.includes('git');
+      const isAlsoOfficial = Boolean(d1Pkg && (d1Pkg.provider === 'contentdb' || d1Tags.includes('contentdb')));
       const sources: Array<'official' | 'git'> = [];
       if (isAlsoOfficial) sources.push('official');
       if (isGitPkg) sources.push('git');
       if (sources.length === 0) sources.push('git');
 
-      const readme = isGitPkg ? await fetchRepoReadmeCached(d1Pkg.repo_url) : undefined;
-      const fallbackRawBase = d1Pkg.repo_url
-        ? `${String(d1Pkg.repo_url).replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${d1Pkg.default_branch || 'main'}`
-        : undefined;
-      const fallbackReadme = d1Pkg.long_desc && d1Pkg.long_desc !== d1Pkg.short_desc
-        ? rewriteRelativeMarkdownUrls(d1Pkg.long_desc, fallbackRawBase)
-        : undefined;
+      const readme = (!isLite && resolvedRepo) ? await fetchRepoReadmeCached(resolvedRepo) : undefined;
+      const fallbackRawBase =
+        gitScan?.rawBaseUrl ||
+        (resolvedRepo
+          ? `${String(resolvedRepo).replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${d1Pkg?.default_branch || 'main'}`
+          : undefined);
+      const rawLongDesc =
+        d1Pkg?.long_desc ||
+        gitScan?.cdbMeta?.long_description ||
+        gitScan?.longDesc ||
+        d1Pkg?.short_desc ||
+        gitScan?.shortDesc ||
+        '';
+      const fallbackReadme =
+        rawLongDesc && rawLongDesc !== (d1Pkg?.short_desc || gitScan?.shortDesc)
+          ? rewriteRelativeMarkdownUrls(rawLongDesc, fallbackRawBase)
+          : undefined;
 
-      // Only show file_size on pure Git packages when a reliable byte size exists (e.g. uploaded binary asset or verified D1 size)
-      const firstRelSize = Number(bundledReleases[0]?.size || d1Pkg.download_size || 0);
-      const gitFileSize = firstRelSize > 0
-        ? formatByteSize(firstRelSize)
-        : (d1Pkg.file_size || undefined);
-
-      const lhDownloads = Math.max(
-        Number(d1Pkg.luantihub_downloads || 0),
-        d1DailyDownloadsSum,
-        Number(d1Pkg.downloads_count || 0)
-      );
-
-      let gitVideoUrl = d1Pkg.video_url;
-      let gitVideoThumb = d1Pkg.video_thumbnail_url;
-      if (!gitVideoUrl && d1Pkg.repo_url) {
-        const cdbProbe = await probeGitRepoConfAndLicense(
-          d1Pkg.author_name,
-          d1Pkg.name,
-          d1Pkg.type || 'mod',
-          d1Pkg.repo_url
+      if (bundledReleases.length === 0 && !isLite && resolvedRepo) {
+        const discoveredGitRels = await discoverGitReleasesCached(
+          resolvedAuthor,
+          resolvedName,
+          resolvedRepo,
+          d1Pkg?.default_branch || 'main',
+          d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0'
         );
-        if (cdbProbe?.cdbMeta?.video_url) {
-          gitVideoUrl = cdbProbe.cdbMeta.video_url;
-          if (context.env.DB) {
-            context.env.DB.prepare('UPDATE packages SET video_url = ? WHERE id = ?').bind(gitVideoUrl, d1Pkg.id).run().catch(() => {});
-          }
+        if (discoveredGitRels.length > 0) {
+          bundledReleases = discoveredGitRels;
         }
       }
 
+      const firstRelSize = Number(bundledReleases[0]?.size || d1Pkg?.download_size || 0);
+      const gitFileSize = firstRelSize > 0
+        ? formatByteSize(firstRelSize)
+        : (d1Pkg?.file_size || undefined);
+
+      const cdbDownloads = Number(d1Pkg?.contentdb_downloads || 0);
+      const lhDownloads = Math.max(
+        Number(d1Pkg?.luantihub_downloads || 0),
+        d1DailyDownloadsSum,
+        Math.max(0, Number(d1Pkg?.downloads_count || 0) - cdbDownloads)
+      );
+      const totalDownloads = cdbDownloads + lhDownloads;
+
+      const gitVideoUrl = d1Pkg?.video_url || gitScan?.cdbMeta?.video_url;
+      const gitVideoThumb = d1Pkg?.video_thumbnail_url;
       const resolvedGitVideo = extractEmbeddedVideo(
         gitVideoUrl,
         gitVideoThumb,
-        d1Pkg.long_desc || d1Pkg.short_desc,
+        rawLongDesc,
         readme || fallbackReadme
       );
 
+      const mergedTags = Array.from(
+        new Set([
+          ...d1Tags,
+          ...(gitScan?.cdbMeta?.tags || []),
+          ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) ? [resolvedType, 'git'] : [])
+        ])
+      ).filter(Boolean);
+      const mergedHardDeps = d1HardDeps.length > 0 ? d1HardDeps : (gitScan?.hardDeps || []);
+      const mergedSoftDeps = d1SoftDeps.length > 0 ? d1SoftDeps : (gitScan?.softDeps || []);
+      const mergedLicense = d1Pkg?.license || gitScan?.license || gitScan?.mediaLicense || '';
+      const mergedMediaLicense = d1Pkg?.media_license || gitScan?.mediaLicense || mergedLicense || '';
+      const mergedShortDesc = d1Pkg?.short_desc || gitScan?.cdbMeta?.short_description || gitScan?.shortDesc || '';
+      const mergedTitle = d1Pkg?.title || gitScan?.cdbMeta?.title || gitScan?.title || resolvedName;
+
+      // Persist newly scanned Git/.cdb.json metadata back into D1 if missing
+      if (context.env.DB && d1Pkg && gitScan && gitScan.gitRepoStatus === 'verified') {
+        context.env.DB.prepare(`
+          UPDATE packages SET
+            license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END,
+            media_license = CASE WHEN COALESCE(media_license, '') = '' THEN ? ELSE media_license END,
+            short_desc = CASE WHEN COALESCE(short_desc, '') = '' THEN ? ELSE short_desc END,
+            video_url = COALESCE(video_url, ?),
+            video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+            dependencies = COALESCE(dependencies, ?),
+            optional_dependencies = COALESCE(optional_dependencies, ?)
+          WHERE id = ?
+        `).bind(
+          mergedLicense,
+          mergedMediaLicense,
+          mergedShortDesc || null,
+          resolvedGitVideo.video_url || null,
+          resolvedGitVideo.video_thumbnail_url || null,
+          mergedHardDeps.length > 0 ? JSON.stringify(mergedHardDeps) : null,
+          mergedSoftDeps.length > 0 ? JSON.stringify(mergedSoftDeps) : null,
+          d1Pkg.id
+        ).run().catch(() => {});
+      }
+
       const pureGitPayload = {
-        id: `${d1Pkg.author_name}/${d1Pkg.name}`,
-        author: d1Pkg.author_name,
-        name: d1Pkg.name,
-        title: d1Pkg.title,
-        type: d1Pkg.type,
-        short_desc: d1Pkg.short_desc,
-        long_description: d1Pkg.long_desc || d1Pkg.short_desc,
-        desc: d1Pkg.long_desc || d1Pkg.short_desc,
+        id: `${resolvedAuthor}/${resolvedName}`,
+        author: resolvedAuthor,
+        name: resolvedName,
+        title: mergedTitle,
+        type: resolvedType,
+        short_desc: mergedShortDesc,
+        long_description: rawLongDesc || mergedShortDesc,
+        desc: rawLongDesc || mergedShortDesc,
         readme: readme || fallbackReadme || undefined,
-        thumbnail: d1Pkg.thumbnail_url,
-        banner: d1Pkg.banner_url || d1Pkg.thumbnail_url,
-        license: d1Pkg.license,
-        media_license: d1Pkg.media_license,
-        score: d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : 0,
-        contentdb_downloads: 0,
+        thumbnail: d1Pkg?.thumbnail_url || (fallbackRawBase ? `${fallbackRawBase}/screenshot.png` : 'logo.svg'),
+        banner: d1Pkg?.banner_url || d1Pkg?.thumbnail_url || (fallbackRawBase ? `${fallbackRawBase}/screenshot.png` : 'logo.svg'),
+        license: mergedLicense,
+        media_license: mergedMediaLicense,
+        score: d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : Number(d1Pkg?.score || 0),
+        contentdb_downloads: cdbDownloads,
         luantihub_downloads: lhDownloads,
-        downloads: lhDownloads,
-        repo: d1Pkg.repo_url,
-        repo_url: d1Pkg.repo_url,
-        issue_tracker: d1Pkg.issue_tracker || undefined,
-        forum_url: d1Pkg.forum_url || undefined,
-        forums: d1Pkg.forum_url || undefined,
-        donate_url: d1Pkg.donate_url || undefined,
-        translation_url: d1Pkg.translation_url || undefined,
+        downloads: totalDownloads,
+        repo: resolvedRepo,
+        repo_url: resolvedRepo,
+        git_repo_status: gitScan?.gitRepoStatus || (resolvedRepo ? 'verified' : 'unverified'),
+        website: gitScan?.cdbMeta?.website || undefined,
+        issue_tracker: d1Pkg?.issue_tracker || gitScan?.cdbMeta?.issue_tracker || undefined,
+        forum_url: d1Pkg?.forum_url || gitScan?.cdbMeta?.forum_url || undefined,
+        forums: d1Pkg?.forum_url || gitScan?.cdbMeta?.forum_url || undefined,
+        donate_url: d1Pkg?.donate_url || gitScan?.cdbMeta?.donate_url || undefined,
+        translation_url: d1Pkg?.translation_url || gitScan?.cdbMeta?.translation_url || undefined,
         video_url: resolvedGitVideo.video_url,
         video_thumbnail_url: resolvedGitVideo.video_thumbnail_url,
-        dev_state: d1Pkg.dev_state || undefined,
-        provides: parseJsonArray(d1Pkg.provides),
-        content_warnings: parseJsonArray(d1Pkg.content_warnings),
-        ai_disclosures: parseJsonArray(d1Pkg.ai_disclosures),
-        maintainers: parseJsonArray(d1Pkg.maintainers),
-        created_at: d1Pkg.created_at || undefined,
-        updated_at: d1Pkg.updated_at || undefined,
-        provider: d1Pkg.provider,
-        default_branch: d1Pkg.default_branch || 'main',
-        min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
-        max_minetest_version: d1Pkg.max_minetest_version || undefined,
-        tags: d1Tags.length > 0 ? d1Tags : [d1Pkg.type || 'mod'],
-        dependencies: parseJsonArray(d1Pkg.dependencies),
-        optional_dependencies: parseJsonArray(d1Pkg.optional_dependencies),
+        dev_state: d1Pkg?.dev_state || gitScan?.cdbMeta?.dev_state || undefined,
+        provides: parseJsonArray(d1Pkg?.provides),
+        content_warnings:
+          parseJsonArray(d1Pkg?.content_warnings).length > 0
+            ? parseJsonArray(d1Pkg?.content_warnings)
+            : (gitScan?.cdbMeta?.content_warnings || []),
+        ai_disclosures:
+          parseJsonArray(d1Pkg?.ai_disclosures).length > 0
+            ? parseJsonArray(d1Pkg?.ai_disclosures)
+            : (gitScan?.cdbMeta?.ai_disclosures || []),
+        maintainers: parseJsonArray(d1Pkg?.maintainers),
+        created_at: d1Pkg?.created_at || undefined,
+        updated_at: d1Pkg?.updated_at || undefined,
+        provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : 'github'),
+        default_branch: d1Pkg?.default_branch || 'main',
+        min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
+        max_minetest_version: d1Pkg?.max_minetest_version || gitScan?.maxVersion || undefined,
+        tags: mergedTags,
+        dependencies: mergedHardDeps,
+        optional_dependencies: mergedSoftDeps,
         download_size: firstRelSize > 0 ? firstRelSize : undefined,
         file_size: gitFileSize,
-        status: d1Pkg.status || 'active',
+        status: d1Pkg?.status || 'active',
         source: isGitPkg ? 'git' : 'official',
         sources,
         releases_list: bundledReleases,
@@ -1179,11 +1040,22 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let resolvedMediaLicense = upstreamData.media_license || upstreamData.license || d1Pkg?.media_license || '';
   let repoUrl = normalizeDefunctGitHost(upstreamData.repo || upstreamData.repo_url || d1Pkg?.repo_url || undefined);
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = repoUrl ? 'verified' : 'unverified';
-  let minVersion = upstreamData.min_minetest_version || forClientData?.min_minetest_version || d1Pkg?.min_minetest_version || undefined;
-  const maxVersion = upstreamData.max_minetest_version || forClientData?.max_minetest_version || d1Pkg?.max_minetest_version || undefined;
+  let minVersion =
+    extractEngineVersionString(upstreamData.min_minetest_version) ||
+    extractEngineVersionString(forClientData?.min_minetest_version) ||
+    extractEngineVersionString(Array.isArray(releasesPayload) && releasesPayload[0]?.min_minetest_version) ||
+    extractEngineVersionString(d1Pkg?.min_minetest_version) ||
+    undefined;
+  let maxVersion =
+    extractEngineVersionString(upstreamData.max_minetest_version) ||
+    extractEngineVersionString(forClientData?.max_minetest_version) ||
+    extractEngineVersionString(Array.isArray(releasesPayload) && releasesPayload[0]?.max_minetest_version) ||
+    extractEngineVersionString(d1Pkg?.max_minetest_version) ||
+    undefined;
 
   // Always probe/verify Git repository when repo_url is missing, migrated, or when mirror lacks dependencies/license/video_url
   let probedCdbMeta: CdbJsonMetadata | null = null;
+  let gitProbeScan: GitRepoScanResult | null = null;
   const needsGitProbe = isLite
     ? !resolvedLicense
     : Boolean(repoUrl || !resolvedLicense || !d1Pkg?.video_url);
@@ -1194,6 +1066,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       upstreamData.type || 'mod',
       repoUrl
     );
+    gitProbeScan = gitProbe;
     gitRepoStatus = gitProbe.gitRepoStatus;
     probedCdbMeta = gitProbe.cdbMeta || null;
     if (finalHardDeps.length === 0 && gitProbe.hardDeps.length > 0) {
@@ -1213,6 +1086,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
     if (!minVersion && gitProbe.minVersion) {
       minVersion = gitProbe.minVersion;
+    }
+    if (!maxVersion && gitProbe.maxVersion) {
+      maxVersion = gitProbe.maxVersion;
     }
 
     // Automated 404 Git Repository Detection & Self-Healing:
@@ -1307,13 +1183,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   );
   const sources: Array<'official' | 'git'> = isRegisteredInGitCommunity ? ['official', 'git'] : ['official'];
 
-  // Extract long_description (supports plain string or { type: 'hypertext', body: '...' } across detail, for-client, .cdb.json, and dependencies payloads)
+  // Extract long_description (supports plain string or { type: 'hypertext', body: '...' } across detail, for-client, .cdb.json, .conf, and dependencies payloads)
   const extractedLongDesc =
     extractLongDescriptionText(upstreamData.long_description) ||
     extractLongDescriptionText(forClientData?.long_description) ||
     extractLongDescriptionText(depsPayload?.long_description) ||
     extractLongDescriptionText(upstreamData.desc) ||
     probedCdbMeta?.long_description ||
+    gitProbeScan?.longDesc ||
     (!readmeText ? d1Pkg?.long_desc : undefined) ||
     '';
 
@@ -1322,6 +1199,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     upstreamData.short_description ||
     forClientData?.short_desc ||
     probedCdbMeta?.short_description ||
+    gitProbeScan?.shortDesc ||
     d1Pkg?.short_desc ||
     '';
 
@@ -1375,7 +1253,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   const rawAiDisclosures = Array.isArray(upstreamData.ai_disclosures)
     ? upstreamData.ai_disclosures
-    : (Array.isArray(forClientData?.ai_disclosures) ? forClientData.ai_disclosures : parseJsonArray(d1Pkg?.ai_disclosures));
+    : typeof upstreamData.ai_disclosure === 'string' && upstreamData.ai_disclosure.trim()
+      ? [upstreamData.ai_disclosure.trim()]
+      : (Array.isArray(forClientData?.ai_disclosures)
+          ? forClientData.ai_disclosures
+          : typeof forClientData?.ai_disclosure === 'string' && forClientData.ai_disclosure.trim()
+            ? [forClientData.ai_disclosure.trim()]
+            : (probedCdbMeta?.ai_disclosures?.length ? probedCdbMeta.ai_disclosures : parseJsonArray(d1Pkg?.ai_disclosures)));
   const aiDisclosures = rawAiDisclosures
     .map((a: any) => (typeof a === 'string' ? a : a?.name || a?.title || ''))
     .filter(Boolean);
@@ -1404,7 +1288,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const updatedAt =
     upstreamData.updated_at ||
     forClientData?.updated_at ||
-    (bundledReleases[0]?.release_date) ||
+    (bundledReleases[0]?.release_date || bundledReleases[0]?.released_at) ||
+    upstreamData.approved_at ||
     d1Pkg?.updated_at ||
     undefined;
 
@@ -1492,6 +1377,24 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ).run().catch(() => {});
   }
 
+  const rawGameSupport = Array.isArray(upstreamData.game_support)
+    ? upstreamData.game_support
+    : (Array.isArray(forClientData?.game_support) ? forClientData.game_support : []);
+  const gameSupport = rawGameSupport
+    .filter((gs: any) => gs && gs.game && gs.supports !== false)
+    .map((gs: any) => ({
+      supports: Boolean(gs.supports ?? true),
+      confidence: typeof gs.confidence === 'number' ? gs.confidence : undefined,
+      game: {
+        id: `${gs.game.author}/${gs.game.name}`,
+        author: String(gs.game.author || ''),
+        name: String(gs.game.name || ''),
+        title: String(gs.game.title || gs.game.name || ''),
+        thumbnail: gs.game.thumbnail || undefined,
+        short_description: gs.game.short_description || gs.game.short_desc || undefined
+      }
+    }));
+
   const enriched = {
     ...upstreamData,
     id: canonicalId,
@@ -1519,6 +1422,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ai_disclosures: aiDisclosures,
     maintainers: maintainersList,
     review_thread_counts: reviewThreadCounts,
+    supports_all_games: typeof upstreamData.supports_all_games === 'boolean' ? upstreamData.supports_all_games : undefined,
+    game_support: gameSupport.length > 0 ? gameSupport : undefined,
     created_at: createdAt,
     updated_at: updatedAt,
     screenshots,

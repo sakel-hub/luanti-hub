@@ -19,11 +19,14 @@ import {
   parseCdbJsonMetadata,
   CdbJsonMetadata,
   ensureExtendedPackageColumns,
-  extractEmbeddedVideo
+  extractEmbeddedVideo,
+  ensureModerationColumns
 } from '../lib/upstream';
+import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
 interface Env {
   DB?: any;
+  AI?: any;
   SESSION_SECRET?: string;
   ADMIN_USERS?: string;
 }
@@ -601,10 +604,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // Optional: Probe `.cdb.json` (Luanti ContentDB repository metadata specification)
     let cdbMeta: CdbJsonMetadata | null = null;
+    let rawCdbJsonText = '';
     try {
       const cdbRes = await fetch(buildRawUrl(branch, '.cdb.json'));
       if (cdbRes.ok) {
         const cdbText = await cdbRes.text();
+        rawCdbJsonText = cdbText;
         cdbMeta = parseCdbJsonMetadata(cdbText);
         if (cdbMeta) {
           diagnostics.push({
@@ -749,6 +754,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
+    let discoveredRootEntries: RepoEntry[] | null = null;
     if (packageType === 'mod') {
       if (!luaSource) {
         diagnostics.push({
@@ -767,6 +773,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     } else {
       // Verify repository directory structure for game.conf, modpack.conf, or texture_pack.conf
       const rootEntries = await fetchRepoRootEntries(provider, host, owner, repo, branch);
+      discoveredRootEntries = rootEntries;
       if (rootEntries && rootEntries.length > 0) {
         const hasGitmodules = rootEntries.some(e => e.name.toLowerCase() === '.gitmodules');
         if (packageType === 'game') {
@@ -895,6 +902,50 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         file: 'screenshot.png',
         title: 'Repository Screenshot Verified',
         message: 'Found screenshot.png in repository root.'
+      });
+    }
+
+    // Check 5B: Automated Content Safety Audit (4-Layer Static + Optional Cloudflare Workers AI on Publish)
+    const preliminaryTitle = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+    const preliminaryShortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
+    const safetyEval = await evaluateRepositoryContentSafety(
+      {
+        repoOwner: owner,
+        repoName: repo,
+        confFileName,
+        rawConfig,
+        title: preliminaryTitle,
+        shortDesc: preliminaryShortDesc,
+        cdbJsonText: rawCdbJsonText || undefined,
+        readmeMarkdown: readmeMarkdown || undefined,
+        luaSource: luaSource || undefined,
+        rootFileNames: discoveredRootEntries ? discoveredRootEntries.map(e => e.name) : undefined
+      },
+      {
+        aiBinding: context.env.AI,
+        runAiCheck: !dryRun
+      }
+    );
+
+    if (safetyEval.holdForAdminReview) {
+      const firstMatch = safetyEval.matches[0];
+      diagnostics.push({
+        code: 'CONTENT_SAFETY_HOLD',
+        severity: 'warning',
+        file: firstMatch?.file || confFileName,
+        line: firstMatch?.line,
+        title: 'Content Safety Review Required (Queued for Admin Approval)',
+        message: `${safetyEval.summary}. If published as-is, this package will be held for administrator review before appearing in the public catalog.`,
+        howToFix: 'If this match was unintentional, remove the flagged wording from your repository and re-run Pre-Flight Check. If your package is a legitimate horror/mature mod, you may still click Publish and a moderator will review and approve it.',
+        snippet: firstMatch?.snippet
+      });
+    } else if (safetyEval.autoContentWarnings.length > 0) {
+      diagnostics.push({
+        code: 'CONTENT_WARNING_AUTO_TAGGED',
+        severity: 'warning',
+        file: confFileName,
+        title: `Content Warning Badge Attached (${safetyEval.autoContentWarnings.join(', ')})`,
+        message: `Detected mature thematic terms (${safetyEval.autoContentWarnings.join(', ')}). Package can be published immediately with an automatic Content Warning badge.`
       });
     }
 
@@ -1121,9 +1172,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const resolvedTranslationUrl = cdbMeta?.translation_url || matchedContentDbPkg?.translation_url || existingD1Pkg?.translation_url || undefined;
     const resolvedWebsite = cdbMeta?.website || matchedContentDbPkg?.website || undefined;
     const resolvedDevState = cdbMeta?.dev_state || matchedContentDbPkg?.dev_state || existingD1Pkg?.dev_state || undefined;
-    const resolvedWarnings = (cdbMeta?.content_warnings && cdbMeta.content_warnings.length > 0)
+    const baseWarnings = (cdbMeta?.content_warnings && cdbMeta.content_warnings.length > 0)
       ? cdbMeta.content_warnings
       : parseJsonArray(existingD1Pkg?.content_warnings);
+    const resolvedWarnings = Array.from(
+      new Set([...baseWarnings, ...safetyEval.autoContentWarnings])
+    );
 
     const packagePayload = {
       id: packageId,
@@ -1193,6 +1247,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       confFile: confFileName,
       licenseValid,
       luacheckPassed,
+      contentSafetyHold: safetyEval.holdForAdminReview,
       errorsCount,
       warningsCount,
       branch,
@@ -1291,15 +1346,20 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         : 0;
       packagePayload.score = actualReviewScore;
 
+      const initialStatus = safetyEval.holdForAdminReview ? 'flagged' : 'active';
+      const initialStatusReason = safetyEval.holdForAdminReview
+        ? `[ADMIN] Automated Content Safety Hold: ${safetyEval.summary}`.slice(0, 500)
+        : null;
+
       await context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
           downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
           min_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
-          video_url, video_thumbnail_url, dev_state, content_warnings, status
+          video_url, video_thumbnail_url, dev_state, content_warnings, status, status_reason, flagged_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
         ON CONFLICT(id) DO UPDATE SET
           author_id = excluded.author_id,
           title = excluded.title,
@@ -1327,9 +1387,21 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
           dev_state = COALESCE(excluded.dev_state, packages.dev_state),
           content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
-          status = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status ELSE 'active' END,
-          status_reason = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status_reason ELSE NULL END,
-          flagged_at = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.flagged_at ELSE NULL END,
+          status = CASE
+            WHEN excluded.status = 'flagged' THEN 'flagged'
+            WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status
+            ELSE 'active'
+          END,
+          status_reason = CASE
+            WHEN excluded.status = 'flagged' THEN excluded.status_reason
+            WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status_reason
+            ELSE NULL
+          END,
+          flagged_at = CASE
+            WHEN excluded.status = 'flagged' THEN CURRENT_TIMESTAMP
+            WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.flagged_at
+            ELSE NULL
+          END,
           updated_at = CURRENT_TIMESTAMP
       `).bind(
         packageId,
@@ -1361,7 +1433,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         resolvedVideo.video_url || null,
         resolvedVideo.video_thumbnail_url || null,
         resolvedDevState || null,
-        resolvedWarnings.length > 0 ? JSON.stringify(resolvedWarnings) : null
+        resolvedWarnings.length > 0 ? JSON.stringify(resolvedWarnings) : null,
+        initialStatus,
+        initialStatusReason,
+        initialStatus
       ).run();
 
       await context.env.DB.prepare(
@@ -1391,12 +1466,38 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
       }
 
-      // Auto-resolve any open 'broken' (404) moderation reports for this package now that its Git repo passed audit
-      await autoResolveBrokenRepoReport(
-        context.env.DB,
-        packageId,
-        `Repository verified and updated via Git Pre-Flight Audit (${repoUrl.trim()}).`
-      );
+      if (safetyEval.holdForAdminReview) {
+        await ensureModerationColumns(context.env.DB);
+        const reportDetails =
+          `[Automated Content Safety Hold] ${safetyEval.summary}. ` +
+          `Submitted by @${canonicalAuthor} (${repoUrl.trim()}). ` +
+          `Click Restore (or Dismiss) to approve and publish to the catalog, or Delist to keep blocked.`;
+        const existingSafetyReport = await context.env.DB.prepare(`
+          SELECT id FROM moderation_reports
+          WHERE LOWER(package_id) = LOWER(?) AND reason = 'inappropriate' AND status = 'open'
+          LIMIT 1
+        `).bind(packageId).first().catch(() => null);
+
+        if (existingSafetyReport?.id) {
+          await context.env.DB.prepare(`
+            UPDATE moderation_reports
+            SET details = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).bind(reportDetails.slice(0, 1000), existingSafetyReport.id).run();
+        } else {
+          await context.env.DB.prepare(`
+            INSERT INTO moderation_reports (package_id, reporter_user_id, reason, details, status)
+            VALUES (?, 'system-content-guard', 'inappropriate', ?, 'open')
+          `).bind(packageId, reportDetails.slice(0, 1000)).run();
+        }
+      } else {
+        // Auto-resolve any open 'broken' (404) moderation reports for this package now that its Git repo passed audit
+        await autoResolveBrokenRepoReport(
+          context.env.DB,
+          packageId,
+          `Repository verified and updated via Git Pre-Flight Audit (${repoUrl.trim()}).`
+        );
+      }
     }
 
     await invalidateEdgeCacheKeys([
@@ -1405,9 +1506,25 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       `/__api_pkg_detail_v2/${canonicalAuthor.toLowerCase()}/${technicalName.toLowerCase()}`
     ]);
 
+    if (safetyEval.holdForAdminReview) {
+      return Response.json({
+        success: true,
+        canPublish: true,
+        pendingModeration: true,
+        status: 'flagged',
+        message:
+          `Your package was flagged by automated content safety checks (${safetyEval.summary}) and has been submitted to administrators for review before appearing in the public catalog.`,
+        audit: auditReport,
+        auditReport,
+        package: packagePayload
+      });
+    }
+
     return Response.json({
       success: true,
       canPublish: true,
+      pendingModeration: false,
+      status: 'active',
       audit: auditReport,
       auditReport,
       package: packagePayload

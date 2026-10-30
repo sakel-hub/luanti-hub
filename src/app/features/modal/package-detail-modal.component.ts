@@ -1056,6 +1056,28 @@ import {
                   </div>
                 </div>
 
+                <!-- Supported Games (from ContentDB game_support) -->
+                @if (package.game_support && package.game_support.length > 0) {
+                  <div class="space-y-1.5">
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      Supported Games
+                    </span>
+                    <div class="flex flex-wrap gap-1.5">
+                      @for (gs of package.game_support.slice(0, 6); track gs.game.id) {
+                        <button
+                          type="button"
+                          (click)="packageService.openPackageModalById(gs.game.author, gs.game.name, true)"
+                          class="px-2 py-1 rounded-lg glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-semibold flex items-center gap-1.5 transition cursor-pointer">
+                          @if (gs.game.thumbnail) {
+                            <img [src]="gs.game.thumbnail" [alt]="gs.game.title" class="w-3.5 h-3.5 rounded object-cover" />
+                          }
+                          <span class="truncate max-w-[130px]">{{ gs.game.title }}</span>
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
+
                 <!-- Content Warnings & AI Disclosures (When present on ContentDB) -->
                 @if ((package.content_warnings && package.content_warnings.length > 0) || (package.ai_disclosures && package.ai_disclosures.length > 0)) {
                   <div class="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2 text-[11px]">
@@ -1289,11 +1311,59 @@ import {
                   @if (reviews().length === 0) {
                     <p class="text-xs text-slate-500 text-center py-4">{{ 'modal.noReviews' | translate }}</p>
                   } @else {
+                    <!-- Reviews Source Summary Bar (Luanti Hub vs. ContentDB) -->
+                    <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/40 border border-white/10 text-[11px]">
+                      <span class="text-slate-400 font-semibold">
+                        Showing <span class="text-white font-bold">{{ reviews().length }}</span> community {{ reviews().length === 1 ? 'review' : 'reviews' }}
+                      </span>
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span
+                          [appTooltip]="'Reviews submitted directly on Luanti Hub'"
+                          class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-emerald-500/15 border border-emerald-400/35 text-emerald-300 font-bold text-[10px]">
+                          <img src="logo.svg" alt="Luanti Hub" class="w-3.5 h-3.5 object-contain flex-shrink-0" />
+                          <span>Luanti Hub ({{ luantiHubReviewsCount() }})</span>
+                        </span>
+                        <span
+                          [appTooltip]="'Reviews synced from the official Luanti ContentDB registry'"
+                          class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-sky-500/15 border border-sky-400/35 text-sky-300 font-bold text-[10px]">
+                          <svg lucideGlobe class="w-3 h-3 text-sky-300 flex-shrink-0"></svg>
+                          <span>ContentDB ({{ contentDbReviewsCount() }})</span>
+                        </span>
+                      </div>
+                    </div>
+
                     <div class="space-y-3">
                       @for (rev of reviews(); track rev.id) {
-                        <div class="p-3.5 rounded-2xl glass-panel space-y-1.5 text-xs">
-                          <div class="flex items-center justify-between gap-2">
-                            <div class="flex items-center gap-2 min-w-0">
+                        <div
+                          [class]="rev.source === 'contentdb' ? 'border-l-2 border-l-sky-400/60' : 'border-l-2 border-l-emerald-400/60'"
+                          class="p-3.5 rounded-2xl glass-panel space-y-2 text-xs">
+                          <div class="flex items-start justify-between gap-2">
+                            <div class="flex items-center gap-2.5 min-w-0 flex-wrap">
+                              <!-- Reviewer Avatar + Platform Corner Badge -->
+                              <div class="relative flex-shrink-0">
+                                @if (rev.source === 'contentdb') {
+                                  <div class="w-7 h-7 rounded-xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-[11px] font-black text-sky-300 uppercase select-none">
+                                    {{ (rev.author.display_name || rev.author.username || 'C').slice(0, 1) }}
+                                  </div>
+                                  <span
+                                    [appTooltip]="'Official ContentDB Review'"
+                                    class="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-slate-950 border border-sky-400/50 flex items-center justify-center shadow">
+                                    <svg lucideGlobe class="w-2.5 h-2.5 text-sky-300"></svg>
+                                  </span>
+                                } @else {
+                                  <img
+                                    [src]="rev.author.avatar_url || 'logo.svg'"
+                                    appImgFallback="logo.svg"
+                                    [alt]="rev.author.display_name || rev.author.username"
+                                    class="w-7 h-7 rounded-xl object-cover bg-slate-900 border border-emerald-400/30" />
+                                  <span
+                                    [appTooltip]="'Verified Luanti Hub Review'"
+                                    class="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-slate-950 border border-emerald-400/50 flex items-center justify-center p-0.5 shadow">
+                                    <img src="logo.svg" alt="" class="w-full h-full object-contain" />
+                                  </span>
+                                }
+                              </div>
+
                               <button
                                 type="button"
                                 (click)="openAuthorProfile(rev.author.username)"
@@ -1304,8 +1374,48 @@ import {
                                 <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
                                 <span class="font-bold text-[11px]">{{ rev.rating }}/5</span>
                               </div>
+
+                              <!-- Distinct Platform Source Badge with Logo / Icon -->
+                              @if (rev.source === 'contentdb') {
+                                <span
+                                  [appTooltip]="'Synced from Official Luanti ContentDB'"
+                                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border bg-sky-500/15 text-sky-300 border-sky-400/35 text-[9px] font-bold uppercase tracking-wider">
+                                  <svg lucideGlobe class="w-2.5 h-2.5 text-sky-300 flex-shrink-0"></svg>
+                                  <span>ContentDB</span>
+                                </span>
+                                @if (rev.is_positive !== undefined) {
+                                  <span
+                                    [class]="rev.is_positive ? 'bg-emerald-500/10 text-emerald-300 border-emerald-400/25' : 'bg-rose-500/10 text-rose-300 border-rose-400/25'"
+                                    class="px-1.5 py-0.5 rounded-md border text-[9px] font-semibold">
+                                    {{ rev.is_positive ? '👍 Recommended' : '👎 Not Recommended' }}
+                                  </span>
+                                }
+                              } @else {
+                                <span
+                                  [appTooltip]="'Submitted directly on Luanti Hub'"
+                                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border bg-emerald-500/15 text-emerald-300 border-emerald-400/35 text-[9px] font-bold uppercase tracking-wider">
+                                  <img src="logo.svg" alt="" class="w-3 h-3 object-contain flex-shrink-0" />
+                                  <span>Luanti Hub</span>
+                                </span>
+                              }
+
+                              @if (rev.votes && rev.votes.helpful > 0) {
+                                <span class="text-[10px] text-slate-400 font-medium">
+                                  • {{ rev.votes.helpful }} helpful
+                                </span>
+                              }
                             </div>
                             <div class="flex items-center gap-2 flex-shrink-0">
+                              @if (rev.thread_url) {
+                                <a
+                                  [href]="rev.thread_url"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  [appTooltip]="'View review thread on ContentDB'"
+                                  class="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-0.5 transition">
+                                  <svg lucideExternalLink class="w-2.5 h-2.5"></svg>
+                                </a>
+                              }
                               <span class="text-[10px] text-slate-500">{{ rev.created_at | date }}</span>
                               @if (authService.currentUser() && !isOwnReview(rev)) {
                                 @if (flaggedReviewIds().has(rev.id)) {
@@ -1394,33 +1504,50 @@ import {
                     </div>
                   } @else {
                     @for (rel of releases(); track rel.id) {
-                      <div class="p-3.5 rounded-2xl glass-panel flex items-center justify-between gap-3 text-xs">
-                        <div class="space-y-0.5">
-                          <div class="flex items-center gap-2">
-                            <span class="font-bold text-white">{{ rel.version }}</span>
-                            @if (rel.commit_sha) {
-                              <code class="text-[10px] text-sky-400 bg-slate-950/80 px-1.5 py-0.5 rounded font-mono border border-white/10">
-                                {{ rel.commit_sha | slice:0:8 }}
-                              </code>
-                            }
+                      <div class="p-3.5 rounded-2xl glass-panel flex flex-col gap-2 text-xs">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="space-y-0.5 min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                              <span class="font-bold text-white">{{ rel.version }}</span>
+                              @if (rel.commit_sha) {
+                                <code class="text-[10px] text-sky-400 bg-slate-950/80 px-1.5 py-0.5 rounded font-mono border border-white/10">
+                                  {{ rel.commit_sha | slice:0:8 }}
+                                </code>
+                              }
+                              @if (rel.min_minetest_version) {
+                                <span class="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[10px] text-slate-300">
+                                  Engine {{ rel.min_minetest_version }}+
+                                </span>
+                              }
+                            </div>
+                            <div class="flex items-center gap-2 text-[10px] text-slate-500 flex-wrap">
+                              @if (rel.released_at) {
+                                <span>{{ rel.released_at | date }}</span>
+                              }
+                              @if (rel.downloads !== undefined && rel.downloads > 0) {
+                                <span>• {{ rel.downloads | compactNumber }} downloads</span>
+                              }
+                            </div>
                           </div>
-                          @if (rel.released_at) {
-                            <span class="text-[10px] text-slate-500 block">{{ rel.released_at | date }}</span>
-                          }
-                        </div>
 
-                        <button
-                          type="button"
-                          (click)="onDownloadRelease(rel)"
-                          class="px-3.5 py-1.5 rounded-xl glass-btn hover:bg-white text-white hover:text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer">
-                          <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                          <span>
-                            {{ 'card.downloadZip' | translate }}
-                            @if (rel.file_size || package.file_size) {
-                              ({{ rel.file_size || package.file_size }})
-                            }
-                          </span>
-                        </button>
+                          <button
+                            type="button"
+                            (click)="onDownloadRelease(rel)"
+                            class="px-3.5 py-1.5 rounded-xl glass-btn hover:bg-white text-white hover:text-slate-950 font-bold text-xs flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
+                            <svg lucideDownload class="w-3.5 h-3.5"></svg>
+                            <span>
+                              {{ 'card.downloadZip' | translate }}
+                              @if (rel.file_size || package.file_size) {
+                                ({{ rel.file_size || package.file_size }})
+                              }
+                            </span>
+                          </button>
+                        </div>
+                        @if (rel.release_notes || rel.changelog) {
+                          <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line border-t border-white/10 pt-2">
+                            {{ rel.release_notes || rel.changelog }}
+                          </p>
+                        }
                       </div>
                     }
                   }
@@ -1569,6 +1696,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
+  readonly luantiHubReviewsCount = computed(() =>
+    this.reviews().filter(r => r.source !== 'contentdb').length
+  );
+  readonly contentDbReviewsCount = computed(() =>
+    this.reviews().filter(r => r.source === 'contentdb').length
+  );
   readonly releases = signal<PackageRelease[]>([]);
   readonly copied = signal(false);
   readonly copiedUrl = signal(false);
@@ -1948,7 +2081,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
-    this.packageService.fetchReviews(this.package, true).then(res => this.reviews.set(res));
+    this.packageService.fetchReviews(this.package, false).then(res => this.reviews.set(res));
     this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
   }
 

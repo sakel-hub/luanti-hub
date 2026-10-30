@@ -1,7 +1,8 @@
 import {
-  fetchWithFailover,
+  fetchUpstreamJsonCached,
   invalidateEdgeCacheKeys,
-  ensureModerationColumns
+  ensureModerationColumns,
+  normalizeContentDbReviewItem
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -20,10 +21,12 @@ interface Env {
 export async function onRequestGet(context: { params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const packageId = `${author}/${name}`;
+  const encAuthor = encodeURIComponent(author);
+  const encName = encodeURIComponent(name);
 
-  // 1. Fetch Official ContentDB Reviews (with failover)
-  const officialPromise = fetchWithFailover(`/packages/${author}/${name}/reviews/`)
-    .then(r => (r.ok ? r.json() : []))
+  // 1. Fetch Official ContentDB Reviews (with Edge Cache + failover)
+  const officialPromise = fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
+    .then(list => (Array.isArray(list) ? list : []))
     .catch(() => []);
 
   // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1 (case-insensitive package_id match)
@@ -43,21 +46,10 @@ export async function onRequestGet(context: { params: { author: string; name: st
 
   const [officialReviews, localReviews] = await Promise.all([officialPromise, localPromise]);
 
-  // 3. Normalize ContentDB Reviews (recommends: true = 5★, neutral = 3★, false = 1★)
-  const normalizedOfficial = (Array.isArray(officialReviews) ? officialReviews : []).map((r: any) => ({
-    id: `cdb_${r.id || Math.random()}`,
-    package_id: packageId,
-    source: 'contentdb',
-    rating: r.rating ? Math.min(5, Math.max(1, Number(r.rating))) : (r.recommends === false ? 1 : r.recommends === true ? 5 : 3),
-    title: r.title,
-    comment: r.comment || r.text || '',
-    created_at: r.created_at,
-    author: {
-      username: r.author || r.user?.username || 'contentdb_user',
-      display_name: r.author || r.user?.display_name || r.user?.username || 'Community Member',
-      avatar_url: `https://github.com/${r.author || r.user?.username || 'octocat'}.png`
-    }
-  }));
+  // 3. Normalize ContentDB Reviews (`PackageReview.as_dict()`)
+  const normalizedOfficial = (Array.isArray(officialReviews) ? officialReviews : []).map((r: any, idx: number) =>
+    normalizeContentDbReviewItem(r, idx, packageId)
+  );
 
   // 4. Normalize LuantiHub Local Reviews
   const normalizedLocal = localReviews.map((r: any) => ({
