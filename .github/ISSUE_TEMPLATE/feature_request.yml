@@ -1,0 +1,59 @@
+name: "✨ Feature Request / Suggestion"
+description: "Propose a new feature, improvement, or UX idea for LuantiHub"
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Share an idea to make LuantiHub better! 💡
+        Thank you for helping improve the LuantiHub ecosystem. Please fill out the details below.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Functional Area
+      description: Which part of LuantiHub does this suggestion touch?
+      options:
+        - "PWA & Mobile UX (Offline Mode, Install Prompts, Notifications)"
+        - "Search, Tagging & Package Discovery"
+        - "In-Game Client Integration (contentdb_url & engine setup)"
+        - "Git Submission Pipeline & Pre-Flight Luacheck Audit"
+        - "Ready-to-Drop .zip Packaging & Mirror Fallback"
+        - "Community Reviews & Ratings"
+        - "Translations & Accessibility (i18n, contrast, keyboard nav)"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Limitation
+      description: Is your feature request related to a specific friction point or missing capability?
+      placeholder: "I find it difficult to..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution
+      description: Describe what you would like to see implemented and how it should behave.
+      placeholder: "A new button or setting in the drawer that allows..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions, third-party tools, or workarounds?
+      placeholder: "An alternative approach could be..."
+    validations:
+      required: false
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Mockups or Additional Context
+      description: Add any mockups, screenshots, or reference links here.
+      placeholder: "Attach concept diagrams or relevant links..."
+    validations:
+      required: false
+

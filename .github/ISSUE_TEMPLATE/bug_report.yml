@@ -1,0 +1,112 @@
+name: "🐛 Bug Report (PWA & Web App)"
+description: "Report an error, unexpected behavior, or PWA issue in LuantiHub"
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Thanks for reporting an issue! 🚀
+        Before submitting, please make sure your issue hasn't already been reported by searching open [GitHub Issues](https://github.com/sakel-hub/luanti-hub/issues).
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Running Environment / Platform
+      description: Where are you experiencing this issue?
+      options:
+        - "Installed PWA (Standalone Desktop/Mobile app)"
+        - "Mobile Browser (iOS Safari)"
+        - "Mobile Browser (Android Chrome / Chromium)"
+        - "Mobile Browser (Firefox Mobile)"
+        - "Desktop Browser (Chrome / Chromium / Edge / Brave)"
+        - "Desktop Browser (Firefox)"
+        - "Desktop Browser (Safari macOS)"
+        - "SteamOS / Steam Deck"
+        - "Other (please explain in description)"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - "Windows 10/11"
+        - "macOS"
+        - "Linux (Ubuntu / Debian / Arch / Fedora)"
+        - "Android"
+        - "iOS / iPadOS"
+        - "SteamOS"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: browser_version
+    attributes:
+      label: Browser & Version (if applicable)
+      description: e.g., Chrome 128, Safari 18.1, Firefox 132
+      placeholder: "e.g., Chrome 128 on Android 14"
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+      placeholder: "When doing X, Y happened instead of Z..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed step-by-step instructions so maintainers can reproduce the behavior.
+      value: |
+        1. Open '...'
+        2. Click on '....'
+        3. Scroll down to '....'
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: "The package modal should open cleanly without stutter..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: pwa_checks
+    attributes:
+      label: PWA & Offline Checks
+      description: "Please check any troubleshooting steps you've tried:"
+      options:
+        - label: "I tried clearing the PWA cache (via Header Gear Menu ⚙️ ➔ Clear Cache) and the issue persists."
+        - label: "I checked if an update banner or reload was prompted by the Service Worker."
+        - label: "The issue occurs while online (connected to the internet)."
+  - type: textarea
+    id: console_logs
+    attributes:
+      label: Console Logs & Network Errors
+      description: Copy and paste relevant JavaScript console errors (F12 Developer Tools / Web Inspector).
+      placeholder: "Uncaught TypeError: ..."
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or Screen Recordings
+      description: Drag and drop or paste images / video recordings demonstrating the issue here.
+      placeholder: "Attach images or video files here..."
+    validations:
+      required: false
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Issue Checklist
+      options:
+        - label: "I have searched open and closed issues to ensure this is not a duplicate."
+          required: true
+        - label: "I provided sufficient details for maintainers to reproduce or understand the problem."
+          required: true

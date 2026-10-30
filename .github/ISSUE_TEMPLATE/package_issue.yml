@@ -1,0 +1,77 @@
+name: "📦 Package or Registry Issue"
+description: "Report a package-specific error (failed zip packaging, broken git upstream, or client download error)"
+title: "[Package]: "
+labels: ["package-issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Report a Package or Engine Integration Problem 📦
+        > [!NOTE]
+        > **DMCA / Malware / Copyright Violation Notice:**
+        > If this report is regarding copyright infringement (DMCA § 512 / EU DSA), malicious Lua scripts, or inappropriate content, you can report it directly inside the web app using the **Flag / Report** button on the package dialog for immediate moderation review.
+  - type: input
+    id: package_id
+    attributes:
+      label: Package Identifier / Author & Name
+      description: The author and package slug (e.g., `sakel-hub/x_mobs` or `minetest/minetest_game`).
+      placeholder: "author/package_name"
+    validations:
+      required: true
+  - type: dropdown
+    id: package_source
+    attributes:
+      label: Package Source
+      description: Where is the package hosted or submitted from?
+      options:
+        - "Git-Submitted Package (GitHub, GitLab, Codeberg, Mesehub)"
+        - "Official ContentDB Mirror"
+        - "Both / Unsure"
+    validations:
+      required: true
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: Issue Type
+      options:
+        - "Ready-to-Drop .zip packaging failed or generated corrupt archive"
+        - "In-game Luanti client cannot download or install via contentdb_url"
+        - "Missing or broken dependencies in mod.conf"
+        - "Upstream Git repository 404, moved, or deleted"
+        - "Luacheck static analysis or metadata parsing mismatch"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: engine_version
+    attributes:
+      label: Luanti / Minetest Engine Version Tested
+      description: What engine version are you testing with?
+      placeholder: "e.g., Luanti 5.10.0, 5.9.1, 5.8.0"
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: Description of the Problem
+      description: What went wrong when attempting to view, download, or install this package?
+      placeholder: "When downloading the zip package..."
+    validations:
+      required: true
+  - type: textarea
+    id: error_log
+    attributes:
+      label: In-Game or Browser Error Logs
+      description: Paste any error messages from the Luanti client `debug.txt` or browser developer console.
+      placeholder: "AsyncErr: ServerEnvironment::loadLuaMod: Failed to load..."
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: "I verified that this is an issue with LuantiHub's packaging or indexing rather than a general engine bug."
+          required: true
+
