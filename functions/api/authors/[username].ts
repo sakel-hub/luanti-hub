@@ -1,7 +1,8 @@
 import {
   fetchUpstreamJsonCached,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  sanitizePublicErrorMessage
 } from '../lib/upstream';
 
 interface Env {
@@ -225,7 +226,7 @@ export async function onRequestGet(context: {
           is_registered: false,
           identities: []
         },
-        error: err.message
+        error: sanitizePublicErrorMessage(err, 'Could not load author profile.')
       },
       { status: 200 }
     );

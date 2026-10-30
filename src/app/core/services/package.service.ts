@@ -15,7 +15,7 @@ import {
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
-import { AuthService } from './auth.service';
+import { AuthService, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 
 const PAGE_SIZE = 32;
@@ -4112,7 +4112,7 @@ export class PackageService {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: data.error || 'Could not update package tags.' };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Could not update package tags.') };
       }
 
       const updatedTags: string[] = Array.isArray(data.tags) ? data.tags : customTags;
@@ -4847,7 +4847,7 @@ export class PackageService {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          return { success: false, message: data.error || 'Failed to submit review.' };
+          return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to submit review.') };
         }
         this.reviewsCache.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
@@ -4926,7 +4926,7 @@ export class PackageService {
       this.reviewsCache.delete(cacheKey);
       return { success: true, review: fallbackReview };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Error submitting review.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Error submitting review.') };
     }
   }
 
@@ -4946,7 +4946,7 @@ export class PackageService {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          return { success: false, message: data.error || 'Failed to flag review.' };
+          return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to flag review.') };
         }
         if (this.authService.isAdmin()) {
           this.authService.fetchModerationQueue();
@@ -4958,7 +4958,7 @@ export class PackageService {
       }
       return { success: false, message: 'Failed to flag review.' };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Error flagging review.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Error flagging review.') };
     }
   }
 
@@ -4978,7 +4978,7 @@ export class PackageService {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          return { success: false, message: data.error || 'Failed to delete review.' };
+          return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to delete review.') };
         }
         this.reviewsCache.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
@@ -5043,7 +5043,7 @@ export class PackageService {
       }
       return { success: false, message: 'Failed to delete review.' };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Error deleting review.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Error deleting review.') };
     }
   }
 
@@ -5075,7 +5075,12 @@ export class PackageService {
         if (!res.ok) {
           return {
             success: false,
-            message: result.error || 'Git pre-flight audit failed.',
+            message: sanitizeUserFacingError(
+              result.error,
+              payload.dryRun
+                ? 'Git pre-flight audit failed. Please try again in a moment.'
+                : 'We encountered a temporary server error while publishing your package. Please try again in a moment.'
+            ),
             audit: resolvedAudit
           };
         }
@@ -5110,7 +5115,10 @@ export class PackageService {
 
       return { success: false, message: 'Git audit service returned an unexpected response.' };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error connecting to Git audit service.' };
+      return {
+        success: false,
+        message: sanitizeUserFacingError(err, 'Network error connecting to Git audit service.')
+      };
     }
   }
 
@@ -5124,12 +5132,12 @@ export class PackageService {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: data.error || 'Could not submit report.' };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Could not submit report.') };
       }
       this.pwaService.showToast('modal.reportSubmitted');
       return { success: true, message: data.message };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Failed to submit report.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Failed to submit report.') };
     }
   }
 
@@ -5148,7 +5156,7 @@ export class PackageService {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: data.error || 'Moderation action failed.' };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Moderation action failed.') };
       }
 
       const targetId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
@@ -5186,7 +5194,10 @@ export class PackageService {
       );
       return { success: true, message: data.message };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error executing moderation action.' };
+      return {
+        success: false,
+        message: sanitizeUserFacingError(err, 'Network error executing moderation action.')
+      };
     }
   }
 }

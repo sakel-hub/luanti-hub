@@ -434,13 +434,20 @@ export interface DiscoveredGitRelease {
 let extendedColumnsEnsured = false;
 
 /**
- * Ensures `contentdb_downloads` and `luantihub_downloads` columns exist on `packages`
- * in Cloudflare D1 at runtime so dual-counter tracking works without manual CLI migration.
+ * Ensures all extended metadata columns (including `content_warnings`, `ai_disclosures`,
+ * `maintainers`, `max_minetest_version`, `contentdb_downloads`, `luantihub_downloads`, etc.)
+ * exist on `packages` in Cloudflare D1 at runtime without requiring manual CLI migration.
  */
-export async function ensureExtendedPackageColumns(db: any): Promise<void> {
-  if (!db || extendedColumnsEnsured) return;
-  extendedColumnsEnsured = true;
+export async function ensureExtendedPackageColumns(db: any, force = false): Promise<void> {
+  if (!db || (extendedColumnsEnsured && !force)) return;
   const requiredCols: Array<[string, string]> = [
+    ['tags', 'TEXT'],
+    ['dependencies', 'TEXT'],
+    ['optional_dependencies', 'TEXT'],
+    ['min_minetest_version', "TEXT DEFAULT '5.0.0'"],
+    ['max_minetest_version', 'TEXT'],
+    ['status_reason', 'TEXT'],
+    ['flagged_at', 'DATETIME'],
     ['contentdb_downloads', 'INTEGER DEFAULT 0'],
     ['luantihub_downloads', 'INTEGER DEFAULT 0'],
     ['download_size', 'INTEGER'],
@@ -452,7 +459,10 @@ export async function ensureExtendedPackageColumns(db: any): Promise<void> {
     ['video_url', 'TEXT'],
     ['video_thumbnail_url', 'TEXT'],
     ['dev_state', 'TEXT'],
-    ['provides', 'TEXT']
+    ['provides', 'TEXT'],
+    ['content_warnings', 'TEXT'],
+    ['ai_disclosures', 'TEXT'],
+    ['maintainers', 'TEXT']
   ];
   try {
     const info = await db.prepare(`PRAGMA table_info(packages)`).all();
@@ -464,9 +474,35 @@ export async function ensureExtendedPackageColumns(db: any): Promise<void> {
         await db.prepare(`ALTER TABLE packages ADD COLUMN ${colName} ${colDef}`).run().catch(() => {});
       }
     }
+    if (existing.size > 0) {
+      extendedColumnsEnsured = true;
+    }
   } catch {
-    // Ignore schema inspection errors
+    // Ignore schema inspection errors; will retry on next request
   }
+}
+
+/**
+ * Sanitizes error messages before returning them in HTTP JSON responses so internal
+ * database schema details (`D1_ERROR`, `SQLITE_ERROR`, table/column names, stack traces,
+ * or runtime exceptions) are never exposed to the client.
+ */
+export function sanitizePublicErrorMessage(
+  err: any,
+  fallbackMessage = 'A temporary server error occurred. Please try again in a moment.'
+): string {
+  const raw = typeof err === 'string' ? err.trim() : String(err?.message || '').trim();
+  if (!raw) return fallbackMessage;
+
+  const sensitivePattern =
+    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal)/i;
+
+  if (sensitivePattern.test(raw) || raw.startsWith('<!DOCTYPE') || raw.startsWith('<html')) {
+    console.error('[LuantiHub Internal Error]:', raw);
+    return fallbackMessage;
+  }
+
+  return raw;
 }
 
 /**

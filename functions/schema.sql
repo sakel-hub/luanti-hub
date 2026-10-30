@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS packages (
     dependencies TEXT,                   -- JSON array of required dependency names
     optional_dependencies TEXT,          -- JSON array of optional dependency names
     min_minetest_version TEXT DEFAULT '5.0.0',
+    max_minetest_version TEXT,
     status TEXT DEFAULT 'active' CHECK(status IN ('active', 'flagged', 'delisted')),
     status_reason TEXT,                  -- Reason for flag/delist (e.g. DMCA, Malware)
     flagged_at DATETIME,
@@ -66,6 +67,9 @@ CREATE TABLE IF NOT EXISTS packages (
     video_thumbnail_url TEXT,
     dev_state TEXT,
     provides TEXT,
+    content_warnings TEXT,               -- JSON array of content warning identifiers
+    ai_disclosures TEXT,                 -- JSON array of AI disclosure identifiers
+    maintainers TEXT,                    -- JSON array of maintainer handles
     score REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

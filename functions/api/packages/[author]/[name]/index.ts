@@ -17,7 +17,8 @@ import {
   CdbJsonMetadata,
   scanGitRepoMetadataCached,
   GitRepoScanResult,
-  normalizeContentDbReviewItem
+  normalizeContentDbReviewItem,
+  sanitizePublicErrorMessage
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -1458,12 +1459,15 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
 // PATCH /api/packages/:author/:name — Allow package author or admin to edit package tags
 export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
-  const pkgId = `${author}/${name}`;
+  try {
+    const { author, name } = context.params;
+    const pkgId = `${author}/${name}`;
 
-  if (!context.env.DB) {
-    return Response.json({ error: 'Database unavailable.' }, { status: 503 });
-  }
+    if (!context.env.DB) {
+      return Response.json({ error: 'Database unavailable.' }, { status: 503 });
+    }
+
+    await ensureExtendedPackageColumns(context.env.DB);
 
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
@@ -1545,8 +1549,14 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
   ]);
 
-  return Response.json({
-    success: true,
-    tags: finalTags
-  });
+    return Response.json({
+      success: true,
+      tags: finalTags
+    });
+  } catch (err: any) {
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Could not update package tags.') },
+      { status: 500 }
+    );
+  }
 }

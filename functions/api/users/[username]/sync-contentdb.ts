@@ -1,6 +1,6 @@
 // Link ContentDB Author Account & Sync Packages to LuantiHub Profile
 import { verifySessionToken, parseCookies, checkIsAdmin } from '../../auth/lib/session';
-import { syncAuthorContentDbPackages } from '../../lib/upstream';
+import { syncAuthorContentDbPackages, sanitizePublicErrorMessage } from '../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -98,6 +98,6 @@ export async function onRequestPost(context: { params: { username: string }; req
     });
 
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Failed to sync ContentDB account.' }, { status: 500 });
+    return Response.json({ error: sanitizePublicErrorMessage(err, 'Failed to sync ContentDB account.') }, { status: 500 });
   }
 }

@@ -1,4 +1,5 @@
 import { verifySessionToken, parseCookies } from './lib/session';
+import { sanitizePublicErrorMessage } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -119,6 +120,6 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       favorites: (updated.results || []).map((r: any) => r.package_id)
     });
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Failed to sync favorites.' }, { status: 500 });
+    return Response.json({ error: sanitizePublicErrorMessage(err, 'Failed to sync favorites.') }, { status: 500 });
   }
 }

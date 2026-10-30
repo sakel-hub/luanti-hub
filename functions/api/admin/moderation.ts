@@ -1,6 +1,12 @@
 // Admin & Author Moderation Queue, Communication, Pagination & 404 Live Re-Check Endpoint
 import { verifySessionToken, parseCookies, checkIsAdmin } from '../auth/lib/session';
-import { ensureModerationColumns, fetchUpstreamJsonCached, invalidateEdgeCacheKeys } from '../lib/upstream';
+import {
+  ensureModerationColumns,
+  ensureExtendedPackageColumns,
+  fetchUpstreamJsonCached,
+  invalidateEdgeCacheKeys,
+  sanitizePublicErrorMessage
+} from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -195,7 +201,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         page: 1,
         pageSize: 5,
         totalPages: 1,
-        error: err.message
+        error: sanitizePublicErrorMessage(err, 'Could not load moderation reports.')
       });
     }
   }
@@ -300,30 +306,32 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       page: 1,
       pageSize: 10,
       totalPages: 1,
-      error: err.message
+      error: sanitizePublicErrorMessage(err, 'Could not load moderation queue.')
     });
   }
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
-  const { request, env } = context;
+  try {
+    const { request, env } = context;
 
-  if (!env.DB) {
-    return Response.json({ error: 'Database binding not available.' }, { status: 503 });
-  }
+    if (!env.DB) {
+      return Response.json({ error: 'Database binding not available.' }, { status: 503 });
+    }
 
-  const cookies = parseCookies(request);
-  const sessionToken = cookies['lh_session'];
-  if (!sessionToken) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+    const cookies = parseCookies(request);
+    const sessionToken = cookies['lh_session'];
+    if (!sessionToken) {
+      return Response.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-  const userId = await verifySessionToken(sessionToken, env.SESSION_SECRET);
-  if (!userId) {
-    return Response.json({ error: 'Invalid session' }, { status: 401 });
-  }
+    const userId = await verifySessionToken(sessionToken, env.SESSION_SECRET);
+    if (!userId) {
+      return Response.json({ error: 'Invalid session' }, { status: 401 });
+    }
 
-  await ensureModerationColumns(env.DB);
+    await ensureModerationColumns(env.DB);
+    await ensureExtendedPackageColumns(env.DB);
 
   const currentUser = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(userId).first();
   const idRes = await env.DB.prepare(
@@ -542,13 +550,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
   }
 
-  return Response.json({
-    success: true,
-    status: nextStatus,
-    packageApproved: packageApprovedAndPublished,
-    resolution_note: formattedNote.slice(0, 2000),
-    message: packageApprovedAndPublished
-      ? `Report #${reportRow.id} dismissed and package '${reportRow.package_id}' approved for the public catalog.`
-      : `Report #${reportRow.id} marked as ${nextStatus}.`
-  });
+    return Response.json({
+      success: true,
+      status: nextStatus,
+      packageApproved: packageApprovedAndPublished,
+      resolution_note: formattedNote.slice(0, 2000),
+      message: packageApprovedAndPublished
+        ? `Report #${reportRow.id} dismissed and package '${reportRow.package_id}' approved for the public catalog.`
+        : `Report #${reportRow.id} marked as ${nextStatus}.`
+    });
+  } catch (err: any) {
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Could not process moderation action.') },
+      { status: 500 }
+    );
+  }
 }

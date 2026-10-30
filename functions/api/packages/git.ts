@@ -20,7 +20,8 @@ import {
   CdbJsonMetadata,
   ensureExtendedPackageColumns,
   extractEmbeddedVideo,
-  ensureModerationColumns
+  ensureModerationColumns,
+  sanitizePublicErrorMessage
 } from '../lib/upstream';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
@@ -1351,7 +1352,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ? `[ADMIN] Automated Content Safety Hold: ${safetyEval.summary}`.slice(0, 500)
         : null;
 
-      await context.env.DB.prepare(`
+      const runPackageUpsert = () => context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
@@ -1438,6 +1439,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         initialStatusReason,
         initialStatus
       ).run();
+
+      try {
+        await runPackageUpsert();
+      } catch (upsertErr: any) {
+        if (/has no column named|no such column/i.test(String(upsertErr?.message || ''))) {
+          await ensureExtendedPackageColumns(context.env.DB, true);
+          await runPackageUpsert();
+        } else {
+          throw upsertErr;
+        }
+      }
 
       await context.env.DB.prepare(
         `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
@@ -1531,6 +1543,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     });
 
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Internal error auditing repository.' }, { status: 500 });
+    return Response.json(
+      {
+        error: sanitizePublicErrorMessage(
+          err,
+          'We encountered a temporary server error while processing your repository. Please try again in a moment.'
+        )
+      },
+      { status: 500 }
+    );
   }
 }

@@ -2,7 +2,9 @@ import {
   fetchUpstreamJsonCached,
   invalidateEdgeCacheKeys,
   ensureModerationColumns,
-  normalizeContentDbReviewItem
+  ensureExtendedPackageColumns,
+  normalizeContentDbReviewItem,
+  sanitizePublicErrorMessage
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -107,30 +109,32 @@ async function recalculateAndPersistPackageScore(db: any, packageId: string): Pr
 
 // POST: Submit a Community Review, Flag an Inappropriate Comment, or Remove a Comment (Admin/Author)
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
-  const packageId = `${author}/${name}`;
+  try {
+    const { author, name } = context.params;
+    const packageId = `${author}/${name}`;
 
-  // 1. Verify User Authentication
-  const cookies = parseCookies(context.request);
-  const sessionToken = cookies['lh_session'];
-  if (!sessionToken) {
-    return Response.json({ error: 'Please log in to continue.' }, { status: 401 });
-  }
+    // 1. Verify User Authentication
+    const cookies = parseCookies(context.request);
+    const sessionToken = cookies['lh_session'];
+    if (!sessionToken) {
+      return Response.json({ error: 'Please log in to continue.' }, { status: 401 });
+    }
 
-  const rawUserId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
-  if (!rawUserId) {
-    return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
-  }
+    const rawUserId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
+    if (!rawUserId) {
+      return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
+    }
 
-  const body = (await context.request.json().catch(() => ({}))) as any;
-  const action = String(body.action || 'create').toLowerCase();
+    const body = (await context.request.json().catch(() => ({}))) as any;
+    const action = String(body.action || 'create').toLowerCase();
 
-  let userId = String(rawUserId);
-  let reconciledUser: any = null;
-  let identities: Array<{ provider: string; username: string; verified: boolean }> = [];
+    let userId = String(rawUserId);
+    let reconciledUser: any = null;
+    let identities: Array<{ provider: string; username: string; verified: boolean }> = [];
 
-  if (context.env.DB) {
-    reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, rawUserId);
+    if (context.env.DB) {
+      await ensureExtendedPackageColumns(context.env.DB);
+      reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, rawUserId);
     if (reconciledUser?.id) {
       userId = String(reconciledUser.id);
     }
@@ -362,23 +366,29 @@ export async function onRequestPost(context: { request: Request; params: { autho
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
   ]);
 
-  return Response.json({
-    success: true,
-    review: {
-      id: savedReviewId,
-      package_id: packageId,
-      source: 'luantihub',
-      rating: numericRating,
-      title,
-      comment: comment.trim(),
-      created_at: new Date().toISOString(),
-      author: {
-        username: authorUsername,
-        display_name: authorDisplayName,
-        avatar_url: authorAvatarUrl
+    return Response.json({
+      success: true,
+      review: {
+        id: savedReviewId,
+        package_id: packageId,
+        source: 'luantihub',
+        rating: numericRating,
+        title,
+        comment: comment.trim(),
+        created_at: new Date().toISOString(),
+        author: {
+          username: authorUsername,
+          display_name: authorDisplayName,
+          avatar_url: authorAvatarUrl
+        }
       }
-    }
-  });
+    });
+  } catch (err: any) {
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Could not process review request.') },
+      { status: 500 }
+    );
+  }
 }
 
 // DELETE /api/packages/:author/:name/reviews?reviewId=...

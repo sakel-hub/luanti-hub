@@ -4,6 +4,23 @@ import { AuthUser, GitProvider, ModerationReport, LuantiPackage } from '../model
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
 
+export function sanitizeUserFacingError(
+  rawError: any,
+  fallbackMessage = 'A temporary error occurred. Please try again in a moment.'
+): string {
+  const raw = typeof rawError === 'string' ? rawError.trim() : String(rawError?.message || '').trim();
+  if (!raw) return fallbackMessage;
+
+  const sensitivePattern =
+    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal)/i;
+
+  if (sensitivePattern.test(raw) || raw.startsWith('<!DOCTYPE') || raw.startsWith('<html')) {
+    return fallbackMessage;
+  }
+
+  return raw;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -417,7 +434,10 @@ export class AuthService {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          return { success: false, message: data.error || 'Could not verify account handle.' };
+          return {
+            success: false,
+            message: sanitizeUserFacingError(data.error, 'Could not verify account handle.')
+          };
         }
         this.clearAuthCache();
         await this.initAuth(true);
@@ -462,7 +482,7 @@ export class AuthService {
       }
       return { success: true };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Connection error during sign-in.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Connection error during sign-in.') };
     } finally {
       this._isLoading.set(false);
     }
@@ -506,7 +526,7 @@ export class AuthService {
         if (!res.ok) {
           return {
             success: false,
-            message: data.error || 'Could not verify token against the Git provider API.'
+            message: sanitizeUserFacingError(data.error, 'Could not verify token against the Git provider API.')
           };
         }
         this.clearAuthCache();
@@ -516,7 +536,10 @@ export class AuthService {
 
       return { success: false, message: 'Verification endpoint unavailable.' };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error while verifying repository ownership.' };
+      return {
+        success: false,
+        message: sanitizeUserFacingError(err, 'Network error while verifying repository ownership.')
+      };
     } finally {
       this._isLoading.set(false);
     }
@@ -572,9 +595,9 @@ export class AuthService {
         return { success: true };
       }
       const data = await res.json().catch(() => ({}));
-      return { success: false, message: data.error || 'Could not unlink identity.' };
+      return { success: false, message: sanitizeUserFacingError(data.error, 'Could not unlink identity.') };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Error unlinking identity.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Error unlinking identity.') };
     }
   }
 
@@ -607,7 +630,7 @@ export class AuthService {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          return { success: false, message: data.error || 'Failed to sync ContentDB account.' };
+          return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to sync ContentDB account.') };
         }
         this.clearAuthCache();
         await this.initAuth(true);
@@ -615,7 +638,7 @@ export class AuthService {
       }
       return { success: false, message: 'ContentDB sync endpoint unreachable.' };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Connection error syncing ContentDB.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Connection error syncing ContentDB.') };
     }
   }
 
@@ -720,7 +743,7 @@ export class AuthService {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: data.error || 'Could not update moderation report.' };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Could not update moderation report.') };
       }
       if (this.isAdmin()) {
         await this.fetchModerationQueue(true);
@@ -731,7 +754,7 @@ export class AuthService {
       }
       return { success: true, message: data.message, online: data.online };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error updating report.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Network error updating report.') };
     }
   }
 
@@ -747,7 +770,7 @@ export class AuthService {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: data.error || 'Bulk moderation action failed.' };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Bulk moderation action failed.') };
       }
       await this.fetchModerationQueue(true, 1);
       if (data.message) {
@@ -755,7 +778,7 @@ export class AuthService {
       }
       return { success: true, message: data.message };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error executing bulk action.' };
+      return { success: false, message: sanitizeUserFacingError(err, 'Network error executing bulk action.') };
     }
   }
 

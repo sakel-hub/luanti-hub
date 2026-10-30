@@ -46,7 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
 UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r WHERE LOWER(r.package_id) = LOWER(packages.id)), 0);
 
 -- 6. Separate ContentDB vs Luanti Hub download counters and extended ContentDB metadata columns
--- (Also auto-initialized at runtime by the Worker if not yet migrated)
+-- (Also auto-initialized at runtime by the Worker via ensureExtendedPackageColumns if not yet migrated)
 -- ALTER TABLE packages ADD COLUMN contentdb_downloads INTEGER DEFAULT 0;
 -- ALTER TABLE packages ADD COLUMN luantihub_downloads INTEGER DEFAULT 0;
 -- ALTER TABLE packages ADD COLUMN download_size INTEGER;
@@ -59,5 +59,10 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE packages ADD COLUMN video_thumbnail_url TEXT;
 -- ALTER TABLE packages ADD COLUMN dev_state TEXT;
 -- ALTER TABLE packages ADD COLUMN provides TEXT;
+-- ALTER TABLE packages ADD COLUMN content_warnings TEXT;
+-- ALTER TABLE packages ADD COLUMN ai_disclosures TEXT;
+-- ALTER TABLE packages ADD COLUMN maintainers TEXT;
+-- ALTER TABLE packages ADD COLUMN max_minetest_version TEXT;
+
 
 

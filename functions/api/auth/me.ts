@@ -8,7 +8,13 @@ import {
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from './lib/session';
-import { syncAuthorContentDbPackages, ensureModerationColumns, invalidateEdgeCacheKeys } from '../lib/upstream';
+import {
+  syncAuthorContentDbPackages,
+  ensureModerationColumns,
+  ensureExtendedPackageColumns,
+  invalidateEdgeCacheKeys,
+  sanitizePublicErrorMessage
+} from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -270,7 +276,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       headers
     });
   } catch (err: any) {
-    return Response.json({ user: null, oauthProviders, error: err.message }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { user: null, oauthProviders, error: sanitizePublicErrorMessage(err, 'Could not load session.') },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }
 
@@ -482,7 +491,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     });
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Sign in failed.' }, { status: 500 });
+    return Response.json({ error: sanitizePublicErrorMessage(err, 'Sign in failed.') }, { status: 500 });
   }
 }
 
@@ -541,7 +550,7 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
 
     return Response.json({ success: true });
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Failed to update profile.' }, { status: 500 });
+    return Response.json({ error: sanitizePublicErrorMessage(err, 'Failed to update profile.') }, { status: 500 });
   }
 }
 
@@ -587,6 +596,6 @@ export async function onRequestDelete(context: { request: Request; env: Env }) {
 
     return Response.json({ success: true });
   } catch (err: any) {
-    return Response.json({ error: err.message || 'Failed to unlink account.' }, { status: 500 });
+    return Response.json({ error: sanitizePublicErrorMessage(err, 'Failed to unlink account.') }, { status: 500 });
   }
 }

@@ -6,7 +6,12 @@ import {
   reconcileAndMergeUserAccount,
   verifyStrictPackageAuthorOwnership
 } from '../../../auth/lib/session';
-import { invalidateEdgeCacheKeys, ensureModerationColumns } from '../../../lib/upstream';
+import {
+  invalidateEdgeCacheKeys,
+  ensureModerationColumns,
+  ensureExtendedPackageColumns,
+  sanitizePublicErrorMessage
+} from '../../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -20,42 +25,44 @@ export async function onRequestPost(context: {
   request: Request;
   env: Env;
 }) {
-  const { author, name } = context.params;
-  const packageId = `${author}/${name}`;
-  const { request, env } = context;
+  try {
+    const { author, name } = context.params;
+    const packageId = `${author}/${name}`;
+    const { request, env } = context;
 
-  if (!env.DB) {
-    return Response.json({ error: 'Database binding not available.' }, { status: 503 });
-  }
-
-  const cookies = parseCookies(request);
-  const sessionToken = cookies['lh_session'];
-  const rawUserId = sessionToken ? await verifySessionToken(sessionToken, env.SESSION_SECRET) : null;
-
-  let currentUser: any = null;
-  let userId: string | null = rawUserId;
-  let identities: Array<{ provider: string; username: string; verified?: number | boolean }> = [];
-  if (rawUserId) {
-    currentUser = (await reconcileAndMergeUserAccount(env.DB, rawUserId)) ||
-      (await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(rawUserId).first());
-    if (currentUser?.id) {
-      userId = String(currentUser.id);
+    if (!env.DB) {
+      return Response.json({ error: 'Database binding not available.' }, { status: 503 });
     }
-    const idRes = await env.DB.prepare(
-      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
-    ).bind(userId).all();
-    identities = idRes.results || [];
-  }
 
-  const body = await request.json() as {
-    action: 'report' | 'delist' | 'flag' | 'restore' | 'remove';
-    reason?: 'dmca' | 'malware' | 'license' | 'broken' | 'inappropriate' | 'other';
-    details?: string;
-    resolutionNote?: string;
-    reportId?: number | string;
-  };
+    const cookies = parseCookies(request);
+    const sessionToken = cookies['lh_session'];
+    const rawUserId = sessionToken ? await verifySessionToken(sessionToken, env.SESSION_SECRET) : null;
 
-  await ensureModerationColumns(env.DB);
+    let currentUser: any = null;
+    let userId: string | null = rawUserId;
+    let identities: Array<{ provider: string; username: string; verified?: number | boolean }> = [];
+    if (rawUserId) {
+      currentUser = (await reconcileAndMergeUserAccount(env.DB, rawUserId)) ||
+        (await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(rawUserId).first());
+      if (currentUser?.id) {
+        userId = String(currentUser.id);
+      }
+      const idRes = await env.DB.prepare(
+        `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
+      ).bind(userId).all();
+      identities = idRes.results || [];
+    }
+
+    const body = await request.json() as {
+      action: 'report' | 'delist' | 'flag' | 'restore' | 'remove';
+      reason?: 'dmca' | 'malware' | 'license' | 'broken' | 'inappropriate' | 'other';
+      details?: string;
+      resolutionNote?: string;
+      reportId?: number | string;
+    };
+
+    await ensureModerationColumns(env.DB);
+    await ensureExtendedPackageColumns(env.DB);
 
   // Mode 1: Community or Automated Git-404 Report Submission
   if (body.action === 'report') {
@@ -214,10 +221,16 @@ export async function onRequestPost(context: {
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
   ]);
 
-  return Response.json({
-    success: true,
-    package_id: packageId,
-    status: newStatus,
-    reason: statusReason
-  });
+    return Response.json({
+      success: true,
+      package_id: packageId,
+      status: newStatus,
+      reason: statusReason
+    });
+  } catch (err: any) {
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Could not complete moderation action.') },
+      { status: 500 }
+    );
+  }
 }
