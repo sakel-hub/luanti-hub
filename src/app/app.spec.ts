@@ -1346,6 +1346,35 @@ description = Mob animation and spawning framework.
       expect(dispatchedNotifications[0].title).toBe('New Git Package · [MOD] My Super Pickaxe');
       expect(dispatchedNotifications[0].options?.body).toContain('by sakel-hub');
 
+      // 2b. Dual-indexed ContentDB packages and packages older than 48 hours must NOT fire notifications
+      const quietCount = pwaService.checkAndNotifyNewGitPackages(
+        [
+          {
+            id: 'sakel-hub/tumbleweed',
+            author: 'sakel-hub',
+            name: 'tumbleweed',
+            title: 'X Tumbleweed',
+            type: 'mod',
+            source: 'git',
+            sources: ['official', 'git'], // ContentDB dual-indexed
+            created_at: new Date(Date.now() - 3600 * 1000).toISOString()
+          },
+          {
+            id: 'sakel-hub/old_git_mod',
+            author: 'sakel-hub',
+            name: 'old_git_mod',
+            title: 'Old Mod',
+            type: 'mod',
+            source: 'git',
+            sources: ['git'],
+            created_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString() // 5 days old
+          }
+        ],
+        { isBaselineSeedAllowed: false }
+      );
+      expect(quietCount).toBe(0);
+      expect(dispatchedNotifications.length).toBe(1); // unchanged
+
       // 3. Disabling master notifications tears down active state and sets notificationsEnabled to false
       await pwaService.setNotificationsEnabled(false);
       expect(settingsService.notificationsEnabled()).toBe(false);
@@ -2730,5 +2759,27 @@ supported_games = minetest_game, voxelibre
     expect(modalHtml).toContain('Luanti Hub (1)');
     expect(modalHtml).toContain('ContentDB (1)');
     expect(modalHtml).toContain('Recommended');
+  });
+
+  it('should implement MDN PWA best practices: reactive offline status, Web Share Target prefill, and rich manifest configuration', async () => {
+    const pwaService = TestBed.inject(PwaService);
+
+    // 1. Reactive network connectivity status
+    expect(pwaService.isOnline()).toBe(true);
+    window.dispatchEvent(new Event('offline'));
+    expect(pwaService.isOnline()).toBe(false);
+    expect(pwaService.statusMessage()).toBe('pwa.offlineModeToast');
+
+    window.dispatchEvent(new Event('online'));
+    expect(pwaService.isOnline()).toBe(true);
+    expect(pwaService.statusMessage()).toBe('pwa.backOnline');
+
+    // 2. SubmitModalComponent prefilling repoUrl via Web Share Target query params
+    const submitFixture = TestBed.createComponent(SubmitModalComponent);
+    const submitComp = submitFixture.componentInstance;
+    submitComp.repoUrl = 'https://github.com/sakel-hub/shared_mod';
+    submitComp.onUrlChange();
+    expect(submitComp.parsedRepoTarget()?.owner).toBe('sakel-hub');
+    expect(submitComp.parsedRepoTarget()?.repo).toBe('shared_mod');
   });
 });

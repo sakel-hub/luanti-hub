@@ -34,6 +34,7 @@ export class PwaService {
   readonly updateAvailable = signal<boolean>(false);
   readonly canInstall = signal<boolean>(false);
   readonly isInstalled = signal<boolean>(this.checkIfInstalled());
+  readonly isOnline = signal<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
   readonly checkingForUpdate = signal<boolean>(false);
   readonly statusMessage = signal<string | null>(null);
   readonly notificationPermission = signal<NotificationPermission>(this.readBrowserNotificationPermission());
@@ -47,6 +48,21 @@ export class PwaService {
     this.initInstallPrompt();
     this.initNotificationClickRouting();
     this.initPermissionStatusWatcher();
+    this.initNetworkStatusWatcher();
+  }
+
+  private initNetworkStatusWatcher(): void {
+    if (typeof window === 'undefined') return;
+
+    window.addEventListener('online', () => {
+      this.isOnline.set(true);
+      this.showToast('pwa.backOnline', 3000);
+    });
+
+    window.addEventListener('offline', () => {
+      this.isOnline.set(false);
+      this.showToast('pwa.offlineModeToast', 4000);
+    });
   }
 
   private initPermissionStatusWatcher(): void {
@@ -370,7 +386,7 @@ export class PwaService {
    * Tracks known community Git package IDs in localStorage (`lh_known_git_packages_v1`).
    * On the very first catalog load, seeds the baseline set silently without spamming notifications.
    * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
-   * formatted as `New Git Package · [MOD] Title` for newly published Git packages.
+   * formatted as `New Git Package · [MOD] Title` for genuinely new community Git packages (published <= 48h).
    */
   checkAndNotifyNewGitPackages(
     candidates: Array<{
@@ -386,6 +402,8 @@ export class PwaService {
       source?: string;
       sources?: string[];
       status?: string;
+      created_at?: string;
+      updated_at?: string;
     }>,
     options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean }
   ): number {
@@ -396,19 +414,20 @@ export class PwaService {
       (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
     );
 
-    const gitPackages = candidates.filter(pkg => {
+    // 1. Identify all eligible Git packages (including dual-indexed ones) for baseline seeding
+    const allGitCandidates = candidates.filter(pkg => {
       if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
       const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
       const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
       if (!author || !name) return false;
-      const isGit =
+      return (
         pkg.source === 'git' ||
         (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
-        forceSet.has(`${author}/${name}`.toLowerCase());
-      return isGit;
+        forceSet.has(`${author}/${name}`.toLowerCase())
+      );
     });
 
-    if (gitPackages.length === 0) return 0;
+    if (allGitCandidates.length === 0) return 0;
 
     let rawKnown: string | null = null;
     try {
@@ -417,7 +436,7 @@ export class PwaService {
       return 0;
     }
 
-    // First-time baseline seed: record existing Git packages silently without notification flood
+    // First-time baseline seed: record all existing Git packages silently without notification flood
     if (rawKnown === null && forceSet.size === 0) {
       if (options?.isBaselineSeedAllowed === false) {
         return 0;
@@ -425,7 +444,7 @@ export class PwaService {
       try {
         const initialIds = Array.from(
           new Set(
-            gitPackages.map(pkg => {
+            allGitCandidates.map(pkg => {
               const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
               const name = pkg.name || String(pkg.id).split('/')[1];
               return (pkg.id || `${author}/${name}`).toLowerCase();
@@ -452,16 +471,37 @@ export class PwaService {
     }
 
     const knownSet = new Set<string>(knownList.map(id => id.toLowerCase()));
-    const newlyDiscovered: typeof gitPackages = [];
 
-    for (const pkg of gitPackages) {
+    // 2. Strict Filter for Notifications: Only notify for genuine community Git packages
+    // Exclude established ContentDB packages that simply linked a Git repo (dual-indexed: sources.includes('official'))
+    // And exclude packages published more than 48 hours ago
+    const newlyDiscovered: typeof allGitCandidates = [];
+
+    for (const pkg of allGitCandidates) {
       const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
       const name = pkg.name || String(pkg.id).split('/')[1];
       const resolvedId = pkg.id || `${author}/${name}`;
       const lowerId = resolvedId.toLowerCase();
+      const isForced = forceSet.has(lowerId);
 
-      if (!knownSet.has(lowerId) || forceSet.has(lowerId)) {
+      const isOfficial = Array.isArray(pkg.sources) ? pkg.sources.includes('official') : pkg.source === 'official';
+      const isPureGit = !isOfficial || isForced;
+
+      // Check recency: must be created within the last 48 hours
+      let isRecent = true;
+      if (!isForced && (pkg.created_at || pkg.updated_at)) {
+        const timeMs = new Date(pkg.created_at || pkg.updated_at!).getTime();
+        if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
+          isRecent = false;
+        }
+      }
+
+      if (!knownSet.has(lowerId)) {
         knownSet.add(lowerId);
+        if (isPureGit && isRecent) {
+          newlyDiscovered.push(pkg);
+        }
+      } else if (isForced) {
         newlyDiscovered.push(pkg);
       }
     }

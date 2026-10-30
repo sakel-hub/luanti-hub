@@ -427,7 +427,10 @@ export const ru: TranslationDictionary = {
     clearCacheTitle: 'Очистить Кэш и Перезагрузить',
     clearCacheDesc: 'Сбросить Service Workers и удалить все закэшированные файлы',
     clearCacheConfirm: 'Нажмите ещё раз для подтверждения сброса кэша',
-    downloadingZipToast: 'Скачивание {name}.zip — распакуйте архив в папку Luanti mods/, games/ или textures/!'
+    downloadingZipToast: 'Скачивание {name}.zip — распакуйте архив в папку Luanti mods/, games/ или textures/!',
+    offlineMode: 'Автономный режим (из кэша)',
+    offlineModeToast: 'Соединение с сетью потеряно. Вы просматриваете кэшированные пакеты.',
+    backOnline: 'Снова в сети. Синхронизация каталога...'
   },
   common: {
     loading: 'Загрузка пакетов из реестра...',

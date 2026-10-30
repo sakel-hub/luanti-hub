@@ -15,6 +15,21 @@
   "theme_color": "#020617",
   "background_color": "#020617",
   "categories": ["games", "developer", "utilities", "entertainment"],
+  "share_target": {
+    "action": "/submit",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "protocol_handlers": [
+    {
+      "protocol": "web+luanti",
+      "url": "/package/%s"
+    }
+  ],
   "shortcuts": [
     {
       "name": "Browse Catalog",
@@ -36,6 +51,22 @@
       "description": "Configure Luanti luanti.conf to install mods in-game",
       "url": "/setup",
       "icons": [{ "src": "icons/icon-96x96.png", "sizes": "96x96" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot-desktop.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "LuantiHub Desktop"
+    },
+    {
+      "src": "/screenshot-mobile.png",
+      "sizes": "720x1280",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "LuantiHub Mobile"
     }
   ],
   "icons": [

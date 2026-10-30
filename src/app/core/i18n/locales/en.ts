@@ -427,7 +427,10 @@ export const en: TranslationDictionary = {
     clearCacheTitle: 'Clear Cache & Hard Reload',
     clearCacheDesc: 'Unregister service workers and purge all cached API files and assets',
     clearCacheConfirm: 'Click again to confirm Clear Cache',
-    downloadingZipToast: 'Downloading {name}.zip — extract into your Luanti mods/, games/, or textures/ directory!'
+    downloadingZipToast: 'Downloading {name}.zip — extract into your Luanti mods/, games/, or textures/ directory!',
+    offlineMode: 'Offline Mode (Cached)',
+    offlineModeToast: 'Network connection lost. You are browsing cached packages.',
+    backOnline: 'Back online. Syncing catalog...'
   },
   common: {
     loading: 'Loading packages from registry...',

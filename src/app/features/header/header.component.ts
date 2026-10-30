@@ -88,7 +88,7 @@ import {
       </div>
     }
 
-    <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header transition-colors duration-200">
+    <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header luanti-wco-header transition-colors duration-200">
       <div class="w-full px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 lg:gap-5">
 
         <!-- Left: Logo & Category Tabs -->

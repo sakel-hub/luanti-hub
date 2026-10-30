@@ -557,6 +557,26 @@ select:disabled {
 }
 
 /* ==========================================================================
+   Desktop Window Controls Overlay (WCO) Support (MDN PWA Best Practice)
+   ========================================================================== */
+@media (display-mode: window-controls-overlay) {
+  .luanti-wco-header {
+    padding-left: env(titlebar-area-x, 0px);
+    width: env(titlebar-area-width, 100%);
+    app-region: drag;
+    -webkit-app-region: drag;
+
+    button,
+    a,
+    input,
+    select {
+      app-region: no-drag;
+      -webkit-app-region: no-drag;
+    }
+  }
+}
+
+/* ==========================================================================
    Unified Dialog, Drawer & Tab Motion System (Enter + Exit)
    ========================================================================== */
 @keyframes luantiBackdropIn {

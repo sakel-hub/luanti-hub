@@ -443,6 +443,9 @@ export interface TranslationDictionary {
     clearCacheDesc: string;
     clearCacheConfirm: string;
     downloadingZipToast: string;
+    offlineMode: string;
+    offlineModeToast: string;
+    backOnline: string;
   };
   common: {
     loading: string;

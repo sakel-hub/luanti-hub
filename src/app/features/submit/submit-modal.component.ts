@@ -1,6 +1,7 @@
 import { Component, ChangeDetectionStrategy, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { GitAuditReport, GitProvider } from '../../core/models/package.model';
@@ -462,6 +463,7 @@ import {
 export class SubmitModalComponent {
   readonly packageService = inject(PackageService);
   readonly authService = inject(AuthService);
+  private readonly route = inject(ActivatedRoute, { optional: true });
 
   repoUrl = '';
   warrantyOwnership = false;
@@ -521,6 +523,39 @@ export class SubmitModalComponent {
   onSignInFromSubmit(): void {
     this.packageService.closeSubmitModal();
     this.authService.openAuthModal();
+  }
+
+  constructor() {
+    if (typeof window !== 'undefined' && window.location?.search) {
+      try {
+        const sp = new URLSearchParams(window.location.search);
+        const initial = sp.get('url') || sp.get('text') || '';
+        if (initial) {
+          const match = initial.match(/https?:\/\/[^\s]+/i);
+          const found = match ? match[0] : (initial.startsWith('http') ? initial.trim() : '');
+          if (found) {
+            this.repoUrl = found;
+            this.onUrlChange();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (this.route) {
+      this.route.queryParams.subscribe(params => {
+        const candidate = params['url'] || params['text'] || '';
+        if (candidate && typeof candidate === 'string') {
+          const urlMatch = candidate.match(/https?:\/\/[^\s]+/i);
+          const found = urlMatch ? urlMatch[0] : (candidate.startsWith('http') ? candidate.trim() : '');
+          if (found) {
+            this.repoUrl = found;
+            this.onUrlChange();
+          }
+        }
+      });
+    }
   }
 
   isTagSelected(tagName: string): boolean {

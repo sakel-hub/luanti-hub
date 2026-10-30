@@ -228,15 +228,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           type,
           short_desc,
           thumbnail_url AS thumbnail,
-          source,
+          provider,
           status,
           created_at
         FROM packages
-        WHERE source = 'git' AND COALESCE(status, 'active') = 'active'
-        ORDER BY COALESCE(created_at, updated_at) DESC
+        WHERE provider != 'contentdb'
+          AND COALESCE(status, 'active') = 'active'
+          AND created_at >= datetime('now', '-2 days')
+        ORDER BY created_at DESC
         LIMIT 5
       `).all();
-      latestGitPackages = latestGitRes.results || [];
+      latestGitPackages = (latestGitRes.results || []).map((p: any) => ({
+        ...p,
+        source: 'git',
+        sources: ['git']
+      }));
     } catch {
       openReportsCount = 0;
     }

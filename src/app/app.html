@@ -15,22 +15,33 @@
     <router-outlet></router-outlet>
   </main>
 
-  <!-- Global Toast Notification -->
+  <!-- Offline Indicator Badge (MDN PWA Best Practice) -->
+  @if (!pwaService.isOnline()) {
+    <div
+      role="status"
+      aria-live="polite"
+      class="fixed top-18 sm:top-20 right-4 sm:right-6 z-40 px-3.5 py-1.5 rounded-full glass-panel !border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-2 shadow-lg backdrop-blur-md animate-fade-in">
+      <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0"></span>
+      <span>{{ 'pwa.offlineMode' | translate }}</span>
+    </div>
+  }
+
+  <!-- Global Toast Notification (with mobile gesture safe-area inset) -->
   @if (pwaService.statusMessage(); as msgKey) {
     <div
       role="status"
       aria-live="polite"
-      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 glass-dropdown text-white rounded-xl flex items-center gap-2.5 text-xs font-semibold luanti-dialog-panel">
+      class="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom,1.5rem))] left-1/2 -translate-x-1/2 z-[100] px-4 py-2.5 glass-dropdown text-white rounded-xl flex items-center gap-2.5 text-xs font-semibold luanti-dialog-panel shadow-2xl max-w-[90vw] text-center">
       <svg lucideCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
       <span>{{ msgKey | translate }}</span>
     </div>
   }
 
-  <!-- PWA Automatic Update Banner -->
+  <!-- PWA Automatic Update Banner (with mobile gesture safe-area inset) -->
   @if (pwaService.updateAvailable()) {
     <div
       role="alert"
-      class="fixed bottom-6 right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 luanti-dialog-panel">
+      class="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom,1.5rem))] right-4 sm:right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 luanti-dialog-panel shadow-2xl max-w-[95vw]">
       <div class="text-xs font-medium">
         <p class="font-bold">{{ 'pwa.updateAvailable' | translate }}</p>
         <p class="text-sky-100">{{ 'pwa.updateDesc' | translate }}</p>
@@ -38,7 +49,7 @@
       <button
         type="button"
         (click)="pwaService.applyUpdate()"
-        class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow cursor-pointer">
+        class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow cursor-pointer whitespace-nowrap">
         {{ 'pwa.reloadNow' | translate }}
       </button>
     </div>

@@ -427,7 +427,10 @@ export const sk: TranslationDictionary = {
     clearCacheTitle: 'Vyčistiť Vyrovnávaciu Pamäť & Reštartovať',
     clearCacheDesc: 'Zrušiť registráciu service workerov a vymazať všetky uložené súbory a dáta',
     clearCacheConfirm: 'Kliknite znova pre potvrdenie vymazania pamäte',
-    downloadingZipToast: 'Sťahujem {name}.zip — rozbaľte ho do priečinka Luanti mods/, games/ alebo textures/!'
+    downloadingZipToast: 'Sťahujem {name}.zip — rozbaľte ho do priečinka Luanti mods/, games/ alebo textures/!',
+    offlineMode: 'Offline režim (z vyrovnávacej pamäte)',
+    offlineModeToast: 'Sieťové pripojenie bolo prerušené. Prehliadate balíčky z vyrovnávacej pamäte.',
+    backOnline: 'Opäť online. Synchronizujem katalóg...'
   },
   common: {
     loading: 'Načítavam balíčky z registra...',

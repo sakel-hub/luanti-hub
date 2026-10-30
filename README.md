@@ -38,8 +38,11 @@
   <a href="https://developers.cloudflare.com/d1/">
     <img src="https://img.shields.io/badge/Cloudflare-Pages_%2B_D1-f38020.svg?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Pages + D1">
   </a>
-  <a href="https://web.dev/progressive-web-apps/">
-    <img src="https://img.shields.io/badge/PWA-Offline_First-10b981.svg?style=flat-square&logo=pwa&logoColor=white" alt="PWA Offline First">
+  <a href="https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Best_practices">
+    <img src="https://img.shields.io/badge/PWA-MDN_Best_Practices-10b981.svg?style=flat-square&logo=pwa&logoColor=white" alt="PWA MDN Best Practices">
+  </a>
+  <a href="https://w3c.github.io/web-share-target/">
+    <img src="https://img.shields.io/badge/Web_Share_Target-Enabled-0284c7.svg?style=flat-square&logo=googlechrome&logoColor=white" alt="Web Share Target">
   </a>
   <a href="#contributing--translations">
     <img src="https://img.shields.io/badge/i18n-6_Languages-8b5cf6.svg?style=flat-square" alt="i18n 6 Languages">
@@ -106,10 +109,21 @@ Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a *
 - **6 Supported Languages:** Fully translated in **English (`en`)**, **Slovak (`sk`)**, **German (`de`)**, **French (`fr`)**, **Spanish (`es`)**, and **Russian (`ru`)**.
 - **Instant In-App Switching:** Change languages on the fly via the header selector, with automatic detection from browser preferences or deep-link parameter (`?lang=de`).
 
-### ⚡ Offline-First PWA & Edge SSR SEO
-- **Installable PWA:** Install LuantiHub as a desktop or mobile application powered by Angular Service Worker (`@angular/pwa`).
-- **Edge Dynamic Meta Tags (SSR):** Cloudflare Pages Functions dynamically inject OpenGraph, Twitter Cards, and schema.org JSON-LD structured metadata at `/package/:author/:name` for rich link previews across Discord, Telegram, and social platforms.
-- **Automated Dynamic Sitemap:** Dynamically serves an up-to-date XML sitemap at `/sitemap.xml` for search engine indexing.
+### ⚡ Modern PWA, Deep Linking & Web Share Target (MDN Best Practices)
+- **Installable PWA with Rich Install UI:** Full Web App Manifest compliant with modern W3C standards, featuring high-resolution icons, adaptive maskable icons, and 16:9 desktop / mobile screenshots that trigger Chromium's native Rich Install UI dialog.
+- **Web Share Target API (OS Share Sheet Integration):** When LuantiHub is installed as a PWA, it registers with Android and Windows as an OS-level Share Target for URLs and text. When browsing any mod repository on GitHub, Codeberg, or GitLab on your phone or PC, tap the native **Share** button &rarr; choose **LuantiHub**, and the app opens instantly with the repository URL prefilled in the submission dialog!
+- **1-Click Pre-Filled Submission Deep Links:** Anyone can construct direct URLs that immediately open LuantiHub, launch the "Submit Git Package" modal, and prefill the Git repository URL:
+  ```text
+  https://luanti-hub.pages.dev/submit?url=https://github.com/owner/repository
+  ```
+- **Mod Author README Badges:** Mod developers can add a 1-click submission badge to their GitHub, GitLab, or Codeberg README so community members or server operators can instantly index and audit their mod on LuantiHub:
+  ```markdown
+  [![Submit to LuantiHub](https://img.shields.io/badge/Submit_to-LuantiHub-0284c7?style=flat-square&logo=cloudflare&logoColor=white)](https://luanti-hub.pages.dev/submit?url=https://github.com/YOUR_USERNAME/YOUR_REPOSITORY)
+  ```
+- **Custom Protocol Handlers (`web+luanti://`):** Registered URL protocol handler allowing external sites and community chat apps to deep-link directly into installed LuantiHub packages (`web+luanti://author/package_name`).
+- **Reactive Offline Experience:** Built with Angular Service Worker (`@angular/service-worker`), proactive asset caching, and reactive online/offline state detection with an accessible offline mode indicator and automated catalog synchronization upon reconnection.
+- **Window Controls Overlay (WCO) & Safe Area Insets:** Native desktop titlebar draggable integration on Windows/macOS/Linux, plus `env(safe-area-inset-bottom)` mobile padding preventing toast alert collisions with device gesture bars.
+- **Edge Dynamic Meta Tags (SSR) & Dynamic Sitemap:** Cloudflare Pages Functions dynamically inject OpenGraph, Twitter Cards, and schema.org JSON-LD structured metadata at `/package/:author/:name` for rich social link previews on Discord, Telegram, and Reddit, with an automated XML sitemap at `/sitemap.xml`.
 
 ---
 

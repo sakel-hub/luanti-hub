@@ -427,7 +427,10 @@ export const de: TranslationDictionary = {
     clearCacheTitle: 'Cache Leeren & Neu Laden',
     clearCacheDesc: 'Service Worker abmelden und alle zwischengespeicherten Daten bereinigen',
     clearCacheConfirm: 'Erneut klicken, um Cache leeren zu bestätigen',
-    downloadingZipToast: 'Lade {name}.zip herunter — entpacken Sie das Archiv in Ihren Luanti mods/, games/ oder textures/ Ordner!'
+    downloadingZipToast: 'Lade {name}.zip herunter — entpacken Sie das Archiv in Ihren Luanti mods/, games/ oder textures/ Ordner!',
+    offlineMode: 'Offline-Modus (Zwischengespeichert)',
+    offlineModeToast: 'Netzwerkverbindung verloren. Sie durchsuchen zwischengespeicherte Pakete.',
+    backOnline: 'Wieder online. Katalog wird synchronisiert...'
   },
   common: {
     loading: 'Pakete werden aus der Registry geladen...',
