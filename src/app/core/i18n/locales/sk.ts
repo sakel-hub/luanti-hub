@@ -308,8 +308,10 @@ export const sk: TranslationDictionary = {
     notifyModerationLabel: 'Aktualizácie hlásení a balíčkov (Odpovede & Vyriešenia)',
     notifyAdminQueueLabel: 'Upozornenia frontu moderovania (Admin)',
     notifyAppUpdatesLabel: 'Aktualizácie aplikácie LuantiHub',
+    notifyNewGitPackagesLabel: 'Nové publikované komunitné Git balíčky',
     permissionGranted: 'Aktívne',
-    permissionBlocked: 'Zablokované v prehliadači'
+    permissionBlocked: 'Zablokované v prehliadači',
+    permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.'
   },
   setup: {
     title: 'Používajte LuantiHub Priamo v Hre',

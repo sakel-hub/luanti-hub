@@ -127,9 +127,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const url = new URL(request.url);
   const isMineOnly = url.searchParams.get('mine') === '1';
 
-  // Mode A: Reporter / Package Author fetching their own submitted reports & package alerts
+  // Mode A: Reporter / Package Author fetching their own submitted reports & package alerts (Paginated)
   if (isMineOnly) {
     try {
+      const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
+      const pageSize = Math.min(25, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10) || 5));
+      const offset = (page - 1) * pageSize;
+
       const verifiedHandles = identities
         .filter((i: any) => Boolean(i.verified))
         .map((i: any) => String(i.username || '').toLowerCase())
@@ -141,6 +145,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       const authorClause = authorHandles.length > 0
         ? `OR LOWER(SUBSTR(r.package_id, 1, INSTR(r.package_id, '/') - 1)) IN (${authorHandles.map(() => '?').join(', ')})`
         : '';
+
+      const totalRes = await env.DB.prepare(`
+        SELECT COUNT(*) AS cnt
+        FROM moderation_reports r
+        WHERE r.reporter_user_id = ? ${authorClause}
+      `).bind(userId, ...authorHandles).first();
+      const total = Number(totalRes?.cnt || 0);
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
       const myReportsRes = await env.DB.prepare(`
         SELECT
@@ -163,15 +175,28 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         LEFT JOIN users u ON u.id = r.reporter_user_id
         WHERE r.reporter_user_id = ? ${authorClause}
         ORDER BY CASE WHEN r.status = 'open' THEN 0 ELSE 1 END, COALESCE(r.updated_at, r.created_at) DESC
-        LIMIT 25
-      `).bind(userId, ...authorHandles).all();
+        LIMIT ? OFFSET ?
+      `).bind(userId, ...authorHandles, pageSize, offset).all();
 
       return Response.json(
-        { reports: myReportsRes.results || [] },
+        {
+          reports: myReportsRes.results || [],
+          total,
+          page,
+          pageSize,
+          totalPages
+        },
         { headers: { 'Cache-Control': 'no-store' } }
       );
     } catch (err: any) {
-      return Response.json({ reports: [], error: err.message });
+      return Response.json({
+        reports: [],
+        total: 0,
+        page: 1,
+        pageSize: 5,
+        totalPages: 1,
+        error: err.message
+      });
     }
   }
 

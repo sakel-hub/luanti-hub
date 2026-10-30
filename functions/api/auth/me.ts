@@ -140,6 +140,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     let openReportsCount = 0;
     let adminLatestOpen: any[] = [];
     let userAlerts: any[] = [];
+    let myReportsTotal = 0;
+    let latestGitPackages: any[] = [];
 
     try {
       await ensureModerationColumns(context.env.DB);
@@ -179,6 +181,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         ? `OR LOWER(SUBSTR(r.package_id, 1, INSTR(r.package_id, '/') - 1)) IN (${authorPrefixes.map(() => '?').join(', ')})`
         : '';
 
+      const userAlertsCountRes = await context.env.DB.prepare(`
+        SELECT COUNT(*) AS cnt
+        FROM moderation_reports r
+        WHERE r.reporter_user_id = ? ${authorClause}
+      `).bind(resolvedUserId, ...authorPrefixes).first();
+      myReportsTotal = Number(userAlertsCountRes?.cnt || 0);
+
       const userAlertsRes = await context.env.DB.prepare(`
         SELECT
           r.id,
@@ -197,10 +206,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         FROM moderation_reports r
         LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
         WHERE r.reporter_user_id = ? ${authorClause}
-        ORDER BY COALESCE(r.updated_at, r.resolved_at, r.created_at) DESC
+        ORDER BY CASE WHEN r.status = 'open' THEN 0 ELSE 1 END, COALESCE(r.updated_at, r.resolved_at, r.created_at) DESC
         LIMIT 5
       `).bind(resolvedUserId, ...authorPrefixes).all();
       userAlerts = userAlertsRes.results || [];
+
+      const latestGitRes = await context.env.DB.prepare(`
+        SELECT
+          id,
+          author_name AS author,
+          name,
+          title,
+          type,
+          short_desc,
+          thumbnail_url AS thumbnail,
+          source,
+          status,
+          created_at
+        FROM packages
+        WHERE source = 'git' AND COALESCE(status, 'active') = 'active'
+        ORDER BY COALESCE(created_at, updated_at) DESC
+        LIMIT 5
+      `).all();
+      latestGitPackages = latestGitRes.results || [];
     } catch {
       openReportsCount = 0;
     }
@@ -230,7 +258,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         downloads,
         notification_digest: {
           user_alerts: userAlerts,
-          admin_latest_open: adminLatestOpen
+          my_reports_total: myReportsTotal || userAlerts.length,
+          admin_latest_open: adminLatestOpen,
+          latest_git_packages: latestGitPackages
         }
       },
       oauthProviders

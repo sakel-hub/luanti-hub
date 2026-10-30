@@ -308,8 +308,10 @@ export const es: TranslationDictionary = {
     notifyModerationLabel: 'Actualizaciones de autor y reportes (Respuestas y Resoluciones)',
     notifyAdminQueueLabel: 'Alertas de cola de moderación (Admin)',
     notifyAppUpdatesLabel: 'Actualizaciones de la aplicación LuantiHub',
+    notifyNewGitPackagesLabel: 'Nuevos paquetes Git comunitarios publicados',
     permissionGranted: 'Activo',
-    permissionBlocked: 'Bloqueado en navegador'
+    permissionBlocked: 'Bloqueado en navegador',
+    permissionResetHint: 'Las notificaciones están silenciadas en LuantiHub. Para revocar por completo el permiso del navegador, haz clic en el icono de configuración del sitio en la barra de direcciones y selecciona «Restablecer permiso».'
   },
   setup: {
     title: 'Usa LuantiHub Dentro del Juego',

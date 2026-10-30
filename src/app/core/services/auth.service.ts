@@ -21,6 +21,10 @@ export class AuthService {
   private readonly _oauthProviders = signal<Record<string, boolean>>({});
   private readonly _moderationReports = signal<ModerationReport[]>([]);
   private readonly _myReports = signal<ModerationReport[]>([]);
+  private readonly _myReportsPage = signal<number>(1);
+  private readonly _myReportsPageSize = signal<number>(5);
+  private readonly _myReportsTotal = signal<number>(0);
+  private readonly _myReportsTotalPages = signal<number>(1);
   private readonly _delistedPackages = signal<LuantiPackage[]>([]);
   private readonly _moderationPage = signal<number>(1);
   private readonly _moderationPageSize = signal<number>(10);
@@ -43,6 +47,10 @@ export class AuthService {
   readonly oauthProviders = this._oauthProviders.asReadonly();
   readonly moderationReports = this._moderationReports.asReadonly();
   readonly myReports = this._myReports.asReadonly();
+  readonly myReportsPage = this._myReportsPage.asReadonly();
+  readonly myReportsPageSize = this._myReportsPageSize.asReadonly();
+  readonly myReportsTotal = this._myReportsTotal.asReadonly();
+  readonly myReportsTotalPages = this._myReportsTotalPages.asReadonly();
   readonly delistedPackages = this._delistedPackages.asReadonly();
   readonly moderationPage = this._moderationPage.asReadonly();
   readonly moderationPageSize = this._moderationPageSize.asReadonly();
@@ -62,6 +70,20 @@ export class AuthService {
     this.pwaService.registerNotificationClickHandler((data: any) => {
       if (data?.targetTab) {
         this._requestedDrawerTab.set(data.targetTab);
+        this.openProfileDrawer();
+        return;
+      }
+      if (data?.packageId && typeof data.packageId === 'string') {
+        const [author, name] = data.packageId.split('/');
+        if (author && name) {
+          this.closeProfileDrawer(false);
+          if (this.router) {
+            this.router.navigate(['/package', author, name]);
+          } else if (typeof window !== 'undefined') {
+            window.location.href = `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+          }
+          return;
+        }
       }
       this.openProfileDrawer();
     });
@@ -540,18 +562,34 @@ export class AuthService {
     }
   }
 
-  async fetchMyReports(force = false): Promise<void> {
+  async fetchMyReports(force = false, page?: number): Promise<void> {
     if (!this.isLoggedIn()) return;
-    if (!force && this.lastMyReportsFetchAt > 0 && Date.now() - this.lastMyReportsFetchAt < 60_000) {
+    const targetPage = Math.max(1, page ?? this._myReportsPage());
+    const pageChanged = targetPage !== this._myReportsPage();
+    this._myReportsPage.set(targetPage);
+
+    if (!force && !pageChanged && this.lastMyReportsFetchAt > 0 && Date.now() - this.lastMyReportsFetchAt < 60_000) {
       return;
     }
     this.lastMyReportsFetchAt = Date.now();
     try {
-      const res = await fetch('/api/admin/moderation?mine=1');
+      const limit = this._myReportsPageSize();
+      const params = new URLSearchParams({
+        mine: '1',
+        page: String(targetPage),
+        limit: String(limit)
+      });
+      const res = await fetch(`/api/admin/moderation?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.reports)) {
           this._myReports.set(data.reports);
+          const total = typeof data.total === 'number' ? data.total : data.reports.length;
+          const totalPages = typeof data.totalPages === 'number'
+            ? Math.max(1, data.totalPages)
+            : Math.max(1, Math.ceil(total / limit));
+          this._myReportsTotal.set(total);
+          this._myReportsTotalPages.set(totalPages);
         }
       }
     } catch {
@@ -626,6 +664,11 @@ export class AuthService {
 
     if (Array.isArray(digest.user_alerts)) {
       this._myReports.set(digest.user_alerts);
+      const total = typeof digest.my_reports_total === 'number'
+        ? Math.max(digest.my_reports_total, digest.user_alerts.length)
+        : digest.user_alerts.length;
+      this._myReportsTotal.set(total);
+      this._myReportsTotalPages.set(Math.max(1, Math.ceil(total / this._myReportsPageSize())));
 
       for (const alert of digest.user_alerts) {
         const isResolvedOrReplied = alert.status !== 'open' || Boolean(alert.resolution_note);
@@ -672,6 +715,12 @@ export class AuthService {
           }
         });
       }
+    }
+
+    if (Array.isArray(digest.latest_git_packages) && digest.latest_git_packages.length > 0) {
+      this.pwaService.checkAndNotifyNewGitPackages(digest.latest_git_packages, {
+        isBaselineSeedAllowed: false
+      });
     }
   }
 }

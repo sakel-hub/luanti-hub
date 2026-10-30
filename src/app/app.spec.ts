@@ -1273,4 +1273,151 @@ description = Mob animation and spawning framework.
     const routesConfig = (await import('../../public/_routes.json')).default;
     expect(routesConfig.include).toContain('/packages/*');
   });
+
+  it('should notify for newly published Git packages with [TYPE] Title, teardown notifications on disable, and collapse/paginate My Reports when > 5', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    const authService = TestBed.inject(AuthService);
+
+    localStorage.removeItem('lh_known_git_packages_v1');
+    localStorage.removeItem('lh_seen_notification_tags');
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyNewGitPackages.set(true);
+
+    const dispatchedNotifications: Array<{ title: string; options?: NotificationOptions }> = [];
+    const origNotification = (window as any).Notification;
+    class MockNotification {
+      static permission: NotificationPermission = 'granted';
+      onclick: (() => void) | null = null;
+      constructor(public title: string, public options?: NotificationOptions) {
+        dispatchedNotifications.push({ title, options });
+      }
+      close(): void {}
+    }
+    (window as any).Notification = MockNotification;
+
+    try {
+      // 1. First boot seeds baseline silently without spamming notifications
+      const seededCount = pwaService.checkAndNotifyNewGitPackages(
+        [
+          {
+            id: 'sakel-hub/existing_mod',
+            author: 'sakel-hub',
+            name: 'existing_mod',
+            title: 'Existing Mod',
+            type: 'mod',
+            source: 'git'
+          }
+        ],
+        { isBaselineSeedAllowed: true }
+      );
+      expect(seededCount).toBe(0);
+      expect(dispatchedNotifications.length).toBe(0);
+
+      // 2. Subsequent check with a newly published Git package fires notification with [MOD] My Super Pickaxe
+      const newCount = pwaService.checkAndNotifyNewGitPackages(
+        [
+          {
+            id: 'sakel-hub/existing_mod',
+            author: 'sakel-hub',
+            name: 'existing_mod',
+            title: 'Existing Mod',
+            type: 'mod',
+            source: 'git'
+          },
+          {
+            id: 'sakel-hub/super_pickaxe',
+            author: 'sakel-hub',
+            name: 'super_pickaxe',
+            title: 'My Super Pickaxe',
+            type: 'mod',
+            short_desc: 'Mines 3x3 blocks instantly',
+            source: 'git'
+          }
+        ],
+        { isBaselineSeedAllowed: true }
+      );
+      expect(newCount).toBe(1);
+      // Wait for async sendNativeNotification
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(dispatchedNotifications.length).toBe(1);
+      expect(dispatchedNotifications[0].title).toBe('New Git Package · [MOD] My Super Pickaxe');
+      expect(dispatchedNotifications[0].options?.body).toContain('by sakel-hub');
+
+      // 3. Disabling master notifications tears down active state and sets notificationsEnabled to false
+      await pwaService.setNotificationsEnabled(false);
+      expect(settingsService.notificationsEnabled()).toBe(false);
+    } finally {
+      (window as any).Notification = origNotification;
+    }
+
+    // 4. Verify collapsible & paginated "My Reports & Package Alerts" in ProfileDrawerComponent
+    (authService as any)._currentUser.set({
+      id: 'u-1',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [],
+      packages: []
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+
+    // Case A: <= 5 alerts -> open by default
+    const threeReports = Array.from({ length: 3 }, (_, i) => ({
+      id: `rep-${i + 1}`,
+      package_id: `sakel-hub/mod_${i + 1}`,
+      package_title: `Mod ${i + 1}`,
+      reason: 'broken',
+      details: `Alert #${i + 1}`,
+      status: 'open' as const,
+      created_at: new Date().toISOString()
+    }));
+    (authService as any)._myReports.set(threeReports);
+    (authService as any)._myReportsTotal.set(3);
+    (authService as any)._myReportsPage.set(1);
+    (authService as any)._myReportsTotalPages.set(1);
+
+    const fixture = TestBed.createComponent(ProfileDrawerComponent);
+    const comp = fixture.componentInstance;
+    comp.activeTab.set('account');
+    fixture.detectChanges();
+
+    expect(comp.myReportsCount()).toBe(3);
+    expect(comp.isMyReportsOpen()).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain('Alert #1');
+
+    // Case B: > 5 alerts (e.g. 15 alerts) -> collapsed by default, and paginated to 5 per page when expanded
+    const fifteenReports = Array.from({ length: 15 }, (_, i) => ({
+      id: `rep-${i + 1}`,
+      package_id: `sakel-hub/mod_${i + 1}`,
+      package_title: `Mod ${i + 1}`,
+      reason: 'broken',
+      details: `Historical Alert #${i + 1}`,
+      status: 'resolved' as const,
+      created_at: new Date().toISOString()
+    }));
+    (authService as any)._myReports.set(fifteenReports);
+    (authService as any)._myReportsTotal.set(15);
+    (authService as any)._myReportsPage.set(1);
+    (authService as any)._myReportsTotalPages.set(3);
+    comp.myReportsManualOpen.set(null);
+    fixture.detectChanges();
+
+    expect(comp.myReportsCount()).toBe(15);
+    expect(comp.isMyReportsOpen()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('My Reports & Package Alerts (15)');
+    expect(fixture.nativeElement.textContent).not.toContain('Historical Alert #1');
+
+    // Toggle open -> shows only 5 items on page 1 and renders Page 1 / 3 controls
+    comp.toggleMyReports();
+    fixture.detectChanges();
+    expect(comp.isMyReportsOpen()).toBe(true);
+    expect(comp.paginatedMyReports().length).toBe(5);
+    expect(fixture.nativeElement.textContent).toContain('Historical Alert #1');
+    expect(fixture.nativeElement.textContent).toContain('Historical Alert #5');
+    expect(fixture.nativeElement.textContent).not.toContain('Historical Alert #6');
+    expect(fixture.nativeElement.textContent).toContain('Page 1 / 3');
+  });
 });

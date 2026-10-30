@@ -308,8 +308,10 @@ export const ru: TranslationDictionary = {
     notifyModerationLabel: 'Обновления по жалобам и пакетам (Ответы и решения)',
     notifyAdminQueueLabel: 'Уведомления очереди модерации (Админ)',
     notifyAppUpdatesLabel: 'Обновления приложения LuantiHub',
+    notifyNewGitPackagesLabel: 'Новые опубликованные Git-пакеты сообщества',
     permissionGranted: 'Активно',
-    permissionBlocked: 'Заблокировано в браузере'
+    permissionBlocked: 'Заблокировано в браузере',
+    permissionResetHint: 'Уведомления отключены в LuantiHub. Чтобы полностью отозвать разрешение браузера, нажмите на значок настроек сайта в адресной строке и выберите «Сбросить разрешение».'
   },
   setup: {
     title: 'Использование LuantiHub в Игре',

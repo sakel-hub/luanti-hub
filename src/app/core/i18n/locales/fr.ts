@@ -308,8 +308,10 @@ export const fr: TranslationDictionary = {
     notifyModerationLabel: 'Mises à jour auteur & signalements (Réponses & Résolutions)',
     notifyAdminQueueLabel: 'Alertes de la file de modération (Admin)',
     notifyAppUpdatesLabel: 'Mises à jour de l\'application LuantiHub',
+    notifyNewGitPackagesLabel: 'Nouveaux paquets Git communautaires publiés',
     permissionGranted: 'Actif',
-    permissionBlocked: 'Bloqué par le navigateur'
+    permissionBlocked: 'Bloqué par le navigateur',
+    permissionResetHint: 'Les notifications sont désactivées dans LuantiHub. Pour révoquer complètement l\'autorisation du navigateur, cliquez sur l\'icône des paramètres du site dans la barre d\'adresse et sélectionnez « Réinitialiser l\'autorisation ».'
   },
   setup: {
     title: 'Utiliser LuantiHub en Jeu',

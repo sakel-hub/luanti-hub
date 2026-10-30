@@ -323,8 +323,10 @@ export interface TranslationDictionary {
     notifyModerationLabel: string;
     notifyAdminQueueLabel: string;
     notifyAppUpdatesLabel: string;
+    notifyNewGitPackagesLabel: string;
     permissionGranted: string;
     permissionBlocked: string;
+    permissionResetHint: string;
   };
   setup: {
     title: string;

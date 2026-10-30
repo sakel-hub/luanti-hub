@@ -308,8 +308,10 @@ export const de: TranslationDictionary = {
     notifyModerationLabel: 'Autoren- & Meldungs-Updates (Antworten & Lösungen)',
     notifyAdminQueueLabel: 'Admin-Moderations-Warteschlange',
     notifyAppUpdatesLabel: 'LuantiHub App- & Funktions-Updates',
+    notifyNewGitPackagesLabel: 'Neue veröffentlichte Git-Community-Pakete',
     permissionGranted: 'Aktiv',
-    permissionBlocked: 'Im Browser blockiert'
+    permissionBlocked: 'Im Browser blockiert',
+    permissionResetHint: 'Benachrichtigungen sind in LuantiHub stummgeschaltet. Um die Browser-Berechtigung vollständig zurückzusetzen, klicken Sie auf das Website-Einstellungssymbol in der Adressleiste und wählen Sie „Berechtigung zurücksetzen“.'
   },
   setup: {
     title: 'LuantiHub im Spiel verwenden',

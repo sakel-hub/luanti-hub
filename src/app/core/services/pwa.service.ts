@@ -7,7 +7,7 @@ export interface NativeNotificationPayload {
   title: string;
   body: string;
   tag: string;
-  category: 'moderation' | 'admin_queue' | 'app_update';
+  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package';
   icon?: string;
   data?: {
     targetTab?: 'moderation' | 'account' | 'packages';
@@ -18,6 +18,7 @@ export interface NativeNotificationPayload {
 }
 
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
+const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
@@ -44,6 +45,43 @@ export class PwaService {
     this.initSwUpdate();
     this.initInstallPrompt();
     this.initNotificationClickRouting();
+    this.initPermissionStatusWatcher();
+  }
+
+  private initPermissionStatusWatcher(): void {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') return;
+    const perms = (navigator as any).permissions;
+    if (!perms || typeof perms.query !== 'function') return;
+
+    try {
+      perms
+        .query({ name: 'notifications' as PermissionName })
+        .then((status: PermissionStatus) => {
+          if (!status) return;
+          const syncState = () => {
+            const currentPerm = this.readBrowserNotificationPermission();
+            const mappedPerm: NotificationPermission =
+              status.state === 'granted'
+                ? 'granted'
+                : status.state === 'denied'
+                  ? 'denied'
+                  : currentPerm === 'granted' && status.state === 'prompt'
+                    ? 'default'
+                    : currentPerm;
+            this.notificationPermission.set(mappedPerm);
+            if (mappedPerm !== 'granted' && this.settingsService.notificationsEnabled()) {
+              this.settingsService.notificationsEnabled.set(false);
+            }
+          };
+          syncState();
+          status.onchange = () => syncState();
+        })
+        .catch(() => {
+          // Permissions API query for notifications not supported
+        });
+    } catch {
+      // Ignore unsupported Permissions API errors
+    }
   }
 
   private readBrowserNotificationPermission(): NotificationPermission {
@@ -211,6 +249,7 @@ export class PwaService {
   async setNotificationsEnabled(enabled: boolean): Promise<boolean> {
     if (!enabled) {
       this.settingsService.notificationsEnabled.set(false);
+      await this.teardownBrowserNotifications();
       return false;
     }
 
@@ -232,6 +271,61 @@ export class PwaService {
     const granted = perm === 'granted';
     this.settingsService.notificationsEnabled.set(granted);
     return granted;
+  }
+
+  private async teardownBrowserNotifications(): Promise<void> {
+    try {
+      await this.syncAppBadge(0);
+    } catch {
+      // ignore
+    }
+
+    if (typeof navigator !== 'undefined') {
+      try {
+        if (this.swPush?.isEnabled) {
+          await this.swPush.unsubscribe().catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
+
+      try {
+        if ('serviceWorker' in navigator) {
+          const reg = await navigator.serviceWorker.getRegistration();
+          if (reg) {
+            if (typeof reg.getNotifications === 'function') {
+              const activeNotifs = await reg.getNotifications();
+              for (const n of activeNotifs || []) {
+                try {
+                  n.close();
+                } catch {
+                  // ignore
+                }
+              }
+            }
+            if (reg.pushManager && typeof reg.pushManager.getSubscription === 'function') {
+              const sub = await reg.pushManager.getSubscription();
+              if (sub && typeof sub.unsubscribe === 'function') {
+                await sub.unsubscribe().catch(() => {});
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore service worker teardown errors
+      }
+
+      try {
+        const perms = (navigator as any).permissions;
+        if (perms && typeof perms.revoke === 'function') {
+          await perms.revoke({ name: 'notifications' });
+        }
+      } catch {
+        // navigator.permissions.revoke is only supported in select Chromium runtimes
+      }
+    }
+
+    this.notificationPermission.set(this.readBrowserNotificationPermission());
   }
 
   hasSeenNotificationTag(tag: string): boolean {
@@ -267,7 +361,141 @@ export class PwaService {
     if (category === 'moderation') return this.settingsService.notifyModeration();
     if (category === 'admin_queue') return this.settingsService.notifyAdminQueue();
     if (category === 'app_update') return this.settingsService.notifyAppUpdates();
+    if (category === 'new_git_package') return this.settingsService.notifyNewGitPackages();
     return false;
+  }
+
+  /**
+   * Tracks known community Git package IDs in localStorage (`lh_known_git_packages_v1`).
+   * On the very first catalog load, seeds the baseline set silently without spamming notifications.
+   * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
+   * formatted as `New Git Package · [MOD] Title` for newly published Git packages.
+   */
+  checkAndNotifyNewGitPackages(
+    candidates: Array<{
+      id?: string;
+      author?: string;
+      author_name?: string;
+      name?: string;
+      title?: string;
+      type?: string;
+      short_desc?: string;
+      thumbnail?: string;
+      thumbnail_url?: string;
+      source?: string;
+      sources?: string[];
+      status?: string;
+    }>,
+    options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean }
+  ): number {
+    if (!Array.isArray(candidates) || candidates.length === 0) return 0;
+    if (typeof localStorage === 'undefined') return 0;
+
+    const forceSet = new Set(
+      (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
+    );
+
+    const gitPackages = candidates.filter(pkg => {
+      if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+      const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+      const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
+      if (!author || !name) return false;
+      const isGit =
+        pkg.source === 'git' ||
+        (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
+        forceSet.has(`${author}/${name}`.toLowerCase());
+      return isGit;
+    });
+
+    if (gitPackages.length === 0) return 0;
+
+    let rawKnown: string | null = null;
+    try {
+      rawKnown = localStorage.getItem(KNOWN_GIT_PACKAGES_KEY);
+    } catch {
+      return 0;
+    }
+
+    // First-time baseline seed: record existing Git packages silently without notification flood
+    if (rawKnown === null && forceSet.size === 0) {
+      if (options?.isBaselineSeedAllowed === false) {
+        return 0;
+      }
+      try {
+        const initialIds = Array.from(
+          new Set(
+            gitPackages.map(pkg => {
+              const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+              const name = pkg.name || String(pkg.id).split('/')[1];
+              return (pkg.id || `${author}/${name}`).toLowerCase();
+            })
+          )
+        ).slice(-2000);
+        localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(initialIds));
+      } catch {
+        // ignore storage quota errors
+      }
+      return 0;
+    }
+
+    let knownList: string[] = [];
+    if (rawKnown) {
+      try {
+        const parsed = JSON.parse(rawKnown);
+        if (Array.isArray(parsed)) {
+          knownList = parsed.filter((item): item is string => typeof item === 'string');
+        }
+      } catch {
+        knownList = [];
+      }
+    }
+
+    const knownSet = new Set<string>(knownList.map(id => id.toLowerCase()));
+    const newlyDiscovered: typeof gitPackages = [];
+
+    for (const pkg of gitPackages) {
+      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+      const name = pkg.name || String(pkg.id).split('/')[1];
+      const resolvedId = pkg.id || `${author}/${name}`;
+      const lowerId = resolvedId.toLowerCase();
+
+      if (!knownSet.has(lowerId) || forceSet.has(lowerId)) {
+        knownSet.add(lowerId);
+        newlyDiscovered.push(pkg);
+      }
+    }
+
+    if (newlyDiscovered.length === 0) return 0;
+
+    try {
+      const updatedIds = Array.from(knownSet).slice(-2000);
+      localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(updatedIds));
+    } catch {
+      // ignore storage errors
+    }
+
+    // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
+    for (const pkg of newlyDiscovered.slice(0, 3)) {
+      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+      const name = pkg.name || String(pkg.id).split('/')[1];
+      const resolvedId = pkg.id || `${author}/${name}`;
+      const typeLabel = String(pkg.type || 'mod').toUpperCase();
+      const displayTitle = pkg.title || name;
+      const thumb = pkg.thumbnail || pkg.thumbnail_url;
+
+      this.sendNativeNotification({
+        title: `New Git Package · [${typeLabel}] ${displayTitle}`,
+        body: `by ${author} — ${pkg.short_desc || 'New community Git repository published on LuantiHub.'}`,
+        icon: thumb,
+        tag: `lh-new-git-pkg-${resolvedId.toLowerCase()}`,
+        category: 'new_git_package',
+        data: {
+          packageId: resolvedId
+        }
+      });
+    }
+
+    return newlyDiscovered.length;
   }
 
   async sendNativeNotification(payload: NativeNotificationPayload): Promise<boolean> {

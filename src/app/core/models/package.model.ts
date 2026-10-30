@@ -121,7 +121,9 @@ export interface AuthUser {
   downloads?: Record<string, number>;
   notification_digest?: {
     user_alerts?: ModerationReport[];
+    my_reports_total?: number;
     admin_latest_open?: ModerationReport[];
+    latest_git_packages?: Array<Partial<LuantiPackage>>;
   };
 }
 

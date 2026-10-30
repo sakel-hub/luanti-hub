@@ -1163,6 +1163,7 @@ export class PackageService {
 
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
+    this.pwaService.checkAndNotifyNewGitPackages(normalized, { isBaselineSeedAllowed: true });
 
     if (Array.isArray(payload.tags) && payload.tags.length > 0) {
       const parsedTags: ContentDbTag[] = payload.tags
@@ -4110,6 +4111,10 @@ export class PackageService {
           this.clearBootCache();
           const normalized = this.normalizePackage(result.package);
           this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
+          this.pwaService.checkAndNotifyNewGitPackages([normalized], {
+            forceNotifyIds: [normalized.id],
+            isBaselineSeedAllowed: false
+          });
           this.authService.clearAuthCache();
           this.authService.initAuth(true);
         }
