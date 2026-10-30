@@ -181,6 +181,64 @@ export class AuthService {
     return verifiedOnProvider.some(id => id.username.trim().toLowerCase() === targetOwner);
   }
 
+  inferPackageProvider(pkg?: Partial<LuantiPackage> | null): GitProvider {
+    const explicit = String(pkg?.provider || '').trim().toLowerCase();
+    if (
+      explicit === 'github' ||
+      explicit === 'codeberg' ||
+      explicit === 'gitlab' ||
+      explicit === 'mesehub' ||
+      explicit === 'contentdb'
+    ) {
+      return explicit;
+    }
+    const repoUrl = String(pkg?.repo_url || '').trim().toLowerCase();
+    if (repoUrl.includes('github.com')) return 'github';
+    if (repoUrl.includes('codeberg.org')) return 'codeberg';
+    if (repoUrl.includes('gitlab.com')) return 'gitlab';
+    if (repoUrl.includes('minetest.land')) return 'mesehub';
+    return 'contentdb';
+  }
+
+  /**
+   * Checks whether the current user is an administrator or the cryptographically verified
+   * owner of the given package on its hosting forge provider.
+   */
+  canManagePackage(pkg?: Partial<LuantiPackage> | null): boolean {
+    const user = this._currentUser();
+    if (!user || !pkg) return false;
+    if (this.isAdmin()) return true;
+
+    const provider = this.inferPackageProvider(pkg);
+    const pkgAuthor = String(pkg.author || (pkg as any).author_name || '').trim();
+    if (pkgAuthor && this.hasVerifiedProviderOwnership(provider, pkgAuthor)) {
+      return true;
+    }
+
+    if (pkg.repo_url) {
+      try {
+        const parts = new URL(pkg.repo_url).pathname.split('/').filter(Boolean);
+        if (parts.length >= 2 && this.hasVerifiedProviderOwnership(provider, parts[0])) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const pkgId = String(pkg.id || `${pkgAuthor}/${pkg.name || ''}`).toLowerCase();
+    const isSubmittedByCurrentUser = (user.packages || []).some((up: any) => {
+      const upAuthor = up.author || up.author_name || user.username;
+      const upId = String(up.id || `${upAuthor}/${up.name}`).toLowerCase();
+      return upId === pkgId && String(up.author_id || '') === String(user.id);
+    });
+    if (isSubmittedByCurrentUser && this.hasVerifiedProviderOwnership(provider)) {
+      return true;
+    }
+
+    return false;
+  }
+
   async initAuth(forceRefresh = false): Promise<void> {
     try {
       this._isLoading.set(true);

@@ -4881,10 +4881,10 @@ export class PackageService {
     }
   }
 
-  // Instant Kill Switch (Admin or Package Owner)
+  // Instant Kill Switch & Author Self-Delist / Self-Remove (Admin or Verified Package Owner)
   async moderatePackage(
     pkg: { author: string; name: string; id?: string },
-    action: 'delist' | 'flag' | 'restore',
+    action: 'delist' | 'flag' | 'restore' | 'remove',
     details?: string,
     reportId?: string
   ): Promise<{ success: boolean; message?: string }> {
@@ -4902,9 +4902,18 @@ export class PackageService {
       const targetId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
       this.deepHydratedIds.delete(targetId);
       this.clearBootCache();
-      if (action === 'delist' || action === 'flag') {
+      if (action === 'remove') {
+        this._packages.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
+        this._serverTop10Today.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
+        this._serverTop10Week.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
+        if (this._activePackage()?.id.toLowerCase() === targetId) {
+          this.closePackageModal(true);
+        }
+      } else if (action === 'delist' || action === 'flag') {
         const nextStatus = action === 'delist' ? 'delisted' : 'flagged';
         this._packages.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
+        this._serverTop10Today.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
+        this._serverTop10Week.update(list => list.filter(p => p.id.toLowerCase() !== targetId));
         if (this._activePackage()?.id.toLowerCase() === targetId) {
           this._activePackage.update(curr => curr ? { ...curr, status: nextStatus } : null);
         }
@@ -4915,8 +4924,14 @@ export class PackageService {
         await this.initCatalog(true);
       }
 
-      await this.authService.fetchModerationQueue(true);
-      this.pwaService.showToast(data.message || `Package ${action}ed.`);
+      this.authService.clearAuthCache();
+      await this.authService.initAuth(true);
+      if (this.authService.isAdmin()) {
+        await this.authService.fetchModerationQueue(true);
+      }
+      this.pwaService.showToast(
+        data.message || (action === 'remove' ? 'Package removed.' : `Package ${action}ed.`)
+      );
       return { success: true, message: data.message };
     } catch (err: any) {
       return { success: false, message: err.message || 'Network error executing moderation action.' };

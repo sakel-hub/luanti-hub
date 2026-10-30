@@ -20,7 +20,8 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  verifyStrictPackageAuthorOwnership
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -1596,29 +1597,14 @@ export async function onRequestPatch(context: { request: Request; params: { auth
   }));
 
   const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
-  const userHandles = new Set<string>([
-    String(user.username || '').toLowerCase(),
-    ...identities.map((i: any) => String(i.username || '').toLowerCase())
-  ].filter(Boolean));
-
-  let repoOwner = '';
-  if (pkgRow.repo_url) {
-    try {
-      const parts = new URL(pkgRow.repo_url).pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) repoOwner = parts[0].toLowerCase();
-    } catch {
-      // ignore
-    }
-  }
-
   const isOwner =
     isAdmin ||
-    (pkgRow.author_id && String(pkgRow.author_id) === resolvedUserId) ||
-    userHandles.has(String(pkgRow.author_name || author).toLowerCase()) ||
-    (repoOwner && userHandles.has(repoOwner));
+    verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author);
 
   if (!isOwner) {
-    return Response.json({ error: 'Only the package author or an administrator can edit this package.' }, { status: 403 });
+    return Response.json({
+      error: 'Forbidden: Only an administrator or the cryptographically verified package author on the hosting Git forge can edit this package.'
+    }, { status: 403 });
   }
 
   const body = await context.request.json().catch(() => ({})) as { tags?: string[] };

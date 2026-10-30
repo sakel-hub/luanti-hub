@@ -88,6 +88,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     status: 302,
     headers: {
       Location: authUrl,
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
       'Set-Cookie': `lh_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${isHttps ? '; Secure' : ''}`
     }
   });

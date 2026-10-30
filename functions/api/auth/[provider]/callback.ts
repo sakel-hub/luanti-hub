@@ -40,18 +40,105 @@ function cleanEnvValue(val?: string): string {
   return (val || '').trim().replace(/^["']|["']$/g, '').trim();
 }
 
+function getOAuthCodeEdgeCacheUrl(provider: string, code: string): string {
+  return `https://cache.luantihub.internal/__oauth_code/${encodeURIComponent(provider)}/${encodeURIComponent(code)}`;
+}
+
+async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: string): Promise<string | null> {
+  const cachedCodeKey = `${provider}:${code}`;
+  const inMemory = completedOAuthCodes.get(cachedCodeKey);
+  if (inMemory && Date.now() < inMemory.expiresAt) {
+    return inMemory.userId;
+  }
+  try {
+    const cacheStorage = (globalThis as any).caches?.default;
+    if (!cacheStorage) return null;
+    const cachedRes = await cacheStorage.match(new Request(getOAuthCodeEdgeCacheUrl(provider, code)));
+    if (!cachedRes || !cachedRes.ok) return null;
+    const data = await cachedRes.json() as { userId?: string };
+    if (data?.userId) {
+      completedOAuthCodes.set(cachedCodeKey, {
+        userId: data.userId,
+        expiresAt: Date.now() + 90_000
+      });
+      return data.userId;
+    }
+  } catch {
+    // Ignore Cache API errors in local/non-Worker environments
+  }
+  return null;
+}
+
+async function writeCompletedOAuthCodeToEdgeCache(provider: string, code: string, userId: string): Promise<void> {
+  const cachedCodeKey = `${provider}:${code}`;
+  completedOAuthCodes.set(cachedCodeKey, {
+    userId,
+    expiresAt: Date.now() + 90_000
+  });
+  try {
+    const cacheStorage = (globalThis as any).caches?.default;
+    if (!cacheStorage) return;
+    const res = new Response(JSON.stringify({ userId }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=90'
+      }
+    });
+    await cacheStorage.put(new Request(getOAuthCodeEdgeCacheUrl(provider, code)), res);
+  } catch {
+    // Ignore Cache API errors in local/non-Worker environments
+  }
+}
+
+function computeOAuthRetryDelayMs(attempt: number, status: number, retryAfterHeader: string | null): number {
+  if (retryAfterHeader) {
+    const trimmed = retryAfterHeader.trim();
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(Math.max(Math.round(seconds * 1000), 1000), 5500);
+    }
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate)) {
+      const deltaMs = parsedDate - Date.now();
+      if (deltaMs > 0) {
+        return Math.min(Math.max(deltaMs, 1000), 5500);
+      }
+    }
+  }
+
+  const jitter = Math.floor(Math.random() * 250);
+  if (status === 429 || status === 503) {
+    // GitHub's web front-end `/login/oauth/access_token` per-IP burst window requires >1s cooldown
+    const schedule = [1200, 2300, 3600, 5000];
+    const base = schedule[Math.min(attempt, schedule.length - 1)];
+    return base + jitter;
+  }
+
+  return 300 * (attempt + 1) + jitter;
+}
+
 async function exchangeOAuthTokenWithRetry(
   tokenUrl: string,
   params: Record<string, string>,
   providerLabel: string,
-  allowJsonRetry = false
+  allowJsonRetry = false,
+  onBeforeRetry?: () => Promise<string | null>
 ): Promise<any> {
   const formBody = new URLSearchParams(params).toString();
   let lastStatus = 0;
+  const maxAttempts = 5;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0 && onBeforeRetry) {
+      const alreadyResolvedUserId = await onBeforeRetry();
+      if (alreadyResolvedUserId) {
+        return { __resolvedUserId: alreadyResolvedUserId };
+      }
+    }
+
     try {
-      const useJson = allowJsonRetry && attempt === 1;
+      // Only switch to JSON body if a previous attempt failed with a non-rate-limit format error (e.g. 400/415)
+      const useJson = allowJsonRetry && attempt === 1 && lastStatus !== 429 && lastStatus !== 503;
       const res = await fetch(tokenUrl, {
         method: 'POST',
         headers: {
@@ -80,20 +167,24 @@ async function exchangeOAuthTokenWithRetry(
         }
       }
 
-      // Retry on transient 403/408/429/5xx or cold-start proxy errors
-      if (attempt < 2) {
-        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      // Retry on 429 Too Many Requests, 403/408/5xx, or transient upstream proxy errors
+      if (attempt < maxAttempts - 1) {
+        const delayMs = computeOAuthRetryDelayMs(attempt, lastStatus, res.headers?.get?.('Retry-After') || null);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
         continue;
       }
     } catch (err: any) {
-      if (attempt === 2) {
+      if (attempt === maxAttempts - 1) {
         throw err;
       }
-      await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      const delayMs = computeOAuthRetryDelayMs(attempt, lastStatus, null);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
 
-  throw new Error(`${providerLabel} token exchange failed (HTTP ${lastStatus || 'network error'})`);
+  const rateLimitError: any = new Error(`${providerLabel} token exchange failed (HTTP ${lastStatus || 'network error'})`);
+  rateLimitError.httpStatus = lastStatus;
+  throw rateLimitError;
 }
 
 async function buildSuccessRedirectResponse(
@@ -105,6 +196,7 @@ async function buildSuccessRedirectResponse(
   const sessionToken = await createSessionToken(userId, sessionSecret);
   const headers = new Headers();
   headers.set('Location', `${origin}/?auth_success=1`);
+  headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   headers.append(
     'Set-Cookie',
     `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
@@ -161,11 +253,11 @@ export async function onRequestGet(context: {
     ? await verifySessionToken(cookies['lh_session'], sessionSecret)
     : null;
 
-  // Fast-path: If this exact authorization code already completed moments ago (duplicate browser/network navigation)
+  // Fast-path: If this exact authorization code already completed moments ago (in-memory or Cloudflare Edge Cache)
   const cachedCodeKey = `${provider}:${code}`;
-  const completedEntry = completedOAuthCodes.get(cachedCodeKey);
-  if (completedEntry && Date.now() < completedEntry.expiresAt) {
-    return buildSuccessRedirectResponse(url.origin, isHttps, completedEntry.userId, sessionSecret);
+  const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+  if (completedUserId) {
+    return buildSuccessRedirectResponse(url.origin, isHttps, completedUserId, sessionSecret);
   }
 
   // Fast-path: If this exact authorization code is currently being processed by a concurrent request
@@ -178,6 +270,8 @@ export async function onRequestGet(context: {
       // Fall through to standard flow if in-flight promise failed
     }
   }
+
+  const checkEdgeCacheBeforeRetry = () => readCompletedOAuthCodeFromEdgeCache(provider, code);
 
   const processOAuthCallback = async (): Promise<string> => {
     let providerUserId = '';
@@ -197,8 +291,11 @@ export async function onRequestGet(context: {
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
         },
-        'Codeberg'
+        'Codeberg',
+        false,
+        checkEdgeCacheBeforeRetry
       );
+      if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
       if (tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'Codeberg token exchange failed');
       }
@@ -227,8 +324,11 @@ export async function onRequestGet(context: {
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
         },
-        'Mesehub'
+        'Mesehub',
+        false,
+        checkEdgeCacheBeforeRetry
       );
+      if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
       if (tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'Mesehub token exchange failed');
       }
@@ -257,8 +357,11 @@ export async function onRequestGet(context: {
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
         },
-        'GitLab'
+        'GitLab',
+        false,
+        checkEdgeCacheBeforeRetry
       );
+      if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
       if (tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'GitLab token exchange failed');
       }
@@ -287,13 +390,22 @@ export async function onRequestGet(context: {
           redirect_uri: redirectUri
         },
         'GitHub',
-        true
+        true,
+        checkEdgeCacheBeforeRetry
       );
+      if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
       if (tokenData.error || !tokenData.access_token) {
-        // If a duplicate request hit another Worker isolate milliseconds after the code was already consumed
-        // and the user already has a valid session cookie, return that session seamlessly
-        if (tokenData.error === 'bad_verification_code' && existingSessionUserId) {
-          return existingSessionUserId;
+        // If a duplicate request hit another Worker isolate milliseconds after the code was already consumed,
+        // check cross-isolate edge cache first, then fall back to existingSessionUserId if present
+        if (tokenData.error === 'bad_verification_code') {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          const cachedFromOtherIsolate = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+          if (cachedFromOtherIsolate) {
+            return cachedFromOtherIsolate;
+          }
+          if (existingSessionUserId) {
+            return existingSessionUserId;
+          }
         }
         throw new Error(tokenData.error_description || tokenData.error || 'GitHub OAuth token missing');
       }
@@ -322,8 +434,11 @@ export async function onRequestGet(context: {
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
         },
-        'ContentDB'
+        'ContentDB',
+        false,
+        checkEdgeCacheBeforeRetry
       );
+      if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
       if (tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'ContentDB token exchange failed');
       }
@@ -379,7 +494,30 @@ export async function onRequestGet(context: {
         verified: number;
       }>;
 
+      // Determine whether this OAuth login should link to activeSessionUser (connecting a new forge)
+      // or switch accounts (when activeSessionUser already has a DIFFERENT account on this same provider)
+      let shouldLinkToActiveSession = Boolean(activeSessionUser?.id);
       if (activeSessionUser?.id) {
+        const existingSameProviderIdentity = await context.env.DB.prepare(`
+          SELECT provider_user_id, provider_username
+          FROM user_identities
+          WHERE user_id = ? AND provider = ?
+          LIMIT 1
+        `).bind(activeSessionUser.id, provider).first() as {
+          provider_user_id?: string;
+          provider_username?: string;
+        } | null;
+
+        if (
+          existingSameProviderIdentity &&
+          String(existingSameProviderIdentity.provider_user_id || '') !== providerUserId &&
+          String(existingSameProviderIdentity.provider_username || '').toLowerCase() !== providerUsername.toLowerCase()
+        ) {
+          shouldLinkToActiveSession = false;
+        }
+      }
+
+      if (shouldLinkToActiveSession && activeSessionUser?.id) {
         userId = String(activeSessionUser.id);
       } else {
         // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
@@ -516,18 +654,34 @@ export async function onRequestGet(context: {
 
   try {
     const resolvedUserId = await inFlightPromise;
-    completedOAuthCodes.set(cachedCodeKey, {
-      userId: resolvedUserId,
-      expiresAt: Date.now() + 60_000
-    });
+    await writeCompletedOAuthCodeToEdgeCache(provider, code, resolvedUserId);
     return await buildSuccessRedirectResponse(url.origin, isHttps, resolvedUserId, sessionSecret);
   } catch (err: any) {
-    // If another isolate already set a valid session cookie for the user, redirect to success
-    if (existingSessionUserId) {
+    // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache
+    const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+    if (edgeResolvedUserId) {
+      return await buildSuccessRedirectResponse(url.origin, isHttps, edgeResolvedUserId, sessionSecret);
+    }
+
+    // 2. If GitHub's front-end load balancer returned HTTP 429, the authorization code is still unconsumed.
+    // Perform up to 2 automatic callback self-retry redirects after a cooldown window so switching accounts succeeds seamlessly.
+    const errMsg = String(err?.message || 'Auth failure');
+    const isRateLimited429 = err?.httpStatus === 429 || errMsg.includes('HTTP 429');
+    const retry429Count = Number(url.searchParams.get('retry_429') || '0');
+    if (isRateLimited429 && retry429Count < 2) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const retryUrl = new URL(url.toString());
+      retryUrl.searchParams.set('retry_429', String(retry429Count + 1));
+      return Response.redirect(retryUrl.toString(), 302);
+    }
+
+    // 3. If another isolate consumed the code and the user already has a valid session cookie, redirect to success
+    if (existingSessionUserId && !isRateLimited429) {
       return await buildSuccessRedirectResponse(url.origin, isHttps, existingSessionUserId, sessionSecret);
     }
+
     return Response.redirect(
-      `${url.origin}/?auth_error=${encodeURIComponent(err.message || 'Auth failure')}&provider=${encodeURIComponent(provider)}`,
+      `${url.origin}/?auth_error=${encodeURIComponent(errMsg)}&provider=${encodeURIComponent(provider)}`,
       302
     );
   } finally {

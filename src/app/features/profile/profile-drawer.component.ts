@@ -234,43 +234,105 @@ import {
                 } @else {
                   <div class="space-y-2">
                     @for (pkg of userPackages(); track pkg.id) {
-                      <div class="p-3 rounded-2xl glass-panel flex items-center justify-between gap-3 text-xs hover:border-sky-400/40 transition">
-                        <button
-                          type="button"
-                          (click)="openPackage(pkg)"
-                          class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
-                          <img [src]="pkg.thumbnail || 'logo.svg'" [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
-                          <div class="min-w-0 flex-1">
-                            <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
-                            <div class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5">
-                              <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
-                              <span>•</span>
-                              <span
-                                [class]="pkg.type === 'game' ? 'glass-badge-emerald' : pkg.type === 'txp' ? 'glass-badge-purple' : 'glass-badge-sky'"
-                                class="glass-badge font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
-                                {{ pkg.type }}
-                              </span>
+                      <div class="p-3 rounded-2xl glass-panel space-y-2.5 text-xs hover:border-sky-400/40 transition">
+                        <div class="flex items-center justify-between gap-3">
+                          <button
+                            type="button"
+                            (click)="openPackage(pkg)"
+                            class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
+                            <img [src]="pkg.thumbnail || 'logo.svg'" [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
+                            <div class="min-w-0 flex-1">
+                              <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
+                              <div class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 flex-wrap">
+                                <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
+                                <span>•</span>
+                                <span
+                                  [class]="pkg.type === 'game' ? 'glass-badge-emerald' : pkg.type === 'txp' ? 'glass-badge-purple' : 'glass-badge-sky'"
+                                  class="glass-badge font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
+                                  {{ pkg.type }}
+                                </span>
+                                @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
+                                  <span class="glass-badge glass-badge-amber font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
+                                    {{ pkg.status }}
+                                  </span>
+                                }
+                              </div>
+                            </div>
+                          </button>
+
+                          <div class="flex items-center gap-1.5 flex-shrink-0">
+                            @if (authService.canManagePackage(pkg)) {
+                              <button
+                                type="button"
+                                (click)="openPackageAndEditTags(pkg)"
+                                class="p-2 rounded-xl glass-icon-btn text-sky-400 hover:text-white transition cursor-pointer"
+                                title="Edit Tags"
+                                aria-label="Edit package tags">
+                                <svg lucideTag class="w-3.5 h-3.5"></svg>
+                              </button>
+                            }
+                            <button
+                              type="button"
+                              (click)="packageService.downloadPackage(pkg)"
+                              class="p-2 rounded-xl glass-icon-btn text-slate-200 hover:text-white transition cursor-pointer"
+                              [attr.aria-label]="'card.downloadZip' | translate">
+                              <svg lucideDownload class="w-3.5 h-3.5"></svg>
+                            </button>
+                            @if (authService.canManagePackage(pkg)) {
+                              <button
+                                type="button"
+                                (click)="toggleConfirmManagePackage(pkg.id)"
+                                class="p-2 rounded-xl glass-icon-btn text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                                title="Delist or remove package"
+                                aria-label="Delist or remove package">
+                                <svg lucideTrash class="w-3.5 h-3.5"></svg>
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        @if (confirmingPackageId() === pkg.id) {
+                          <div class="pt-2.5 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                            <span class="text-slate-300 font-medium">
+                              Manage <strong class="text-white font-mono">{{ pkg.id }}</strong>:
+                            </span>
+                            <div class="flex items-center gap-1.5 flex-wrap justify-end">
+                              <button
+                                type="button"
+                                (click)="confirmingPackageId.set(null)"
+                                [disabled]="managingPackageId() === pkg.id"
+                                class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
+                                {{ 'profile.cancel' | translate }}
+                              </button>
+                              @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
+                                <button
+                                  type="button"
+                                  (click)="onAuthorManagePackage(pkg, 'restore')"
+                                  [disabled]="managingPackageId() === pkg.id"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-emerald font-bold text-white cursor-pointer">
+                                  {{ 'modal.killSwitchRestore' | translate }}
+                                </button>
+                              } @else {
+                                <button
+                                  type="button"
+                                  (click)="onAuthorManagePackage(pkg, 'delist')"
+                                  [disabled]="managingPackageId() === pkg.id"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-amber font-bold cursor-pointer">
+                                  {{ 'modal.killSwitchDelist' | translate }}
+                                </button>
+                              }
+                              @if (pkg.source === 'git' || (pkg.provider && pkg.provider !== 'contentdb')) {
+                                <button
+                                  type="button"
+                                  (click)="onAuthorManagePackage(pkg, 'remove')"
+                                  [disabled]="managingPackageId() === pkg.id"
+                                  class="px-2.5 py-1 rounded-lg glass-btn-rose font-black text-white cursor-pointer">
+                                  Remove Permanently
+                                </button>
+                              }
                             </div>
                           </div>
-                        </button>
-
-                        <div class="flex items-center gap-1.5 flex-shrink-0">
-                          <button
-                            type="button"
-                            (click)="openPackageAndEditTags(pkg)"
-                            class="p-2 rounded-xl glass-icon-btn text-sky-400 hover:text-white transition cursor-pointer"
-                            title="Edit Tags"
-                            aria-label="Edit package tags">
-                            <svg lucideTag class="w-3.5 h-3.5"></svg>
-                          </button>
-                          <button
-                            type="button"
-                            (click)="packageService.downloadPackage(pkg)"
-                            class="p-2 rounded-xl glass-icon-btn text-slate-200 hover:text-white transition cursor-pointer"
-                            [attr.aria-label]="'card.downloadZip' | translate">
-                            <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                          </button>
-                        </div>
+                        }
                       </div>
                     }
                   </div>
@@ -950,6 +1012,8 @@ export class ProfileDrawerComponent implements OnInit {
   private readonly noteInputs = signal<Record<string, string>>({});
   private readonly actingReportIds = signal<Record<string, boolean>>({});
   readonly myReportsManualOpen = signal<boolean | null>(null);
+  readonly confirmingPackageId = signal<string | null>(null);
+  readonly managingPackageId = signal<string | null>(null);
 
   readonly myReportsCount = computed<number>(() => {
     return Math.max(this.authService.myReportsTotal(), this.authService.myReports().length);
@@ -1044,6 +1108,8 @@ export class ProfileDrawerComponent implements OnInit {
         min_minetest_version: p.min_minetest_version || '5.0.0',
         source: isGitSource ? 'git' : 'official',
         sources: isGitSource ? ['git'] : ['official'],
+        status: p.status || 'active',
+        moderation_reason: p.status_reason || p.moderation_reason || undefined,
         tags: parseTagsOrDeps(p.tags, [p.type || 'mod']),
         dependencies: parseTagsOrDeps(p.dependencies),
         optional_dependencies: parseTagsOrDeps(p.optional_dependencies)
@@ -1058,7 +1124,12 @@ export class ProfileDrawerComponent implements OnInit {
       const key = pkg.id.toLowerCase();
       const existing = byKey.get(key);
       if (existing) {
-        byKey.set(key, this.packageService.mergeDualSourcePackage(existing, pkg));
+        const merged = this.packageService.mergeDualSourcePackage(existing, pkg);
+        byKey.set(key, {
+          ...merged,
+          status: pkg.status || merged.status,
+          moderation_reason: pkg.moderation_reason || merged.moderation_reason
+        });
       } else {
         byKey.set(key, pkg);
       }
@@ -1210,6 +1281,23 @@ export class ProfileDrawerComponent implements OnInit {
   openPackageAndEditTags(pkg: LuantiPackage): void {
     this.authService.closeProfileDrawer(false);
     this.packageService.openPackageModal(pkg, true, true);
+  }
+
+  toggleConfirmManagePackage(pkgId: string): void {
+    this.confirmingPackageId.update(curr => (curr === pkgId ? null : pkgId));
+  }
+
+  async onAuthorManagePackage(pkg: LuantiPackage, action: 'delist' | 'restore' | 'remove'): Promise<void> {
+    const [author, name] = (pkg.id || `${pkg.author}/${pkg.name}`).split('/');
+    if (!author || !name) return;
+    this.managingPackageId.set(pkg.id);
+    await this.packageService.moderatePackage(
+      { author, name, id: pkg.id },
+      action,
+      `Author ${action} action from Profile Drawer`
+    );
+    this.managingPackageId.set(null);
+    this.confirmingPackageId.set(null);
   }
 
   async onSyncContentDb(): Promise<void> {

@@ -213,6 +213,78 @@ export function isProtectedAdminHandle(username: string, provider?: string, admi
   return false;
 }
 
+export function inferPackageProvider(pkgRow?: { provider?: string; repo_url?: string } | null): string {
+  const explicit = String(pkgRow?.provider || '').trim().toLowerCase();
+  if (explicit && ['github', 'codeberg', 'gitlab', 'mesehub', 'contentdb'].includes(explicit)) {
+    return explicit;
+  }
+  const repoUrl = String(pkgRow?.repo_url || '').trim().toLowerCase();
+  if (repoUrl.includes('github.com')) return 'github';
+  if (repoUrl.includes('codeberg.org')) return 'codeberg';
+  if (repoUrl.includes('gitlab.com')) return 'gitlab';
+  if (repoUrl.includes('minetest.land')) return 'mesehub';
+  return 'contentdb';
+}
+
+/**
+ * Cryptographically strict package author ownership verification.
+ * Prevents cross-forge username spoofing and rejects unverified direct-handle sessions:
+ * - Requires at least one verified identity (`verified === 1 | true`)
+ * - Requires the verified identity to be on the EXACT forge provider where the package is hosted
+ *   (or that `pkgRow.author_id === user.id` while holding a verified identity on that provider).
+ */
+export function verifyStrictPackageAuthorOwnership(
+  user: { id?: string; username?: string } | null,
+  identities: Array<{ provider?: string; username?: string; provider_username?: string; verified?: number | boolean }> = [],
+  pkgRow: { author_id?: string; author_name?: string; provider?: string; repo_url?: string } | null,
+  fallbackAuthor?: string
+): boolean {
+  if (!user || !user.id || !pkgRow) return false;
+
+  const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
+  if (verifiedIdentities.length === 0) {
+    return false;
+  }
+
+  const pkgProvider = inferPackageProvider(pkgRow);
+  const pkgAuthor = String(pkgRow.author_name || fallbackAuthor || '').trim().toLowerCase();
+  let repoOwner = '';
+  if (pkgRow.repo_url) {
+    try {
+      const parts = new URL(pkgRow.repo_url).pathname.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        repoOwner = parts[0].trim().toLowerCase();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 1. Verified identity on the exact package forge provider matching repoOwner or pkgAuthor
+  const hasExactProviderMatch = verifiedIdentities.some(id => {
+    const idProvider = String(id.provider || '').trim().toLowerCase();
+    const idUsername = String(id.username || id.provider_username || '').trim().toLowerCase();
+    if (!idProvider || !idUsername || idProvider !== pkgProvider) return false;
+    return (pkgAuthor && idUsername === pkgAuthor) || (repoOwner && idUsername === repoOwner);
+  });
+  if (hasExactProviderMatch) {
+    return true;
+  }
+
+  // 2. Submitter user_id match (e.g. verified organization member who published via Pre-Flight Audit)
+  const pkgAuthorId = String(pkgRow.author_id || '').trim();
+  if (pkgAuthorId && !pkgAuthorId.startsWith('ext_') && pkgAuthorId === String(user.id)) {
+    const hasVerifiedOnPkgProvider = verifiedIdentities.some(
+      id => String(id.provider || '').trim().toLowerCase() === pkgProvider
+    );
+    if (hasVerifiedOnPkgProvider) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * Deduplicates `user_identities` rows for the same (user_id, provider, LOWER(provider_username))
  * and automatically merges duplicate suffixed accounts (e.g. `username_gi` -> `username`)

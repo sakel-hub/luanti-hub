@@ -105,34 +105,71 @@ import {
 
           <div class="overflow-y-auto flex-1 flex flex-col">
 
-            <!-- Admin / Author Moderation Control Bar (Mutually Exclusive: Delist when active, Restore when delisted) -->
+            <!-- Admin / Verified Author Package Control Bar (Delist, Restore & Safe Permanent Removal) -->
             @if (canModerate()) {
               <div
                 [class]="isPackageDelisted() ? 'bg-amber-950/75 border-amber-500/30 text-amber-200' : 'bg-rose-950/75 border-rose-500/30 text-rose-200'"
-                class="px-5 py-2.5 backdrop-blur-md border-b flex items-center justify-between gap-3 flex-wrap text-xs flex-shrink-0">
-                <div class="flex items-center gap-2 font-bold">
-                  <svg lucideShieldAlert class="w-4 h-4 flex-shrink-0" [class]="isPackageDelisted() ? 'text-amber-400' : 'text-rose-400'"></svg>
-                  <span>{{ 'modal.adminModeration' | translate }}</span>
+                class="px-5 py-2.5 backdrop-blur-md border-b flex flex-col gap-2 text-xs flex-shrink-0">
+                <div class="flex items-center justify-between gap-3 flex-wrap">
+                  <div class="flex items-center gap-2 font-bold">
+                    <svg lucideShieldAlert class="w-4 h-4 flex-shrink-0" [class]="isPackageDelisted() ? 'text-amber-400' : 'text-rose-400'"></svg>
+                    <span>{{ authService.isAdmin() ? ('modal.adminModeration' | translate) : 'Author Package Controls' }}</span>
+                  </div>
+                  <div class="flex items-center gap-2 flex-wrap">
+                    @if (isPackageDelisted()) {
+                      <button
+                        type="button"
+                        (click)="onKillSwitch('restore')"
+                        [disabled]="isModerating()"
+                        class="px-3.5 py-1.5 rounded-xl glass-btn-emerald disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
+                        {{ 'modal.killSwitchRestore' | translate }}
+                      </button>
+                    } @else {
+                      <button
+                        type="button"
+                        (click)="onKillSwitch('delist')"
+                        [disabled]="isModerating()"
+                        class="px-3.5 py-1.5 rounded-xl glass-btn-rose disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
+                        {{ 'modal.killSwitchDelist' | translate }}
+                      </button>
+                    }
+                    @if (isGitSubmittedPackage()) {
+                      <button
+                        type="button"
+                        (click)="isConfirmingRemove.set(!isConfirmingRemove())"
+                        [disabled]="isModerating()"
+                        class="px-3 py-1.5 rounded-xl glass-btn border-rose-400/40 text-rose-200 hover:text-white disabled:opacity-50 font-bold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                        <svg lucideTrash2 class="w-3.5 h-3.5 text-rose-400"></svg>
+                        <span>Remove Package</span>
+                      </button>
+                    }
+                  </div>
                 </div>
-                <div class="flex items-center gap-2">
-                  @if (isPackageDelisted()) {
-                    <button
-                      type="button"
-                      (click)="onKillSwitch('restore')"
-                      [disabled]="isModerating()"
-                      class="px-3.5 py-1.5 rounded-xl glass-btn-emerald disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
-                      {{ 'modal.killSwitchRestore' | translate }}
-                    </button>
-                  } @else {
-                    <button
-                      type="button"
-                      (click)="onKillSwitch('delist')"
-                      [disabled]="isModerating()"
-                      class="px-3.5 py-1.5 rounded-xl glass-btn-rose disabled:opacity-50 font-black text-[11px] transition cursor-pointer">
-                      {{ 'modal.killSwitchDelist' | translate }}
-                    </button>
-                  }
-                </div>
+
+                @if (isConfirmingRemove()) {
+                  <div class="pt-2 border-t border-white/10 flex items-center justify-between gap-3 flex-wrap text-[11px]">
+                    <span class="text-rose-200 font-semibold">
+                      Permanently remove <strong class="text-white font-mono">{{ package.author }}/{{ package.name }}</strong> from Luanti Hub?
+                    </span>
+                    <div class="flex items-center gap-2">
+                      <button
+                        type="button"
+                        (click)="isConfirmingRemove.set(false)"
+                        [disabled]="isModerating()"
+                        class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
+                        {{ 'profile.cancel' | translate }}
+                      </button>
+                      <button
+                        type="button"
+                        (click)="onKillSwitch('remove')"
+                        [disabled]="isModerating()"
+                        class="px-3 py-1 rounded-lg glass-btn-rose font-black text-white flex items-center gap-1 cursor-pointer">
+                        <svg lucideTrash2 class="w-3 h-3"></svg>
+                        <span>Confirm Permanent Removal</span>
+                      </button>
+                    </div>
+                  </div>
+                }
               </div>
             }
 
@@ -1643,6 +1680,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
   reportDetails = '';
   readonly isReporting = signal(false);
   readonly isModerating = signal(false);
+  readonly isConfirmingRemove = signal(false);
 
   // Author Tag Editing state
   readonly isEditingTags = signal(false);
@@ -1650,13 +1688,17 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
   readonly isSavingTags = signal(false);
 
   readonly canModerate = computed(() => {
-    const user = this.authService.currentUser();
-    if (!user || !this.package) return false;
-    if (this.authService.isAdmin()) return true;
-    const lowerAuthor = (this.package.author || (this.package as any).author_name || '').toLowerCase();
-    if (!lowerAuthor) return false;
-    return user.identities.some(
-      id => Boolean(id.verified) && id.username.toLowerCase() === lowerAuthor
+    const pkg = this.packageService.activePackage() || this.package;
+    return this.authService.canManagePackage(pkg);
+  });
+
+  readonly isGitSubmittedPackage = computed(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return false;
+    return (
+      pkg.source === 'git' ||
+      (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
+      Boolean(pkg.provider && pkg.provider !== 'contentdb')
     );
   });
 
@@ -1847,6 +1889,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     this.packageService.registerModalSubOverlayCloser(() => {
       if (this.lightboxImageUrl()) {
         this.closeLightbox();
+        return true;
+      }
+      if (this.isConfirmingRemove()) {
+        this.isConfirmingRemove.set(false);
         return true;
       }
       if (this.isReportOpen()) {
@@ -2303,8 +2349,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     }
   }
 
-  async onKillSwitch(action: 'delist' | 'flag' | 'restore'): Promise<void> {
+  async onKillSwitch(action: 'delist' | 'flag' | 'restore' | 'remove'): Promise<void> {
     this.isModerating.set(true);
+    this.isConfirmingRemove.set(false);
     await this.packageService.moderatePackage(this.package, action, `Executed ${action} from Package Detail Modal`);
     this.isModerating.set(false);
   }

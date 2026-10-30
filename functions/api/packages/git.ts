@@ -1301,6 +1301,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(id) DO UPDATE SET
+          author_id = excluded.author_id,
           title = excluded.title,
           short_desc = excluded.short_desc,
           long_desc = excluded.long_desc,
@@ -1326,6 +1327,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
           dev_state = COALESCE(excluded.dev_state, packages.dev_state),
           content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
+          status = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status ELSE 'active' END,
+          status_reason = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status_reason ELSE NULL END,
+          flagged_at = CASE WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.flagged_at ELSE NULL END,
           updated_at = CURRENT_TIMESTAMP
       `).bind(
         packageId,

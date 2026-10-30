@@ -88,14 +88,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
-    // 4. Fetch User's Published / Claimed Packages
-    const identityHandles = Array.from(
-      new Set([
-        String(user.username || '').toLowerCase(),
-        ...identities.map((i: any) => String(i.username || '').toLowerCase())
-      ].filter(Boolean))
+    // 4. Fetch User's Published / Claimed Packages (Only match author_name against VERIFIED identities)
+    const verifiedHandles = Array.from(
+      new Set(
+        identities
+          .filter((i: any) => Boolean(i.verified))
+          .map((i: any) => String(i.username || '').toLowerCase())
+          .filter(Boolean)
+      )
     );
-    const handlePlaceholders = identityHandles.map(() => 'LOWER(author_name) = ?').join(' OR ');
+    const handlePlaceholders = verifiedHandles.map(() => 'LOWER(author_name) = ?').join(' OR ');
     const pkgQuery = handlePlaceholders
       ? `SELECT *,
                 author_name AS author,
@@ -108,7 +110,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
          FROM packages WHERE author_id = ?
          ORDER BY downloads_count DESC`;
     const packagesRes = await context.env.DB.prepare(pkgQuery)
-      .bind(resolvedUserId, ...identityHandles)
+      .bind(resolvedUserId, ...verifiedHandles)
       .all();
     const userPackages = (packagesRes.results || []).map((p: any) => ({
       ...p,

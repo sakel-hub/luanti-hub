@@ -1,5 +1,11 @@
-// Community Abuse Reporting & Instant Cloudflare D1 Kill Switch Endpoint
-import { verifySessionToken, parseCookies, checkIsAdmin } from '../../../auth/lib/session';
+// Community Abuse Reporting, Author Self-Delist/Remove & Instant Cloudflare D1 Kill Switch Endpoint
+import {
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  reconcileAndMergeUserAccount,
+  verifyStrictPackageAuthorOwnership
+} from '../../../auth/lib/session';
 import { invalidateEdgeCacheKeys, ensureModerationColumns } from '../../../lib/upstream';
 
 interface Env {
@@ -24,12 +30,17 @@ export async function onRequestPost(context: {
 
   const cookies = parseCookies(request);
   const sessionToken = cookies['lh_session'];
-  const userId = sessionToken ? await verifySessionToken(sessionToken, env.SESSION_SECRET) : null;
+  const rawUserId = sessionToken ? await verifySessionToken(sessionToken, env.SESSION_SECRET) : null;
 
   let currentUser: any = null;
+  let userId: string | null = rawUserId;
   let identities: Array<{ provider: string; username: string; verified?: number | boolean }> = [];
-  if (userId) {
-    currentUser = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(userId).first();
+  if (rawUserId) {
+    currentUser = (await reconcileAndMergeUserAccount(env.DB, rawUserId)) ||
+      (await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(rawUserId).first());
+    if (currentUser?.id) {
+      userId = String(currentUser.id);
+    }
     const idRes = await env.DB.prepare(
       `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
     ).bind(userId).all();
@@ -37,7 +48,7 @@ export async function onRequestPost(context: {
   }
 
   const body = await request.json() as {
-    action: 'report' | 'delist' | 'flag' | 'restore';
+    action: 'report' | 'delist' | 'flag' | 'restore' | 'remove';
     reason?: 'dmca' | 'malware' | 'license' | 'broken' | 'inappropriate' | 'other';
     details?: string;
     resolutionNote?: string;
@@ -82,33 +93,68 @@ export async function onRequestPost(context: {
     });
   }
 
-  // Mode 2: Instant Kill Switch ('delist' | 'flag' | 'restore')
+  // Mode 2: Author Self-Delist / Self-Remove or Admin Instant Kill Switch ('delist' | 'flag' | 'restore' | 'remove')
   const authHeader = request.headers.get('Authorization') || '';
   const hasSecretToken = Boolean(
     env.KILL_SWITCH_SECRET && authHeader === `Bearer ${env.KILL_SWITCH_SECRET}`
   );
   const isAdmin = hasSecretToken || checkIsAdmin(currentUser, identities, env.ADMIN_USERS);
 
-  // Also check if the logged-in user is the verified owner of this package
   const existingPkg = await env.DB.prepare(
-    `SELECT * FROM packages WHERE LOWER(id) = LOWER(?)`
-  ).bind(packageId).first();
+    `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+  ).bind(packageId, author, name).first();
 
-  const hasVerifiedAuthorIdentity = identities.some(
-    id => (id.verified === 1 || id.verified === true) && id.username.toLowerCase() === author.toLowerCase()
-  );
-
-  const isPackageOwner = Boolean(
-    userId && (
-      hasVerifiedAuthorIdentity ||
-      (existingPkg && existingPkg.author_id === userId && identities.some(id => id.verified === 1 || id.verified === true))
-    )
+  // Strictly verify cryptographic ownership on the exact forge provider where the package is hosted
+  const isPackageOwner = verifyStrictPackageAuthorOwnership(
+    currentUser || (userId ? { id: userId } : null),
+    identities,
+    existingPkg,
+    author
   );
 
   if (!isAdmin && !isPackageOwner) {
     return Response.json({
-      error: 'Forbidden: Only administrators or the verified package author can change package status.'
+      error: 'Forbidden: Only administrators or the cryptographically verified package author on the hosting Git forge can delist or remove this package.'
     }, { status: 403 });
+  }
+
+  // Prevent non-admin authors from restoring a package that was delisted by an administrator (e.g. DMCA/malware takedown)
+  if (body.action === 'restore' && !isAdmin && existingPkg) {
+    const existingReason = String(existingPkg.status_reason || '');
+    const isAdminTakedown =
+      existingReason.startsWith('[ADMIN]') ||
+      existingReason.toLowerCase().includes('administrative takedown') ||
+      existingReason.toLowerCase().includes('dmca') ||
+      existingReason.toLowerCase().includes('malware');
+    if (isAdminTakedown) {
+      return Response.json({
+        error: 'Forbidden: This package was delisted by an administrator and can only be restored by moderation staff.'
+      }, { status: 403 });
+    }
+  }
+
+  // Mode 2A: Permanent Removal of a Submitted Package from Luanti Hub D1 Registry (`action: 'remove'`)
+  if (body.action === 'remove') {
+    if (!existingPkg) {
+      return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
+    }
+    const canonicalId = String(existingPkg.id || packageId);
+    await env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(canonicalId).run().catch(() => {});
+    await env.DB.prepare(`DELETE FROM moderation_reports WHERE LOWER(package_id) = LOWER(?)`).bind(canonicalId).run().catch(() => {});
+    await env.DB.prepare(`DELETE FROM packages WHERE LOWER(id) = LOWER(?)`).bind(canonicalId).run();
+
+    await invalidateEdgeCacheKeys([
+      '/__api_packages_v2',
+      '/__api_packages_v2?boot=1',
+      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+    ]);
+
+    return Response.json({
+      success: true,
+      package_id: canonicalId,
+      status: 'removed',
+      message: 'Package permanently removed from Luanti Hub.'
+    });
   }
 
   const newStatus = body.action === 'delist'
@@ -117,7 +163,12 @@ export async function onRequestPost(context: {
       ? 'flagged'
       : 'active';
 
-  const statusReason = (body.details || body.reason || (newStatus === 'active' ? null : 'Administrative takedown'));
+  const rawReason = (body.details || body.reason || '').trim();
+  const statusReason = newStatus === 'active'
+    ? null
+    : isAdmin && !isPackageOwner
+      ? `[ADMIN] ${rawReason || 'Administrative takedown'}`
+      : `[AUTHOR] ${rawReason || 'Self-delisted by package author'}`;
 
   // Upsert package status in D1 so even upstream ContentDB packages can be immediately delisted via the Kill Switch!
   await env.DB.prepare(`

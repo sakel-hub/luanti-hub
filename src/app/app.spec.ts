@@ -2011,4 +2011,181 @@ description = Mob animation and spawning framework.
       window.matchMedia = origMatchMedia;
     }
   });
+
+  it('should recover from GitHub OAuth HTTP 429 rate-limit when switching between two GitHub accounts', async () => {
+    const { onRequestGet: oauthCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const { createOAuthStateToken, verifySessionToken } = await import('../../functions/api/auth/lib/session');
+
+    const secret = 'test-oauth-session-secret';
+    const state = await createOAuthStateToken('github', secret);
+    let tokenExchangeCalls = 0;
+    const tokenContentTypes: string[] = [];
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr === 'https://github.com/login/oauth/access_token') {
+        tokenExchangeCalls++;
+        const headers = new Headers(init?.headers || {});
+        tokenContentTypes.push(headers.get('Content-Type') || '');
+        if (tokenExchangeCalls === 1) {
+          return new Response('Too Many Requests', {
+            status: 429,
+            headers: { 'Retry-After': '1' }
+          });
+        }
+        return new Response(JSON.stringify({ access_token: 'gho_account2_token' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (urlStr === 'https://api.github.com/user') {
+        return new Response(
+          JSON.stringify({
+            id: 998877,
+            login: 'SecondGitHubUser',
+            name: 'Second GitHub User',
+            avatar_url: 'https://github.com/SecondGitHubUser.png',
+            html_url: 'https://github.com/SecondGitHubUser'
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const callbackUrl = `https://luanti-hub.pages.dev/api/auth/github/callback?code=gh_switch_code_429&state=${encodeURIComponent(state)}`;
+      const req = new Request(callbackUrl, {
+        headers: {
+          Cookie: `lh_oauth_state=${state}`
+        }
+      });
+
+      const res = await oauthCallbackGet({
+        params: { provider: 'github' },
+        request: req,
+        env: {
+          GITHUB_CLIENT_ID: 'gh_client_id',
+          GITHUB_CLIENT_SECRET: 'gh_client_secret',
+          SESSION_SECRET: secret
+        }
+      });
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get('Location')).toBe('https://luanti-hub.pages.dev/?auth_success=1');
+      expect(tokenExchangeCalls).toBe(2);
+      // Both attempts must preserve application/x-www-form-urlencoded rather than switching to JSON on 429
+      expect(tokenContentTypes).toEqual([
+        'application/x-www-form-urlencoded',
+        'application/x-www-form-urlencoded'
+      ]);
+
+      const setCookie = res.headers.get('Set-Cookie') || '';
+      const sessionMatch = setCookie.match(/lh_session=([^;]+)/);
+      expect(sessionMatch).toBeTruthy();
+      const verifiedUserId = await verifySessionToken(sessionMatch![1], secret);
+      expect(verifiedUserId).toBe('usr_github_SecondGitHubUser');
+
+      // Duplicate callback request with the same code should hit the cache without calling GitHub again
+      const duplicateRes = await oauthCallbackGet({
+        params: { provider: 'github' },
+        request: req,
+        env: {
+          GITHUB_CLIENT_ID: 'gh_client_id',
+          GITHUB_CLIENT_SECRET: 'gh_client_secret',
+          SESSION_SECRET: secret
+        }
+      });
+      expect(duplicateRes.status).toBe(302);
+      expect(duplicateRes.headers.get('Location')).toBe('https://luanti-hub.pages.dev/?auth_success=1');
+      expect(tokenExchangeCalls).toBe(2);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should enforce strict cryptographic forge-provider ownership before allowing an author to delist or remove a package', async () => {
+    const { verifyStrictPackageAuthorOwnership } = await import('../../functions/api/auth/lib/session');
+    const authService = TestBed.inject(AuthService);
+
+    const targetGithubPkg = {
+      id: 'SaKeL/voxel_garden',
+      author: 'SaKeL',
+      author_name: 'SaKeL',
+      author_id: 'usr_sakel_gh',
+      name: 'voxel_garden',
+      title: 'Voxel Garden',
+      type: 'mod' as const,
+      short_desc: 'Garden mod',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 5,
+      downloads: 100,
+      license: 'MIT',
+      provider: 'github' as const,
+      repo_url: 'https://github.com/SaKeL/voxel_garden',
+      source: 'git' as const
+    };
+
+    // 1. Unverified handle spoof (e.g. Direct Sign-In without OAuth or PAT) -> REJECTED
+    expect(
+      verifyStrictPackageAuthorOwnership(
+        { id: 'usr_attacker_1', username: 'SaKeL' },
+        [{ provider: 'github', username: 'SaKeL', verified: 0 }],
+        targetGithubPkg,
+        'SaKeL'
+      )
+    ).toBe(false);
+
+    (authService as any)._currentUser.set({
+      id: 'usr_attacker_1',
+      username: 'SaKeL',
+      role: 'user',
+      is_admin: false,
+      identities: [{ provider: 'github', username: 'SaKeL', profile_url: '', verified: false }]
+    });
+    expect(authService.canManagePackage(targetGithubPkg)).toBe(false);
+
+    // 2. Cross-forge username spoof (attacker verified 'SaKeL' on GitLab, trying to remove SaKeL's GitHub package) -> REJECTED
+    expect(
+      verifyStrictPackageAuthorOwnership(
+        { id: 'usr_attacker_2', username: 'SaKeL' },
+        [{ provider: 'gitlab', username: 'SaKeL', verified: 1 }],
+        targetGithubPkg,
+        'SaKeL'
+      )
+    ).toBe(false);
+
+    (authService as any)._currentUser.set({
+      id: 'usr_attacker_2',
+      username: 'SaKeL',
+      role: 'user',
+      is_admin: false,
+      identities: [{ provider: 'gitlab', username: 'SaKeL', profile_url: '', verified: true }]
+    });
+    expect(authService.canManagePackage(targetGithubPkg)).toBe(false);
+
+    // 3. True verified author on the exact hosting forge (GitHub 'SaKeL') -> ALLOWED
+    expect(
+      verifyStrictPackageAuthorOwnership(
+        { id: 'usr_sakel_gh', username: 'SaKeL' },
+        [{ provider: 'github', username: 'SaKeL', verified: 1 }],
+        targetGithubPkg,
+        'SaKeL'
+      )
+    ).toBe(true);
+
+    (authService as any)._currentUser.set({
+      id: 'usr_sakel_gh',
+      username: 'SaKeL',
+      role: 'user',
+      is_admin: false,
+      identities: [{ provider: 'github', username: 'SaKeL', profile_url: '', verified: true }]
+    });
+    expect(authService.canManagePackage(targetGithubPkg)).toBe(true);
+  });
 });
