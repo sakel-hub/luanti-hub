@@ -36,7 +36,10 @@ import {
   LucideLanguages,
   LucideHeart,
   LucideShieldAlert,
-  LucideMenu
+  LucideMenu,
+  LucideShare2,
+  LucideCopy,
+  LucideExternalLink
 } from '@lucide/angular';
 
 @Component({
@@ -68,7 +71,10 @@ import {
     LucideLanguages,
     LucideHeart,
     LucideShieldAlert,
-    LucideMenu
+    LucideMenu,
+    LucideShare2,
+    LucideCopy,
+    LucideExternalLink
   ],
   template: `
     <!-- Reusable Standard Modal/Sidebar Backdrop Blur for Mobile Hamburger Menu -->
@@ -261,6 +267,71 @@ import {
             }
           </div>
 
+          <!-- Ko-fi Support Menu Toggle (md+) -->
+          <div #kofiMenuContainer class="hidden md:block relative flex-shrink-0">
+            <button
+              type="button"
+              (click)="toggleKofiMenu($event)"
+              [appTooltip]="'header.supportKofiTooltip' | translate"
+              [attr.aria-label]="'header.supportKofi' | translate"
+              [attr.aria-expanded]="isKofiMenuOpen()"
+              [class.border-rose-500/40]="isKofiMenuOpen()"
+              class="h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-300 hover:border-rose-500/30 transition flex-shrink-0 cursor-pointer">
+              <svg class="w-5 h-5 flex-shrink-0" viewBox="15 18 292 222" fill="none" aria-hidden="true">
+                <path fill="#202020" d="M66 25 H242 C278 25 301 51 301 89 C301 127 278 153 242 153 H238 C227 202 187 234 134 234 C72 234 21 190 21 118 V70 C21 41 38 25 66 25 Z"/>
+                <path fill="#FFFFFF" d="M66 47 H240 C263 47 278 64 278 89 C278 114 263 131 240 131 H219 C215 178 181 211 134 211 C84 211 44 176 44 118 V70 C44 54 52 47 66 47 Z"/>
+                <path fill="#202020" d="M222 69 H236 C246 69 253 77 253 89 C253 101 246 109 236 109 H222 V69 Z"/>
+                <path fill="#FF5A16" d="M134.5 91 C126 77 114 72 102 72 C84 72 73 86 73 105 C73 134 106 160 128 176 C132 179 137 179 141 176 C163 160 196 134 196 105 C196 86 185 72 167 72 C155 72 143 77 134.5 91 Z"/>
+              </svg>
+            </button>
+
+            @if (isKofiMenuOpen()) {
+              <div
+                (click)="$event.stopPropagation()"
+                class="absolute right-0 mt-2 w-[340px] sm:w-[360px] rounded-2xl glass-dropdown p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+                <div class="flex items-center justify-between px-1.5 py-0.5">
+                  <div class="flex items-center gap-2 text-xs font-bold text-white">
+                    <svg class="w-4 h-4 flex-shrink-0" viewBox="15 18 292 222" fill="none" aria-hidden="true">
+                      <path fill="#202020" d="M66 25 H242 C278 25 301 51 301 89 C301 127 278 153 242 153 H238 C227 202 187 234 134 234 C72 234 21 190 21 118 V70 C21 41 38 25 66 25 Z"/>
+                      <path fill="#FFFFFF" d="M66 47 H240 C263 47 278 64 278 89 C278 114 263 131 240 131 H219 C215 178 181 211 134 211 C84 211 44 176 44 118 V70 C44 54 52 47 66 47 Z"/>
+                      <path fill="#202020" d="M222 69 H236 C246 69 253 77 253 89 C253 101 246 109 236 109 H222 V69 Z"/>
+                      <path fill="#FF5A16" d="M134.5 91 C126 77 114 72 102 72 C84 72 73 86 73 105 C73 134 106 160 128 176 C132 179 137 179 141 176 C163 160 196 134 196 105 C196 86 185 72 167 72 C155 72 143 77 134.5 91 Z"/>
+                    </svg>
+                    <span>{{ 'header.supportKofi' | translate }}</span>
+                  </div>
+                  <div class="flex items-center gap-1">
+                    <a
+                      href="https://ko-fi.com/sakel"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label="Open Ko-fi in new tab"
+                      class="h-7 w-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                      <svg lucideExternalLink class="w-3.5 h-3.5"></svg>
+                    </a>
+                    <button
+                      type="button"
+                      (click)="isKofiMenuOpen.set(false)"
+                      aria-label="Close Ko-fi panel"
+                      class="h-7 w-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                      <svg lucideX class="w-3.5 h-3.5"></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="rounded-xl overflow-hidden bg-[#0f172a]">
+                  <iframe
+                    id="kofiframe"
+                    src="https://ko-fi.com/sakel/?hidefeed=true&widget=true&embed=true&preview=true"
+                    style="border:none;width:100%;padding:4px;background:#0f172a;color-scheme:normal;"
+                    height="620"
+                    loading="lazy"
+                    title="sakel">
+                  </iframe>
+                </div>
+              </div>
+            }
+          </div>
+
           <!-- PWA & Cache Settings Menu Toggle (md+) -->
           <div #settingsMenuContainer class="hidden md:block relative flex-shrink-0">
             <button
@@ -284,6 +355,25 @@ import {
                   <svg lucideTerminal class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
                   <span>{{ 'header.inGameSetup' | translate }}</span>
                 </button>
+
+                <div class="flex items-center gap-1">
+                  <button
+                    type="button"
+                    (click)="onShareApp()"
+                    [appTooltip]="'header.shareAppTooltip' | translate"
+                    class="flex-1 flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-white/10 transition text-left cursor-pointer">
+                    <svg lucideShare2 class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+                    <span>{{ 'header.shareApp' | translate }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    (click)="onCopyAppLink($event)"
+                    [appTooltip]="'modal.copyConfig' | translate"
+                    aria-label="Copy app link"
+                    class="h-8 w-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition flex-shrink-0 cursor-pointer">
+                    <svg lucideCopy class="w-3.5 h-3.5 text-sky-400"></svg>
+                  </button>
+                </div>
 
                 <div class="h-px bg-white/10 my-1"></div>
 
@@ -476,6 +566,27 @@ import {
               <span>{{ 'header.inGameSetup' | translate }}</span>
             </button>
 
+            <button
+              type="button"
+              (click)="onShareApp()"
+              class="px-3.5 py-2.5 rounded-xl glass-btn text-slate-200 hover:text-white font-semibold text-xs flex items-center gap-2 cursor-pointer">
+              <svg lucideShare2 class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+              <span>{{ 'header.shareApp' | translate }}</span>
+            </button>
+
+            <button
+              type="button"
+              (click)="toggleMobileKofi()"
+              class="px-3.5 py-2.5 rounded-xl glass-btn text-slate-200 hover:text-white font-semibold text-xs flex items-center gap-2 cursor-pointer">
+              <svg class="w-4 h-4 flex-shrink-0" viewBox="15 18 292 222" fill="none" aria-hidden="true">
+                <path fill="#202020" d="M66 25 H242 C278 25 301 51 301 89 C301 127 278 153 242 153 H238 C227 202 187 234 134 234 C72 234 21 190 21 118 V70 C21 41 38 25 66 25 Z"/>
+                <path fill="#FFFFFF" d="M66 47 H240 C263 47 278 64 278 89 C278 114 263 131 240 131 H219 C215 178 181 211 134 211 C84 211 44 176 44 118 V70 C44 54 52 47 66 47 Z"/>
+                <path fill="#202020" d="M222 69 H236 C246 69 253 77 253 89 C253 101 246 109 236 109 H222 V69 Z"/>
+                <path fill="#FF5A16" d="M134.5 91 C126 77 114 72 102 72 C84 72 73 86 73 105 C73 134 106 160 128 176 C132 179 137 179 141 176 C163 160 196 134 196 105 C196 86 185 72 167 72 C155 72 143 77 134.5 91 Z"/>
+              </svg>
+              <span>{{ 'header.supportKofi' | translate }}</span>
+            </button>
+
             @if (!pwaService.isInstalled()) {
               <button
                 type="button"
@@ -486,6 +597,18 @@ import {
               </button>
             }
           </div>
+
+          @if (isMobileKofiOpen()) {
+            <div class="rounded-2xl overflow-hidden bg-[#0f172a]">
+              <iframe
+                src="https://ko-fi.com/sakel/?hidefeed=true&widget=true&embed=true&preview=true"
+                style="border:none;width:100%;padding:4px;background:#0f172a;color-scheme:normal;"
+                height="580"
+                loading="lazy"
+                title="sakel">
+              </iframe>
+            </div>
+          }
 
           <!-- GitHub Issues & Feedback Quick Link (Mobile) -->
           <a
@@ -562,21 +685,25 @@ export class HeaderComponent {
 
   readonly isLanguageMenuOpen = signal<boolean>(false);
   readonly isSettingsMenuOpen = signal<boolean>(false);
+  readonly isKofiMenuOpen = signal<boolean>(false);
   readonly isMobileMenuOpen = signal<boolean>(false);
+  readonly isMobileKofiOpen = signal<boolean>(false);
   readonly isCheckingUpdates = signal<boolean>(false);
   readonly updateFeedback = signal<string | null>(null);
 
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
-    if (!this.isLanguageMenuOpen() && !this.isSettingsMenuOpen() && !this.isMobileMenuOpen()) return;
+    if (!this.isLanguageMenuOpen() && !this.isSettingsMenuOpen() && !this.isKofiMenuOpen() && !this.isMobileMenuOpen()) return;
     const target = event.target as Node | null;
     if (target && !this.hostEl.nativeElement.contains(target)) {
       this.isLanguageMenuOpen.set(false);
       this.isSettingsMenuOpen.set(false);
+      this.isKofiMenuOpen.set(false);
       this.isMobileMenuOpen.set(false);
     } else {
       this.isLanguageMenuOpen.set(false);
       this.isSettingsMenuOpen.set(false);
+      this.isKofiMenuOpen.set(false);
     }
   }
 
@@ -584,6 +711,7 @@ export class HeaderComponent {
   onEscapeKey(): void {
     this.isLanguageMenuOpen.set(false);
     this.isSettingsMenuOpen.set(false);
+    this.isKofiMenuOpen.set(false);
     this.isMobileMenuOpen.set(false);
   }
 
@@ -611,17 +739,20 @@ export class HeaderComponent {
     this.isMobileMenuOpen.update(v => !v);
     this.isLanguageMenuOpen.set(false);
     this.isSettingsMenuOpen.set(false);
+    this.isKofiMenuOpen.set(false);
   }
 
   closeMobileMenu(event?: MouseEvent): void {
     if (event) event.stopPropagation();
     this.isMobileMenuOpen.set(false);
+    this.isMobileKofiOpen.set(false);
   }
 
   toggleLanguageMenu(event?: MouseEvent): void {
     if (event) event.stopPropagation();
     this.isLanguageMenuOpen.update(v => !v);
     this.isSettingsMenuOpen.set(false);
+    this.isKofiMenuOpen.set(false);
     this.isMobileMenuOpen.set(false);
   }
 
@@ -629,7 +760,20 @@ export class HeaderComponent {
     if (event) event.stopPropagation();
     this.isSettingsMenuOpen.update(v => !v);
     this.isLanguageMenuOpen.set(false);
+    this.isKofiMenuOpen.set(false);
     this.isMobileMenuOpen.set(false);
+  }
+
+  toggleKofiMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isKofiMenuOpen.update(v => !v);
+    this.isLanguageMenuOpen.set(false);
+    this.isSettingsMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
+  }
+
+  toggleMobileKofi(): void {
+    this.isMobileKofiOpen.update(v => !v);
   }
 
   selectLanguage(locale: LocaleId): void {
@@ -665,6 +809,19 @@ export class HeaderComponent {
         this.updateFeedback.set(null);
       }, 4000);
     }
+  }
+
+  async onShareApp(): Promise<void> {
+    this.isSettingsMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
+    const title = `${this.translationService.translate('header.title')} — ${this.translationService.translate('header.subtitle')}`;
+    await this.pwaService.shareApp(title);
+  }
+
+  async onCopyAppLink(event?: MouseEvent): Promise<void> {
+    if (event) event.stopPropagation();
+    await this.pwaService.copyAppLink();
+    this.isSettingsMenuOpen.set(false);
   }
 
   onClearCache(): void {

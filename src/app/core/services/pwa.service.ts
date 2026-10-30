@@ -738,16 +738,53 @@ export class PwaService {
     }, durationMs);
   }
 
+  private getCanonicalAppUrl(): string {
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      return window.location.origin;
+    }
+    return 'https://luanti-hub.pages.dev';
+  }
+
+  async copyAppLink(): Promise<boolean> {
+    const url = this.getCanonicalAppUrl();
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(url);
+        this.showToast('common.copiedToClipboard');
+        return true;
+      } catch {
+        // Ignore clipboard errors
+      }
+    }
+    return false;
+  }
+
+  async shareApp(customTitle?: string, customText?: string): Promise<void> {
+    const url = this.getCanonicalAppUrl();
+    const title = customTitle || 'LuantiHub — Decentralized Package Registry & Content Hub';
+    const text = customText || 'Discover, browse, and install mods, games, and texture packs for Luanti (Minetest).';
+    await this.sharePackage(title, text, url);
+  }
+
   async sharePackage(title: string, text: string, url: string): Promise<void> {
-    if (typeof navigator !== 'undefined' && navigator.share) {
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       try {
         await navigator.share({ title, text, url });
-      } catch {
-        // User cancelled or unsupported
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        // Fall through to clipboard copy if navigator.share failed for a non-abort reason
       }
-    } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      await navigator.clipboard.writeText(url);
-      this.showToast('common.copiedToClipboard');
+    }
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(url);
+        this.showToast('common.copiedToClipboard');
+      } catch {
+        // Ignore clipboard errors
+      }
     }
   }
 }

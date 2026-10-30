@@ -1420,4 +1420,65 @@ description = Mob animation and spawning framework.
     expect(fixture.nativeElement.textContent).not.toContain('Historical Alert #6');
     expect(fixture.nativeElement.textContent).toContain('Page 1 / 3');
   });
+
+  it('should render Share LuantiHub and quick Copy Link under the header gear menu and support Web Share API + clipboard fallback', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const fixture = TestBed.createComponent(HeaderComponent);
+    const comp = fixture.componentInstance;
+
+    comp.isSettingsMenuOpen.set(true);
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('Share LuantiHub');
+    const copyLinkBtn = el.querySelector('button[aria-label="Copy app link"]') as HTMLButtonElement;
+    expect(copyLinkBtn).toBeTruthy();
+
+    // Test clipboard copy via copyAppLink()
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    const origClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: writeTextSpy },
+      configurable: true
+    });
+
+    try {
+      await comp.onCopyAppLink();
+      expect(writeTextSpy).toHaveBeenCalledWith(window.location.origin);
+      expect(pwaService.statusMessage()).toBe('common.copiedToClipboard');
+      expect(comp.isSettingsMenuOpen()).toBe(false);
+
+      // Test native share when navigator.share is available
+      const shareSpy = vi.fn().mockResolvedValue(undefined);
+      const origShare = (navigator as any).share;
+      Object.defineProperty(navigator, 'share', {
+        value: shareSpy,
+        configurable: true
+      });
+      try {
+        await comp.onShareApp();
+        expect(shareSpy).toHaveBeenCalled();
+        expect(shareSpy.mock.calls[0][0].url).toBe(window.location.origin);
+      } finally {
+        Object.defineProperty(navigator, 'share', {
+          value: origShare,
+          configurable: true
+        });
+      }
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: origClipboard,
+        configurable: true
+      });
+    }
+
+    // Verify Ko-fi donation button and lazy-loaded frosted-glass checkout dropdown
+    expect(el.querySelector('#kofiframe')).toBeNull();
+    comp.toggleKofiMenu();
+    fixture.detectChanges();
+    expect(comp.isKofiMenuOpen()).toBe(true);
+    const kofiIframe = el.querySelector('#kofiframe') as HTMLIFrameElement;
+    expect(kofiIframe).toBeTruthy();
+    expect(kofiIframe.getAttribute('src')).toBe('https://ko-fi.com/sakel/?hidefeed=true&widget=true&embed=true&preview=true');
+  });
 });

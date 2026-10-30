@@ -18,6 +18,7 @@
   <a href="#tech-stack--architecture">Tech Stack</a> &bull;
   <a href="#cloudflare-production-deployment">Deployment</a> &bull;
   <a href="#contributing--translations">Contributing &amp; Translations</a> &bull;
+  <a href="#support">Support</a> &bull;
   <a href="#license--legal">License</a>
 </p>
 
@@ -45,6 +46,12 @@
   </a>
   <a href="LICENSE.txt">
     <img src="https://img.shields.io/badge/License-LGPL_2.1+-blue.svg?style=flat-square" alt="License LGPL 2.1+">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://ko-fi.com/M1E029PWMN">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="ko-fi">
   </a>
 </p>
 
@@ -367,6 +374,14 @@ Start the development server (`npm start`) and navigate to `http://localhost:420
 **Step 7: Submit a Pull Request**
 
 Commit your new files and submit a PR titled `i18n: Add Italian (it) translation`.
+
+---
+
+## 💖 Support
+
+If you find LuantiHub useful, consider supporting its continued open-source development and infrastructure:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/M1E029PWMN)
 
 ---
 

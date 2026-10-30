@@ -30,6 +30,10 @@ export interface TranslationDictionary {
     installAppTooltip: string;
     inGameSetup: string;
     inGameSetupTooltip: string;
+    shareApp: string;
+    shareAppTooltip: string;
+    supportKofi: string;
+    supportKofiTooltip: string;
     submitRepo: string;
     submitRepoTooltip: string;
     favorites: string;
