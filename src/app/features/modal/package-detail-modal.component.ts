@@ -764,15 +764,27 @@ import {
                     <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                       {{ 'modal.author' | translate }}
                     </span>
-                    <button
-                      type="button"
-                      (click)="filterByTerm(package.author)"
-                      class="flex items-center gap-2 mt-1 group text-left cursor-pointer">
-                      <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs">
-                        {{ package.author.charAt(0).toUpperCase() }}
-                      </div>
-                      <span class="font-bold text-white group-hover:text-sky-400 transition text-sm">{{ package.author }}</span>
-                    </button>
+                    <div class="flex items-center justify-between gap-2 mt-1">
+                      <button
+                        type="button"
+                        (click)="filterByTerm(package.author)"
+                        class="flex items-center gap-2 group text-left min-w-0 cursor-pointer">
+                        <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs flex-shrink-0">
+                          {{ package.author.charAt(0).toUpperCase() }}
+                        </div>
+                        <span class="font-bold text-white group-hover:text-sky-400 transition text-sm truncate">{{ package.author }}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        (click)="openAuthorProfile(package.author)"
+                        [appTooltip]="'author.viewProfile' | translate"
+                        [attr.aria-label]="'author.viewProfile' | translate"
+                        class="px-2 py-1 rounded-lg glass-btn text-sky-300 hover:text-white text-[11px] font-bold flex items-center gap-1 flex-shrink-0 transition cursor-pointer">
+                        <svg lucideUser class="w-3 h-3 text-sky-400"></svg>
+                        <span>{{ 'author.viewProfile' | translate }}</span>
+                      </button>
+                    </div>
                   </div>
 
                   @if (extraMaintainers().length > 0) {
@@ -782,12 +794,22 @@ import {
                       </span>
                       <div class="flex flex-wrap gap-1.5 mt-1">
                         @for (m of extraMaintainers(); track m) {
-                          <button
-                            type="button"
-                            (click)="filterByTerm(m)"
-                            class="px-2 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 font-medium text-[11px] transition cursor-pointer">
-                            @{{ m }}
-                          </button>
+                          <div class="inline-flex items-center rounded-md glass-pill overflow-hidden">
+                            <button
+                              type="button"
+                              (click)="filterByTerm(m)"
+                              class="px-2 py-0.5 text-slate-300 hover:text-sky-300 font-medium text-[11px] transition cursor-pointer">
+                              @{{ m }}
+                            </button>
+                            <button
+                              type="button"
+                              (click)="openAuthorProfile(m)"
+                              [appTooltip]="'author.viewProfile' | translate"
+                              [attr.aria-label]="'author.viewProfile' | translate"
+                              class="px-1.5 py-0.5 border-l border-white/10 text-sky-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                              <svg lucideUser class="w-2.5 h-2.5"></svg>
+                            </button>
+                          </div>
                         }
                       </div>
                     </div>
@@ -1222,7 +1244,12 @@ import {
                         <div class="p-3.5 rounded-2xl glass-panel space-y-1.5 text-xs">
                           <div class="flex items-center justify-between gap-2">
                             <div class="flex items-center gap-2 min-w-0">
-                              <span class="font-bold text-white truncate">{{ rev.author.display_name || rev.author.username }}</span>
+                              <button
+                                type="button"
+                                (click)="openAuthorProfile(rev.author.username)"
+                                class="font-bold text-white hover:text-sky-300 transition truncate cursor-pointer">
+                                {{ rev.author.display_name || rev.author.username }}
+                              </button>
                               <div class="flex items-center gap-0.5 text-amber-400 flex-shrink-0">
                                 <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
                                 <span class="font-bold text-[11px]">{{ rev.rating }}/5</span>
@@ -2125,6 +2152,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
 
   filterByTerm(term: string): void {
     this.packageService.searchByTermFromModal(term);
+  }
+
+  openAuthorProfile(username: string): void {
+    this.packageService.openAuthorDrawer(username, true, this.package);
   }
 
   filterByTag(tag: string): void {

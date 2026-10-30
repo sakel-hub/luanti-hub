@@ -9,7 +9,8 @@ import {
   PackageRelease,
   SortOption,
   GitAuditReport,
-  ContentDbTag
+  ContentDbTag,
+  PublicAuthorProfile
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
@@ -74,6 +75,9 @@ export class PackageService {
   private readonly _isSubmitModalOpen = signal<boolean>(false);
   private readonly _isSetupModalOpen = signal<boolean>(false);
   private readonly _isLegalModalOpen = signal<boolean>(false);
+  private readonly _activeAuthorUsername = signal<string | null>(null);
+  private readonly _activeAuthorProfile = signal<PublicAuthorProfile | null>(null);
+  private readonly _isLoadingAuthorProfile = signal<boolean>(false);
 
   private searchDebounceTimer: any = null;
   private bootCacheSyncTimer: any = null;
@@ -124,6 +128,9 @@ export class PackageService {
   readonly isSubmitModalOpen = this._isSubmitModalOpen.asReadonly();
   readonly isSetupModalOpen = this._isSetupModalOpen.asReadonly();
   readonly isLegalModalOpen = this._isLegalModalOpen.asReadonly();
+  readonly activeAuthorUsername = this._activeAuthorUsername.asReadonly();
+  readonly activeAuthorProfile = this._activeAuthorProfile.asReadonly();
+  readonly isLoadingAuthorProfile = this._isLoadingAuthorProfile.asReadonly();
 
   // True whenever any search or filter is active (switches Home view to Filtered Grid)
   readonly hasActiveFilters = computed<boolean>(() => {
@@ -683,9 +690,6 @@ export class PackageService {
       : this.parseArrayField(item.soft_dependencies).map((d: any) => (typeof d === 'string' ? d : d?.name || '')).filter(Boolean);
 
     const repoUrl = this.normalizeGitRepoUrl(item.repo_url || item.repo || cachedMeta?.repo_url || undefined);
-    const isGitProvider = Boolean(item.provider && item.provider !== 'contentdb');
-    const source: PackageSource = (item.source === 'git' || isGitProvider) ? 'git' : (item.source === 'mirror' ? 'mirror' : 'official');
-
     const parsedTagList = this.parseArrayField(item.tags);
     const rawTagsFromItem = parsedTagList
       .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
@@ -698,6 +702,19 @@ export class PackageService {
     const explicitSources: PackageSource[] = Array.isArray(item.sources)
       ? item.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
       : [];
+    const isExplicitOfficialOnly =
+      (explicitSources.length > 0 && !explicitSources.includes('git') && item.source !== 'git') ||
+      (item.source === 'official' && !explicitSources.includes('git'));
+    const rawProvider = typeof item.provider === 'string' ? item.provider.toLowerCase() : '';
+    const isGitProvider =
+      !isExplicitOfficialOnly &&
+      ['github', 'codeberg', 'gitlab', 'mesehub'].includes(rawProvider);
+    const source: PackageSource =
+      explicitSources.includes('git') || item.source === 'git' || isGitProvider
+        ? 'git'
+        : item.source === 'mirror'
+          ? 'mirror'
+          : 'official';
 
     const hasOfficial =
       explicitSources.includes('official') ||
@@ -708,7 +725,7 @@ export class PackageService {
       explicitSources.includes('git') ||
       source === 'git' ||
       isGitProvider ||
-      lowerTags.includes('git');
+      (!isExplicitOfficialOnly && lowerTags.includes('git'));
 
     const sources: PackageSource[] = [];
     if (hasOfficial) sources.push('official');
@@ -799,7 +816,9 @@ export class PackageService {
             ? 'mesehub'
             : repoUrl?.includes('gitlab.com')
               ? 'gitlab'
-              : 'github'),
+              : hasGit
+                ? 'github'
+                : 'contentdb'),
       default_branch: item.default_branch || 'main',
       source,
       sources,
@@ -937,17 +956,20 @@ export class PackageService {
     const byNameTitle = new Map<string, number>();
     const byNameType = new Map<string, number>();
     const nameTypeCounts = new Map<string, number>();
+    const normalizeBaseAuthor = (author: string) =>
+      String(author || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
 
     for (const pkg of list) {
-      const ntKey = `${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const ntKey = `${normalizeBaseAuthor(pkg.author)}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
       nameTypeCounts.set(ntKey, (nameTypeCounts.get(ntKey) || 0) + 1);
     }
 
     for (const pkg of list) {
       const idKey = pkg.id.toLowerCase();
       const repoKey = this.normalizeRepoComparisonKey(pkg.repo_url);
-      const nameTitleKey = `${pkg.name.toLowerCase()}::${(pkg.title || '').trim().toLowerCase()}`;
-      const nameTypeKey = `${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const baseAuthor = normalizeBaseAuthor(pkg.author);
+      const nameTitleKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.title || '').trim().toLowerCase()}`;
+      const nameTypeKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
 
       const matchIdx =
         byId.get(idKey) ??
@@ -962,8 +984,9 @@ export class PackageService {
         byId.set(idKey, matchIdx);
         const mergedRepoKey = this.normalizeRepoComparisonKey(merged.repo_url);
         if (mergedRepoKey) byRepo.set(mergedRepoKey, matchIdx);
-        byNameTitle.set(`${merged.name.toLowerCase()}::${(merged.title || '').trim().toLowerCase()}`, matchIdx);
-        byNameType.set(`${merged.name.toLowerCase()}::${(merged.type || 'mod').toLowerCase()}`, matchIdx);
+        const mergedBaseAuthor = normalizeBaseAuthor(merged.author);
+        byNameTitle.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.title || '').trim().toLowerCase()}`, matchIdx);
+        byNameType.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.type || 'mod').toLowerCase()}`, matchIdx);
       } else {
         const idx = result.length;
         result.push(pkg);
@@ -1077,6 +1100,7 @@ export class PackageService {
     const isModalRoute =
       path.startsWith('/package/') ||
       path.startsWith('/packages/') ||
+      path.startsWith('/author/') ||
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
@@ -1131,13 +1155,24 @@ export class PackageService {
         this._isSubmitModalOpen.set(false);
         this._isSetupModalOpen.set(false);
         this._isLegalModalOpen.set(false);
+        this._activeAuthorUsername.set(null);
         this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
+        return;
+      }
+    } else if (path.startsWith('/author/')) {
+      const authorPart = path.replace(/^\/author\//, '').split('/').filter(Boolean)[0];
+      if (authorPart) {
+        this._isSubmitModalOpen.set(false);
+        this._isSetupModalOpen.set(false);
+        this._isLegalModalOpen.set(false);
+        this.openAuthorDrawer(decodeURIComponent(authorPart), false);
         return;
       }
     } else if (isFirstSync && edgeSeed?.author && edgeSeed?.name) {
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
+      this._activeAuthorUsername.set(null);
       this.openPackageModalById(String(edgeSeed.author), String(edgeSeed.name), true);
       return;
     } else {
@@ -1146,6 +1181,7 @@ export class PackageService {
 
     if (path === '/submit') {
       this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
       this._isSubmitModalOpen.set(true);
@@ -1153,6 +1189,7 @@ export class PackageService {
       return;
     } else if (path === '/setup') {
       this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isLegalModalOpen.set(false);
       this._isSetupModalOpen.set(true);
@@ -1160,6 +1197,7 @@ export class PackageService {
       return;
     } else if (path === '/profile') {
       this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
@@ -1168,6 +1206,7 @@ export class PackageService {
       return;
     } else if (path === '/legal') {
       this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(true);
@@ -1176,6 +1215,7 @@ export class PackageService {
     }
 
     this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
@@ -1196,7 +1236,7 @@ export class PackageService {
     if (!this.router) return;
     const queryParams = this.buildActiveQueryParams();
     const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
-    if (currentPath !== '/' && !this._activePackage() && !this.pendingRoutePackage) {
+    if (currentPath !== '/' && !this._activePackage() && !this._activeAuthorUsername() && !this.pendingRoutePackage) {
       this.router.navigate(['/'], {
         queryParams,
         replaceUrl: true
@@ -1248,6 +1288,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v3');
         sessionStorage.removeItem('lh_boot_cache_v4');
         sessionStorage.removeItem('lh_boot_cache_v5');
+        sessionStorage.removeItem('lh_boot_cache_v6');
       }
     } catch {
       // Ignore storage errors
@@ -1446,10 +1487,10 @@ export class PackageService {
     }
     this.bootCacheSyncTimer = setTimeout(() => {
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v5');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v6');
         const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
         sessionStorage.setItem(
-          'lh_boot_cache_v5',
+          'lh_boot_cache_v6',
           JSON.stringify({
             ts: existingTs,
             edge: this.edgeApiAvailable,
@@ -1473,7 +1514,8 @@ export class PackageService {
     try {
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v5');
+          sessionStorage.removeItem('lh_boot_cache_v5');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v6');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -1583,7 +1625,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v5',
+                'lh_boot_cache_v6',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -1842,14 +1884,21 @@ export class PackageService {
   }
 
   /**
-   * Immediately closes any open modal and filters the catalog by a search term (e.g. dependency or author).
+   * Immediately closes any open modal/drawer and filters the catalog by a search term (e.g. dependency or author).
    */
   searchByTermFromModal(term: string): void {
     const clean = term.trim();
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
+    this.modalOpenRequestSeq++;
+    this.pendingRoutePackage = null;
+    this.returnToPackageAfterModal = null;
+    this.returnToPackageAfterAuthorDrawer = null;
+    this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
@@ -1869,13 +1918,20 @@ export class PackageService {
   }
 
   /**
-   * Immediately closes any open modal and filters the catalog by a ContentDB tag.
+   * Immediately closes any open modal/drawer and filters the catalog by a ContentDB tag.
    */
   filterByTagFromModal(tag: string): void {
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
+    this.modalOpenRequestSeq++;
+    this.pendingRoutePackage = null;
+    this.returnToPackageAfterModal = null;
+    this.returnToPackageAfterAuthorDrawer = null;
+    this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
@@ -1958,7 +2014,14 @@ export class PackageService {
     this._visibleCount.set(PAGE_SIZE);
 
     if (navigateToRoot) {
+      this.modalOpenRequestSeq++;
+      this.pendingRoutePackage = null;
+      this.returnToPackageAfterModal = null;
+      this.returnToPackageAfterAuthorDrawer = null;
+      this.returnToAuthorAfterPackageModal = null;
       this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
+      this._isLoadingAuthorProfile.set(false);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
@@ -4022,6 +4085,9 @@ export class PackageService {
 
   private modalSubOverlayCloser: (() => boolean) | null = null;
   private returnToPackageAfterModal: LuantiPackage | null = null;
+  private returnToPackageAfterAuthorDrawer: LuantiPackage | null = null;
+  private returnToAuthorAfterPackageModal: string | null = null;
+  private readonly authorProfileCache = new Map<string, PublicAuthorProfile>();
 
   registerModalSubOverlayCloser(closer: (() => boolean) | null): void {
     this.modalSubOverlayCloser = closer;
@@ -4031,7 +4097,176 @@ export class PackageService {
     return this.modalSubOverlayCloser ? this.modalSubOverlayCloser() : false;
   }
 
-  closePackageModal(updateUrl = true): void {
+  getAuthorPackages(username: string): LuantiPackage[] {
+    const clean = (username || '').trim().toLowerCase();
+    if (!clean) return [];
+    const baseClean = clean.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const currentUser = this.authService.currentUser();
+    const isSelf =
+      currentUser &&
+      (currentUser.username.toLowerCase() === clean ||
+        (currentUser.identities || []).some(i => (i.username || '').toLowerCase() === clean));
+    const linkedHandles = new Set<string>([clean, baseClean]);
+    if (isSelf && currentUser) {
+      linkedHandles.add(currentUser.username.toLowerCase());
+      for (const id of currentUser.identities || []) {
+        if (id.username) {
+          const h = id.username.toLowerCase();
+          linkedHandles.add(h);
+          linkedHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, ''));
+        }
+      }
+    }
+    const profileIdentities = this._activeAuthorProfile()?.identities || [];
+    if (this._activeAuthorUsername()?.toLowerCase() === clean) {
+      for (const id of profileIdentities) {
+        if (id.username) {
+          const h = id.username.toLowerCase();
+          linkedHandles.add(h);
+          linkedHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, ''));
+        }
+      }
+    }
+
+    return this._packages().filter(pkg => {
+      const pkgAuthor = (pkg.author || '').toLowerCase();
+      const pkgBase = pkgAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      return linkedHandles.has(pkgAuthor) || (pkgBase.length > 0 && linkedHandles.has(pkgBase));
+    });
+  }
+
+  async openAuthorDrawer(username: string, updateUrl = true, returnToPkg?: LuantiPackage | null): Promise<void> {
+    const clean = (username || '').trim();
+    if (!clean) return;
+
+    if (returnToPkg !== undefined) {
+      this.returnToPackageAfterAuthorDrawer = returnToPkg;
+    } else if (this._activePackage()) {
+      this.returnToPackageAfterAuthorDrawer = this._activePackage();
+    }
+
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(clean);
+
+    const lower = clean.toLowerCase();
+    const currentUser = this.authService.currentUser();
+    const isSelf =
+      currentUser &&
+      (currentUser.username.toLowerCase() === lower ||
+        (currentUser.identities || []).some(i => (i.username || '').toLowerCase() === lower));
+
+    const authorPkgs = this.getAuthorPackages(clean);
+    const donatePkg = authorPkgs.find(p => p.donate_url);
+    const hasOfficial = authorPkgs.some(p => p.sources?.includes('official') || p.source === 'official');
+    const canonicalCdbAuthor = authorPkgs.find(p => p.sources?.includes('official') || p.source === 'official')?.author || clean;
+
+    const initialProfile: PublicAuthorProfile = isSelf && currentUser
+      ? {
+          username: currentUser.username,
+          display_name: currentUser.display_name || currentUser.username,
+          avatar_url: currentUser.avatar_url || `https://github.com/${currentUser.username}.png`,
+          bio: currentUser.bio || '',
+          created_at: currentUser.created_at,
+          is_registered: true,
+          identities: currentUser.identities || [],
+          donate_url: donatePkg?.donate_url,
+          contentdb_url: hasOfficial ? `https://content.luanti.org/users/${encodeURIComponent(canonicalCdbAuthor)}/` : undefined
+        }
+      : this.authorProfileCache.get(lower) || {
+          username: clean,
+          display_name: clean,
+          avatar_url: `https://github.com/${clean}.png`,
+          bio: '',
+          is_registered: false,
+          identities: [],
+          donate_url: donatePkg?.donate_url,
+          contentdb_url: hasOfficial ? `https://content.luanti.org/users/${encodeURIComponent(canonicalCdbAuthor)}/` : undefined
+        };
+
+    this._activeAuthorProfile.set(initialProfile);
+    this.seoService?.updateStaticRoute(
+      `${initialProfile.display_name} (@${initialProfile.username})`,
+      initialProfile.bio || `Browse Luanti mods, games, and texture packs by ${initialProfile.display_name} on Luanti Hub.`,
+      `/author/${encodeURIComponent(clean)}`
+    );
+
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/author', clean]);
+    }
+
+    if (isSelf && currentUser) {
+      this.authorProfileCache.set(lower, initialProfile);
+      return;
+    }
+
+    this._isLoadingAuthorProfile.set(true);
+    try {
+      const res = await fetch(`/api/authors/${encodeURIComponent(clean)}`, {
+        headers: { Accept: 'application/json' }
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        if (data?.author && this._activeAuthorUsername()?.toLowerCase() === lower) {
+          const latestPkgs = this.getAuthorPackages(clean);
+          const latestDonate = latestPkgs.find(p => p.donate_url)?.donate_url || initialProfile.donate_url;
+          const latestOfficial = latestPkgs.some(p => p.sources?.includes('official') || p.source === 'official');
+          const mergedProfile: PublicAuthorProfile = {
+            username: data.author.username || clean,
+            display_name: data.author.display_name || data.author.username || clean,
+            avatar_url: data.author.avatar_url || initialProfile.avatar_url,
+            bio: data.author.bio || '',
+            created_at: data.author.created_at,
+            is_registered: Boolean(data.author.is_registered),
+            identities: Array.isArray(data.author.identities) ? data.author.identities : [],
+            donate_url: latestDonate,
+            contentdb_url: (latestOfficial || hasOfficial)
+              ? `https://content.luanti.org/users/${encodeURIComponent(canonicalCdbAuthor)}/`
+              : undefined
+          };
+          this.authorProfileCache.set(lower, mergedProfile);
+          this._activeAuthorProfile.set(mergedProfile);
+          this.seoService?.updateStaticRoute(
+            `${mergedProfile.display_name} (@${mergedProfile.username})`,
+            mergedProfile.bio || `Browse Luanti mods, games, and texture packs by ${mergedProfile.display_name} on Luanti Hub.`,
+            `/author/${encodeURIComponent(clean)}`
+          );
+        }
+      }
+    } catch {
+      // Keep local catalog-derived profile
+    } finally {
+      if (this._activeAuthorUsername()?.toLowerCase() === lower) {
+        this._isLoadingAuthorProfile.set(false);
+      }
+    }
+  }
+
+  openPackageFromAuthorDrawer(pkg: LuantiPackage, updateUrl = true): void {
+    const currentAuthor = this._activeAuthorUsername();
+    if (currentAuthor) {
+      this.returnToAuthorAfterPackageModal = currentAuthor;
+    }
+    this.returnToPackageAfterAuthorDrawer = null;
+    this._activeAuthorUsername.set(null);
+    this.openPackageModal(pkg, updateUrl);
+  }
+
+  closeAuthorDrawer(updateUrl = true, restorePrevious = true): void {
+    this._activeAuthorUsername.set(null);
+    this._isLoadingAuthorProfile.set(false);
+    const prevPkg = this.returnToPackageAfterAuthorDrawer;
+    this.returnToPackageAfterAuthorDrawer = null;
+    if (restorePrevious && prevPkg) {
+      this.openPackageModal(prevPkg, updateUrl);
+      return;
+    }
+    this.seoService?.resetToHome();
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/']);
+    }
+  }
+
+  closePackageModal(updateUrl = true, restorePrevious = true): void {
     this.modalOpenRequestSeq++;
     this.pendingRoutePackage = null;
     this.edgeInitialPackageSeed = null;
@@ -4039,6 +4274,12 @@ export class PackageService {
       delete (window as any).__LUANTI_INITIAL_PACKAGE__;
     }
     this._activePackage.set(null);
+    const prevAuthor = this.returnToAuthorAfterPackageModal;
+    this.returnToAuthorAfterPackageModal = null;
+    if (restorePrevious && prevAuthor) {
+      this.openAuthorDrawer(prevAuthor, updateUrl, null);
+      return;
+    }
     this.seoService?.resetToHome();
     if (updateUrl) {
       this.navigatePreservingScroll(['/']);
@@ -4102,7 +4343,14 @@ export class PackageService {
   }
 
   closeAllModals(updateUrl = true): void {
+    this.modalOpenRequestSeq++;
+    this.pendingRoutePackage = null;
+    this.returnToPackageAfterModal = null;
+    this.returnToPackageAfterAuthorDrawer = null;
+    this.returnToAuthorAfterPackageModal = null;
     this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);

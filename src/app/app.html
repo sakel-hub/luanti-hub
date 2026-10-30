@@ -68,6 +68,10 @@
     <app-profile-drawer [class.is-closing]="isClosingProfileDrawer()"></app-profile-drawer>
   }
 
+  @if (renderAuthorDrawer()) {
+    <app-author-drawer [class.is-closing]="isClosingAuthorDrawer()"></app-author-drawer>
+  }
+
   <!-- Official Legal, DMCA & Safe Harbor Modal (/legal) -->
   @if (renderLegalModal()) {
     <div

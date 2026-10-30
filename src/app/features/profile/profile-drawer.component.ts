@@ -85,16 +85,29 @@ import {
                   }
                 </div>
                 <span class="text-xs text-sky-400 font-mono block truncate">&#64;{{ user.username }}</span>
+                @if (user.bio) {
+                  <p class="text-[11px] text-slate-300 line-clamp-1 mt-0.5">{{ user.bio }}</p>
+                }
               </div>
             </div>
 
-            <button
-              type="button"
-              (click)="authService.closeProfileDrawer()"
-              aria-label="Close profile drawer"
-              class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer">
-              <svg lucideX class="w-4 h-4 sm:w-5 sm:h-5"></svg>
-            </button>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <button
+                type="button"
+                (click)="onPreviewPublicProfile()"
+                class="px-2.5 py-1.5 rounded-xl glass-btn text-sky-300 hover:text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer">
+                <svg lucideUser class="w-3.5 h-3.5 text-sky-400"></svg>
+                <span class="hidden sm:inline">{{ 'author.viewPublicProfile' | translate }}</span>
+              </button>
+
+              <button
+                type="button"
+                (click)="authService.closeProfileDrawer()"
+                aria-label="Close profile drawer"
+                class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer">
+                <svg lucideX class="w-4 h-4 sm:w-5 sm:h-5"></svg>
+              </button>
+            </div>
           </div>
 
           <!-- Adaptive Non-Truncating Navigation Tabs (My Packages, Favorites, Account, + Admin Moderation) -->
@@ -1257,5 +1270,12 @@ export class ProfileDrawerComponent implements OnInit {
   onOpenLinkAccountModal(): void {
     this.authService.closeProfileDrawer(false);
     this.authService.openAuthModal();
+  }
+
+  onPreviewPublicProfile(): void {
+    const user = this.authService.currentUser();
+    if (!user) return;
+    this.authService.closeProfileDrawer(false);
+    this.packageService.openAuthorDrawer(user.username, true, null);
   }
 }

@@ -149,7 +149,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
 
   const expandedUrls = new Set<string>([
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;

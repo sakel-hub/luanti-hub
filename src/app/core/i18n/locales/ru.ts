@@ -208,7 +208,8 @@ export const ru: TranslationDictionary = {
     flagReview: 'Пожаловаться на отзыв',
     flagReviewPrompt: 'Причина жалобы на комментарий (спам, оскорбления)...',
     reviewFlagged: 'Отправлено',
-    removeReview: 'Удалить'
+    removeReview: 'Удалить',
+    reportSubmitted: 'Жалоба отправлена на рассмотрение модераторам.'
   },
   auth: {
     title: 'Вход в LuantiHub',
@@ -419,6 +420,7 @@ export const ru: TranslationDictionary = {
     installSuccess: 'LuantiHub успешно установлен!',
     clearCacheTitle: 'Очистить Кэш и Перезагрузить',
     clearCacheDesc: 'Сбросить Service Workers и удалить все закэшированные файлы',
+    clearCacheConfirm: 'Нажмите ещё раз для подтверждения сброса кэша',
     downloadingZipToast: 'Скачивание {name}.zip — распакуйте архив в папку Luanti mods/, games/ или textures/!'
   },
   common: {
@@ -445,5 +447,23 @@ export const ru: TranslationDictionary = {
     safeHarborDetail: 'Работает в соответствии с 17 U.S.C. § 512 (DMCA Safe Harbor) и Законом ЕС о цифровых услугах (DSA). Пакеты с нарушениями мгновенно блокируются через Cloudflare D1 Kill Switch.',
     legalSafeHarbor: 'Работает в соответствии с 17 U.S.C. § 512 (DMCA Safe Harbor) и Законом ЕС о цифровых услугах (DSA). Пакеты с нарушениями мгновенно блокируются через Cloudflare D1 Kill Switch.',
     legalPrivacy: 'LuantiHub не использует сторонние рекламные трекеры. В Cloudflare D1 хранятся только необходимые сессионные данные и открытые метаданные пакетов.'
+  },
+  author: {
+    viewProfile: 'Профиль автора',
+    creatorProfile: 'Профиль Автора',
+    verifiedCreator: 'Подтверждённый автор',
+    aboutCreator: 'Об авторе',
+    noBioFallback: 'Разработчик сообщества, создающий пакеты с открытым исходным кодом для экосистемы Luanti.',
+    totalPackages: 'Пакеты',
+    totalDownloads: 'Всего загрузок',
+    avgRating: 'Рейтинг',
+    sourcesLabel: 'Источники',
+    topTags: 'Основные теги и направления',
+    searchAuthorPackages: 'Фильтр пакетов автора...',
+    filterAllCatalog: 'Найти в каталоге',
+    shareProfile: 'Поделиться профилем',
+    supportCreator: 'Поддержать автора',
+    editMyBio: 'Изменить био',
+    viewPublicProfile: 'Публичный профиль'
   }
 };

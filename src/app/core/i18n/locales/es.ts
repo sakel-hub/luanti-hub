@@ -208,7 +208,8 @@ export const es: TranslationDictionary = {
     flagReview: 'Reportar comentario',
     flagReviewPrompt: 'Motivo para reportar este comentario (spam, inapropiado)...',
     reviewFlagged: 'Reportado',
-    removeReview: 'Eliminar'
+    removeReview: 'Eliminar',
+    reportSubmitted: 'Reporte enviado para revisión de los moderadores.'
   },
   auth: {
     title: 'Iniciar sesión en LuantiHub',
@@ -419,6 +420,7 @@ export const es: TranslationDictionary = {
     installSuccess: '¡LuantiHub se instaló correctamente!',
     clearCacheTitle: 'Limpiar Caché y Recargar',
     clearCacheDesc: 'Desregistrar service workers y purgar todos los datos almacenados',
+    clearCacheConfirm: 'Haz clic de nuevo para confirmar borrar caché',
     downloadingZipToast: 'Descargando {name}.zip — ¡extrae el archivo en tu carpeta Luanti mods/, games/ o textures/!'
   },
   common: {
@@ -445,5 +447,23 @@ export const es: TranslationDictionary = {
     safeHarborDetail: 'Operado en cumplimiento con 17 U.S.C. § 512 (DMCA Safe Harbor) y la Ley de Servicios Digitales (DSA) de la UE. Los paquetes reportados pueden ser retirados de inmediato mediante nuestro Kill Switch en Cloudflare D1.',
     legalSafeHarbor: 'Operado en cumplimiento con 17 U.S.C. § 512 (DMCA Safe Harbor) y la Ley de Servicios Digitales (DSA) de la UE. Los paquetes reportados pueden ser retirados de inmediato mediante nuestro Kill Switch en Cloudflare D1.',
     legalPrivacy: 'LuantiHub no utiliza rastreadores publicitarios de terceros. Solo se almacenan cookies de sesión esenciales y metadatos públicos de código abierto en Cloudflare D1.'
+  },
+  author: {
+    viewProfile: 'Ver perfil del autor',
+    creatorProfile: 'Perfil de Creador',
+    verifiedCreator: 'Creador Verificado',
+    aboutCreator: 'Sobre el autor',
+    noBioFallback: 'Creador de la comunidad que aporta paquetes de código abierto al ecosistema Luanti.',
+    totalPackages: 'Paquetes',
+    totalDownloads: 'Alcance total',
+    avgRating: 'Valoración',
+    sourcesLabel: 'Fuentes',
+    topTags: 'Especialidades y Etiquetas',
+    searchAuthorPackages: 'Filtrar paquetes del autor...',
+    filterAllCatalog: 'Buscar en el catálogo',
+    shareProfile: 'Compartir perfil',
+    supportCreator: 'Apoyar al autor',
+    editMyBio: 'Editar bio',
+    viewPublicProfile: 'Perfil público'
   }
 };

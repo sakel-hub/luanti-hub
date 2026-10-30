@@ -424,7 +424,7 @@ import {
                   [class]="confirmingClearCache() ? 'glass-btn-rose text-rose-100' : 'text-rose-300 hover:bg-rose-500/20 hover:text-rose-200'"
                   class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold transition text-left cursor-pointer">
                   <svg lucideTrash class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
-                  <span>{{ (confirmingClearCache() ? 'pwa.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
+                  <span>{{ (confirmingClearCache() ? 'header.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
                 </button>
               </div>
             }
@@ -663,7 +663,7 @@ import {
               [class]="confirmingClearCache() ? 'glass-btn-rose text-rose-100' : 'glass-btn text-rose-300'"
               class="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 cursor-pointer">
               <svg lucideTrash class="w-3.5 h-3.5 text-rose-400"></svg>
-              <span>{{ (confirmingClearCache() ? 'pwa.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
+              <span>{{ (confirmingClearCache() ? 'header.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
             </button>
           </div>
         </div>

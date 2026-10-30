@@ -208,7 +208,8 @@ export const fr: TranslationDictionary = {
     flagReview: 'Signaler le commentaire',
     flagReviewPrompt: 'Motif du signalement de ce commentaire (spam, inapproprié)...',
     reviewFlagged: 'Signalé',
-    removeReview: 'Supprimer'
+    removeReview: 'Supprimer',
+    reportSubmitted: 'Signalement envoyé aux modérateurs.'
   },
   auth: {
     title: 'Connexion à LuantiHub',
@@ -419,6 +420,7 @@ export const fr: TranslationDictionary = {
     installSuccess: 'LuantiHub a été installé avec succès !',
     clearCacheTitle: 'Vider le Cache & Recharger',
     clearCacheDesc: 'Désenregistrer les service workers et supprimer les données en cache',
+    clearCacheConfirm: 'Cliquez à nouveau pour confirmer le vidage du cache',
     downloadingZipToast: 'Téléchargement de {name}.zip — extrayez l\'archive dans votre dossier Luanti mods/, games/ ou textures/ !'
   },
   common: {
@@ -445,5 +447,23 @@ export const fr: TranslationDictionary = {
     safeHarborDetail: 'Opéré conformément au 17 U.S.C. § 512 (DMCA Safe Harbor) et au Digital Services Act (DSA) de l\'UE. Les paquets signalés peuvent être immédiatement retirés via notre Kill Switch Cloudflare D1.',
     legalSafeHarbor: 'Opéré conformément au 17 U.S.C. § 512 (DMCA Safe Harbor) et au Digital Services Act (DSA) de l\'UE. Les paquets signalés peuvent être immédiatement retirés via notre Kill Switch Cloudflare D1.',
     legalPrivacy: 'LuantiHub n\'utilise aucun traceur publicitaire tiers. Seules les sessions essentielles et les métadonnées publiques open-source sont enregistrées dans Cloudflare D1.'
+  },
+  author: {
+    viewProfile: 'Voir le profil de l\'auteur',
+    creatorProfile: 'Profil Créateur',
+    verifiedCreator: 'Créateur Vérifié',
+    aboutCreator: 'À propos de l\'auteur',
+    noBioFallback: 'Créateur communautaire contribuant des paquets open-source à l\'écosystème Luanti.',
+    totalPackages: 'Paquets',
+    totalDownloads: 'Téléchargements',
+    avgRating: 'Note moy.',
+    sourcesLabel: 'Sources',
+    topTags: 'Spécialités & Tags',
+    searchAuthorPackages: 'Filtrer les paquets de l\'auteur...',
+    filterAllCatalog: 'Voir dans le catalogue',
+    shareProfile: 'Partager le profil',
+    supportCreator: 'Soutenir l\'auteur',
+    editMyBio: 'Modifier la bio',
+    viewPublicProfile: 'Profil public'
   }
 };

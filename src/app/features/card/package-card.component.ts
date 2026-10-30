@@ -23,7 +23,8 @@ import {
   LucideStar,
   LucideHeart,
   LucideChevronDown,
-  LucideDownload
+  LucideDownload,
+  LucideUser
 } from '@lucide/angular';
 
 @Component({
@@ -41,7 +42,8 @@ import {
     LucideStar,
     LucideHeart,
     LucideChevronDown,
-    LucideDownload
+    LucideDownload,
+    LucideUser
   ],
   template: `
     <div
@@ -226,22 +228,34 @@ import {
         </div>
 
         <!-- Bottom Capped Single-Line Tags / Author Footer -->
-        <div class="mt-auto pt-1.5 flex items-center gap-1.5 text-[10px] text-slate-400 overflow-hidden whitespace-nowrap min-h-[22px]">
-          @if (displayTags.length > 0) {
-            @for (t of displayTags; track t; let last = $last) {
-              <button
-                type="button"
-                (click)="onTagClick($event, t)"
-                class="hover:text-sky-300 transition truncate max-w-[90px] cursor-pointer">
-                #{{ t }}
-              </button>
-              @if (!last) {
-                <span class="text-slate-600 flex-shrink-0">•</span>
+        <div class="mt-auto pt-1.5 flex items-center justify-between gap-1.5 text-[10px] text-slate-400 overflow-hidden whitespace-nowrap min-h-[22px]">
+          <div class="flex items-center gap-1.5 overflow-hidden min-w-0">
+            @if (displayTags.length > 0) {
+              @for (t of displayTags; track t; let last = $last) {
+                <button
+                  type="button"
+                  (click)="onTagClick($event, t)"
+                  class="hover:text-sky-300 transition truncate max-w-[78px] cursor-pointer">
+                  #{{ t }}
+                </button>
+                @if (!last) {
+                  <span class="text-slate-600 flex-shrink-0">•</span>
+                }
               }
+            } @else {
+              <span class="text-slate-500 truncate">{{ 'card.byAuthor' | translate }} {{ package.author }}</span>
             }
-          } @else {
-            <span class="text-slate-500 truncate">{{ 'card.byAuthor' | translate }} {{ package.author }}</span>
-          }
+          </div>
+
+          <button
+            type="button"
+            (click)="onAuthorClick($event)"
+            [appTooltip]="('author.viewProfile' | translate) + ' (@' + package.author + ')'"
+            [attr.aria-label]="('author.viewProfile' | translate) + ' ' + package.author"
+            class="px-1.5 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer">
+            <svg lucideUser class="w-2.5 h-2.5 text-sky-400 flex-shrink-0"></svg>
+            <span class="truncate font-medium">{{ package.author }}</span>
+          </button>
         </div>
 
       </div>
@@ -417,5 +431,10 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   onTagClick(event: MouseEvent, tag: string): void {
     event.stopPropagation();
     this.packageService.setTagFilter(tag);
+  }
+
+  onAuthorClick(event: MouseEvent): void {
+    event.stopPropagation();
+    this.packageService.openAuthorDrawer(this.package.author, true, null);
   }
 }

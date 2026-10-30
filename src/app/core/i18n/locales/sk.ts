@@ -208,7 +208,8 @@ export const sk: TranslationDictionary = {
     flagReview: 'Nahlásiť komentár',
     flagReviewPrompt: 'Dôvod nahlásenia tohto komentára (spam, nevhodný obsah)...',
     reviewFlagged: 'Nahlásené',
-    removeReview: 'Odstrániť'
+    removeReview: 'Odstrániť',
+    reportSubmitted: 'Hlásenie bolo odoslané na kontrolu moderátorom.'
   },
   auth: {
     title: 'Prihlásiť sa do LuantiHub',
@@ -419,6 +420,7 @@ export const sk: TranslationDictionary = {
     installSuccess: 'LuantiHub bol úspešne nainštalovaný!',
     clearCacheTitle: 'Vyčistiť Vyrovnávaciu Pamäť & Reštartovať',
     clearCacheDesc: 'Zrušiť registráciu service workerov a vymazať všetky uložené súbory a dáta',
+    clearCacheConfirm: 'Kliknite znova pre potvrdenie vymazania pamäte',
     downloadingZipToast: 'Sťahujem {name}.zip — rozbaľte ho do priečinka Luanti mods/, games/ alebo textures/!'
   },
   common: {
@@ -445,5 +447,23 @@ export const sk: TranslationDictionary = {
     safeHarborDetail: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalSafeHarbor: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalPrivacy: 'LuantiHub nepoužíva žiadne reklamné sledovacie skripty tretích strán. V Cloudflare D1 sú uložené iba nevyhnutné prihlasovacie údaje a verejné open-source metadáta balíčkov.'
+  },
+  author: {
+    viewProfile: 'Zobraziť profil autora',
+    creatorProfile: 'Profil tvorcu',
+    verifiedCreator: 'Overený tvorca',
+    aboutCreator: 'O autorovi',
+    noBioFallback: 'Komunitný tvorca prispievajúci open-source balíčkami do ekosystému Luanti.',
+    totalPackages: 'Balíčky',
+    totalDownloads: 'Celkový dosah',
+    avgRating: 'Hodnotenie',
+    sourcesLabel: 'Zdroje',
+    topTags: 'Hlavné zameranie & Tagy',
+    searchAuthorPackages: 'Filtrovať balíčky autora...',
+    filterAllCatalog: 'Hľadať v katalógu',
+    shareProfile: 'Zdieľať profil',
+    supportCreator: 'Podporiť autora',
+    editMyBio: 'Upraviť bio',
+    viewPublicProfile: 'Verejný profil'
   }
 };

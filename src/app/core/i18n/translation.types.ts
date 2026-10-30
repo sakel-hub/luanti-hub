@@ -224,6 +224,7 @@ export interface TranslationDictionary {
     flagReviewPrompt: string;
     reviewFlagged: string;
     removeReview: string;
+    reportSubmitted: string;
   };
   auth: {
     title: string;
@@ -434,6 +435,7 @@ export interface TranslationDictionary {
     installSuccess: string;
     clearCacheTitle: string;
     clearCacheDesc: string;
+    clearCacheConfirm: string;
     downloadingZipToast: string;
   };
   common: {
@@ -461,6 +463,24 @@ export interface TranslationDictionary {
     legalSafeHarbor: string;
     legalPrivacy: string;
   };
+  author: {
+    viewProfile: string;
+    creatorProfile: string;
+    verifiedCreator: string;
+    aboutCreator: string;
+    noBioFallback: string;
+    totalPackages: string;
+    totalDownloads: string;
+    avgRating: string;
+    sourcesLabel: string;
+    topTags: string;
+    searchAuthorPackages: string;
+    filterAllCatalog: string;
+    shareProfile: string;
+    supportCreator: string;
+    editMyBio: string;
+    viewPublicProfile: string;
+  };
 }
 
 export type TranslationKey =
@@ -476,4 +496,5 @@ export type TranslationKey =
   | `submit.${keyof TranslationDictionary['submit']}`
   | `pwa.${keyof TranslationDictionary['pwa']}`
   | `common.${keyof TranslationDictionary['common']}`
-  | `footer.${keyof TranslationDictionary['footer']}`;
+  | `footer.${keyof TranslationDictionary['footer']}`
+  | `author.${keyof TranslationDictionary['author']}`;

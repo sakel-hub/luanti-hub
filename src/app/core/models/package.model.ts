@@ -105,6 +105,18 @@ export interface UserIdentity {
   verified?: boolean;
 }
 
+export interface PublicAuthorProfile {
+  username: string;
+  display_name: string;
+  avatar_url: string;
+  bio: string;
+  created_at?: string;
+  is_registered?: boolean;
+  identities: UserIdentity[];
+  donate_url?: string;
+  contentdb_url?: string;
+}
+
 export interface AuthUser {
   id: string;
   username: string;

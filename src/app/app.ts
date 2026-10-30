@@ -7,6 +7,7 @@ import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { SetupGuideModalComponent } from './features/setup-guide/setup-guide-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
+import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
@@ -28,6 +29,7 @@ import { LucideX, LucideShieldCheck, LucideCheck } from '@lucide/angular';
     SetupGuideModalComponent,
     AuthModalComponent,
     ProfileDrawerComponent,
+    AuthorDrawerComponent,
     LucideX,
     LucideShieldCheck,
     LucideCheck
@@ -55,6 +57,9 @@ export class App {
 
   readonly renderProfileDrawer = signal(false);
   readonly isClosingProfileDrawer = signal(false);
+
+  readonly renderAuthorDrawer = signal(false);
+  readonly isClosingAuthorDrawer = signal(false);
 
   readonly renderLegalModal = signal(false);
   readonly isClosingLegalModal = signal(false);
@@ -88,6 +93,7 @@ export class App {
     this.bindAnimatedOverlay(() => this.packageService.isSetupModalOpen(), this.renderSetupModal, this.isClosingSetupModal, 200);
     this.bindAnimatedOverlay(() => this.authService.isAuthModalOpen(), this.renderAuthModal, this.isClosingAuthModal, 200);
     this.bindAnimatedOverlay(() => this.authService.isProfileDrawerOpen(), this.renderProfileDrawer, this.isClosingProfileDrawer, 220);
+    this.bindAnimatedOverlay(() => Boolean(this.packageService.activeAuthorUsername()), this.renderAuthorDrawer, this.isClosingAuthorDrawer, 220);
     this.bindAnimatedOverlay(() => this.packageService.isLegalModalOpen(), this.renderLegalModal, this.isClosingLegalModal, 200);
 
     // Lock background scroll whenever a modal or drawer is open while preserving scroll position
@@ -95,6 +101,7 @@ export class App {
       if (typeof document === 'undefined' || typeof window === 'undefined') return;
       const anyModalOpen = Boolean(
         this.packageService.activePackage() ||
+        this.packageService.activeAuthorUsername() ||
         this.packageService.isSubmitModalOpen() ||
         this.packageService.isSetupModalOpen() ||
         this.packageService.isLegalModalOpen() ||
@@ -160,6 +167,8 @@ export class App {
         this.authService.closeAuthModal();
       } else if (this.authService.isProfileDrawerOpen()) {
         this.authService.closeProfileDrawer();
+      } else if (this.packageService.activeAuthorUsername()) {
+        this.packageService.closeAuthorDrawer();
       } else if (this.packageService.activePackage()) {
         if (this.packageService.tryCloseModalSubOverlay()) {
           return;

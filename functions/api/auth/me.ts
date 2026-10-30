@@ -8,7 +8,7 @@ import {
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from './lib/session';
-import { syncAuthorContentDbPackages, ensureModerationColumns } from '../lib/upstream';
+import { syncAuthorContentDbPackages, ensureModerationColumns, invalidateEdgeCacheKeys } from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -517,6 +517,25 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(displayName, bio, avatarUrl, userId).run();
+
+    try {
+      const uRow = await context.env.DB.prepare(`SELECT username FROM users WHERE id = ?`).bind(userId).first();
+      const idRows = await context.env.DB.prepare(`SELECT provider_username FROM user_identities WHERE user_id = ?`).bind(userId).all();
+      const keysToEvict: string[] = [];
+      if (uRow?.username) {
+        keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(String(uRow.username).toLowerCase())}`);
+      }
+      for (const r of (idRows?.results || [])) {
+        if (r?.provider_username) {
+          keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(String(r.provider_username).toLowerCase())}`);
+        }
+      }
+      if (keysToEvict.length > 0) {
+        await invalidateEdgeCacheKeys(keysToEvict);
+      }
+    } catch {
+      // Ignore cache eviction errors
+    }
 
     return Response.json({ success: true });
   } catch (err: any) {

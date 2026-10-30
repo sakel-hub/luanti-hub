@@ -208,7 +208,8 @@ export const de: TranslationDictionary = {
     flagReview: 'Kommentar melden',
     flagReviewPrompt: 'Grund für die Meldung dieses Kommentars (Spam, unangemessen)...',
     reviewFlagged: 'Gemeldet',
-    removeReview: 'Entfernen'
+    removeReview: 'Entfernen',
+    reportSubmitted: 'Meldung zur Überprüfung an die Moderation gesendet.'
   },
   auth: {
     title: 'Bei LuantiHub anmelden',
@@ -419,6 +420,7 @@ export const de: TranslationDictionary = {
     installSuccess: 'LuantiHub wurde erfolgreich installiert!',
     clearCacheTitle: 'Cache Leeren & Neu Laden',
     clearCacheDesc: 'Service Worker abmelden und alle zwischengespeicherten Daten bereinigen',
+    clearCacheConfirm: 'Erneut klicken, um Cache leeren zu bestätigen',
     downloadingZipToast: 'Lade {name}.zip herunter — entpacken Sie das Archiv in Ihren Luanti mods/, games/ oder textures/ Ordner!'
   },
   common: {
@@ -445,5 +447,23 @@ export const de: TranslationDictionary = {
     safeHarborDetail: 'Betrieben gemäß 17 U.S.C. § 512 (DMCA Safe Harbor) und dem EU Digital Services Act (DSA). Gemeldete Pakete können über unseren Cloudflare D1 Kill Switch umgehend entfernt werden.',
     legalSafeHarbor: 'Betrieben gemäß 17 U.S.C. § 512 (DMCA Safe Harbor) und dem EU Digital Services Act (DSA). Gemeldete Pakete können über unseren Cloudflare D1 Kill Switch umgehend entfernt werden.',
     legalPrivacy: 'LuantiHub verwendet keinerlei Werbe-Tracker von Drittanbietern. Es werden ausschließlich notwendige Sitzungsdaten und öffentliche Open-Source-Paketmetadaten in Cloudflare D1 gespeichert.'
+  },
+  author: {
+    viewProfile: 'Autorenprofil ansehen',
+    creatorProfile: 'Autorenprofil',
+    verifiedCreator: 'Verifizierter Autor',
+    aboutCreator: 'Über den Autor',
+    noBioFallback: 'Community-Entwickler von Open-Source-Paketen für das Luanti-Ökosystem.',
+    totalPackages: 'Pakete',
+    totalDownloads: 'Downloads gesamt',
+    avgRating: 'Bewertung',
+    sourcesLabel: 'Quellen',
+    topTags: 'Top-Schwerpunkte & Tags',
+    searchAuthorPackages: 'Pakete des Autors filtern...',
+    filterAllCatalog: 'Im Katalog suchen',
+    shareProfile: 'Profil teilen',
+    supportCreator: 'Autor unterstützen',
+    editMyBio: 'Bio bearbeiten',
+    viewPublicProfile: 'Öffentliches Profil'
   }
 };

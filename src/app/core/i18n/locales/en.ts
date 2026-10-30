@@ -208,7 +208,8 @@ export const en: TranslationDictionary = {
     flagReview: 'Flag Comment',
     flagReviewPrompt: 'Reason for flagging this comment (spam, harassment, inappropriate)...',
     reviewFlagged: 'Flagged',
-    removeReview: 'Remove'
+    removeReview: 'Remove',
+    reportSubmitted: 'Report submitted for moderator review.'
   },
   auth: {
     title: 'Sign in to LuantiHub',
@@ -419,6 +420,7 @@ export const en: TranslationDictionary = {
     installSuccess: 'LuantiHub was successfully installed!',
     clearCacheTitle: 'Clear Cache & Hard Reload',
     clearCacheDesc: 'Unregister service workers and purge all cached API files and assets',
+    clearCacheConfirm: 'Click again to confirm Clear Cache',
     downloadingZipToast: 'Downloading {name}.zip — extract into your Luanti mods/, games/, or textures/ directory!'
   },
   common: {
@@ -445,5 +447,23 @@ export const en: TranslationDictionary = {
     safeHarborDetail: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalSafeHarbor: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalPrivacy: 'LuantiHub uses zero third-party ad trackers. Only essential session cookies and public open-source package metadata are stored in Cloudflare D1.'
+  },
+  author: {
+    viewProfile: 'View Author Profile',
+    creatorProfile: 'Creator Profile',
+    verifiedCreator: 'Verified Creator',
+    aboutCreator: 'About Creator',
+    noBioFallback: 'Community creator contributing open-source packages to the Luanti ecosystem.',
+    totalPackages: 'Packages',
+    totalDownloads: 'Total Reach',
+    avgRating: 'Avg Rating',
+    sourcesLabel: 'Sources',
+    topTags: 'Top Specialties & Tags',
+    searchAuthorPackages: 'Filter creator packages...',
+    filterAllCatalog: 'Search in Catalog',
+    shareProfile: 'Share Profile',
+    supportCreator: 'Support Creator',
+    editMyBio: 'Edit Bio',
+    viewPublicProfile: 'Public Profile'
   }
 };

@@ -118,7 +118,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
   const noCache = url.searchParams.get('nocache') === '1';
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3';
 
   if (isBootBundle && !noCache && !q && types.length === 0 && !author) {
     const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
@@ -292,12 +292,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  // 3. Build upstream ContentDB index by ID, normalized repo URL, (name + title), and unambiguous (name + type) to prevent duplicates
+  // 3. Build upstream ContentDB index by ID, normalized repo URL, (baseAuthor + name + title), and unambiguous (baseAuthor + name + type) to prevent duplicates
   const upstreamById = new Map<string, any>();
   const upstreamByRepo = new Map<string, any>();
   const upstreamByNameTitle = new Map<string, any>();
   const upstreamByNameTypeCount = new Map<string, number>();
   const upstreamByNameType = new Map<string, any>();
+  const normalizeBaseAuthor = (a: string) =>
+    String(a || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
 
   for (const item of upstreamList) {
     if (!item || !item.author || !item.name) continue;
@@ -305,9 +307,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     upstreamById.set(uKey, item);
     const rKey = normalizeRepoKey(item.repo || item.repo_url);
     if (rKey) upstreamByRepo.set(rKey, item);
-    const ntKey = `${String(item.name).toLowerCase()}::${String(item.title || '').trim().toLowerCase()}`;
+    const baseAuthor = normalizeBaseAuthor(item.author);
+    const ntKey = `${baseAuthor}::${String(item.name).toLowerCase()}::${String(item.title || '').trim().toLowerCase()}`;
     upstreamByNameTitle.set(ntKey, item);
-    const nameTypeKey = `${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
+    const nameTypeKey = `${baseAuthor}::${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
     upstreamByNameTypeCount.set(nameTypeKey, (upstreamByNameTypeCount.get(nameTypeKey) || 0) + 1);
     upstreamByNameType.set(nameTypeKey, item);
   }
@@ -321,8 +324,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (blockedIds.has(d1Key)) continue;
 
     const pRepoKey = normalizeRepoKey(p.repo_url);
-    const pNameTitleKey = `${String(p.name || '').toLowerCase()}::${String(p.title || '').trim().toLowerCase()}`;
-    const pNameTypeKey = `${String(p.name || '').toLowerCase()}::${String(p.type || 'mod').toLowerCase()}`;
+    const pBaseAuthor = normalizeBaseAuthor(p.author_name);
+    const pNameTitleKey = `${pBaseAuthor}::${String(p.name || '').toLowerCase()}::${String(p.title || '').trim().toLowerCase()}`;
+    const pNameTypeKey = `${pBaseAuthor}::${String(p.name || '').toLowerCase()}::${String(p.type || 'mod').toLowerCase()}`;
     const matchedUpstream =
       upstreamById.get(d1Key) ||
       (pRepoKey ? upstreamByRepo.get(pRepoKey) : undefined) ||
@@ -365,8 +369,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     const parsedTags = parseJsonArray(p.tags);
-    const isGitSource = p.provider !== 'contentdb' || parsedTags.includes('git');
-    const isAlsoOfficial = Boolean(matchedUpstream) || p.provider === 'contentdb' || parsedTags.includes('contentdb');
+    const rawProvider = String(p.provider || '').toLowerCase();
+    const isGitSource =
+      ['github', 'codeberg', 'gitlab', 'mesehub'].includes(rawProvider) ||
+      parsedTags.includes('git');
+    const isAlsoOfficial = Boolean(matchedUpstream) || rawProvider === 'contentdb' || parsedTags.includes('contentdb');
 
     const sources: Array<'official' | 'git'> = [];
     if (isAlsoOfficial) sources.push('official');
@@ -469,6 +476,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       luantihub_downloads: lhDl,
       downloads: cdbDl + lhDl,
       min_minetest_version: item.min_minetest_version || '5.0.0',
+      provider: 'contentdb',
       source: 'official',
       sources: ['official']
     });

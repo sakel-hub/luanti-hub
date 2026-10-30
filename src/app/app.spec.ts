@@ -15,6 +15,7 @@ import { SubmitModalComponent } from './features/submit/submit-modal.component';
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
+import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { HeaderComponent } from './features/header/header.component';
 import { PwaService } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
@@ -1706,5 +1707,196 @@ description = Mob animation and spawning framework.
     pkgService.closeSetupModal(false);
     expect(pkgService.isSetupModalOpen()).toBe(false);
     expect(pkgService.activePackage()?.name).toBe('recent_mod');
+  });
+
+  it('should translate clearCacheConfirm in the mobile hamburger menu and keep ContentDB packages out of decentralizedGitPackages after sessionStorage boot cache re-normalization', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const translationService = TestBed.inject(TranslationService);
+
+    for (const locale of ['en', 'sk', 'de', 'fr', 'es', 'ru'] as const) {
+      translationService.setLocale(locale);
+      const headerConfirm = translationService.translate('header.clearCacheConfirm');
+      const pwaConfirm = translationService.translate('pwa.clearCacheConfirm');
+      const reportSubmitted = translationService.translate('modal.reportSubmitted');
+      expect(headerConfirm).not.toBe('header.clearCacheConfirm');
+      expect(pwaConfirm).not.toBe('pwa.clearCacheConfirm');
+      expect(reportSubmitted).not.toBe('modal.reportSubmitted');
+    }
+    translationService.setLocale('en');
+
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    const headerComp = headerFixture.componentInstance;
+    headerComp.isMobileMenuOpen.set(true);
+    headerFixture.detectChanges();
+
+    headerComp.onClearCache(new MouseEvent('click'));
+    headerFixture.detectChanges();
+    expect(headerComp.confirmingClearCache()).toBe(true);
+    expect(headerFixture.nativeElement.textContent).toContain('Clear all cached files, service workers, and reload LuantiHub?');
+    expect(headerFixture.nativeElement.textContent).not.toContain('pwa.clearCacheConfirm');
+
+    // Simulate initial boot payload with official ContentDB packages (no provider or provider='contentdb') + 1 genuine Git Community submission
+    const initialBootPayload = {
+      packages: [
+        {
+          id: 'Minetest/minetest_game',
+          author: 'Minetest',
+          name: 'minetest_game',
+          title: 'Minetest Game',
+          type: 'game',
+          source: 'official',
+          sources: ['official'],
+          downloads: 950000
+        },
+        {
+          id: 'mt-mods/i3',
+          author: 'mt-mods',
+          name: 'i3',
+          title: 'i3',
+          type: 'mod',
+          repo: 'https://github.com/mt-mods/i3',
+          source: 'official',
+          sources: ['official'],
+          downloads: 45000
+        },
+        {
+          id: 'other-author/x_custom',
+          author: 'other-author',
+          name: 'x_custom',
+          title: 'Completely Different Mod',
+          type: 'mod',
+          source: 'official',
+          sources: ['official'],
+          downloads: 12000
+        },
+        {
+          id: 'sakel-hub/x_custom',
+          author: 'sakel-hub',
+          name: 'x_custom',
+          title: 'Sakel Custom Git Mod',
+          type: 'mod',
+          provider: 'codeberg',
+          repo_url: 'https://codeberg.org/sakel-hub/x_custom',
+          source: 'git',
+          sources: ['git'],
+          downloads: 300
+        }
+      ]
+    };
+
+    (pkgService as any).applyBootPayload(initialBootPayload);
+    expect(pkgService.decentralizedGitPackages().map(p => p.id)).toEqual(['sakel-hub/x_custom']);
+
+    // Simulate mobile browsing session where `this._packages()` is persisted to sessionStorage (`lh_boot_cache_v6`) and re-applied on reload/return
+    const persistedPackages = JSON.parse(JSON.stringify(pkgService.packages()));
+    (pkgService as any).applyBootPayload({ packages: persistedPackages });
+
+    // ContentDB packages must NEVER flip to 'git' or leak into decentralizedGitPackages()
+    expect(pkgService.decentralizedGitPackages().map(p => p.id)).toEqual(['sakel-hub/x_custom']);
+    const mtg = pkgService.packages().find(p => p.id === 'Minetest/minetest_game');
+    expect(mtg?.source).toBe('official');
+    expect(mtg?.sources).toEqual(['official']);
+    expect(mtg?.provider).toBe('contentdb');
+  });
+
+  it('should open the Public Author Profile Drawer with Creator Bio, Verified Identities, aggregated stats, and 8-per-page pagination, preserving modal/drawer navigation context', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+    const translationService = TestBed.inject(TranslationService);
+
+    for (const locale of ['en', 'sk', 'de', 'fr', 'es', 'ru'] as const) {
+      translationService.setLocale(locale);
+      expect(translationService.translate('author.viewProfile')).not.toBe('author.viewProfile');
+      expect(translationService.translate('author.aboutCreator')).not.toBe('author.aboutCreator');
+      expect(translationService.translate('author.totalPackages')).not.toBe('author.totalPackages');
+    }
+    translationService.setLocale('en');
+
+    // Seed 10 packages by 'SaKeL' (and 'sakel-hub') to test 8-per-page pagination + stats
+    const mockPackages = Array.from({ length: 10 }, (_, idx) =>
+      (pkgService as any).normalizePackage({
+        id: `${idx === 0 ? 'sakel-hub' : 'SaKeL'}/x_mod_${idx + 1}`,
+        author: idx === 0 ? 'sakel-hub' : 'SaKeL',
+        name: `x_mod_${idx + 1}`,
+        title: `X Mod ${idx + 1}`,
+        type: idx === 0 ? 'game' : 'mod',
+        source: idx === 0 ? 'git' : 'official',
+        sources: idx === 0 ? ['git'] : ['official'],
+        provider: idx === 0 ? 'codeberg' : 'contentdb',
+        downloads: (10 - idx) * 1000,
+        contentdb_downloads: idx === 0 ? 0 : (10 - idx) * 900,
+        luantihub_downloads: (10 - idx) * 100,
+        score: 4.8,
+        tags: ['survival', 'building', idx % 2 === 0 ? 'mapgen' : 'combat'],
+        donate_url: idx === 0 ? 'https://ko-fi.com/sakel' : undefined
+      })
+    );
+    (pkgService as any)._packages.set(mockPackages);
+
+    (authService as any)._currentUser.set({
+      id: 'u-sakel',
+      username: 'SaKeL',
+      display_name: 'Juraj (SaKeL)',
+      avatar_url: 'https://github.com/SaKeL.png',
+      bio: 'Creator of X-Farming, X-Bows, and voxel survival mods for Luanti.',
+      identities: [
+        { provider: 'codeberg', username: 'sakel-hub', verified: true },
+        { provider: 'contentdb', username: 'SaKeL', verified: true }
+      ]
+    });
+
+    // Open Package Detail Modal for x_mod_1, then click View Author Profile
+    pkgService.openPackageModal(mockPackages[0], false);
+    expect(pkgService.activePackage()?.name).toBe('x_mod_1');
+
+    await pkgService.openAuthorDrawer('SaKeL', false, mockPackages[0]);
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.activeAuthorUsername()).toBe('SaKeL');
+    expect(pkgService.activeAuthorProfile()?.bio).toBe('Creator of X-Farming, X-Bows, and voxel survival mods for Luanti.');
+
+    const drawerFixture = TestBed.createComponent(AuthorDrawerComponent);
+    const drawerComp = drawerFixture.componentInstance;
+    drawerFixture.detectChanges();
+
+    expect(drawerComp.authorPackages().length).toBe(10);
+    expect(drawerComp.totalDownloads()).toBe(55000);
+    expect(drawerComp.averageRating()).toBe(4.8);
+    expect(drawerComp.totalPages()).toBe(2);
+    expect(drawerComp.pagedAuthorPackages().length).toBe(8);
+    expect(drawerFixture.nativeElement.textContent).toContain('Creator of X-Farming, X-Bows, and voxel survival mods for Luanti.');
+
+    // Advance to page 2 -> shows remaining 2 packages
+    drawerComp.setPage(2);
+    drawerFixture.detectChanges();
+    expect(drawerComp.currentPage()).toBe(2);
+    expect(drawerComp.pagedAuthorPackages().length).toBe(2);
+
+    // Filter by 'game' category inside the Author Drawer
+    drawerComp.selectCategory('game');
+    drawerFixture.detectChanges();
+    expect(drawerComp.filteredAuthorPackages().length).toBe(1);
+    expect(drawerComp.currentPage()).toBe(1);
+
+    // Clicking a package inside AuthorDrawerComponent opens that package modal, and closing that package modal returns to the Author Drawer
+    drawerComp.openPackage(mockPackages[1]);
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(pkgService.activePackage()?.name).toBe('x_mod_2');
+
+    pkgService.closePackageModal(false);
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.activeAuthorUsername()).toBe('SaKeL');
+
+    // Closing AuthorDrawerComponent when opened from x_mod_1 restores x_mod_1
+    await pkgService.openAuthorDrawer('SaKeL', false, mockPackages[0]);
+    pkgService.closeAuthorDrawer(false);
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(pkgService.activePackage()?.name).toBe('x_mod_1');
+
+    // Clicking "Search in Catalog" inside AuthorDrawerComponent when opened from x_mod_1 closes BOTH the Author Drawer and the Package Detail Modal
+    await pkgService.openAuthorDrawer('SaKeL', false, mockPackages[0]);
+    drawerComp.filterCatalogByAuthor();
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.searchQuery()).toBe('SaKeL');
   });
 });

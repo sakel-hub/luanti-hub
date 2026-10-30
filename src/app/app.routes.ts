@@ -27,6 +27,10 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'author/:username',
+    component: CatalogComponent
+  },
+  {
     path: 'legal',
     component: CatalogComponent
   },
