@@ -105,15 +105,15 @@ import {
 
           <div class="overflow-y-auto flex-1 flex flex-col">
 
-            <!-- Admin / Verified Author Package Control Bar (Delist, Restore & Safe Permanent Removal) -->
-            @if (canModerate()) {
+            <!-- Admin-Only Package Moderation Bar (Delist, Restore & Safe Permanent Removal) -->
+            @if (authService.isAdmin()) {
               <div
                 [class]="isPackageDelisted() ? 'bg-amber-950/75 border-amber-500/30 text-amber-200' : 'bg-rose-950/75 border-rose-500/30 text-rose-200'"
                 class="px-5 py-2.5 backdrop-blur-md border-b flex flex-col gap-2 text-xs flex-shrink-0">
                 <div class="flex items-center justify-between gap-3 flex-wrap">
                   <div class="flex items-center gap-2 font-bold">
                     <svg lucideShieldAlert class="w-4 h-4 flex-shrink-0" [class]="isPackageDelisted() ? 'text-amber-400' : 'text-rose-400'"></svg>
-                    <span>{{ authService.isAdmin() ? ('modal.adminModeration' | translate) : 'Author Package Controls' }}</span>
+                    <span>{{ 'modal.adminModeration' | translate }}</span>
                   </div>
                   <div class="flex items-center gap-2 flex-wrap">
                     @if (isPackageDelisted()) {
@@ -136,7 +136,7 @@ import {
                     @if (isGitSubmittedPackage()) {
                       <button
                         type="button"
-                        (click)="isConfirmingRemove.set(!isConfirmingRemove())"
+                        (click)="toggleConfirmRemove()"
                         [disabled]="isModerating()"
                         class="px-3 py-1.5 rounded-xl glass-btn border-rose-400/40 text-rose-200 hover:text-white disabled:opacity-50 font-bold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
                         <svg lucideTrash2 class="w-3.5 h-3.5 text-rose-400"></svg>
@@ -145,31 +145,6 @@ import {
                     }
                   </div>
                 </div>
-
-                @if (isConfirmingRemove()) {
-                  <div class="pt-2 border-t border-white/10 flex items-center justify-between gap-3 flex-wrap text-[11px]">
-                    <span class="text-rose-200 font-semibold">
-                      Permanently remove <strong class="text-white font-mono">{{ package.author }}/{{ package.name }}</strong> from Luanti Hub?
-                    </span>
-                    <div class="flex items-center gap-2">
-                      <button
-                        type="button"
-                        (click)="isConfirmingRemove.set(false)"
-                        [disabled]="isModerating()"
-                        class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
-                        {{ 'profile.cancel' | translate }}
-                      </button>
-                      <button
-                        type="button"
-                        (click)="onKillSwitch('remove')"
-                        [disabled]="isModerating()"
-                        class="px-3 py-1 rounded-lg glass-btn-rose font-black text-white flex items-center gap-1 cursor-pointer">
-                        <svg lucideTrash2 class="w-3 h-3"></svg>
-                        <span>Confirm Permanent Removal</span>
-                      </button>
-                    </div>
-                  </div>
-                }
               </div>
             }
 
@@ -239,12 +214,14 @@ import {
                   (click)="onFavoriteClick()"
                   [appTooltip]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
                   [attr.aria-label]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
-                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                  [class]="settingsService.isFavorite(package.id)
+                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-rose-400/50 !bg-rose-500/20 text-rose-400 hover:text-rose-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-200 hover:text-rose-400 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
                   <svg
                     lucideHeart
-                    [class]="settingsService.isFavorite(package.id) ? 'w-4 h-4 fill-rose-500 text-rose-500 transition-colors' : 'w-4 h-4 transition-colors'"
+                    [class]="settingsService.isFavorite(package.id) ? 'w-4 h-4 fill-rose-500 text-rose-400 transition-colors' : 'w-4 h-4 transition-colors'"
                     [style.fill]="settingsService.isFavorite(package.id) ? '#f43f5e' : 'none'"
-                    [color]="settingsService.isFavorite(package.id) ? '#f43f5e' : 'currentColor'">
+                    [color]="settingsService.isFavorite(package.id) ? '#fb7185' : 'currentColor'">
                   </svg>
                 </button>
 
@@ -254,42 +231,70 @@ import {
                   (click)="pwaService.sharePackage(package.title, package.short_desc, shareUrl)"
                   [appTooltip]="'modal.shareTooltip' | translate"
                   [attr.aria-label]="'modal.shareTooltip' | translate"
-                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-200 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
                   <svg lucideShare2 class="w-4 h-4"></svg>
                 </button>
-
-                <!-- Git Repository or ContentDB Link Button (Adapts icon & label to target destination) -->
-                <a
-                  [href]="gitRepoUrl"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  [appTooltip]="hasValidGitRepo ? ('modal.viewGitRepo' | translate) : ('modal.viewOnContentDb' | translate)"
-                  [class]="hasValidGitRepo ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-amber-300 hover:text-white flex items-center justify-center transition hover:scale-105 cursor-pointer' : 'relative w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-emerald-300 hover:text-white flex items-center justify-center transition hover:scale-105 cursor-pointer'"
-                  [attr.aria-label]="hasValidGitRepo ? ('modal.viewGitRepo' | translate) : ('modal.viewOnContentDb' | translate)">
-                  @if (hasValidGitRepo) {
-                    <svg lucideGitBranch class="w-4 h-4"></svg>
-                  } @else {
-                    <svg lucideGlobe class="w-4 h-4"></svg>
-                  }
-                  @if (package.git_repo_status === 'broken_404') {
-                    <span class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-rose-500 ring-2 ring-slate-950"></span>
-                  }
-                </a>
 
                 <!-- Report / Flag Button -->
                 <button
                   type="button"
-                  (click)="isReportOpen.set(!isReportOpen())"
+                  (click)="toggleReportForm()"
                   [appTooltip]="'modal.reportPackage' | translate"
                   [attr.aria-label]="'modal.reportPackage' | translate"
-                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-300 hover:text-rose-400 flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                  [class]="isReportOpen()
+                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-amber-400/50 !bg-amber-500/20 text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-300 hover:text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
                   <svg lucideFlag class="w-4 h-4"></svg>
                 </button>
+
+                <!-- Author / Admin Delete Git Package Button (With Confirmation Prompt) -->
+                @if ((isPackageAuthor() || canModerate()) && isGitSubmittedPackage()) {
+                  <button
+                    type="button"
+                    (click)="toggleConfirmRemove()"
+                    [disabled]="isModerating()"
+                    appTooltip="Remove Package"
+                    aria-label="Remove Package"
+                    [class]="isConfirmingRemove()
+                      ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-btn-rose text-white flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'
+                      : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-rose-400/40 !bg-rose-500/15 text-rose-300 hover:text-white hover:!border-rose-400/70 hover:!bg-rose-500/30 flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'">
+                    <svg lucideTrash2 class="w-4 h-4"></svg>
+                  </button>
+                }
               </div>
 
             </div>
 
           </div>
+
+          <!-- Inline Package Removal Confirmation Banner (Prevent Accidental Removals) -->
+          @if (isConfirmingRemove()) {
+            <div class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/45 border border-rose-500/35 backdrop-blur-md flex items-center justify-between gap-3 flex-wrap text-xs luanti-tab-enter">
+              <div class="flex items-center gap-2 text-rose-200 font-semibold">
+                <svg lucideTrash2 class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
+                <span>
+                  Permanently remove <strong class="text-white font-mono">{{ package.author }}/{{ package.name }}</strong> from Luanti Hub?
+                </span>
+              </div>
+              <div class="flex items-center gap-2 ml-auto">
+                <button
+                  type="button"
+                  (click)="isConfirmingRemove.set(false)"
+                  [disabled]="isModerating()"
+                  class="px-3 py-1.5 rounded-xl glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
+                  {{ 'profile.cancel' | translate }}
+                </button>
+                <button
+                  type="button"
+                  (click)="onKillSwitch('remove')"
+                  [disabled]="isModerating()"
+                  class="px-3.5 py-1.5 rounded-xl glass-btn-rose font-black text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-50">
+                  <svg lucideTrash2 class="w-3.5 h-3.5"></svg>
+                  <span>Confirm Permanent Removal</span>
+                </button>
+              </div>
+            </div>
+          }
 
           <!-- Inline Community Report Form -->
           @if (isReportOpen()) {
@@ -1078,37 +1083,21 @@ import {
                   </div>
                 }
 
-                <!-- Content Warnings & AI Disclosures (When present on ContentDB) -->
-                @if ((package.content_warnings && package.content_warnings.length > 0) || (package.ai_disclosures && package.ai_disclosures.length > 0)) {
+                <!-- Content Warnings (When present on ContentDB / D1) -->
+                @if (package.content_warnings && package.content_warnings.length > 0) {
                   <div class="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2 text-[11px]">
-                    @if (package.content_warnings && package.content_warnings.length > 0) {
-                      <div>
-                        <span class="text-amber-300 font-bold uppercase tracking-wider block text-[10px]">
-                          {{ 'modal.contentWarnings' | translate }}
-                        </span>
-                        <div class="flex flex-wrap gap-1 mt-1">
-                          @for (w of package.content_warnings; track w) {
-                            <span class="glass-badge glass-badge-amber font-medium">
-                              {{ w }}
-                            </span>
-                          }
-                        </div>
+                    <div>
+                      <span class="text-amber-300 font-bold uppercase tracking-wider block text-[10px]">
+                        {{ 'modal.contentWarnings' | translate }}
+                      </span>
+                      <div class="flex flex-wrap gap-1 mt-1">
+                        @for (w of package.content_warnings; track w) {
+                          <span class="glass-badge glass-badge-amber font-medium">
+                            {{ w }}
+                          </span>
+                        }
                       </div>
-                    }
-                    @if (package.ai_disclosures && package.ai_disclosures.length > 0) {
-                      <div>
-                        <span class="text-purple-300 font-bold uppercase tracking-wider block text-[10px]">
-                          {{ 'modal.aiDisclosures' | translate }}
-                        </span>
-                        <div class="flex flex-wrap gap-1 mt-1">
-                          @for (ai of package.ai_disclosures; track ai) {
-                            <span class="glass-badge glass-badge-purple font-medium">
-                              {{ ai }}
-                            </span>
-                          }
-                        </div>
-                      </div>
-                    }
+                    </div>
                   </div>
                 }
 
@@ -1557,32 +1546,18 @@ import {
               <!-- Compliance Content -->
               @if (activeTab() === 'compliance') {
                 <div class="pt-4 space-y-3 text-xs text-slate-300 leading-relaxed luanti-tab-enter">
-                  @if ((package.content_warnings && package.content_warnings.length > 0) || (package.ai_disclosures && package.ai_disclosures.length > 0)) {
+                  @if (package.content_warnings && package.content_warnings.length > 0) {
                     <div class="p-3.5 rounded-2xl bg-amber-950/35 border border-amber-500/30 space-y-2">
-                      @if (package.content_warnings && package.content_warnings.length > 0) {
-                        <div>
-                          <span class="font-bold text-amber-300 block mb-1">{{ 'modal.contentWarnings' | translate }}</span>
-                          <div class="flex flex-wrap gap-1.5">
-                            @for (w of package.content_warnings; track w) {
-                              <span class="px-2.5 py-0.5 rounded-md bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[11px] font-medium">
-                                {{ w }}
-                              </span>
-                            }
-                          </div>
+                      <div>
+                        <span class="font-bold text-amber-300 block mb-1">{{ 'modal.contentWarnings' | translate }}</span>
+                        <div class="flex flex-wrap gap-1.5">
+                          @for (w of package.content_warnings; track w) {
+                            <span class="px-2.5 py-0.5 rounded-md bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[11px] font-medium">
+                              {{ w }}
+                            </span>
+                          }
                         </div>
-                      }
-                      @if (package.ai_disclosures && package.ai_disclosures.length > 0) {
-                        <div>
-                          <span class="font-bold text-purple-300 block mb-1">{{ 'modal.aiDisclosures' | translate }}</span>
-                          <div class="flex flex-wrap gap-1.5">
-                            @for (ai of package.ai_disclosures; track ai) {
-                              <span class="px-2.5 py-0.5 rounded-md bg-purple-500/20 text-purple-200 border border-purple-400/30 text-[11px] font-medium">
-                                {{ ai }}
-                              </span>
-                            }
-                          </div>
-                        </div>
-                      }
+                      </div>
                     </div>
                   }
                   <div class="flex items-start gap-2.5 p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 text-emerald-300">
@@ -2338,7 +2313,6 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
 
   openSetupModal(): void {
     const pkg = this.packageService.activePackage() || this.package;
-    this.packageService.trackDownload(pkg);
     this.packageService.closePackageModal(false);
     this.packageService.openSetupModal(true, pkg);
   }
@@ -2468,6 +2442,22 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
       this.pwaService.showToast(res.message || 'Review removed.');
     } else if (res.message) {
       this.pwaService.showToast(res.message);
+    }
+  }
+
+  toggleReportForm(): void {
+    const next = !this.isReportOpen();
+    this.isReportOpen.set(next);
+    if (next) {
+      this.isConfirmingRemove.set(false);
+    }
+  }
+
+  toggleConfirmRemove(): void {
+    const next = !this.isConfirmingRemove();
+    this.isConfirmingRemove.set(next);
+    if (next) {
+      this.isReportOpen.set(false);
     }
   }
 

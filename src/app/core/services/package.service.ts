@@ -3589,10 +3589,9 @@ export class PackageService {
               ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
               : (pkg.contentdb_downloads || 0));
         const localUserDlCount = Number(this.settingsService.downloadedPackages()[cacheKey] || 0);
-        const resolvedLhDownloads = Math.max(
-          Number(data.luantihub_downloads ?? pkg.luantihub_downloads ?? 0) || 0,
-          localUserDlCount
-        );
+        const resolvedLhDownloads = data.luantihub_downloads !== undefined
+          ? Math.max(0, Number(data.luantihub_downloads) || 0)
+          : Math.max(Number(pkg.luantihub_downloads ?? 0) || 0, localUserDlCount);
         const hasAuthoritativeDownloads = data.downloads !== undefined || data.downloads_count !== undefined || hasSplitDownloads;
         const resolvedDownloads = hasAuthoritativeDownloads
           ? Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(data.downloads ?? data.downloads_count ?? 0) || 0)

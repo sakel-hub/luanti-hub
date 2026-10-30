@@ -262,7 +262,7 @@ export async function onRequestGet(context: { request: Request; params: { author
       download_size: d1Pkg.download_size ? formatByteSize(d1Pkg.download_size) : (d1Pkg.file_size || undefined),
       downloads: totalDl,
       contentdb_downloads: Number(d1Pkg.contentdb_downloads) || 0,
-      luantihub_downloads: totalDl,
+      luantihub_downloads: lhDownloads,
       score: Number(d1Pkg.score) || 0,
       reviews: d1ReviewsCount,
       screenshots,

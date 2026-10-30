@@ -20,6 +20,27 @@ const recentDownloadWrites = new Map<string, number>();
 const DOWNLOAD_WRITE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per IP + package
 
 async function shouldRecordDownloadWrite(request: Request, packageId: string): Promise<boolean> {
+  const method = (request.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'POST') {
+    return false;
+  }
+
+  const purpose = (
+    request.headers.get('Sec-Purpose') ||
+    request.headers.get('Purpose') ||
+    request.headers.get('X-Purpose') ||
+    request.headers.get('X-Moz') ||
+    ''
+  ).toLowerCase();
+  if (purpose.includes('prefetch') || purpose.includes('preview') || purpose.includes('prerender')) {
+    return false;
+  }
+
+  const ua = (request.headers.get('User-Agent') || '').toLowerCase();
+  if (/(?:bot|crawler|spider|slurp|bingpreview|facebookexternalhit|discordbot|telegrambot|slackbot|whatsapp|headlesschrome|lighthouse)/i.test(ua)) {
+    return false;
+  }
+
   const clientIp =
     request.headers.get('CF-Connecting-IP') ||
     request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||

@@ -911,8 +911,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const cdbDownloads = Number(d1Pkg?.contentdb_downloads || 0);
       const lhDownloads = Math.max(
         Number(d1Pkg?.luantihub_downloads || 0),
-        d1DailyDownloadsSum,
-        Math.max(0, Number(d1Pkg?.downloads_count || 0) - cdbDownloads)
+        d1DailyDownloadsSum
       );
       const totalDownloads = cdbDownloads + lhDownloads;
 
@@ -1316,13 +1315,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         thumbnail_url, banner_url, license, media_license, tags, dependencies, optional_dependencies,
         min_minetest_version, status, downloads_count, contentdb_downloads, luantihub_downloads,
         download_size, file_size, donate_url, translation_url, forum_url, issue_tracker,
-        video_url, video_thumbnail_url, dev_state, provides
+        video_url, video_thumbnail_url, dev_state, provides, content_warnings, ai_disclosures
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, 'contentdb',
         ?, ?, ?, ?, ?, ?, ?,
         ?, 'active', ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
         contentdb_downloads = excluded.contentdb_downloads,
@@ -1344,6 +1343,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
         dev_state = COALESCE(excluded.dev_state, packages.dev_state),
         provides = COALESCE(excluded.provides, packages.provides),
+        content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
+        ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures),
         updated_at = CURRENT_TIMESTAMP
     `).bind(
       targetRowId,
@@ -1374,7 +1375,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       videoUrl || null,
       videoThumbnailUrl || null,
       devState || null,
-      providesList.length > 0 ? JSON.stringify(providesList) : null
+      providesList.length > 0 ? JSON.stringify(providesList) : null,
+      contentWarnings.length > 0 ? JSON.stringify(contentWarnings) : null,
+      aiDisclosures.length > 0 ? JSON.stringify(aiDisclosures) : null
     ).run().catch(() => {});
   }
 
