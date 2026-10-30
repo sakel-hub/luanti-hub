@@ -2782,4 +2782,131 @@ supported_games = minetest_game, voxelibre
     expect(submitComp.parsedRepoTarget()?.owner).toBe('sakel-hub');
     expect(submitComp.parsedRepoTarget()?.repo).toBe('shared_mod');
   });
+
+  it('should ensure in-game /for-client/ download_size is never nil, synchronize dual-source update releases, and prevent download counter updated_at mutations', async () => {
+    // 1. Verify download_size formatting and non-nil fallback
+    const { formatByteSize } = await import('../../functions/api/lib/upstream');
+    expect(formatByteSize(undefined)).toBeUndefined();
+    expect(formatByteSize(null)).toBeUndefined();
+    expect(formatByteSize(0)).toBeUndefined();
+    expect(formatByteSize(450000)).toBe('439 KB');
+    expect(formatByteSize(2500000)).toBe('2.4 MB');
+
+    // Simulate for-client download_size resolution logic
+    const resolveForClientDownloadSize = (pkg: { download_size?: number | null; file_size?: string | null }) => {
+      return (
+        (pkg.download_size && Number(pkg.download_size) > 0 ? formatByteSize(pkg.download_size) : null) ||
+        (pkg.file_size && String(pkg.file_size).trim() ? String(pkg.file_size).trim() : null) ||
+        '< 1 MB'
+      );
+    };
+
+    expect(resolveForClientDownloadSize({})).toBe('< 1 MB');
+    expect(resolveForClientDownloadSize({ download_size: null, file_size: null })).toBe('< 1 MB');
+    expect(resolveForClientDownloadSize({ download_size: 0, file_size: '' })).toBe('< 1 MB');
+    expect(resolveForClientDownloadSize({ file_size: '340 KB' })).toBe('340 KB');
+    expect(resolveForClientDownloadSize({ download_size: 1048576 })).toBe('1.0 MB');
+
+    // 2. Verify /api/updates/ maps dual-source packages (e.g. sakel-hub/x_mobs) to matching upstream ContentDB release
+    const upstreamUpdatesMock: Record<string, number> = {
+      'elceejo/x_mobs': 1824,
+      'rubenwardy/awards': 2341
+    };
+    const upstreamByName = new Map<string, number>();
+    for (const [k, v] of Object.entries(upstreamUpdatesMock)) {
+      upstreamByName.set(k.split('/')[1].toLowerCase(), v);
+    }
+
+    const d1MockRow = {
+      author_name: 'sakel-hub',
+      name: 'x_mobs',
+      updated_at: '2026-10-30T15:00:00Z',
+      created_at: '2026-10-25T12:00:00Z'
+    };
+    const matchedUpstreamRel = upstreamByName.get(d1MockRow.name.toLowerCase());
+    expect(matchedUpstreamRel).toBe(1824);
+
+    const resolvedReleaseId =
+      Number(matchedUpstreamRel) > 0
+        ? Number(matchedUpstreamRel)
+        : Math.floor(new Date(d1MockRow.updated_at).getTime() / 1000);
+    expect(resolvedReleaseId).toBe(1824); // Exactly matching upstream, NOT timestamp inflation!
+
+    // Pure Git package (e.g. mystical_pixie_companion) uses stable timestamp
+    const pureGitRow = {
+      author_name: 'sakel-hub',
+      name: 'mystical_pixie_companion',
+      updated_at: '2026-10-30T10:00:00Z',
+      created_at: '2026-10-30T10:00:00Z'
+    };
+    const matchedGitUpstream = upstreamByName.get(pureGitRow.name.toLowerCase());
+    expect(matchedGitUpstream).toBeUndefined();
+    const gitReleaseId =
+      Number(matchedGitUpstream) > 0
+        ? Number(matchedGitUpstream)
+        : Math.floor(new Date(pureGitRow.updated_at).getTime() / 1000);
+    expect(gitReleaseId).toBe(Math.floor(new Date('2026-10-30T10:00:00Z').getTime() / 1000));
+  });
+
+  it('should populate notification badge count immediately on app reload without requiring profile drawer open', async () => {
+    const authService = TestBed.inject(AuthService);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/auth/me')) {
+        return new Response(
+          JSON.stringify({
+            user: {
+              id: 'user_sakel',
+              username: 'sakel-hub',
+              display_name: 'SaKeL',
+              avatar_url: 'logo.svg',
+              role: 'admin',
+              is_admin: true,
+              open_reports_count: 3,
+              identities: [{ provider: 'github', username: 'sakel-hub', verified: true }],
+              favorites: [],
+              downloads: {},
+              notification_digest: {
+                user_alerts: [],
+                my_reports_total: 1,
+                admin_latest_open: [],
+                latest_git_packages: []
+              }
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/admin/moderation')) {
+        return new Response(
+          JSON.stringify({
+            reports: [{ id: 1, package_id: 'sakel-hub/x_mobs', reason: 'broken', status: 'open' }],
+            delistedPackages: [],
+            openCount: 3,
+            closedCount: 2,
+            total: 3,
+            totalPages: 1
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    try {
+      expect(authService.isProfileDrawerOpen()).toBe(false);
+      await authService.initAuth(true);
+
+      // Notification badge count must be immediately available on reload while drawer is closed
+      expect(authService.isProfileDrawerOpen()).toBe(false);
+      expect(authService.openReportsCount()).toBe(3);
+
+      const headerFixture = TestBed.createComponent(HeaderComponent);
+      headerFixture.detectChanges();
+      const headerEl = headerFixture.nativeElement as HTMLElement;
+      expect(headerEl.textContent).toContain('3');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
 });

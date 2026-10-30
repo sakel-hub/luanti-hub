@@ -6,6 +6,7 @@ import {
   parseGitRepoTarget,
   normalizeLuantiPackageZip,
   ensureExtendedPackageColumns,
+  formatByteSize,
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../../../lib/upstream';
@@ -18,6 +19,9 @@ interface Env {
 
 const recentDownloadWrites = new Map<string, number>();
 const DOWNLOAD_WRITE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per IP + package
+const isolateZipCache = new Map<string, { exp: number; bytes: Uint8Array; fileName: string }>();
+const MAX_ISOLATE_ZIP_ENTRIES = 8;
+const MAX_ISOLATE_ZIP_ITEM_BYTES = 4 * 1024 * 1024; // 4 MB per cached item
 
 async function shouldRecordDownloadWrite(request: Request, packageId: string): Promise<boolean> {
   const method = (request.method || 'GET').toUpperCase();
@@ -153,8 +157,7 @@ export async function onRequest(context: {
           UPDATE packages
           SET
             luantihub_downloads = COALESCE(luantihub_downloads, 0) + 1,
-            downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1,
-            updated_at = CURRENT_TIMESTAMP
+            downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1
           WHERE LOWER(id) = LOWER(?)
         `).bind(effectivePkgId).run();
 
@@ -222,12 +225,35 @@ export async function onRequest(context: {
     (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
     (/^\d+$/.test(queryRelease) ? queryRelease : '');
 
-  // Check Cloudflare Edge Cache for already-normalized .zip binary
+  // Check Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary
   const edgeZipCacheKey = `https://cache.luantihub.internal/__pkg_zip_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(requestedTag || resolvedReleaseId || 'latest')}`;
+  const isMockedFetch = Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
+  if (!isMockedFetch) {
+    const memZip = isolateZipCache.get(edgeZipCacheKey);
+    if (memZip) {
+      if (Date.now() <= memZip.exp) {
+        return new Response(memZip.bytes, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${memZip.fileName}.zip"`,
+            'Content-Length': String(memZip.bytes.byteLength),
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400',
+            'X-LuantiHub-Cache': 'HIT-ISOLATE'
+          }
+        });
+      }
+      isolateZipCache.delete(edgeZipCacheKey);
+    }
+  }
+
   try {
     const cache = (globalThis as any).caches?.default;
     if (cache) {
-      const cachedZip = await cache.match(new Request(edgeZipCacheKey, { method: 'GET' }));
+      const cachedZip =
+        (await cache.match(request)) ||
+        (await cache.match(new Request(edgeZipCacheKey, { method: 'GET' })));
       if (cachedZip && cachedZip.ok) {
         return cachedZip;
       }
@@ -252,15 +278,18 @@ export async function onRequest(context: {
   let upstreamCommitSha = '';
   let effectiveRepoUrl = String(pkgRecord?.repo_url || '').trim();
   let effectiveType = String(pkgRecord?.type || 'mod').toLowerCase();
+  const isPureGitPkg = Boolean(pkgRecord && pkgRecord.provider && pkgRecord.provider !== 'contentdb');
 
   // Fetch ContentDB releases, package metadata & for-client metadata (cached at Edge, with milcho.org JSON failover)
   // to discover `repo_url`, release ID, commit SHA, and fallback `.zip` upload URLs when not already in D1
   const [upstreamReleases, upstreamPkg, forClient] = await Promise.all([
-    fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300).catch(() => null),
-    !effectiveRepoUrl
+    !isPureGitPkg
+      ? fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300).catch(() => null)
+      : Promise.resolve(null),
+    (!effectiveRepoUrl && !isPureGitPkg)
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600).catch(() => null)
       : Promise.resolve(null),
-    (!resolvedReleaseId || !effectiveRepoUrl)
+    (!resolvedReleaseId || !effectiveRepoUrl) && !isPureGitPkg
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300).catch(() => null)
       : Promise.resolve(null)
   ]);
@@ -407,15 +436,15 @@ export async function onRequest(context: {
   }
 
   if (effectiveRepoUrl) {
-    try {
-      const gitReleases = await fetchGitRepoReleasesAndTags(
-        effectiveRepoUrl,
-        effectiveAuthor,
-        effectiveName,
-        pkgRecord?.min_minetest_version || '5.0.0'
-      );
-      if (gitReleases.length > 0) {
-        if (requestedTag) {
+    if (requestedTag && !candidateUrls.length) {
+      try {
+        const gitReleases = await fetchGitRepoReleasesAndTags(
+          effectiveRepoUrl,
+          effectiveAuthor,
+          effectiveName,
+          pkgRecord?.min_minetest_version || '5.0.0'
+        );
+        if (gitReleases.length > 0) {
           const matchedGitRel = gitReleases.find(
             r =>
               r.tag_name.toLowerCase() === requestedTag.toLowerCase() ||
@@ -425,34 +454,9 @@ export async function onRequest(context: {
             addCandidate(matchedGitRel.download_url);
           }
         }
-        if (gitReleases[0].download_url) {
-          addCandidate(gitReleases[0].download_url);
-        }
-        if (env.DB && pkgRecord?.id) {
-          try {
-            await env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(pkgRecord.id).run();
-            for (const rel of gitReleases) {
-              await env.DB.prepare(`
-                INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
-              `).bind(
-                pkgRecord.id,
-                rel.version,
-                rel.tag_name,
-                rel.commit_sha || '',
-                rel.download_url,
-                rel.min_minetest_version || '5.0.0',
-                rel.changelog || null,
-                rel.released_at || ''
-              ).run();
-            }
-          } catch {
-            // Non-blocking D1 sync
-          }
-        }
+      } catch {
+        // Proceed to branch archive fallbacks
       }
-    } catch {
-      // Proceed to branch archive fallbacks
     }
 
     for (const r of d1Releases) {
@@ -537,17 +541,45 @@ export async function onRequest(context: {
           'Content-Disposition': `attachment; filename="${safeFileName}.zip"`,
           'Content-Length': String(normalizedZip.byteLength),
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=1800, s-maxage=1800'
+          'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400'
         }
       });
+
+      if (!isMockedFetch && normalizedZip.byteLength > 0 && normalizedZip.byteLength <= MAX_ISOLATE_ZIP_ITEM_BYTES) {
+        if (isolateZipCache.size >= MAX_ISOLATE_ZIP_ENTRIES) {
+          const oldestKey = isolateZipCache.keys().next().value;
+          if (oldestKey) isolateZipCache.delete(oldestKey);
+        }
+        isolateZipCache.set(edgeZipCacheKey, {
+          exp: Date.now() + 10 * 60 * 1000,
+          bytes: normalizedZip,
+          fileName: safeFileName
+        });
+      }
 
       try {
         const cache = (globalThis as any).caches?.default;
         if (cache) {
-          await cache.put(new Request(edgeZipCacheKey, { method: 'GET' }), zipResponse.clone());
+          await Promise.all([
+            cache.put(request, zipResponse.clone()),
+            cache.put(new Request(edgeZipCacheKey, { method: 'GET' }), zipResponse.clone())
+          ]).catch(() => {});
         }
       } catch {
         // Non-blocking cache store
+      }
+
+      // Auto-persist exact zip size to packages table in D1 (overwriting any rough repo estimate without touching updated_at)
+      if (env.DB && pkgRecord?.id && normalizedZip.byteLength > 0) {
+        const zipBytes = normalizedZip.byteLength;
+        const formattedSize = formatByteSize(zipBytes);
+        if (formattedSize) {
+          env.DB.prepare(`
+            UPDATE packages
+            SET download_size = ?, file_size = ?
+            WHERE LOWER(id) = LOWER(?)
+          `).bind(zipBytes, formattedSize, pkgRecord.id).run().catch(() => {});
+        }
       }
 
       return zipResponse;

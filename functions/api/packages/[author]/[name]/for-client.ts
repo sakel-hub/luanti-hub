@@ -2,7 +2,10 @@ import {
   fetchUpstreamJsonCached,
   parseJsonArray,
   ensureExtendedPackageColumns,
-  formatByteSize
+  formatByteSize,
+  fetchRepoSizeEstimateFromUrl,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
 } from '../../../lib/upstream';
 
 interface Env {
@@ -92,6 +95,18 @@ export async function onRequestGet(context: { request: Request; params: { author
     forwardParams.set('formspec_version', '8');
   }
   const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
+  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
+  const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
+  if (cachedClient) {
+    return new Response(JSON.stringify(cachedClient), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
+        'X-LuantiHub-Cache': 'HIT-EDGE'
+      }
+    });
+  }
 
   let d1Pkg: any = null;
   let lhDownloads = 0;
@@ -104,6 +119,16 @@ export async function onRequestGet(context: { request: Request; params: { author
       d1Pkg = await context.env.DB.prepare(
         `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
       ).bind(pkgId, author, name, sanitizedName).first();
+
+      if (!d1Pkg) {
+        const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+        d1Pkg = await context.env.DB.prepare(
+          `SELECT * FROM packages
+           WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+             AND LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = LOWER(?)
+           LIMIT 1`
+        ).bind(name, sanitizedName, baseAuthor).first();
+      }
 
       if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
         return Response.json({
@@ -140,10 +165,19 @@ export async function onRequestGet(context: { request: Request; params: { author
     }
   }
 
-  const data = await fetchUpstreamJsonCached<any>(
-    `/packages/${encAuthor}/${encName}/for-client/${querySuffix}`,
-    300
+  const isPureGitPkg = Boolean(
+    d1Pkg &&
+    d1Pkg.provider &&
+    d1Pkg.provider !== 'contentdb' &&
+    !parseJsonArray(d1Pkg.tags).includes('contentdb')
   );
+
+  const data = !isPureGitPkg
+    ? await fetchUpstreamJsonCached<any>(
+        `/packages/${encAuthor}/${encName}/for-client/${querySuffix}`,
+        300
+      )
+    : null;
 
   if (data) {
     const cdbDownloads = Math.max(
@@ -161,25 +195,57 @@ export async function onRequestGet(context: { request: Request; params: { author
     const normalizedScreenshots = Array.isArray(data.screenshots)
       ? data.screenshots.map((s: any) => (typeof s === 'string' ? { url: s } : s)).filter((s: any) => Boolean(s?.url))
       : [];
+    const resolvedDownloadSize =
+      (typeof data.download_size === 'string' && data.download_size.trim() ? data.download_size.trim() : null) ||
+      (typeof data.download_size === 'number' && data.download_size > 0 ? formatByteSize(data.download_size) : null) ||
+      (d1Pkg?.download_size && Number(d1Pkg.download_size) > 0 ? formatByteSize(d1Pkg.download_size) : null) ||
+      (d1Pkg?.file_size && String(d1Pkg.file_size).trim() ? String(d1Pkg.file_size).trim() : null) ||
+      '< 1 MB';
     const enriched = {
       ...data,
       name: name || data.name,
+      download_size: resolvedDownloadSize,
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
       downloads: cdbDownloads + lhDownloads,
       reviews: mergedReviews,
       screenshots: normalizedScreenshots
     };
+    await writeEdgeCacheJson(edgeCacheKey, enriched, 300);
     return new Response(JSON.stringify(enriched), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=300, s-maxage=300'
+        'Cache-Control': 'public, max-age=300, s-maxage=300, stale-while-revalidate=600',
+        'X-LuantiHub-Cache': 'MISS-EDGE'
       }
     });
   }
 
   if (d1Pkg) {
+    // If download_size and file_size are missing in D1, lazily query the Git forge repository size and persist to D1
+    let resolvedSizeLabel =
+      (d1Pkg.download_size && Number(d1Pkg.download_size) > 0 ? formatByteSize(d1Pkg.download_size) : null) ||
+      (d1Pkg.file_size && String(d1Pkg.file_size).trim() ? String(d1Pkg.file_size).trim() : null);
+
+    if (!resolvedSizeLabel && d1Pkg.repo_url) {
+      const repoEstimate = await fetchRepoSizeEstimateFromUrl(
+        d1Pkg.repo_url,
+        d1Pkg.author_name || author,
+        d1Pkg.name || name
+      );
+      if (repoEstimate) {
+        resolvedSizeLabel = repoEstimate.fileSize;
+        if (context.env.DB && d1Pkg.id) {
+          context.env.DB.prepare(`
+            UPDATE packages
+            SET download_size = ?, file_size = ?
+            WHERE LOWER(id) = LOWER(?) AND (download_size IS NULL OR download_size = 0)
+          `).bind(repoEstimate.downloadSize, repoEstimate.fileSize, d1Pkg.id).run().catch(() => {});
+        }
+      }
+    }
+
     const totalDl = Math.max(Number(d1Pkg.downloads_count) || 0, lhDownloads);
     const releaseId = Math.max(
       1,
@@ -259,7 +325,7 @@ export async function onRequestGet(context: { request: Request; params: { author
       video_url: d1Pkg.video_url || null,
       video_thumbnail_url: d1Pkg.video_thumbnail_url || null,
       dev_state: d1Pkg.dev_state || 'ACTIVELY_DEVELOPED',
-      download_size: d1Pkg.download_size ? formatByteSize(d1Pkg.download_size) : (d1Pkg.file_size || undefined),
+      download_size: resolvedSizeLabel || '< 1 MB',
       downloads: totalDl,
       contentdb_downloads: Number(d1Pkg.contentdb_downloads) || 0,
       luantihub_downloads: lhDownloads,
@@ -274,11 +340,14 @@ export async function onRequestGet(context: { request: Request; params: { author
       created_at: d1Pkg.created_at || new Date().toISOString()
     };
 
+    await writeEdgeCacheJson(edgeCacheKey, clientPayload, 300);
+
     return new Response(JSON.stringify(clientPayload), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=120'
+        'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
+        'X-LuantiHub-Cache': 'MISS-EDGE'
       }
     });
   }

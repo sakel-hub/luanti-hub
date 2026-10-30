@@ -297,7 +297,7 @@ export class AuthService {
             this.settingsService.mergeServerDownloads(data.user.downloads);
             await this.settingsService.mergeServerFavorites(data.user.favorites);
             this.processNotificationDigest(data.user);
-            if (this._isProfileDrawerOpen() && this.isAdmin()) {
+            if (this.isAdmin()) {
               this.fetchModerationQueue();
             }
             return;

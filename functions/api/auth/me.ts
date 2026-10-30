@@ -180,6 +180,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
 
       // Fetch up to 5 recent reports submitted by this user or targeting packages owned by this user
+      const identityHandles = (identities || []).map((id: any) => String(id.username || '').toLowerCase());
       const authorPrefixes = Array.from(new Set([
         String(user.username || '').toLowerCase(),
         ...identityHandles
@@ -195,6 +196,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         WHERE r.reporter_user_id = ? ${authorClause}
       `).bind(resolvedUserId, ...authorPrefixes).first();
       myReportsTotal = Number(userAlertsCountRes?.cnt || 0);
+
+      if (!isAdmin) {
+        openReportsCount = myReportsTotal;
+      }
 
       const userAlertsRes = await context.env.DB.prepare(`
         SELECT
@@ -243,8 +248,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         source: 'git',
         sources: ['git']
       }));
-    } catch {
-      openReportsCount = 0;
+    } catch (err) {
+      console.error('[me.ts] Failed to load moderation digest:', err);
     }
 
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' };

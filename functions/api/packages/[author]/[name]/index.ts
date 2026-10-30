@@ -18,7 +18,8 @@ import {
   scanGitRepoMetadataCached,
   GitRepoScanResult,
   normalizeContentDbReviewItem,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  fetchRepoSizeEstimateFromUrl
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -903,10 +904,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         }
       }
 
-      const firstRelSize = Number(bundledReleases[0]?.size || d1Pkg?.download_size || 0);
-      const gitFileSize = firstRelSize > 0
+      let firstRelSize = Number(bundledReleases[0]?.size || d1Pkg?.download_size || 0);
+      let gitFileSize = firstRelSize > 0
         ? formatByteSize(firstRelSize)
         : (d1Pkg?.file_size || undefined);
+
+      if (!gitFileSize && resolvedRepo) {
+        const repoEst = await fetchRepoSizeEstimateFromUrl(resolvedRepo, resolvedAuthor, resolvedName);
+        if (repoEst) {
+          firstRelSize = repoEst.downloadSize;
+          gitFileSize = repoEst.fileSize;
+          if (context.env.DB && d1Pkg?.id) {
+            context.env.DB.prepare(`
+              UPDATE packages
+              SET download_size = ?, file_size = ?
+              WHERE LOWER(id) = LOWER(?) AND (download_size IS NULL OR download_size = 0)
+            `).bind(repoEst.downloadSize, repoEst.fileSize, d1Pkg.id).run().catch(() => {});
+          }
+        }
+      }
 
       const cdbDownloads = Number(d1Pkg?.contentdb_downloads || 0);
       const lhDownloads = Math.max(
@@ -1344,8 +1360,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         dev_state = COALESCE(excluded.dev_state, packages.dev_state),
         provides = COALESCE(excluded.provides, packages.provides),
         content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
-        ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures),
-        updated_at = CURRENT_TIMESTAMP
+        ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures)
     `).bind(
       targetRowId,
       cdbAuthor,

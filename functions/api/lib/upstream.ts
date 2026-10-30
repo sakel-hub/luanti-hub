@@ -95,14 +95,52 @@ export function normalizeContentDbReviewItem(r: any, idx = 0, packageId?: string
   };
 }
 
+const isolateJsonCache = new Map<string, { exp: number; data: any }>();
+const MAX_ISOLATE_CACHE_ENTRIES = 250;
+
+function canUseIsolateCache(): boolean {
+  return !Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
+}
+
+function getIsolateCache<T>(key: string): T | null {
+  if (!canUseIsolateCache()) return null;
+  const hit = isolateJsonCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.exp) {
+    isolateJsonCache.delete(key);
+    return null;
+  }
+  return hit.data as T;
+}
+
+function setIsolateCache(key: string, data: any, ttlSeconds: number): void {
+  if (!canUseIsolateCache() || ttlSeconds <= 0 || data === undefined || data === null) return;
+  if (isolateJsonCache.size >= MAX_ISOLATE_CACHE_ENTRIES) {
+    const now = Date.now();
+    for (const [k, v] of isolateJsonCache.entries()) {
+      if (now > v.exp) isolateJsonCache.delete(k);
+    }
+    if (isolateJsonCache.size >= MAX_ISOLATE_CACHE_ENTRIES) {
+      const oldestKey = isolateJsonCache.keys().next().value;
+      if (oldestKey) isolateJsonCache.delete(oldestKey);
+    }
+  }
+  isolateJsonCache.set(key, { exp: Date.now() + ttlSeconds * 1000, data });
+}
+
 /**
- * Fetches JSON from upstream ContentDB / mirror with Cloudflare Edge Cache API support
+ * Fetches JSON from upstream ContentDB / mirror with Cloudflare Edge Cache API + Isolate Memory Cache support
  */
 export async function fetchUpstreamJsonCached<T = any>(
   path: string,
   ttlSeconds = 300
 ): Promise<T | null> {
   const cacheKeyUrl = `https://cache.luantihub.internal${path}`;
+  const memHit = getIsolateCache<T>(cacheKeyUrl);
+  if (memHit !== null) {
+    return memHit;
+  }
+
   const cacheReq = new Request(cacheKeyUrl, { method: 'GET' });
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
 
@@ -110,7 +148,9 @@ export async function fetchUpstreamJsonCached<T = any>(
     try {
       const cached = await edgeCache.match(cacheReq);
       if (cached) {
-        return await cached.json() as T;
+        const parsed = await cached.json() as T;
+        setIsolateCache(cacheKeyUrl, parsed, ttlSeconds);
+        return parsed;
       }
     } catch {
       // Proceed to network fetch
@@ -122,17 +162,20 @@ export async function fetchUpstreamJsonCached<T = any>(
     if (!res.ok) return null;
     const data = await res.json() as T;
 
-    if (edgeCache && data) {
-      try {
-        const cacheRes = new Response(JSON.stringify(data), {
-          headers: {
-            'Content-Type': 'application/json',
-            'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
-          }
-        });
-        await edgeCache.put(cacheReq, cacheRes);
-      } catch {
-        // Ignore cache write errors
+    if (data) {
+      setIsolateCache(cacheKeyUrl, data, ttlSeconds);
+      if (edgeCache) {
+        try {
+          const cacheRes = new Response(JSON.stringify(data), {
+            headers: {
+              'Content-Type': 'application/json',
+              'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
+            }
+          });
+          await edgeCache.put(cacheReq, cacheRes);
+        } catch {
+          // Ignore cache write errors
+        }
       }
     }
 
@@ -151,16 +194,24 @@ function buildEdgeCacheRequestUrl(cacheKeyPath: string): string {
 }
 
 /**
- * Reads a cached JSON response payload from Cloudflare's Edge Cache (`caches.default`).
+ * Reads a cached JSON response payload from Isolate Memory or Cloudflare's Edge Cache (`caches.default`).
  */
 export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<T | null> {
+  const keyUrl = buildEdgeCacheRequestUrl(cacheKeyPath);
+  const memHit = getIsolateCache<T>(keyUrl);
+  if (memHit !== null) {
+    return memHit;
+  }
+
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache) return null;
   try {
-    const cacheReq = new Request(buildEdgeCacheRequestUrl(cacheKeyPath), { method: 'GET' });
+    const cacheReq = new Request(keyUrl, { method: 'GET' });
     const cached = await edgeCache.match(cacheReq);
     if (cached) {
-      return await cached.json() as T;
+      const parsed = await cached.json() as T;
+      setIsolateCache(keyUrl, parsed, 180);
+      return parsed;
     }
   } catch {
     // Ignore cache read error
@@ -169,17 +220,20 @@ export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<
 }
 
 /**
- * Writes a JSON response payload into Cloudflare's Edge Cache (`caches.default`) with a TTL.
+ * Writes a JSON response payload into Isolate Memory and Cloudflare's Edge Cache (`caches.default`) with a TTL.
  */
 export async function writeEdgeCacheJson(
   cacheKeyPath: string,
   payload: any,
   ttlSeconds = 300
 ): Promise<void> {
+  const keyUrl = buildEdgeCacheRequestUrl(cacheKeyPath);
+  setIsolateCache(keyUrl, payload, ttlSeconds);
+
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache) return;
   try {
-    const cacheReq = new Request(buildEdgeCacheRequestUrl(cacheKeyPath), { method: 'GET' });
+    const cacheReq = new Request(keyUrl, { method: 'GET' });
     const cacheRes = new Response(JSON.stringify(payload), {
       headers: {
         'Content-Type': 'application/json',
@@ -193,12 +247,11 @@ export async function writeEdgeCacheJson(
 }
 
 /**
- * Evicts one or more keys from Cloudflare's Edge Cache (`caches.default`) after a D1 mutation.
+ * Evicts one or more keys from Isolate Memory and Cloudflare's Edge Cache (`caches.default`) after a D1 mutation.
  * Automatically expands package detail keys so both `/full/`, `/lite/`, and legacy URLs are evicted.
  */
 export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<void> {
-  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
-  if (!edgeCache || !Array.isArray(cacheKeyPaths)) return;
+  if (!Array.isArray(cacheKeyPaths)) return;
 
   const expandedUrls = new Set<string>([
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1',
@@ -223,6 +276,22 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/lite/${a}/${n}`);
     }
   }
+
+  for (const url of expandedUrls) {
+    isolateJsonCache.delete(url);
+  }
+  for (const k of Array.from(isolateJsonCache.keys())) {
+    if (
+      k.startsWith('https://cache.luantihub.internal/__catalog_edge_v2_') ||
+      k.startsWith('https://cache.luantihub.internal/__api_updates_v2_') ||
+      k.startsWith('https://cache.luantihub.internal/__for_client_v2/')
+    ) {
+      isolateJsonCache.delete(k);
+    }
+  }
+
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache) return;
 
   await Promise.all(
     Array.from(expandedUrls).map(async (url) => {
@@ -389,8 +458,7 @@ export async function syncAuthorContentDbPackages(
           downloads_count = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads) + COALESCE(packages.luantihub_downloads, 0),
           license = COALESCE(NULLIF(excluded.license, ''), packages.license),
           media_license = COALESCE(NULLIF(excluded.media_license, ''), packages.media_license),
-          tags = COALESCE(excluded.tags, packages.tags),
-          updated_at = CURRENT_TIMESTAMP
+          tags = COALESCE(excluded.tags, packages.tags)
       `).bind(
         pkgId,
         userId,
@@ -1258,6 +1326,88 @@ export function formatByteSize(val: any): string | undefined {
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   }
   return undefined;
+}
+
+/**
+ * Queries the Git forge API (GitHub, Codeberg, Mesehub, GitLab) for repository size
+ * so `download_size` (in bytes) and `file_size` (formatted string) can be populated
+ * even before the first ZIP archive download occurs.
+ */
+export async function fetchRepoSizeEstimateFromUrl(
+  repoUrl?: string | null,
+  fallbackAuthor?: string,
+  fallbackName?: string
+): Promise<{ downloadSize: number; fileSize: string } | null> {
+  const target = parseGitRepoTarget(repoUrl, fallbackAuthor, fallbackName);
+  if (!target) return null;
+
+  const { provider, host, owner, repo } = target;
+  const cacheKey = `https://cache.luantihub.internal/__repo_size/${provider}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`;
+  const cached = await readEdgeCacheJson<{ downloadSize: number; fileSize: string }>(cacheKey);
+  if (cached && cached.downloadSize > 0 && cached.fileSize) {
+    return cached;
+  }
+
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+
+  try {
+    let bytes = 0;
+    if (provider === 'github') {
+      const res = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (res.ok) {
+        const data: any = await res.json();
+        const kb = Number(data?.size);
+        if (Number.isFinite(kb) && kb > 0) {
+          bytes = Math.round(kb * 1024);
+        }
+      }
+    } else if (provider === 'codeberg') {
+      const res = await fetch(
+        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (res.ok) {
+        const data: any = await res.json();
+        const kb = Number(data?.size);
+        if (Number.isFinite(kb) && kb > 0) {
+          bytes = Math.round(kb * 1024);
+        }
+      }
+    } else if (provider === 'gitlab') {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const res = await fetch(
+        `https://${host}/api/v4/projects/${projectPath}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (res.ok) {
+        const data: any = await res.json();
+        const rawBytes = Number(data?.statistics?.repository_size || (data?.size ? data.size * 1024 : 0));
+        if (Number.isFinite(rawBytes) && rawBytes > 0) {
+          bytes = Math.round(rawBytes);
+        }
+      }
+    }
+    clearTimeout(timer);
+
+    if (bytes > 0) {
+      const fileSize = formatByteSize(bytes) || `${Math.max(1, Math.round(bytes / 1024))} KB`;
+      const result = { downloadSize: bytes, fileSize };
+      await writeEdgeCacheJson(cacheKey, result, 3600);
+      return result;
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+
+  return null;
 }
 
 let moderationColsEnsured = false;

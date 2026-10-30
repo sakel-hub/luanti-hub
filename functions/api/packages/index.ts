@@ -167,22 +167,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
   const noCache = url.searchParams.get('nocache') === '1';
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3';
-
-  if (isBootBundle && !noCache && !q && types.length === 0 && !author) {
-    const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
-    if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
-      return new Response(JSON.stringify(cachedBoot), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=60, s-maxage=120, stale-while-revalidate=300',
-          'X-LuantiHub-Cache': 'HIT-EDGE'
-        }
-      });
-    }
-  }
-
   const upstreamParams = new URLSearchParams(url.searchParams);
   upstreamParams.delete('boot');
   upstreamParams.delete('nocache');
@@ -191,6 +175,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
   const upstreamQuery = upstreamParams.toString();
   const upstreamPath = `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
+
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3';
+  const catalogEdgeCacheKey = isBootBundle
+    ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
+    : `https://cache.luantihub.internal/__catalog_edge_v2_${encodeURIComponent(upstreamQuery)}`;
+
+  if (catalogEdgeCacheKey && !noCache) {
+    const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
+    if (cachedCatalog && (Array.isArray(cachedCatalog) || (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))) {
+      return new Response(JSON.stringify(cachedCatalog), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': isBootBundle
+            ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
+            : 'public, max-age=60, s-maxage=180, stale-while-revalidate=600',
+          'X-LuantiHub-Cache': 'HIT-EDGE'
+        }
+      });
+    }
+  }
 
   // 1. Fetch Upstream Packages + Bulk Scores/Downloads (with Cloudflare Edge Cache + mirror failover)
   const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, 300)
@@ -681,14 +686,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
+  if (!isBootBundle && !noCache && catalogEdgeCacheKey) {
+    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 180);
+  }
+
   return new Response(JSON.stringify(responsePayload), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': isBootBundle && !noCache
-        ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
+      'Cache-Control': !noCache
+        ? (isBootBundle
+            ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
+            : 'public, max-age=60, s-maxage=180, stale-while-revalidate=600')
         : 'no-cache, no-store, must-revalidate',
-      'X-LuantiHub-Cache': isBootBundle && !noCache ? 'MISS-EDGE' : 'BYPASS'
+      'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
     }
   });
 }

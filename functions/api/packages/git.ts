@@ -21,6 +21,7 @@ import {
   ensureExtendedPackageColumns,
   extractEmbeddedVideo,
   ensureModerationColumns,
+  formatByteSize,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
@@ -91,6 +92,54 @@ async function fetchRepoRootEntries(
     }
   } catch {
     return null;
+  }
+  return null;
+}
+
+async function fetchRepoSizeEstimate(
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
+  host: string,
+  owner: string,
+  repo: string
+): Promise<{ downloadSize: number; fileSize: string } | null> {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+  };
+  try {
+    if (provider === 'github') {
+      const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
+      if (res.ok) {
+        const data: any = await res.json();
+        const kb = Number(data?.size);
+        if (Number.isFinite(kb) && kb > 0) {
+          const bytes = Math.round(kb * 1024);
+          return { downloadSize: bytes, fileSize: formatByteSize(bytes) || `${kb} KB` };
+        }
+      }
+    } else if (provider === 'codeberg' || provider === 'mesehub') {
+      const res = await fetch(`https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
+      if (res.ok) {
+        const data: any = await res.json();
+        const kb = Number(data?.size);
+        if (Number.isFinite(kb) && kb > 0) {
+          const bytes = Math.round(kb * 1024);
+          return { downloadSize: bytes, fileSize: formatByteSize(bytes) || `${kb} KB` };
+        }
+      }
+    } else if (provider === 'gitlab') {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const res = await fetch(`https://${host}/api/v4/projects/${projectPath}`, { headers });
+      if (res.ok) {
+        const data: any = await res.json();
+        const bytes = Number(data?.statistics?.repository_size || (data?.size ? data.size * 1024 : 0));
+        if (Number.isFinite(bytes) && bytes > 0) {
+          return { downloadSize: Math.round(bytes), fileSize: formatByteSize(bytes) || `${Math.round(bytes / 1024)} KB` };
+        }
+      }
+    }
+  } catch {
+    // Non-blocking estimate
   }
   return null;
 }
@@ -1355,15 +1404,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ? `[ADMIN] Automated Content Safety Hold: ${safetyEval.summary}`.slice(0, 500)
         : null;
 
+      const sizeEstimate = await fetchRepoSizeEstimate(provider, host, owner, repo);
+      const estDownloadSize = sizeEstimate?.downloadSize || null;
+      const estFileSize = sizeEstimate?.fileSize || null;
+
       const runPackageUpsert = () => context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, thumbnail_url, banner_url,
           downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
           min_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
-          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, status, status_reason, flagged_at
+          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
         ON CONFLICT(id) DO UPDATE SET
           author_id = excluded.author_id,
           title = excluded.title,
@@ -1392,6 +1445,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           dev_state = COALESCE(excluded.dev_state, packages.dev_state),
           content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
           ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures),
+          download_size = COALESCE(packages.download_size, excluded.download_size),
+          file_size = COALESCE(packages.file_size, excluded.file_size),
           status = CASE
             WHEN excluded.status = 'flagged' THEN 'flagged'
             WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status
@@ -1440,6 +1495,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         resolvedDevState || null,
         resolvedWarnings.length > 0 ? JSON.stringify(resolvedWarnings) : null,
         resolvedAiDisclosures.length > 0 ? JSON.stringify(resolvedAiDisclosures) : null,
+        estDownloadSize,
+        estFileSize,
         initialStatus,
         initialStatusReason,
         initialStatus
