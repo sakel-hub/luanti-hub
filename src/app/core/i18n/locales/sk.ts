@@ -239,7 +239,11 @@ export const sk: TranslationDictionary = {
     claimSignInBtn: 'Prepojiť & Prihlásiť',
     directLoginBtn: 'Prepojiť & Prihlásiť',
     footerNote: 'Po prihlásení môžete prepojiť všetky svoje ostatné Git a ContentDB účty pod jeden profil.',
-    oauthNotConfiguredNotice: 'OAuth kľúče pre {provider} zatiaľ nie sú nastavené v Cloudflare. Použite Priame Prihlásenie nižšie!'
+    oauthNotConfiguredNotice: 'OAuth kľúče pre {provider} zatiaľ nie sú nastavené v Cloudflare. Použite Priame Prihlásenie nižšie!',
+    signingIn: 'Prihlasovanie...',
+    redirectingToProvider: 'Pripájanie k poskytovateľovi overenia...',
+    preparingProfile: 'Overovanie relácie a synchronizácia vášho profilu...',
+    loading: 'Načítava sa...'
   },
   profile: {
     tabPackages: 'Moje Balíčky',

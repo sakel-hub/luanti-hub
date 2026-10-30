@@ -255,6 +255,10 @@ export interface TranslationDictionary {
     directLoginBtn: string;
     footerNote: string;
     oauthNotConfiguredNotice: string;
+    signingIn?: string;
+    redirectingToProvider?: string;
+    preparingProfile?: string;
+    loading?: string;
   };
   profile: {
     tabPackages: string;

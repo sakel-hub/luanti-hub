@@ -239,7 +239,11 @@ export const en: TranslationDictionary = {
     claimSignInBtn: 'Connect & Sign In',
     directLoginBtn: 'Connect & Sign In',
     footerNote: 'Once signed in, you can link all your other Git and ContentDB accounts under one unified profile.',
-    oauthNotConfiguredNotice: 'OAuth client credentials for {provider} are not yet configured in Cloudflare env. Use Direct Author Sign-In below!'
+    oauthNotConfiguredNotice: 'OAuth client credentials for {provider} are not yet configured in Cloudflare env. Use Direct Author Sign-In below!',
+    signingIn: 'Signing in...',
+    redirectingToProvider: 'Connecting to authentication provider...',
+    preparingProfile: 'Verifying your session and syncing your creator profile...',
+    loading: 'Loading...'
   },
   profile: {
     tabPackages: 'My Packages',

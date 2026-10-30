@@ -651,10 +651,72 @@ select:disabled {
   .luanti-dialog-panel,
   .luanti-drawer-panel,
   .luanti-tab-enter,
+  .luanti-orbital-ring,
+  .luanti-orbital-ring-reverse,
+  .luanti-core-pulse,
   .is-closing .luanti-backdrop,
   .is-closing .luanti-modal-backdrop,
   .is-closing .luanti-dialog-panel,
   .is-closing .luanti-drawer-panel {
     animation-duration: 1ms !important;
   }
+}
+
+/* ==========================================================================
+   Frosted Glass Animated Orbital Preloader (<app-frosted-preloader>)
+   ========================================================================== */
+@keyframes luantiOrbitSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes luantiOrbitSpinReverse {
+  0% {
+    transform: rotate(360deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes luantiCorePulse {
+  0%, 100% {
+    transform: scale(0.88);
+    opacity: 0.78;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+
+.glass-preloader-card {
+  background: linear-gradient(
+    145deg,
+    rgba(15, 23, 42, 0.86) 0%,
+    rgba(2, 6, 23, 0.92) 100%
+  );
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  box-shadow:
+    0 24px 56px -12px rgba(0, 0, 0, 0.82),
+    0 0 36px -8px rgba(56, 189, 248, 0.25),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.22);
+}
+
+.luanti-orbital-ring {
+  animation: luantiOrbitSpin 1.15s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+.luanti-orbital-ring-reverse {
+  animation: luantiOrbitSpinReverse 1.65s linear infinite;
+}
+
+.luanti-core-pulse {
+  animation: luantiCorePulse 1.6s ease-in-out infinite;
 }

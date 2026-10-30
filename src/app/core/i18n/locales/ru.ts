@@ -239,7 +239,11 @@ export const ru: TranslationDictionary = {
     claimSignInBtn: 'Подключить и Войти',
     directLoginBtn: 'Подключить и Войти',
     footerNote: 'После входа вы сможете привязать все остальные аккаунты Git и ContentDB к единому профилю.',
-    oauthNotConfiguredNotice: 'OAuth-ключи для {provider} еще не настроены в Cloudflare. Используйте Прямой вход ниже!'
+    oauthNotConfiguredNotice: 'OAuth-ключи для {provider} еще не настроены в Cloudflare. Используйте Прямой вход ниже!',
+    signingIn: 'Вход...',
+    redirectingToProvider: 'Подключение к провайдеру авторизации...',
+    preparingProfile: 'Проверка сессии и синхронизация вашего профиля...',
+    loading: 'Загрузка...'
   },
   profile: {
     tabPackages: 'Мои Пакеты',

@@ -9,6 +9,7 @@ import { SetupGuideModalComponent } from './features/setup-guide/setup-guide-mod
 import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
+import { FrostedPreloaderComponent } from './shared/components/frosted-preloader.component';
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
@@ -31,6 +32,7 @@ import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } f
     AuthModalComponent,
     ProfileDrawerComponent,
     AuthorDrawerComponent,
+    FrostedPreloaderComponent,
     LucideX,
     LucideShieldCheck,
     LucideCheck,

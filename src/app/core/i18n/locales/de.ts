@@ -239,7 +239,11 @@ export const de: TranslationDictionary = {
     claimSignInBtn: 'Verbinden & Anmelden',
     directLoginBtn: 'Verbinden & Anmelden',
     footerNote: 'Nach der Anmeldung können Sie weitere Git- und ContentDB-Konten mit Ihrem Profil verknüpfen.',
-    oauthNotConfiguredNotice: 'OAuth-Zugangsdaten für {provider} sind in Cloudflare noch nicht konfiguriert. Nutzen Sie die Direkte Anmeldung unten!'
+    oauthNotConfiguredNotice: 'OAuth-Zugangsdaten für {provider} sind in Cloudflare noch nicht konfiguriert. Nutzen Sie die Direkte Anmeldung unten!',
+    signingIn: 'Anmeldung läuft...',
+    redirectingToProvider: 'Verbindung zum Authentifizierungsdienst wird hergestellt...',
+    preparingProfile: 'Sitzung wird überprüft und Profil synchronisiert...',
+    loading: 'Wird geladen...'
   },
   profile: {
     tabPackages: 'Meine Pakete',

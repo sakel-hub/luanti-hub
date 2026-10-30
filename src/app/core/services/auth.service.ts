@@ -16,6 +16,8 @@ export class AuthService {
   private readonly _isAuthModalOpen = signal<boolean>(false);
   private readonly _isProfileDrawerOpen = signal<boolean>(false);
   private readonly _isLoading = signal<boolean>(false);
+  private readonly _isOAuthRedirecting = signal<boolean>(false);
+  private readonly _isCompletingOAuth = signal<boolean>(false);
   private readonly _authError = signal<string | null>(null);
   private readonly _selectedProvider = signal<GitProvider>('contentdb');
   private readonly _oauthProviders = signal<Record<string, boolean>>({});
@@ -42,6 +44,14 @@ export class AuthService {
   readonly isAuthModalOpen = this._isAuthModalOpen.asReadonly();
   readonly isProfileDrawerOpen = this._isProfileDrawerOpen.asReadonly();
   readonly isLoading = this._isLoading.asReadonly();
+  readonly isOAuthRedirecting = this._isOAuthRedirecting.asReadonly();
+  readonly isCompletingOAuth = this._isCompletingOAuth.asReadonly();
+  readonly isBusyAuthenticating = computed(
+    () =>
+      this._isOAuthRedirecting() ||
+      this._isCompletingOAuth() ||
+      (this._isLoading() && (this._isProfileDrawerOpen() || this._isAuthModalOpen()))
+  );
   readonly authError = this._authError.asReadonly();
   readonly selectedProvider = this._selectedProvider.asReadonly();
   readonly oauthProviders = this._oauthProviders.asReadonly();
@@ -111,10 +121,12 @@ export class AuthService {
       }
       if (authError) {
         this.clearAuthCache();
+        this._isCompletingOAuth.set(false);
         this._authError.set(authError);
         this._isAuthModalOpen.set(true);
       } else if (authSuccess) {
         this.clearAuthCache();
+        this._isCompletingOAuth.set(true);
         let returnedToPackage = false;
         try {
           const savedPath = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('lh_oauth_return_path') : null;
@@ -284,6 +296,7 @@ export class AuthService {
       // Offline / unauthenticated
     } finally {
       this._isLoading.set(false);
+      this._isCompletingOAuth.set(false);
     }
   }
 
@@ -304,6 +317,13 @@ export class AuthService {
   private returnToPackageOnAuthClose = false;
 
   openAuthModal(fromPackageReview = false): void {
+    if (this.isBusyAuthenticating()) {
+      return;
+    }
+    if (this._currentUser()) {
+      this.openProfileDrawer();
+      return;
+    }
     this.returnToPackageOnAuthClose = fromPackageReview;
     this._authError.set(null);
     this._isAuthModalOpen.set(true);
@@ -342,14 +362,12 @@ export class AuthService {
     }
   }
 
-  private isRedirectingOAuth = false;
-
   loginWith(provider: GitProvider, loginHint?: string, forceAccountSelect = true): void {
     this._selectedProvider.set(provider);
     this._authError.set(null);
     if (this.isOAuthConfigured(provider)) {
-      if (this.isRedirectingOAuth) return;
-      this.isRedirectingOAuth = true;
+      if (this._isOAuthRedirecting()) return;
+      this._isOAuthRedirecting.set(true);
       this.clearAuthCache();
       if (typeof window !== 'undefined') {
         try {
@@ -367,7 +385,7 @@ export class AuthService {
         window.location.href = `/api/auth/${provider}/login${qs ? `?${qs}` : ''}`;
       }
       setTimeout(() => {
-        this.isRedirectingOAuth = false;
+        this._isOAuthRedirecting.set(false);
       }, 4000);
       return;
     }

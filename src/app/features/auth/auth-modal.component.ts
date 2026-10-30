@@ -5,6 +5,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { GitProvider } from '../../core/models/package.model';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { FrostedPreloaderComponent } from '../../shared/components/frosted-preloader.component';
 import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, LucideGlobe, LucideUser, LucideInfo, LucideKeyRound } from '@lucide/angular';
 
 @Component({
@@ -16,6 +17,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
     FormsModule,
     TranslatePipe,
     TooltipDirective,
+    FrostedPreloaderComponent,
     LucideX,
     LucideChevronRight,
     LucideChevronDown,
@@ -70,8 +72,20 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
           </div>
         }
 
+        @if (authService.isOAuthRedirecting() || authService.isLoading()) {
+          <app-frosted-preloader
+            variant="card"
+            size="md"
+            [label]="'auth.signingIn' | translate"
+            [sublabel]="(authService.isOAuthRedirecting() ? 'auth.redirectingToProvider' : 'auth.preparingProfile') | translate">
+          </app-frosted-preloader>
+        }
+
         <!-- 1-Click OAuth / Provider Selection Buttons (Ordered by Popularity & Authentic Brand Colors) -->
-        <div class="space-y-2.5">
+        <div
+          [class.opacity-50]="authService.isOAuthRedirecting() || authService.isLoading()"
+          [class.pointer-events-none]="authService.isOAuthRedirecting() || authService.isLoading()"
+          class="space-y-2.5">
           <!-- 1. ContentDB Official (Luanti Sky Cyan) -->
           <button
             type="button"
@@ -256,9 +270,13 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
 
               <button
                 type="submit"
-                [disabled]="authService.isLoading() || !handleInput.trim()"
-                class="w-full py-2.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-xs transition cursor-pointer">
-                {{ 'auth.directLoginBtn' | translate }}
+                [disabled]="authService.isLoading() || authService.isOAuthRedirecting() || !handleInput.trim()"
+                class="w-full py-2.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
+                @if (authService.isLoading()) {
+                  <app-frosted-preloader variant="inline" size="sm" [label]="'auth.signingIn' | translate"></app-frosted-preloader>
+                } @else {
+                  <span>{{ 'auth.directLoginBtn' | translate }}</span>
+                }
               </button>
             </form>
           }

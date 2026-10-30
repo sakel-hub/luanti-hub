@@ -239,7 +239,11 @@ export const fr: TranslationDictionary = {
     claimSignInBtn: 'Connecter & Ouvrir',
     directLoginBtn: 'Connecter & Ouvrir',
     footerNote: 'Une fois connecté, vous pouvez lier tous vos autres comptes Git et ContentDB sous un même profil.',
-    oauthNotConfiguredNotice: 'Les identifiants OAuth pour {provider} ne sont pas encore configurés dans Cloudflare. Utilisez la Connexion Directe ci-dessous !'
+    oauthNotConfiguredNotice: 'Les identifiants OAuth pour {provider} ne sont pas encore configurés dans Cloudflare. Utilisez la Connexion Directe ci-dessous !',
+    signingIn: 'Connexion...',
+    redirectingToProvider: 'Connexion au fournisseur d’authentification...',
+    preparingProfile: 'Vérification de votre session et synchronisation du profil...',
+    loading: 'Chargement...'
   },
   profile: {
     tabPackages: 'Mes Paquets',

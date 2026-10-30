@@ -2188,4 +2188,71 @@ description = Mob animation and spawning framework.
     });
     expect(authService.canManagePackage(targetGithubPkg)).toBe(true);
   });
+
+  it('should render reusable FrostedPreloaderComponent variants, replace Sign In button with frosted preloader pill while authenticating, and prevent duplicate login modal opens', async () => {
+    const { FrostedPreloaderComponent } = await import('./shared/components/frosted-preloader.component');
+    const authService = TestBed.inject(AuthService);
+
+    // 1. Test FrostedPreloaderComponent across variants
+    const preloaderFixture = TestBed.createComponent(FrostedPreloaderComponent);
+    preloaderFixture.componentInstance.variant = 'overlay';
+    preloaderFixture.componentInstance.size = 'lg';
+    preloaderFixture.componentInstance.label = 'Signing in...';
+    preloaderFixture.componentInstance.sublabel = 'Verifying your session...';
+    preloaderFixture.detectChanges();
+    const preloaderEl = preloaderFixture.nativeElement as HTMLElement;
+    expect(preloaderEl.querySelector('.glass-preloader-card')).toBeTruthy();
+    expect(preloaderEl.querySelector('.luanti-orbital-ring')).toBeTruthy();
+    expect(preloaderEl.textContent).toContain('Signing in...');
+
+    // 2. Test HeaderComponent replaces Sign In button with FrostedPreloader pill while completing OAuth
+    (authService as any)._currentUser.set(null);
+    (authService as any)._isAuthModalOpen.set(false);
+    (authService as any)._isCompletingOAuth.set(true);
+    expect(authService.isBusyAuthenticating()).toBe(true);
+
+    // Calling openAuthModal while busy authenticating must be a no-op
+    authService.openAuthModal();
+    expect(authService.isAuthModalOpen()).toBe(false);
+
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    headerFixture.detectChanges();
+    const headerEl = headerFixture.nativeElement as HTMLElement;
+    expect(headerEl.querySelector('app-frosted-preloader')).toBeTruthy();
+
+    // Once authentication completes, Sign In or User Avatar renders normally
+    (authService as any)._isCompletingOAuth.set(false);
+    headerFixture.detectChanges();
+  });
+
+  it('should render PackageCardComponent author badge footer without clipping the bottom border', () => {
+    const cardFixture = TestBed.createComponent(PackageCardComponent);
+    cardFixture.componentInstance.package = {
+      id: 'RealBadAngel/technic',
+      author: 'RealBadAngel',
+      name: 'technic',
+      title: 'Technic',
+      type: 'mod',
+      short_desc: 'Extensive machinery mod with electricity and ores.',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 4.8,
+      downloads: 165300,
+      license: 'LGPL-2.1-ONLY',
+      min_minetest_version: '5.0.0',
+      tags: ['mapgen', 'technology', 'tools'],
+      source: 'official'
+    };
+    cardFixture.detectChanges();
+
+    const cardEl = cardFixture.nativeElement as HTMLElement;
+    const outerCard = cardEl.querySelector('[role="button"]') as HTMLElement;
+    expect(outerCard.className).toContain('min-h-[352px]');
+    expect(outerCard.className).not.toContain('max-h-[364px]');
+
+    const footerRow = cardEl.querySelector('.mt-auto.pt-2') as HTMLElement;
+    expect(footerRow).toBeTruthy();
+    expect(footerRow.className).toContain('min-h-[28px]');
+    expect(footerRow.className).not.toContain('overflow-hidden');
+  });
 });

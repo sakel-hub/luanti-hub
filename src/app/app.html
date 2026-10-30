@@ -72,6 +72,16 @@
     <app-author-drawer [class.is-closing]="isClosingAuthorDrawer()"></app-author-drawer>
   }
 
+  <!-- Global Frosted Glass Overlay Preloader for OAuth Handshake & Profile Hydration -->
+  @if (authService.isCompletingOAuth() || (authService.isProfileDrawerOpen() && !authService.currentUser() && authService.isLoading()) || (authService.isOAuthRedirecting() && !renderAuthModal())) {
+    <app-frosted-preloader
+      variant="overlay"
+      size="lg"
+      [label]="'auth.signingIn' | translate"
+      [sublabel]="(authService.isOAuthRedirecting() ? 'auth.redirectingToProvider' : 'auth.preparingProfile') | translate">
+    </app-frosted-preloader>
+  }
+
   <!-- Widescreen 16:9 Cinema Video Theater Dialog (Enlarged from Hover Preview or Modal) -->
   @if (displayedVideoTheater(); as theater) {
     <div

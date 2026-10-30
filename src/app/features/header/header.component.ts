@@ -15,6 +15,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { TranslationService } from '../../core/i18n/translation.service';
 import { LocaleId } from '../../core/i18n/translation.types';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { FrostedPreloaderComponent } from '../../shared/components/frosted-preloader.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideDownload,
@@ -51,6 +52,7 @@ import {
     CommonModule,
     FormsModule,
     TooltipDirective,
+    FrostedPreloaderComponent,
     TranslatePipe,
     LucideDownload,
     LucideSearch,
@@ -452,6 +454,12 @@ import {
                 </span>
               }
             </button>
+          } @else if (authService.isLoading() || authService.isBusyAuthenticating()) {
+            <app-frosted-preloader
+              variant="pill"
+              size="sm"
+              [label]="(authService.isBusyAuthenticating() ? 'auth.signingIn' : 'auth.loading') | translate">
+            </app-frosted-preloader>
           } @else {
             <button
               type="button"

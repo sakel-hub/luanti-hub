@@ -64,7 +64,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       [class.origin-left]="isFirst"
       [class.origin-right]="isLast"
       [class.origin-center]="!isFirst && !isLast"
-      class="group relative flex flex-col h-full min-h-[336px] max-h-[364px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
+      class="group relative flex flex-col h-full min-h-[352px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
 
       <!-- Thumbnail with True 16:9 Widescreen Aspect Ratio + Desktop Hover Video Preview -->
       <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950 overflow-hidden">
@@ -169,7 +169,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       </div>
 
       <!-- Content Details with Equalized Flex Layout -->
-      <div class="p-3.5 flex flex-col flex-1 justify-between min-h-0">
+      <div class="px-3.5 pt-3.5 pb-4 flex flex-col flex-1 justify-between min-h-0">
 
         <div class="space-y-2.5">
           <!-- Action Buttons Row (Direct .zip Download, Favorite, Details) -->
@@ -248,7 +248,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
         </div>
 
         <!-- Bottom Capped Single-Line Tags / Author Footer -->
-        <div class="mt-auto pt-1.5 flex items-center justify-between gap-1.5 text-[10px] text-slate-400 overflow-hidden whitespace-nowrap min-h-[22px]">
+        <div class="mt-auto pt-2 pb-0.5 flex items-center justify-between gap-1.5 text-[10px] text-slate-400 whitespace-nowrap min-h-[28px]">
           <div class="flex items-center gap-1.5 overflow-hidden min-w-0">
             @if (displayTags.length > 0) {
               @for (t of displayTags; track t; let last = $last) {

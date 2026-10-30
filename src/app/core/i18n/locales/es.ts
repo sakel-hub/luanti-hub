@@ -239,7 +239,11 @@ export const es: TranslationDictionary = {
     claimSignInBtn: 'Conectar y Entrar',
     directLoginBtn: 'Conectar y Entrar',
     footerNote: 'Una vez conectado, puedes vincular tus otras cuentas de Git y ContentDB bajo un solo perfil.',
-    oauthNotConfiguredNotice: 'Las credenciales OAuth para {provider} aún no están configuradas en Cloudflare. ¡Usa el Acceso Directo abajo!'
+    oauthNotConfiguredNotice: 'Las credenciales OAuth para {provider} aún no están configuradas en Cloudflare. ¡Usa el Acceso Directo abajo!',
+    signingIn: 'Iniciando sesión...',
+    redirectingToProvider: 'Conectando con el proveedor de autenticación...',
+    preparingProfile: 'Verificando tu sesión y sincronizando tu perfil...',
+    loading: 'Cargando...'
   },
   profile: {
     tabPackages: 'Mis Paquetes',
