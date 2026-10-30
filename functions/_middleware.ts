@@ -84,7 +84,13 @@ export async function onRequest(context: {
   const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
   if (!isApiRoute && !isDownloadRoute) {
-    return next();
+    const res = await next();
+    const assetsBinding = context.env?.['ASSETS'];
+    if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
+      const indexUrl = new URL('/index.html', url.origin);
+      return assetsBinding.fetch(new Request(indexUrl.toString(), request));
+    }
+    return res;
   }
 
   // 1. Block known aggressive AI scrapers & automated SEO crawlers from burning Function/D1 quotas

@@ -723,7 +723,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const noCache = reqUrl?.searchParams.get('nocache') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v2/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v3/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
@@ -762,6 +762,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           if (freshLocalReviews.length > 0) {
             const sum = freshLocalReviews.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
             cachedEdge.score = Number((sum / freshLocalReviews.length).toFixed(1));
+          } else if (existingOfficialOnly.length > 0) {
+            const sum = existingOfficialOnly.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
+            cachedEdge.score = Number((sum / existingOfficialOnly.length).toFixed(1));
+          } else {
+            cachedEdge.score = computeStarRating({ reviews: cachedEdge.review_thread_counts }, 0, undefined);
           }
         } catch {
           // Ignore D1 refresh error
@@ -816,6 +821,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       (!isOfficialFast && Number(d1Pkg?.downloads_count || 0) > 0);
 
     if (isLite && d1Pkg && d1Pkg.license && hasHydratedDownloads) {
+      const revAvgFast = await context.env.DB.prepare(
+        `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(effectivePkgId).first().catch(() => null);
+      const fastStarScore = revAvgFast && Number(revAvgFast.cnt) > 0 && revAvgFast.avg_rating != null
+        ? Number(Number(revAvgFast.avg_rating).toFixed(1))
+        : 0;
       const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
       const lhDl = Number(d1Pkg.luantihub_downloads || 0);
       const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
@@ -837,6 +848,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         contentdb_downloads: cdbDl,
         luantihub_downloads: lhDl,
         downloads: totalDl,
+        score: fastStarScore,
         download_size: Number(d1Pkg.download_size || 0) > 0 ? Number(d1Pkg.download_size) : undefined,
         file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size),
         video_url: d1Pkg.video_url || undefined,
@@ -858,9 +870,20 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
     try {
       if (isLite) {
-        const dailyDlRow = await context.env.DB.prepare(
-          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }));
+        const [revAvgRow, dailyDlRow] = await Promise.all([
+          context.env.DB.prepare(
+            `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+          ).bind(effectivePkgId).first().catch(() => null),
+          context.env.DB.prepare(
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
+          ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }))
+        ]);
+        if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
+          d1ReviewAvg = Number(revAvgRow.avg_rating);
+        } else if (d1Pkg && Number(d1Pkg.score) > 0) {
+          d1Pkg.score = 0;
+          context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
+        }
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
       } else {
         const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([

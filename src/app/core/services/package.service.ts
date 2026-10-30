@@ -81,6 +81,7 @@ export class PackageService {
   private d1WritebackTimer: any = null;
   private bulkScoresInFlight: Promise<void> | null = null;
   private initialUrlSynced = false;
+  private pendingRoutePackage: { author: string; name: string } | null = null;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
@@ -391,8 +392,8 @@ export class PackageService {
 
   constructor() {
     this.loadHydratedMetaCache();
-    this.initCatalog();
     this.initRouterSync();
+    this.initCatalog();
 
     // Ensure the logged-in user's own D1 packages (e.g. newly submitted Git packages)
     // are always merged into the catalog and search index even across refreshes or mirror fallbacks
@@ -529,7 +530,7 @@ export class PackageService {
 
   private computeStarRatingFromData(item: any, fallbackScore = 0): number {
     const rev = item?.reviews;
-    if (rev && typeof rev === 'object') {
+    if (rev && typeof rev === 'object' && !Array.isArray(rev)) {
       const pos = Number(rev.positive) || 0;
       const neu = Number(rev.neutral) || 0;
       const neg = Number(rev.negative) || 0;
@@ -539,9 +540,14 @@ export class PackageService {
         return Number(Math.min(5.0, Math.max(1.0, stars)).toFixed(1));
       }
     }
-    const rawScore = Number(item?.score ?? 0);
-    if (rawScore >= 1.0 && rawScore <= 5.0) {
-      return Number(rawScore.toFixed(1));
+    if (item?.score !== undefined && item?.score !== null) {
+      const rawScore = Number(item.score);
+      if (rawScore === 0) {
+        return 0;
+      }
+      if (rawScore >= 1.0 && rawScore <= 5.0) {
+        return Number(rawScore.toFixed(1));
+      }
     }
     return fallbackScore;
   }
@@ -638,7 +644,11 @@ export class PackageService {
       ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
       : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
 
-    const score = this.computeStarRatingFromData(item, cachedMeta?.score || 0);
+    const score = this.computeStarRatingFromData(item, 0);
+    if (score === 0 && cachedMeta?.score && cachedMeta.score > 0 && item?.score === 0) {
+      this.hydratedMetaCache.set(String(pkgId).toLowerCase(), { ...cachedMeta, score: 0 });
+      this.scheduleHydratedMetaPersist();
+    }
     const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? cachedMeta?.contentdb_score ?? 0);
     const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
 
@@ -963,14 +973,81 @@ export class PackageService {
   }
 
   private initRouterSync(): void {
+    if (typeof window !== 'undefined') {
+      this.syncStateFromUrl(window.location.pathname + window.location.search);
+      this.initPwaLaunchCapture();
+    }
     if (this.router) {
       this.router.events
         .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
         .subscribe((evt) => {
           this.syncStateFromUrl(evt.urlAfterRedirects || evt.url);
         });
-    } else if (typeof window !== 'undefined') {
-      this.syncStateFromUrl(window.location.pathname + window.location.search);
+    }
+  }
+
+  private initPwaLaunchCapture(): void {
+    if (typeof window === 'undefined') return;
+
+    // 1. Web App Launch Handler API (`window.launchQueue`) for installed PWAs
+    // When the OS/browser captures a shared link (`https://luanti-hub.pages.dev/package/:author/:name`)
+    // and launches or focuses the existing standalone PWA window, route directly to that package modal.
+    try {
+      const launchQueue = (window as any).launchQueue;
+      if (launchQueue && typeof launchQueue.setConsumer === 'function') {
+        launchQueue.setConsumer((launchParams: { targetURL?: string }) => {
+          const targetUrl = launchParams?.targetURL;
+          if (!targetUrl) return;
+          try {
+            const parsed = new URL(targetUrl, window.location.origin);
+            if (parsed.origin !== window.location.origin) return;
+            const pathAndQuery = parsed.pathname + parsed.search;
+            if (pathAndQuery && pathAndQuery !== '/') {
+              this.syncStateFromUrl(pathAndQuery);
+              if (this.router && window.location.pathname !== parsed.pathname) {
+                this.router.navigateByUrl(pathAndQuery, { replaceUrl: true }).catch(() => {});
+              }
+            }
+          } catch {
+            // Ignore malformed targetURL
+          }
+        });
+      }
+    } catch {
+      // Ignore launchQueue registration errors on unsupported browsers
+    }
+
+    // 2. Same-origin BroadcastChannel bridge: if the user opens/pastes a `/package/:author/:name`
+    // link in a regular browser tab while the installed standalone PWA is running, sync the open package into the PWA.
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const isStandalone = Boolean(
+          (typeof window.matchMedia === 'function' &&
+            (window.matchMedia('(display-mode: standalone)').matches ||
+              window.matchMedia('(display-mode: window-controls-overlay)').matches)) ||
+            (window.navigator as any)?.standalone === true
+        );
+        const channel = new BroadcastChannel('lh_pwa_deep_link_v1');
+
+        if (isStandalone) {
+          channel.onmessage = (event: MessageEvent) => {
+            const data = event?.data;
+            if (data?.type === 'OPEN_PACKAGE_ROUTE' && typeof data.path === 'string' && data.path.startsWith('/package/')) {
+              this.syncStateFromUrl(data.path);
+              if (this.router && window.location.pathname !== data.path) {
+                this.router.navigateByUrl(data.path, { replaceUrl: true }).catch(() => {});
+              }
+            }
+          };
+        } else if (window.location.pathname.startsWith('/package/') || window.location.pathname.startsWith('/packages/')) {
+          channel.postMessage({
+            type: 'OPEN_PACKAGE_ROUTE',
+            path: window.location.pathname + window.location.search
+          });
+        }
+      }
+    } catch {
+      // Ignore BroadcastChannel errors
     }
   }
 
@@ -1036,7 +1113,11 @@ export class PackageService {
         this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
         return;
       }
-    } else if (path === '/submit') {
+    } else {
+      this.pendingRoutePackage = null;
+    }
+
+    if (path === '/submit') {
       this._activePackage.set(null);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
@@ -1164,6 +1245,16 @@ export class PackageService {
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
     this.pwaService.checkAndNotifyNewGitPackages(normalized, { isBaselineSeedAllowed: true });
+
+    if (this.pendingRoutePackage) {
+      const { author: pendingAuthor, name: pendingName } = this.pendingRoutePackage;
+      const matched = this.findPackageInCatalogByRoute(pendingAuthor, pendingName, normalized);
+      if (matched) {
+        this.pendingRoutePackage = null;
+        const shouldFixUrl = matched.name.toLowerCase() !== pendingName.toLowerCase();
+        this.openPackageModal(matched, shouldFixUrl);
+      }
+    }
 
     if (Array.isArray(payload.tags) && payload.tags.length > 0) {
       const parsedTags: ContentDbTag[] = payload.tags
@@ -3408,7 +3499,7 @@ export class PackageService {
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
             contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
             downloads: resolvedDownloads || prevMeta.downloads,
-            score: resolvedScore || prevMeta.score,
+            score: resolvedScore,
             tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
             file_size: sizeFormatted || prevMeta.file_size,
             video_url: resolvedVideo.video_url || prevMeta.video_url,
@@ -3763,42 +3854,91 @@ export class PackageService {
     }
   }
 
-  async openPackageModalById(author: string, name: string, updateUrl = false): Promise<void> {
-    const targetId = `${author}/${name}`.toLowerCase();
-    const found = this._packages().find(
-      p => p.id.toLowerCase() === targetId ||
-      (p.author.toLowerCase() === author.toLowerCase() && p.name.toLowerCase() === name.toLowerCase())
+  private findPackageInCatalogByRoute(
+    author: string,
+    name: string,
+    list: LuantiPackage[] = this._packages()
+  ): LuantiPackage | undefined {
+    const cleanAuthor = author.trim().toLowerCase();
+    const cleanName = name.trim().toLowerCase();
+    if (!cleanAuthor || !cleanName || list.length === 0) return undefined;
+
+    const targetId = `${cleanAuthor}/${cleanName}`;
+    const exactMatch = list.find(
+      p =>
+        p.id.toLowerCase() === targetId ||
+        (p.author.toLowerCase() === cleanAuthor && p.name.toLowerCase() === cleanName)
     );
+    if (exactMatch) return exactMatch;
+
+    // Handle previously shared links where OS share sheet concatenated `url + short_desc` (e.g. "i3A Next Generation Inventory")
+    const prefixMatch = list.find(p => {
+      if (p.author.toLowerCase() !== cleanAuthor) return false;
+      const pkgNameLower = p.name.toLowerCase();
+      if (!cleanName.startsWith(pkgNameLower) || cleanName.length <= pkgNameLower.length) return false;
+      const remainder = cleanName.slice(pkgNameLower.length).trim();
+      const shortDescLower = (p.short_desc || '').trim().toLowerCase();
+      const titleLower = (p.title || '').trim().toLowerCase();
+      return (
+        (shortDescLower.length > 0 && (shortDescLower.startsWith(remainder) || remainder.startsWith(shortDescLower))) ||
+        (titleLower.length > 0 && (titleLower.startsWith(remainder) || remainder.startsWith(titleLower)))
+      );
+    });
+    if (prefixMatch) return prefixMatch;
+
+    // Fallback when author handle differs between Git and ContentDB
+    const sameNameCandidates = list.filter(p => p.name.toLowerCase() === cleanName);
+    if (sameNameCandidates.length === 1) {
+      return sameNameCandidates[0];
+    }
+    return undefined;
+  }
+
+  async openPackageModalById(author: string, name: string, updateUrl = false): Promise<void> {
+    this.pendingRoutePackage = { author, name };
+    const found = this.findPackageInCatalogByRoute(author, name);
 
     if (found) {
-      this.openPackageModal(found, updateUrl);
-      return;
-    }
-
-    if (!this.edgeApiAvailable && !this.contentDbOnline) {
+      this.pendingRoutePackage = null;
+      const shouldFixUrl = updateUrl || found.name.toLowerCase() !== name.trim().toLowerCase();
+      this.openPackageModal(found, shouldFixUrl);
       return;
     }
 
     try {
-      let res: Response | null = null;
-      if (this.edgeApiAvailable) {
-        res = await fetch(`/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`);
-      } else if (this.contentDbOnline) {
-        res = await fetch(`https://content.luanti.org/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`);
-      }
-      if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-        const item = await res.json();
-        const pkg = this.normalizePackage(item);
-        this._activePackage.set(pkg);
-        this.updateSeoMeta(pkg);
-        this.loadPackageDetails(pkg, true);
+      const encAuthor = encodeURIComponent(author);
+      const encName = encodeURIComponent(name);
+      const endpoints = [
+        `/api/packages/${encAuthor}/${encName}/`,
+        `https://contentdb.milcho.org/api/packages/${encAuthor}/${encName}/`,
+        `https://content.luanti.org/api/packages/${encAuthor}/${encName}/`
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+          if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+            const item = await res.json();
+            if (item && (item.name || item.title)) {
+              const pkg = this.normalizePackage(item);
+              this.pendingRoutePackage = null;
+              this._activePackage.set(pkg);
+              this.updateSeoMeta(pkg);
+              this.loadPackageDetails(pkg, true);
+              return;
+            }
+          }
+        } catch {
+          // Try next endpoint or wait for applyBootPayload() to resolve pendingRoutePackage
+        }
       }
     } catch {
-      // Fallback
+      // Fallback handled when initCatalog() completes and checks pendingRoutePackage
     }
   }
 
   closePackageModal(updateUrl = true): void {
+    this.pendingRoutePackage = null;
     this._activePackage.set(null);
     this.seoService?.resetToHome();
     if (updateUrl) {
@@ -3866,11 +4006,30 @@ export class PackageService {
     const validRatings = (reviewsList || [])
       .map(r => Number(r.rating))
       .filter(n => Number.isFinite(n) && n >= 1 && n <= 5);
-    if (validRatings.length === 0) return;
+    const avg = validRatings.length > 0
+      ? Number((validRatings.reduce((sum, r) => sum + r, 0) / validRatings.length).toFixed(1))
+      : 0;
 
-    const avg = Number((validRatings.reduce((sum, r) => sum + r, 0) / validRatings.length).toFixed(1));
+    const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    const targetAuthorLower = (pkg.author || '').toLowerCase();
+    const targetNameLower = (pkg.name || '').toLowerCase();
+
+    const prevMeta = this.hydratedMetaCache.get(targetIdLower);
+    if (prevMeta || avg > 0) {
+      this.hydratedMetaCache.set(targetIdLower, {
+        ...(prevMeta || {}),
+        score: avg
+      });
+      this.scheduleHydratedMetaPersist();
+    }
+
     this._activePackage.update(current => {
-      if (current && (current.id === pkg.id || (current.author === pkg.author && current.name === pkg.name))) {
+      if (
+        current &&
+        ((current.id || '').toLowerCase() === targetIdLower ||
+          ((current.author || '').toLowerCase() === targetAuthorLower &&
+            (current.name || '').toLowerCase() === targetNameLower))
+      ) {
         const merged = { ...current, score: avg };
         this.updateSeoMeta(merged);
         return merged;
@@ -3878,11 +4037,29 @@ export class PackageService {
       return current;
     });
     this._packages.update(list => list.map(item => {
-      if (item.id === pkg.id || (item.author === pkg.author && item.name === pkg.name)) {
+      if (
+        (item.id || '').toLowerCase() === targetIdLower ||
+        ((item.author || '').toLowerCase() === targetAuthorLower &&
+          (item.name || '').toLowerCase() === targetNameLower)
+      ) {
         return { ...item, score: avg };
       }
       return item;
     }));
+    const syncTop10 = (list: LuantiPackage[]) =>
+      list.map(item => {
+        if (
+          (item.id || '').toLowerCase() === targetIdLower ||
+          ((item.author || '').toLowerCase() === targetAuthorLower &&
+            (item.name || '').toLowerCase() === targetNameLower)
+        ) {
+          return { ...item, score: avg };
+        }
+        return item;
+      });
+    this._serverTop10Today.update(syncTop10);
+    this._serverTop10Week.update(syncTop10);
+    this.scheduleBootCachePersist();
   }
 
   // Fetch Live Reviews from Backend API (Mixed ContentDB + D1) with in-memory caching
@@ -3977,6 +4154,55 @@ export class PackageService {
         }
         this.reviewsCache.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
+        if (data.score !== undefined) {
+          const newScore = Number(data.score) || 0;
+          const prevMeta = this.hydratedMetaCache.get(cacheKey);
+          if (prevMeta || newScore > 0) {
+            this.hydratedMetaCache.set(cacheKey, {
+              ...(prevMeta || {}),
+              score: newScore
+            });
+            this.scheduleHydratedMetaPersist();
+          }
+          const targetAuthorLower = (pkg.author || '').toLowerCase();
+          const targetNameLower = (pkg.name || '').toLowerCase();
+          this._activePackage.update(current => {
+            if (
+              current &&
+              ((current.id || '').toLowerCase() === cacheKey ||
+                ((current.author || '').toLowerCase() === targetAuthorLower &&
+                  (current.name || '').toLowerCase() === targetNameLower))
+            ) {
+              const merged = { ...current, score: newScore };
+              this.updateSeoMeta(merged);
+              return merged;
+            }
+            return current;
+          });
+          this._packages.update(list => list.map(item => {
+            if (
+              (item.id || '').toLowerCase() === cacheKey ||
+              ((item.author || '').toLowerCase() === targetAuthorLower &&
+                (item.name || '').toLowerCase() === targetNameLower)
+            ) {
+              return { ...item, score: newScore };
+            }
+            return item;
+          }));
+          const syncTop10 = (list: LuantiPackage[]) =>
+            list.map(item => {
+              if (
+                (item.id || '').toLowerCase() === cacheKey ||
+                ((item.author || '').toLowerCase() === targetAuthorLower &&
+                  (item.name || '').toLowerCase() === targetNameLower)
+              ) {
+                return { ...item, score: newScore };
+              }
+              return item;
+            });
+          this._serverTop10Today.update(syncTop10);
+          this._serverTop10Week.update(syncTop10);
+        }
         this.clearBootCache();
         return { success: true, review: data.review };
       }
@@ -4059,6 +4285,55 @@ export class PackageService {
         }
         this.reviewsCache.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
+        if (data.score !== undefined) {
+          const newScore = Number(data.score) || 0;
+          const prevMeta = this.hydratedMetaCache.get(cacheKey);
+          if (prevMeta || newScore > 0) {
+            this.hydratedMetaCache.set(cacheKey, {
+              ...(prevMeta || {}),
+              score: newScore
+            });
+            this.scheduleHydratedMetaPersist();
+          }
+          const targetAuthorLower = (pkg.author || '').toLowerCase();
+          const targetNameLower = (pkg.name || '').toLowerCase();
+          this._activePackage.update(current => {
+            if (
+              current &&
+              ((current.id || '').toLowerCase() === cacheKey ||
+                ((current.author || '').toLowerCase() === targetAuthorLower &&
+                  (current.name || '').toLowerCase() === targetNameLower))
+            ) {
+              const merged = { ...current, score: newScore };
+              this.updateSeoMeta(merged);
+              return merged;
+            }
+            return current;
+          });
+          this._packages.update(list => list.map(item => {
+            if (
+              (item.id || '').toLowerCase() === cacheKey ||
+              ((item.author || '').toLowerCase() === targetAuthorLower &&
+                (item.name || '').toLowerCase() === targetNameLower)
+            ) {
+              return { ...item, score: newScore };
+            }
+            return item;
+          }));
+          const syncTop10 = (list: LuantiPackage[]) =>
+            list.map(item => {
+              if (
+                (item.id || '').toLowerCase() === cacheKey ||
+                ((item.author || '').toLowerCase() === targetAuthorLower &&
+                  (item.name || '').toLowerCase() === targetNameLower)
+              ) {
+                return { ...item, score: newScore };
+              }
+              return item;
+            });
+          this._serverTop10Today.update(syncTop10);
+          this._serverTop10Week.update(syncTop10);
+        }
         this.clearBootCache();
         if (this.authService.isAdmin()) {
           this.authService.fetchModerationQueue();

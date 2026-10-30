@@ -101,9 +101,14 @@ async function recalculateAndPersistPackageScore(db: any, packageId: string): Pr
     ? Math.round(Number(avgResult.avg_score) * 10) / 10
     : 0;
 
+  const parts = String(packageId).split('/');
+  const authorPart = parts[0] || '';
+  const namePart = parts[1] || '';
+
   await db.prepare(`
-    UPDATE packages SET score = ? WHERE LOWER(id) = LOWER(?)
-  `).bind(roundedScore, packageId).run().catch(() => {});
+    UPDATE packages SET score = ?
+    WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
+  `).bind(roundedScore, packageId, authorPart, namePart).run().catch(() => {});
 
   return roundedScore;
 }

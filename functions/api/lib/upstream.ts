@@ -148,12 +148,13 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   if (!edgeCache || !Array.isArray(cacheKeyPaths)) return;
 
   const expandedUrls = new Set<string>([
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
-    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v2\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
+    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v[23]\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
     if (pkgDetailMatch) {
       const a = encodeURIComponent(pkgDetailMatch[1].toLowerCase());
       const n = encodeURIComponent(pkgDetailMatch[2].toLowerCase());
@@ -162,6 +163,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/lite/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/lite/${a}/${n}`);
     }
   }
 

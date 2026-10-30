@@ -1481,4 +1481,116 @@ description = Mob animation and spawning framework.
     expect(kofiIframe).toBeTruthy();
     expect(kofiIframe.getAttribute('src')).toBe('https://ko-fi.com/sakel/?hidefeed=true&widget=true&embed=true&preview=true');
   });
+
+  it('should reset package score to 0 when the last review is removed and never resurrect stale 5-star ratings from hydratedMetaCache', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const cacheKey = 'jeija/mesecons';
+
+    // Simulate stale 5-star rating in hydratedMetaCache from a previously deleted review
+    (pkgService as any).hydratedMetaCache.set(cacheKey, {
+      license: 'LGPL-3.0-ONLY',
+      downloads: 264100,
+      score: 5
+    });
+
+    // 1. normalizePackage with ContentDB composite score (1564.3) and 0 reviews must NOT fall back to stale cachedMeta.score = 5
+    const normalized = (pkgService as any).normalizePackage({
+      id: 'Jeija/mesecons',
+      author: 'Jeija',
+      name: 'mesecons',
+      title: 'Mesecons',
+      type: 'mod',
+      score: 0,
+      contentdb_score: 1564.3,
+      reviews: { positive: 0, neutral: 0, negative: 0 },
+      downloads: 264100
+    });
+    expect(normalized.score).toBe(0);
+    expect(normalized.contentdb_score).toBe(1564.3);
+    expect((pkgService as any).hydratedMetaCache.get(cacheKey)?.score).toBe(0);
+
+    // 2. When a package currently has score: 5 in memory and hydratedMetaCache, removing the last review (empty list) must reset score to 0 everywhere
+    const activeMesecons = { ...normalized, score: 5 };
+    (pkgService as any).hydratedMetaCache.set(cacheKey, { license: 'LGPL-3.0-ONLY', score: 5 });
+    (pkgService as any)._packages.set([activeMesecons]);
+    (pkgService as any)._activePackage.set(activeMesecons);
+    (pkgService as any)._serverTop10Today.set([activeMesecons]);
+    (pkgService as any)._serverTop10Week.set([activeMesecons]);
+
+    pkgService.applyReviewAverageToPackage(activeMesecons, []);
+
+    expect(pkgService.packages()[0].score).toBe(0);
+    expect(pkgService.activePackage()?.score).toBe(0);
+    expect(pkgService.top10TodayPackages()[0].score).toBe(0);
+    expect(pkgService.top10WeekPackages()[0].score).toBe(0);
+    expect((pkgService as any).hydratedMetaCache.get(cacheKey)?.score).toBe(0);
+  });
+
+  it('should copy a clean package share URL without concatenating short_desc and open the package modal on direct /package/:author/:name navigation', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const pkgService = TestBed.inject(PackageService);
+
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    const shareSpy = vi.fn().mockResolvedValue(undefined);
+    const origClipboard = navigator.clipboard;
+    const origShare = (navigator as any).share;
+
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: writeTextSpy },
+      configurable: true
+    });
+    Object.defineProperty(navigator, 'share', {
+      value: shareSpy,
+      configurable: true
+    });
+
+    try {
+      const targetUrl = 'https://luanti-hub.pages.dev/package/mt-mods/i3';
+      await pwaService.sharePackage('i3', 'A Next Generation Inventory', targetUrl);
+
+      // Must copy only the clean URL to clipboard and omit `text` from navigator.share so OS share sheets never concatenate url + text
+      expect(writeTextSpy).toHaveBeenCalledWith(targetUrl);
+      expect(shareSpy).toHaveBeenCalledWith({
+        title: 'i3',
+        url: targetUrl
+      });
+      expect(shareSpy.mock.calls[0][0].text).toBeUndefined();
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: origClipboard,
+        configurable: true
+      });
+      Object.defineProperty(navigator, 'share', {
+        value: origShare,
+        configurable: true
+      });
+    }
+
+    // Simulate deep-link navigation to /package/mt-mods/i3 BEFORE catalog boot completes
+    (pkgService as any)._packages.set([]);
+    (pkgService as any)._activePackage.set(null);
+    (pkgService as any).syncStateFromUrl('/package/mt-mods/i3');
+    expect((pkgService as any).pendingRoutePackage).toEqual({ author: 'mt-mods', name: 'i3' });
+
+    // Once boot payload arrives, the package detail modal opens automatically
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          id: 'mt-mods/i3',
+          author: 'mt-mods',
+          name: 'i3',
+          title: 'i3',
+          type: 'mod',
+          short_desc: 'A Next Generation Inventory',
+          downloads: 45000
+        }
+      ]
+    });
+    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+
+    // Also resolve previously broken links that had short_desc concatenated onto the package name
+    (pkgService as any)._activePackage.set(null);
+    await pkgService.openPackageModalById('mt-mods', 'i3A Next Generation Inventory', false);
+    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+  });
 });

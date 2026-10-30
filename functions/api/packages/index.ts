@@ -37,6 +37,28 @@ const DEFAULT_CONTENTDB_TAGS = [
   { name: 'world_maintenance', title: 'World Maintenance' }
 ];
 
+function computeCatalogStarRating(item: any, d1StarAvg?: number): number {
+  if (d1StarAvg !== undefined && d1StarAvg >= 1 && d1StarAvg <= 5) {
+    return Number(d1StarAvg.toFixed(1));
+  }
+  const rev = item?.reviews;
+  if (rev && typeof rev === 'object' && !Array.isArray(rev)) {
+    const pos = Number(rev.positive) || 0;
+    const neu = Number(rev.neutral) || 0;
+    const neg = Number(rev.negative) || 0;
+    const total = pos + neu + neg;
+    if (total > 0) {
+      const stars = (pos * 5 + neu * 3 + neg * 1) / total;
+      return Number(Math.min(5.0, Math.max(1.0, stars)).toFixed(1));
+    }
+  }
+  const rawScore = Number(item?.score || 0);
+  if (rawScore >= 1.0 && rawScore <= 5.0) {
+    return Number(rawScore.toFixed(1));
+  }
+  return 0;
+}
+
 function buildTop10FromCatalog(
   mergedCatalog: any[],
   velocityMap: Map<string, number>,
@@ -67,8 +89,8 @@ function buildTop10FromCatalog(
   if (top10.length < 10) {
     const remaining = [...mergedCatalog].sort((a, b) => {
       if (timeframe === 'today') {
-        const scoreA = (Number(a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50;
-        const scoreB = (Number(b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50;
+        const scoreA = (Number(a.contentdb_score ?? a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50;
+        const scoreB = (Number(b.contentdb_score ?? b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50;
         return scoreB - scoreA;
       }
       return (Number(b.downloads) || 0) - (Number(a.downloads) || 0);
@@ -96,7 +118,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
   const noCache = url.searchParams.get('nocache') === '1';
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2';
 
   if (isBootBundle && !noCache && !q && types.length === 0 && !author) {
     const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
@@ -405,7 +427,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       release: releaseId,
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
-      score: d1StarAvg || matchedUpstream?.score || 0,
+      score: computeCatalogStarRating(matchedUpstream, d1StarAvg),
       contentdb_score: Number(matchedUpstream?.score || 0),
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
@@ -441,7 +463,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
-      score: d1StarAvg !== undefined ? d1StarAvg : item.score,
+      score: computeCatalogStarRating(item, d1StarAvg),
       contentdb_score: Number(item.score || 0),
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,

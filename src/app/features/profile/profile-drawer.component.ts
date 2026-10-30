@@ -92,8 +92,8 @@ import {
               type="button"
               (click)="authService.closeProfileDrawer()"
               aria-label="Close profile drawer"
-              class="w-9 h-9 rounded-full glass-icon-btn text-slate-300 hover:text-white flex items-center justify-center transition flex-shrink-0 cursor-pointer">
-              <svg lucideX class="w-4 h-4"></svg>
+              class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 flex-shrink-0 cursor-pointer">
+              <svg lucideX class="w-4 h-4 sm:w-5 sm:h-5"></svg>
             </button>
           </div>
 

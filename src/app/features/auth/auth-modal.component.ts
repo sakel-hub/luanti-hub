@@ -55,8 +55,8 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
             type="button"
             (click)="authService.closeAuthModal()"
             aria-label="Close sign in dialog"
-            class="p-1.5 rounded-lg glass-icon-btn text-slate-400 hover:text-white transition cursor-pointer">
-            <svg lucideX class="w-5 h-5"></svg>
+            class="p-2 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer">
+            <svg lucideX class="w-4 h-4 sm:w-5 sm:h-5"></svg>
           </button>
         </div>
 

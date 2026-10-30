@@ -8,6 +8,10 @@
   "orientation": "any",
   "scope": "/",
   "start_url": "/",
+  "handle_links": "preferred",
+  "launch_handler": {
+    "client_mode": ["focus-existing", "navigate-existing", "auto"]
+  },
   "theme_color": "#020617",
   "background_color": "#020617",
   "categories": ["games", "developer", "utilities", "entertainment"],

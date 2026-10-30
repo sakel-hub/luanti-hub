@@ -766,10 +766,21 @@ export class PwaService {
     await this.sharePackage(title, text, url);
   }
 
-  async sharePackage(title: string, text: string, url: string): Promise<void> {
+  async sharePackage(title: string, _text: string, url: string): Promise<void> {
+    let copied = false;
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(url);
+        this.showToast('common.copiedToClipboard');
+        copied = true;
+      } catch {
+        // Ignore clipboard errors
+      }
+    }
     if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
       try {
-        await navigator.share({ title, text, url });
+        // Omit `text` when sharing `url` because macOS / Chromium share sheets concatenate `url + text` without a space on Copy
+        await navigator.share({ title, url });
         return;
       } catch (err: any) {
         if (err?.name === 'AbortError') {
@@ -778,7 +789,7 @@ export class PwaService {
         // Fall through to clipboard copy if navigator.share failed for a non-abort reason
       }
     }
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    if (!copied && typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
       try {
         await navigator.clipboard.writeText(url);
         this.showToast('common.copiedToClipboard');
