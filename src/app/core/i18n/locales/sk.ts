@@ -87,11 +87,15 @@ export const sk: TranslationDictionary = {
     sortDownloads: 'Najviac sťahované',
     sortRating: 'Najlepšie hodnotené',
     sortScore: 'Najlepšie hodnotené',
+    sortUpdated: 'Nedávno aktualizované',
     sortTitle: 'Názov (A–Z)',
     loadMore: 'Načítať ďalšie balíčky',
     showingCount: 'Zobrazených {visible} z {total} balíčkov',
     filterByTag: 'Značky:',
-    allTags: 'Všetky značky'
+    allTags: 'Všetky značky',
+    moreTags: '+{count} ďalších značiek',
+    lessTags: 'Zobraziť menej',
+    emptyGitDesc: 'Prehliadajte komunitné balíčky publikované priamo z GitHub, Codeberg a GitLab repozitárov, alebo pridajte vlastný.'
   },
   card: {
     downloads: 'stiahnutí',
@@ -152,6 +156,7 @@ export const sk: TranslationDictionary = {
     noDependencies: 'Nevyžaduje žiadne externé závislosti — funguje samostatne.',
     screenshots: 'Snímky Obrazovky & Médiá',
     enlargeImage: 'Zväčšiť obrázok',
+    videoPreview: 'Ukážka videa',
     readmeTitle: 'Dokumentácia README z Repozitára',
     linksTitle: 'Odkazy & Zdroje Projektu',
     website: 'Webstránka',

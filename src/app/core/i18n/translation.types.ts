@@ -102,11 +102,15 @@ export interface TranslationDictionary {
     sortDownloads: string;
     sortRating: string;
     sortScore: string;
+    sortUpdated: string;
     sortTitle: string;
     loadMore: string;
     showingCount: string;
     filterByTag: string;
     allTags: string;
+    moreTags: string;
+    lessTags: string;
+    emptyGitDesc: string;
   };
   card: {
     downloads: string;
@@ -167,6 +171,7 @@ export interface TranslationDictionary {
     noDependencies: string;
     screenshots: string;
     enlargeImage: string;
+    videoPreview: string;
     readmeTitle: string;
     linksTitle: string;
     website: string;

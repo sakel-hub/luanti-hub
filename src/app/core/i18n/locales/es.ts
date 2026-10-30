@@ -87,11 +87,15 @@ export const es: TranslationDictionary = {
     sortDownloads: 'Más descargados',
     sortRating: 'Mejor valorados',
     sortScore: 'Mejor valorados',
+    sortUpdated: 'Actualizados recientemente',
     sortTitle: 'Título (A–Z)',
     loadMore: 'Cargar más paquetes',
     showingCount: 'Mostrando {visible} de {total} paquetes',
     filterByTag: 'Etiquetas:',
-    allTags: 'Todas las etiquetas'
+    allTags: 'Todas las etiquetas',
+    moreTags: '+{count} etiquetas más',
+    lessTags: 'Mostrar menos',
+    emptyGitDesc: 'Explora paquetes comunitarios publicados directamente desde repositorios de GitHub, Codeberg y GitLab, o envía el tuyo.'
   },
   card: {
     downloads: 'descargas',
@@ -152,6 +156,7 @@ export const es: TranslationDictionary = {
     noDependencies: 'No requiere dependencias externas — funciona de forma independiente.',
     screenshots: 'Capturas de Pantalla y Medios',
     enlargeImage: 'Ampliar / Zoom',
+    videoPreview: 'Vista previa de video',
     readmeTitle: 'Documentación README del Repositorio',
     linksTitle: 'Enlaces y Recursos del Proyecto',
     website: 'Sitio Web',

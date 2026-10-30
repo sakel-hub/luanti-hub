@@ -299,20 +299,20 @@ import {
                     </svg>
                     <span>{{ 'header.supportKofi' | translate }}</span>
                   </div>
-                  <div class="flex items-center gap-1">
+                  <div class="flex items-center gap-1.5">
                     <a
                       href="https://ko-fi.com/sakel"
                       target="_blank"
                       rel="noopener noreferrer"
                       aria-label="Open Ko-fi in new tab"
-                      class="h-7 w-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                      class="p-1.5 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer">
                       <svg lucideExternalLink class="w-3.5 h-3.5"></svg>
                     </a>
                     <button
                       type="button"
                       (click)="isKofiMenuOpen.set(false)"
                       aria-label="Close Ko-fi panel"
-                      class="h-7 w-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                      class="p-1.5 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer">
                       <svg lucideX class="w-3.5 h-3.5"></svg>
                     </button>
                   </div>
@@ -406,7 +406,7 @@ import {
                 <div class="h-px bg-white/10 my-1"></div>
 
                 <a
-                  href="https://github.com/sakel-hub/luanti-hub/issues"
+                  href="https://github.com/sakel-hub/luanti-hub/issues/new/choose"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-white/10 transition text-left cursor-pointer">
@@ -420,10 +420,11 @@ import {
 
                 <button
                   type="button"
-                  (click)="onClearCache()"
-                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-rose-300 hover:bg-rose-500/20 hover:text-rose-200 transition text-left cursor-pointer">
+                  (click)="onClearCache($event)"
+                  [class]="confirmingClearCache() ? 'glass-btn-rose text-rose-100' : 'text-rose-300 hover:bg-rose-500/20 hover:text-rose-200'"
+                  class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold transition text-left cursor-pointer">
                   <svg lucideTrash class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
-                  <span>{{ 'header.clearCache' | translate }}</span>
+                  <span>{{ (confirmingClearCache() ? 'pwa.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
                 </button>
               </div>
             }
@@ -612,7 +613,7 @@ import {
 
           <!-- GitHub Issues & Feedback Quick Link (Mobile) -->
           <a
-            href="https://github.com/sakel-hub/luanti-hub/issues"
+            href="https://github.com/sakel-hub/luanti-hub/issues/new/choose"
             target="_blank"
             rel="noopener noreferrer"
             class="w-full px-3.5 py-2.5 rounded-xl glass-btn text-slate-200 hover:text-white font-semibold text-xs flex items-center justify-between cursor-pointer">
@@ -658,10 +659,11 @@ import {
 
             <button
               type="button"
-              (click)="onClearCache()"
-              class="px-3 py-1.5 rounded-lg glass-btn text-xs font-semibold text-rose-300 flex items-center gap-2 cursor-pointer">
+              (click)="onClearCache($event)"
+              [class]="confirmingClearCache() ? 'glass-btn-rose text-rose-100' : 'glass-btn text-rose-300'"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 cursor-pointer">
               <svg lucideTrash class="w-3.5 h-3.5 text-rose-400"></svg>
-              <span>{{ 'header.clearCache' | translate }}</span>
+              <span>{{ (confirmingClearCache() ? 'pwa.clearCacheConfirm' : 'header.clearCache') | translate }}</span>
             </button>
           </div>
         </div>
@@ -690,6 +692,8 @@ export class HeaderComponent {
   readonly isMobileKofiOpen = signal<boolean>(false);
   readonly isCheckingUpdates = signal<boolean>(false);
   readonly updateFeedback = signal<string | null>(null);
+  readonly confirmingClearCache = signal<boolean>(false);
+  private clearCacheConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
@@ -700,10 +704,12 @@ export class HeaderComponent {
       this.isSettingsMenuOpen.set(false);
       this.isKofiMenuOpen.set(false);
       this.isMobileMenuOpen.set(false);
+      this.confirmingClearCache.set(false);
     } else {
       this.isLanguageMenuOpen.set(false);
       this.isSettingsMenuOpen.set(false);
       this.isKofiMenuOpen.set(false);
+      this.confirmingClearCache.set(false);
     }
   }
 
@@ -713,6 +719,7 @@ export class HeaderComponent {
     this.isSettingsMenuOpen.set(false);
     this.isKofiMenuOpen.set(false);
     this.isMobileMenuOpen.set(false);
+    this.confirmingClearCache.set(false);
   }
 
   currentLocaleMeta() {
@@ -824,10 +831,26 @@ export class HeaderComponent {
     this.isSettingsMenuOpen.set(false);
   }
 
-  onClearCache(): void {
-    if (confirm(this.translationService.translate('pwa.clearCacheDesc'))) {
-      this.pwaService.forceClearCacheAndReload();
+  onClearCache(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    if (!this.confirmingClearCache()) {
+      this.confirmingClearCache.set(true);
+      if (this.clearCacheConfirmTimer) {
+        clearTimeout(this.clearCacheConfirmTimer);
+      }
+      this.clearCacheConfirmTimer = setTimeout(() => {
+        this.confirmingClearCache.set(false);
+        this.clearCacheConfirmTimer = null;
+      }, 4500);
+      return;
     }
+    if (this.clearCacheConfirmTimer) {
+      clearTimeout(this.clearCacheConfirmTimer);
+      this.clearCacheConfirmTimer = null;
+    }
+    this.confirmingClearCache.set(false);
     this.isSettingsMenuOpen.set(false);
+    this.isMobileMenuOpen.set(false);
+    this.pwaService.forceClearCacheAndReload();
   }
 }

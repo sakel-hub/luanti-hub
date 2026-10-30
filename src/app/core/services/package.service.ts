@@ -263,6 +263,11 @@ export class PackageService {
       if (sortBy === 'score') {
         return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
       }
+      if (sortBy === 'updated') {
+        const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
+        const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+        return timeB - timeA || (b.downloads || 0) - (a.downloads || 0);
+      }
       if (sortBy === 'title') {
         return (a.title || a.name).localeCompare(b.title || b.name);
       }
@@ -412,7 +417,7 @@ export class PackageService {
           return this.deduplicateCatalog([...current, ...activeUserPkgs]);
         });
       }
-    }, { allowSignalWrites: true });
+    });
 
     // Proactively hydrate visible packages whenever the user searches, switches categories, filters by tag, or loads more
     effect(() => {
@@ -1113,6 +1118,16 @@ export class PackageService {
         this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
         return;
       }
+    } else if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
+      const seed = (window as any).__LUANTI_INITIAL_PACKAGE__;
+      delete (window as any).__LUANTI_INITIAL_PACKAGE__;
+      if (seed?.author && seed?.name) {
+        this._isSubmitModalOpen.set(false);
+        this._isSetupModalOpen.set(false);
+        this._isLegalModalOpen.set(false);
+        this.openPackageModalById(String(seed.author), String(seed.name), true);
+        return;
+      }
     } else {
       this.pendingRoutePackage = null;
     }
@@ -1169,7 +1184,7 @@ export class PackageService {
     if (!this.router) return;
     const queryParams = this.buildActiveQueryParams();
     const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
-    if (currentPath !== '/') {
+    if (currentPath !== '/' && !this._activePackage() && !this.pendingRoutePackage) {
       this.router.navigate(['/'], {
         queryParams,
         replaceUrl: true
@@ -1897,10 +1912,13 @@ export class PackageService {
     this.syncQueryParamsToUrl();
   }
 
-  setSortBy(sort: SortOption): void {
+  setSortBy(sort: SortOption, updateUrl = true): void {
+    if (this._sortBy() === sort) return;
     this._sortBy.set(sort);
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
+    if (updateUrl) {
+      this.syncQueryParamsToUrl();
+    }
   }
 
   toggleFavoritesFilter(forceValue?: boolean): void {
@@ -3871,6 +3889,16 @@ export class PackageService {
     );
     if (exactMatch) return exactMatch;
 
+    // Official Luanti <-> Minetest author alias (ContentDB renamed the official Minetest account to Luanti)
+    if (cleanAuthor === 'luanti' || cleanAuthor === 'minetest') {
+      const officialAliasMatch = list.find(
+        p =>
+          (p.author.toLowerCase() === 'luanti' || p.author.toLowerCase() === 'minetest') &&
+          p.name.toLowerCase() === cleanName
+      );
+      if (officialAliasMatch) return officialAliasMatch;
+    }
+
     // Handle previously shared links where OS share sheet concatenated `url + short_desc` (e.g. "i3A Next Generation Inventory")
     const prefixMatch = list.find(p => {
       if (p.author.toLowerCase() !== cleanAuthor) return false;
@@ -3886,10 +3914,10 @@ export class PackageService {
     });
     if (prefixMatch) return prefixMatch;
 
-    // Fallback when author handle differs between Git and ContentDB
+    // Fallback when author handle differs between Git and ContentDB: pick highest-downloaded matching package name
     const sameNameCandidates = list.filter(p => p.name.toLowerCase() === cleanName);
-    if (sameNameCandidates.length === 1) {
-      return sameNameCandidates[0];
+    if (sameNameCandidates.length > 0) {
+      return [...sameNameCandidates].sort((a, b) => (b.downloads || 0) - (a.downloads || 0))[0];
     }
     return undefined;
   }
@@ -3903,6 +3931,37 @@ export class PackageService {
       const shouldFixUrl = updateUrl || found.name.toLowerCase() !== name.trim().toLowerCase();
       this.openPackageModal(found, shouldFixUrl);
       return;
+    }
+
+    // Immediately open the modal with an initial package object so deep links (/package/:author/:name)
+    // render the dialog at 0ms while full metadata, releases, and reviews hydrate in place.
+    const edgeSeed =
+      typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__
+        ? (window as any).__LUANTI_INITIAL_PACKAGE__
+        : null;
+    const matchesSeed =
+      edgeSeed &&
+      String(edgeSeed.author || '').toLowerCase() === author.trim().toLowerCase() &&
+      String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase();
+
+    const initialPkg = this.normalizePackage(
+      matchesSeed
+        ? edgeSeed
+        : {
+            id: `${author}/${name}`,
+            author,
+            name,
+            title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+            type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
+            short_desc: '',
+            thumbnail: `https://content.luanti.org/thumbnails/1/${encodeURIComponent(author)}/${encodeURIComponent(name)}.png`
+          }
+    );
+
+    const currentActive = this._activePackage();
+    if (!currentActive || currentActive.id.toLowerCase() !== initialPkg.id.toLowerCase()) {
+      this._activePackage.set(initialPkg);
+      this.updateSeoMeta(initialPkg);
     }
 
     try {
@@ -3921,7 +3980,6 @@ export class PackageService {
             const item = await res.json();
             if (item && (item.name || item.title)) {
               const pkg = this.normalizePackage(item);
-              this.pendingRoutePackage = null;
               this._activePackage.set(pkg);
               this.updateSeoMeta(pkg);
               this.loadPackageDetails(pkg, true);
@@ -3935,6 +3993,17 @@ export class PackageService {
     } catch {
       // Fallback handled when initCatalog() completes and checks pendingRoutePackage
     }
+  }
+
+  private modalSubOverlayCloser: (() => boolean) | null = null;
+  private returnToPackageAfterModal: LuantiPackage | null = null;
+
+  registerModalSubOverlayCloser(closer: (() => boolean) | null): void {
+    this.modalSubOverlayCloser = closer;
+  }
+
+  tryCloseModalSubOverlay(): boolean {
+    return this.modalSubOverlayCloser ? this.modalSubOverlayCloser() : false;
   }
 
   closePackageModal(updateUrl = true): void {
@@ -3961,7 +4030,12 @@ export class PackageService {
     }
   }
 
-  openSetupModal(updateUrl = true): void {
+  openSetupModal(updateUrl = true, returnToPkg?: LuantiPackage): void {
+    if (returnToPkg !== undefined) {
+      this.returnToPackageAfterModal = returnToPkg;
+    } else if (this._activePackage()) {
+      this.returnToPackageAfterModal = this._activePackage();
+    }
     this._isSetupModalOpen.set(true);
     if (updateUrl) {
       this.navigatePreservingScroll(['/setup']);
@@ -3970,6 +4044,12 @@ export class PackageService {
 
   closeSetupModal(updateUrl = true): void {
     this._isSetupModalOpen.set(false);
+    const prevPkg = this.returnToPackageAfterModal;
+    this.returnToPackageAfterModal = null;
+    if (prevPkg) {
+      this.openPackageModal(prevPkg, updateUrl);
+      return;
+    }
     this.seoService?.resetToHome();
     if (updateUrl) {
       this.navigatePreservingScroll(['/']);

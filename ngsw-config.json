@@ -32,7 +32,8 @@
     {
       "name": "luantihub-api",
       "urls": [
-        "/api/packages/**"
+        "/api/packages/**",
+        "/api/tags"
       ],
       "cacheConfig": {
         "maxSize": 250,
@@ -62,9 +63,11 @@
         "https://contentdb.milcho.org/storage/**",
         "https://raw.githubusercontent.com/**",
         "https://codeberg.org/**/raw/**",
+        "https://git.minetest.land/**/raw/**",
         "https://gitlab.com/**/raw/**",
         "https://avatars.githubusercontent.com/**",
         "https://codeberg.org/avatars/**",
+        "https://git.minetest.land/avatars/**",
         "https://gitlab.com/uploads/**"
       ],
       "cacheConfig": {

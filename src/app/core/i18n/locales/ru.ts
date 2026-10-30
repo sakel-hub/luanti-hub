@@ -87,11 +87,15 @@ export const ru: TranslationDictionary = {
     sortDownloads: 'По загрузкам',
     sortRating: 'По рейтингу',
     sortScore: 'По рейтингу',
+    sortUpdated: 'Недавно обновленные',
     sortTitle: 'По названию (А–Я)',
     loadMore: 'Загрузить еще пакеты',
     showingCount: 'Показано {visible} из {total} пакетов',
     filterByTag: 'Теги:',
-    allTags: 'Все теги'
+    allTags: 'Все теги',
+    moreTags: '+{count} тегов',
+    lessTags: 'Скрыть',
+    emptyGitDesc: 'Просматривайте пакеты сообщества из репозиториев GitHub, Codeberg и GitLab или добавьте свой собственный.'
   },
   card: {
     downloads: 'загрузок',
@@ -152,6 +156,7 @@ export const ru: TranslationDictionary = {
     noDependencies: 'Внешние зависимости не требуются — работает автономно.',
     screenshots: 'Скриншоты и Медиа',
     enlargeImage: 'Увеличить / Зум',
+    videoPreview: 'Видео превью',
     readmeTitle: 'Документация README из Репозитория',
     linksTitle: 'Ссылки и Ресурсы Проекта',
     website: 'Веб-сайт',

@@ -66,7 +66,7 @@ describe('App & Core Services', () => {
     fixture.detectChanges();
 
     const issueLinks = compiled.querySelectorAll<HTMLAnchorElement>(
-      'a[href="https://github.com/sakel-hub/luanti-hub/issues"]'
+      'a[href="https://github.com/sakel-hub/luanti-hub/issues/new/choose"]'
     );
     expect(issueLinks.length).toBeGreaterThanOrEqual(2);
     issueLinks.forEach(link => {
@@ -1566,15 +1566,27 @@ description = Mob animation and spawning framework.
       });
     }
 
-    // Simulate deep-link navigation to /package/mt-mods/i3 BEFORE catalog boot completes
+    // Simulate deep-link navigation to /package/Luanti/minetest_game BEFORE catalog boot completes
     (pkgService as any)._packages.set([]);
     (pkgService as any)._activePackage.set(null);
-    (pkgService as any).syncStateFromUrl('/package/mt-mods/i3');
-    expect((pkgService as any).pendingRoutePackage).toEqual({ author: 'mt-mods', name: 'i3' });
+    (pkgService as any).syncStateFromUrl('/package/Luanti/minetest_game');
+    expect((pkgService as any).pendingRoutePackage).toEqual({ author: 'Luanti', name: 'minetest_game' });
+    // Modal opens immediately at 0ms with initial package state while catalog/details load
+    expect(pkgService.activePackage()?.name).toBe('minetest_game');
+    expect(pkgService.activePackage()?.type).toBe('game');
 
-    // Once boot payload arrives, the package detail modal opens automatically
+    // Once boot payload arrives (even if upstream author is 'Minetest' or 'Luanti'), the full package merges into the open modal
     (pkgService as any).applyBootPayload({
       packages: [
+        {
+          id: 'Minetest/minetest_game',
+          author: 'Minetest',
+          name: 'minetest_game',
+          title: 'Minetest Game',
+          type: 'game',
+          short_desc: 'The classic default game',
+          downloads: 950000
+        },
         {
           id: 'mt-mods/i3',
           author: 'mt-mods',
@@ -1586,11 +1598,105 @@ description = Mob animation and spawning framework.
         }
       ]
     });
-    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+    expect(pkgService.activePackage()?.name).toBe('minetest_game');
+    expect(pkgService.activePackage()?.title).toBe('Minetest Game');
+    expect(pkgService.activePackage()?.downloads).toBe(950000);
 
     // Also resolve previously broken links that had short_desc concatenated onto the package name
     (pkgService as any)._activePackage.set(null);
     await pkgService.openPackageModalById('mt-mods', 'i3A Next Generation Inventory', false);
     expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+  });
+
+  it('should layer Escape key dismissal in PackageDetailModalComponent (Lightbox -> Report -> Tag Editor -> Modal) and navigate Lightbox via window Arrow keys', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const appFixture = TestBed.createComponent(App);
+    const appComp = appFixture.componentInstance;
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+
+    const pkg = (pkgService as any).normalizePackage({
+      id: 'mt-mods/i3',
+      author: 'mt-mods',
+      name: 'i3',
+      title: 'i3',
+      type: 'mod',
+      screenshots: [
+        'https://content.luanti.org/shot-1.png',
+        'https://content.luanti.org/shot-2.png'
+      ]
+    });
+
+    (pkgService as any)._activePackage.set(pkg);
+    modalComp.package = pkg;
+    modalFixture.detectChanges();
+
+    // Open Lightbox, Report form, and Tag Editor
+    modalComp.openLightbox('https://content.luanti.org/shot-1.png');
+    modalComp.isReportOpen.set(true);
+    modalComp.isEditingTags.set(true);
+
+    // Window-level ArrowRight advances Lightbox image immediately without requiring manual focus
+    modalComp.handleWindowKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(modalComp.lightboxImageUrl()).toBe('https://content.luanti.org/shot-2.png');
+
+    // 1st Escape: closes Lightbox only, keeping Package Detail Modal open
+    appComp.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(modalComp.lightboxImageUrl()).toBeNull();
+    expect(modalComp.isReportOpen()).toBe(true);
+    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+
+    // 2nd Escape: closes inline Report form, keeping Package Detail Modal open
+    appComp.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(modalComp.isReportOpen()).toBe(false);
+    expect(modalComp.isEditingTags()).toBe(true);
+    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+
+    // 3rd Escape: closes inline Tag Editor, keeping Package Detail Modal open
+    appComp.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(modalComp.isEditingTags()).toBe(false);
+    expect(pkgService.activePackage()?.id).toBe('mt-mods/i3');
+
+    // 4th Escape: closes the Package Detail Modal itself
+    appComp.handleKeyDown(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(pkgService.activePackage()).toBeNull();
+  });
+
+  it('should restore the previous Package Detail Modal after closing the Setup Guide and sort by Recently Updated', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const oldPkg = (pkgService as any).normalizePackage({
+      id: 'author/older_mod',
+      author: 'author',
+      name: 'older_mod',
+      title: 'Older Mod',
+      type: 'mod',
+      downloads: 5000,
+      updated_at: '2025-01-10T00:00:00Z'
+    });
+    const recentPkg = (pkgService as any).normalizePackage({
+      id: 'author/recent_mod',
+      author: 'author',
+      name: 'recent_mod',
+      title: 'Recent Mod',
+      type: 'mod',
+      downloads: 100,
+      updated_at: '2026-10-28T00:00:00Z'
+    });
+
+    (pkgService as any)._packages.set([oldPkg, recentPkg]);
+    pkgService.setSortBy('updated', false);
+    expect(pkgService.filteredPackages().map(p => p.name)).toEqual(['recent_mod', 'older_mod']);
+
+    // Open Setup Modal from Recent Mod and verify closing Setup Modal restores Recent Mod
+    pkgService.openPackageModal(recentPkg, false);
+    expect(pkgService.activePackage()?.name).toBe('recent_mod');
+
+    pkgService.closePackageModal(false);
+    pkgService.openSetupModal(false, recentPkg);
+    expect(pkgService.isSetupModalOpen()).toBe(true);
+
+    pkgService.closeSetupModal(false);
+    expect(pkgService.isSetupModalOpen()).toBe(false);
+    expect(pkgService.activePackage()?.name).toBe('recent_mod');
   });
 });

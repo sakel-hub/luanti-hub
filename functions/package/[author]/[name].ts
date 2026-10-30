@@ -24,9 +24,30 @@ export async function onRequestGet(context: {
   const origin = reqUrl.origin || 'https://luanti-hub.pages.dev';
   const canonicalUrl = `${origin}/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
 
-  // Fetch SPA shell from Cloudflare Pages static assets
-  const assetUrl = new URL('/index.html', origin);
-  const baseResponse = await context.env.ASSETS.fetch(new Request(assetUrl.toString(), context.request));
+  // Fetch SPA shell from Cloudflare Pages static assets using '/' (not '/index.html', which triggers a 308 redirect to '/' on Cloudflare Pages)
+  const assetUrl = new URL('/', origin);
+  let assetRes = await context.env.ASSETS.fetch(
+    new Request(assetUrl.toString(), {
+      method: 'GET',
+      headers: { Accept: 'text/html,application/xhtml+xml' }
+    })
+  );
+  if (assetRes.status >= 300 && assetRes.status < 400) {
+    const redirectLoc = assetRes.headers.get('Location') || '/';
+    assetRes = await context.env.ASSETS.fetch(
+      new Request(new URL(redirectLoc, origin).toString(), {
+        method: 'GET',
+        headers: { Accept: 'text/html,application/xhtml+xml' }
+      })
+    );
+  }
+  const baseResponse = new Response(assetRes.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate'
+    }
+  });
 
   let pkgTitle = `${name} by ${author}`;
   let pkgDesc = `Download and install ${name} by ${author} for Luanti (Minetest) on Luanti Hub.`;
@@ -116,6 +137,16 @@ export async function onRequestGet(context: {
   }
 
   const jsonLd = JSON.stringify(jsonLdObj);
+  const initialPkgScript = JSON.stringify({
+    author,
+    name,
+    title: pkgTitle.replace(new RegExp(`\\s+by\\s+${author}$`, 'i'), ''),
+    short_desc: pkgDesc,
+    thumbnail: pkgThumb,
+    type: pkgType,
+    downloads: pkgDownloads,
+    score: pkgScore
+  });
 
   if (typeof (globalThis as any).HTMLRewriter === 'undefined') {
     return baseResponse;
@@ -174,9 +205,10 @@ export async function onRequestGet(context: {
     })
     .on('head', {
       element(el: any) {
-        el.append(`<script id="luanti-pkg-jsonld" type="application/ld+json">${jsonLd}</script>`, {
-          html: true
-        });
+        el.append(
+          `<script id="luanti-pkg-jsonld" type="application/ld+json">${jsonLd}</script><script id="luanti-initial-pkg">window.__LUANTI_INITIAL_PACKAGE__=${initialPkgScript};</script>`,
+          { html: true }
+        );
       }
     });
 

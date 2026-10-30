@@ -115,7 +115,24 @@ export class AuthService {
         this._isAuthModalOpen.set(true);
       } else if (authSuccess) {
         this.clearAuthCache();
-        this._isProfileDrawerOpen.set(true);
+        let returnedToPackage = false;
+        try {
+          const savedPath = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('lh_oauth_return_path') : null;
+          if (savedPath) {
+            sessionStorage.removeItem('lh_oauth_return_path');
+            if (savedPath.startsWith('/package/') || savedPath.startsWith('/packages/')) {
+              returnedToPackage = true;
+              if (this.router) {
+                setTimeout(() => this.router?.navigateByUrl(savedPath), 0);
+              }
+            }
+          }
+        } catch {
+          // Ignore storage error
+        }
+        if (!returnedToPackage && !window.location.pathname.startsWith('/package/')) {
+          this._isProfileDrawerOpen.set(true);
+        }
       }
       if (authError || authSuccess) {
         params.delete('auth_error');
@@ -226,7 +243,10 @@ export class AuthService {
     }
   }
 
-  openAuthModal(): void {
+  private returnToPackageOnAuthClose = false;
+
+  openAuthModal(fromPackageReview = false): void {
+    this.returnToPackageOnAuthClose = fromPackageReview;
     this._authError.set(null);
     this._isAuthModalOpen.set(true);
   }
@@ -234,6 +254,7 @@ export class AuthService {
   closeAuthModal(): void {
     this._isAuthModalOpen.set(false);
     this._authError.set(null);
+    this.returnToPackageOnAuthClose = false;
   }
 
   openProfileDrawer(updateUrl = true): void {
@@ -273,6 +294,13 @@ export class AuthService {
       this.isRedirectingOAuth = true;
       this.clearAuthCache();
       if (typeof window !== 'undefined') {
+        try {
+          if (this.returnToPackageOnAuthClose && window.location.pathname.startsWith('/package/')) {
+            sessionStorage.setItem('lh_oauth_return_path', window.location.pathname);
+          }
+        } catch {
+          // Ignore storage error
+        }
         const cleanHint = (loginHint || '').trim();
         const query = new URLSearchParams();
         if (cleanHint) query.set('login', cleanHint);
@@ -317,8 +345,11 @@ export class AuthService {
         }
         this.clearAuthCache();
         await this.initAuth(true);
+        const stayOnPackage = this.returnToPackageOnAuthClose;
         this.closeAuthModal();
-        this.openProfileDrawer();
+        if (!stayOnPackage) {
+          this.openProfileDrawer();
+        }
         return { success: true };
       }
 
@@ -348,8 +379,11 @@ export class AuthService {
         packages: []
       };
       this._currentUser.set(localUser);
+      const stayOnPackage = this.returnToPackageOnAuthClose;
       this.closeAuthModal();
-      this.openProfileDrawer();
+      if (!stayOnPackage) {
+        this.openProfileDrawer();
+      }
       return { success: true };
     } catch (err: any) {
       return { success: false, message: err.message || 'Connection error during sign-in.' };

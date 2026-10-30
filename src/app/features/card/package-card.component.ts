@@ -117,7 +117,7 @@ import {
               type="button"
               (click)="toggleHoverMute($event)"
               [attr.aria-label]="(isHoverMuted() ? 'card.unmuteVideo' : 'card.muteVideo') | translate"
-              class="absolute bottom-2 right-2 z-20 w-7 h-7 rounded-full bg-slate-950/80 hover:bg-slate-900 text-white border border-white/20 backdrop-blur-md flex items-center justify-center transition hover:scale-110 cursor-pointer shadow-lg">
+              class="absolute bottom-2 right-2 z-20 w-7 h-7 rounded-xl glass-btn text-slate-100 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer shadow-lg">
               @if (isHoverMuted()) {
                 <svg class="w-3.5 h-3.5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>

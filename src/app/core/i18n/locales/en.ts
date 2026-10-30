@@ -87,11 +87,15 @@ export const en: TranslationDictionary = {
     sortDownloads: 'Most Downloaded',
     sortRating: 'Highest Rated',
     sortScore: 'Highest Rated',
+    sortUpdated: 'Recently Updated',
     sortTitle: 'Title (A–Z)',
     loadMore: 'Load More Packages',
     showingCount: 'Showing {visible} of {total} packages',
     filterByTag: 'Tags:',
-    allTags: 'All Tags'
+    allTags: 'All Tags',
+    moreTags: '+{count} More Tags',
+    lessTags: 'Show Less',
+    emptyGitDesc: 'Browse community-submitted packages published directly from GitHub, Codeberg, and GitLab repositories, or submit your own.'
   },
   card: {
     downloads: 'downloads',
@@ -152,6 +156,7 @@ export const en: TranslationDictionary = {
     noDependencies: 'No external dependencies required — works standalone out of the box.',
     screenshots: 'Screenshots & Media',
     enlargeImage: 'Enlarge / Zoom',
+    videoPreview: 'Video Preview',
     readmeTitle: 'Repository README & Documentation',
     linksTitle: 'Project Links & Resources',
     website: 'Website',

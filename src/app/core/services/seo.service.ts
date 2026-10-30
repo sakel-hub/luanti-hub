@@ -121,12 +121,19 @@ export class SeoService {
     };
 
     if (pkg.score > 0) {
+      const threadCounts = pkg.review_thread_counts;
+      const realReviewCount = threadCounts
+        ? (threadCounts.positive || 0) + (threadCounts.neutral || 0) + (threadCounts.negative || 0)
+        : 0;
+      const resolvedCount = realReviewCount > 0
+        ? realReviewCount
+        : Math.max(1, Math.round((pkg.downloads || 100) / 50));
       schema['aggregateRating'] = {
         '@type': 'AggregateRating',
         ratingValue: String(pkg.score),
         bestRating: '5',
         worstRating: '1',
-        ratingCount: String(Math.max(1, Math.round((pkg.downloads || 100) / 50)))
+        ratingCount: String(resolvedCount)
       };
     }
 

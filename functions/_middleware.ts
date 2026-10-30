@@ -87,8 +87,20 @@ export async function onRequest(context: {
     const res = await next();
     const assetsBinding = context.env?.['ASSETS'];
     if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
-      const indexUrl = new URL('/index.html', url.origin);
-      return assetsBinding.fetch(new Request(indexUrl.toString(), request));
+      const rootUrl = new URL('/', url.origin);
+      const spaRes = await assetsBinding.fetch(
+        new Request(rootUrl.toString(), {
+          method: 'GET',
+          headers: { Accept: 'text/html,application/xhtml+xml' }
+        })
+      );
+      return new Response(spaRes.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate'
+        }
+      });
     }
     return res;
   }

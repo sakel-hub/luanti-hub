@@ -7,8 +7,10 @@ import {
   inject,
   signal,
   computed,
+  HostListener,
   OnInit,
-  OnChanges
+  OnChanges,
+  OnDestroy
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -384,6 +386,8 @@ import {
                     <div
                       (keydown.arrowleft)="prevMediaSlide($event)"
                       (keydown.arrowright)="nextMediaSlide($event)"
+                      (touchstart)="onMediaTouchStart($event)"
+                      (touchend)="onMediaTouchEnd($event)"
                       tabindex="0"
                       role="region"
                       aria-roledescription="carousel"
@@ -440,7 +444,7 @@ import {
                                     <svg class="w-3 h-3 text-sky-400 fill-current" viewBox="0 0 24 24">
                                       <polygon points="5 3 19 12 5 21 5 3"></polygon>
                                     </svg>
-                                    <span>Video Preview</span>
+                                    <span>{{ 'modal.videoPreview' | translate }}</span>
                                   </span>
                                 </div>
                               }
@@ -796,9 +800,18 @@ import {
                     <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                       {{ 'modal.technicalId' | translate }}
                     </span>
-                    <code class="text-sky-300 bg-slate-950/80 border border-white/10 px-2 py-0.5 rounded-md font-mono text-xs mt-1 inline-block">
-                      {{ package.name }}
-                    </code>
+                    <button
+                      type="button"
+                      (click)="copyTechnicalId()"
+                      [appTooltip]="copiedTechId() ? ('modal.copied' | translate) : package.name"
+                      class="text-sky-300 hover:text-white bg-slate-950/80 hover:bg-slate-900 border border-white/10 hover:border-sky-400/40 px-2 py-0.5 rounded-md font-mono text-xs mt-1 inline-flex items-center gap-1.5 transition cursor-pointer group">
+                      <span>{{ package.name }}</span>
+                      @if (copiedTechId()) {
+                        <svg lucideCheck class="w-3 h-3 text-emerald-400"></svg>
+                      } @else {
+                        <svg lucideCopy class="w-3 h-3 text-slate-500 group-hover:text-sky-300 transition-colors"></svg>
+                      }
+                    </button>
                   </div>
 
                   @if (package.updated_at || package.created_at) {
@@ -1392,6 +1405,8 @@ import {
             (keydown.escape)="closeLightbox($event)"
             (keydown.arrowleft)="prevLightboxImage($event)"
             (keydown.arrowright)="nextLightboxImage($event)"
+            (touchstart)="onLightboxTouchStart($event)"
+            (touchend)="onLightboxTouchEnd($event)"
             tabindex="0"
             role="dialog"
             aria-modal="true"
@@ -1438,7 +1453,7 @@ import {
               />
             </div>
 
-            @if (package.screenshots && package.screenshots.length > 1) {
+            @if (activeScreenshots().length > 1) {
               <!-- Lightbox Prev / Next Navigation Controls -->
               <div
                 (click)="$event.stopPropagation()"
@@ -1466,7 +1481,7 @@ import {
     }
   `
 })
-export class PackageDetailModalComponent implements OnInit, OnChanges {
+export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy {
   @Input({ required: true }) package!: LuantiPackage;
 
   readonly packageService = inject(PackageService);
@@ -1480,6 +1495,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   readonly releases = signal<PackageRelease[]>([]);
   readonly copied = signal(false);
   readonly copiedUrl = signal(false);
+  readonly copiedTechId = signal(false);
   readonly showConfLocations = signal(false);
   readonly activeBannerUrl = signal<string | null>(null);
 
@@ -1489,6 +1505,16 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   readonly isVideoPlaying = signal<boolean>(false);
   readonly lightboxImageUrl = signal<string | null>(null);
   readonly isLightboxZoomed = signal<boolean>(false);
+  private mediaTouchStartX = 0;
+  private mediaTouchStartY = 0;
+  private lightboxTouchStartX = 0;
+  private lightboxTouchStartY = 0;
+
+  readonly activeScreenshots = computed<string[]>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg || !Array.isArray(pkg.screenshots)) return [];
+    return pkg.screenshots.filter(Boolean);
+  });
 
   readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string }>>(() => {
     const pkg = this.packageService.activePackage() || this.package;
@@ -1778,11 +1804,42 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   private loadedPackageKey = '';
 
   ngOnInit(): void {
+    this.packageService.registerModalSubOverlayCloser(() => {
+      if (this.lightboxImageUrl()) {
+        this.closeLightbox();
+        return true;
+      }
+      if (this.isReportOpen()) {
+        this.isReportOpen.set(false);
+        return true;
+      }
+      if (this.isEditingTags()) {
+        this.isEditingTags.set(false);
+        return true;
+      }
+      return false;
+    });
     this.ensureExtraDataLoaded();
   }
 
   ngOnChanges(): void {
     this.ensureExtraDataLoaded();
+  }
+
+  ngOnDestroy(): void {
+    this.packageService.registerModalSubOverlayCloser(null);
+  }
+
+  @HostListener('window:keydown', ['$event'])
+  handleWindowKeyDown(event: KeyboardEvent): void {
+    if (!this.lightboxImageUrl()) return;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      this.prevLightboxImage(event);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      this.nextLightboxImage(event);
+    }
   }
 
   private async ensureExtraDataLoaded(): Promise<void> {
@@ -1901,11 +1958,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
   prevLightboxImage(event?: Event): void {
     if (event) event.stopPropagation();
-    const shots = this.package?.screenshots || [];
+    const shots = this.activeScreenshots();
     const current = this.lightboxImageUrl();
     if (shots.length <= 1 || !current) return;
     const idx = shots.indexOf(current);
-    const prevIdx = (idx - 1 + shots.length) % shots.length;
+    const prevIdx = ((idx >= 0 ? idx : 0) - 1 + shots.length) % shots.length;
     const nextShot = shots[prevIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
@@ -1918,11 +1975,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
 
   nextLightboxImage(event?: Event): void {
     if (event) event.stopPropagation();
-    const shots = this.package?.screenshots || [];
+    const shots = this.activeScreenshots();
     const current = this.lightboxImageUrl();
     if (shots.length <= 1 || !current) return;
     const idx = shots.indexOf(current);
-    const nextIdx = (idx + 1) % shots.length;
+    const nextIdx = ((idx >= 0 ? idx : 0) + 1) % shots.length;
     const nextShot = shots[nextIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
@@ -1931,6 +1988,61 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
       this.mediaCarouselIndex.set(slideIdx);
       this.scrollActiveThumbnailIntoView(slideIdx);
     }
+  }
+
+  onMediaTouchStart(event: TouchEvent): void {
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+    this.mediaTouchStartX = touch.clientX;
+    this.mediaTouchStartY = touch.clientY;
+  }
+
+  onMediaTouchEnd(event: TouchEvent): void {
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - this.mediaTouchStartX;
+    const dy = touch.clientY - this.mediaTouchStartY;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < 0) {
+        this.nextMediaSlide();
+      } else {
+        this.prevMediaSlide();
+      }
+    }
+  }
+
+  onLightboxTouchStart(event: TouchEvent): void {
+    if (this.isLightboxZoomed()) return;
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+    this.lightboxTouchStartX = touch.clientX;
+    this.lightboxTouchStartY = touch.clientY;
+  }
+
+  onLightboxTouchEnd(event: TouchEvent): void {
+    if (this.isLightboxZoomed()) return;
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - this.lightboxTouchStartX;
+    const dy = touch.clientY - this.lightboxTouchStartY;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < 0) {
+        this.nextLightboxImage();
+      } else {
+        this.prevLightboxImage();
+      }
+    }
+  }
+
+  copyTechnicalId(): void {
+    const pkg = this.packageService.activePackage() || this.package;
+    const techId = pkg?.name || '';
+    if (!techId) return;
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(techId).catch(() => {});
+    }
+    this.copiedTechId.set(true);
+    setTimeout(() => this.copiedTechId.set(false), 2000);
   }
 
   openEditTags(): void {
@@ -1997,14 +2109,14 @@ export class PackageDetailModalComponent implements OnInit, OnChanges {
   }
 
   openSetupModal(): void {
-    this.packageService.trackDownload(this.package);
+    const pkg = this.packageService.activePackage() || this.package;
+    this.packageService.trackDownload(pkg);
     this.packageService.closePackageModal(false);
-    this.packageService.openSetupModal();
+    this.packageService.openSetupModal(true, pkg);
   }
 
   openSignInForReview(): void {
-    this.packageService.closePackageModal();
-    this.authService.openAuthModal();
+    this.authService.openAuthModal(true);
   }
 
   onFavoriteClick(): void {

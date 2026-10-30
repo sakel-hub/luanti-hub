@@ -161,6 +161,9 @@ export class App {
       } else if (this.authService.isProfileDrawerOpen()) {
         this.authService.closeProfileDrawer();
       } else if (this.packageService.activePackage()) {
+        if (this.packageService.tryCloseModalSubOverlay()) {
+          return;
+        }
         this.packageService.closePackageModal();
       } else if (this.packageService.isSubmitModalOpen()) {
         this.packageService.closeSubmitModal();

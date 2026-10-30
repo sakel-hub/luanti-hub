@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, computed, inject, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, Input, OnChanges, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HeroBillboardComponent } from '../hero/hero-billboard.component';
@@ -178,10 +178,10 @@ import {
                 [class]="isTagsExpanded() ? 'bg-sky-500/20 text-sky-300 border-sky-400/40' : 'glass-pill text-sky-400 hover:text-sky-300'"
                 class="px-3 py-1 rounded-full border text-xs font-bold flex items-center gap-1 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
                 @if (isTagsExpanded()) {
-                  <span>Less</span>
+                  <span>{{ 'catalog.lessTags' | translate }}</span>
                   <svg lucideChevronUp class="w-3.5 h-3.5"></svg>
                 } @else {
-                  <span>+{{ extraTags().length }} More</span>
+                  <span>{{ 'catalog.moreTags' | translate: { count: extraTags().length } }}</span>
                   <svg lucideChevronDown class="w-3.5 h-3.5"></svg>
                 }
               </button>
@@ -230,6 +230,7 @@ import {
                 class="bg-transparent text-white font-bold focus:outline-none cursor-pointer">
                 <option value="downloads" class="bg-slate-900 text-white">{{ 'catalog.sortDownloads' | translate }}</option>
                 <option value="score" class="bg-slate-900 text-white">{{ 'catalog.sortScore' | translate }}</option>
+                <option value="updated" class="bg-slate-900 text-white">{{ 'catalog.sortUpdated' | translate }}</option>
                 <option value="title" class="bg-slate-900 text-white">{{ 'catalog.sortTitle' | translate }}</option>
               </select>
             </div>
@@ -411,7 +412,7 @@ import {
                     </button>
                   </h2>
                   <p class="text-xs text-slate-400">
-                    No decentralized Git community repositories have been published yet. Be the first creator to index a repository from GitHub, Codeberg, or GitLab!
+                    {{ 'catalog.emptyGitDesc' | translate }}
                   </p>
                 </div>
               </div>
@@ -451,9 +452,22 @@ import {
     }
   `
 })
-export class CatalogComponent {
+export class CatalogComponent implements OnChanges {
+  @Input() author?: string;
+  @Input() name?: string;
+
   readonly packageService = inject(PackageService);
   readonly isTagsExpanded = signal(false);
+
+  ngOnChanges(): void {
+    if (this.author && this.name) {
+      const current = this.packageService.activePackage();
+      const targetId = `${this.author}/${this.name}`.toLowerCase();
+      if (!current || current.id.toLowerCase() !== targetId) {
+        this.packageService.openPackageModalById(this.author, this.name, false);
+      }
+    }
+  }
 
   private readonly PRIMARY_TAG_LIMIT = 8;
 
