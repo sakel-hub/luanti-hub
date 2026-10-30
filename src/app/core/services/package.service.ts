@@ -979,7 +979,11 @@ export class PackageService {
 
   private initRouterSync(): void {
     if (typeof window !== 'undefined') {
-      this.syncStateFromUrl(window.location.pathname + window.location.search);
+      const initialUrl =
+        this.router?.url && this.router.url !== '/'
+          ? this.router.url
+          : window.location.pathname + window.location.search;
+      this.syncStateFromUrl(initialUrl);
       this.initPwaLaunchCapture();
     }
     if (this.router) {
@@ -1078,6 +1082,18 @@ export class PackageService {
       path === '/profile' ||
       path === '/legal';
 
+    const isFirstSync = !this.initialUrlSynced;
+    const edgeSeed =
+      typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__
+        ? (window as any).__LUANTI_INITIAL_PACKAGE__
+        : null;
+    if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
+      delete (window as any).__LUANTI_INITIAL_PACKAGE__;
+    }
+    if (edgeSeed?.author && edgeSeed?.name) {
+      this.edgeInitialPackageSeed = edgeSeed;
+    }
+
     // Only apply filter query params on initial page load or when navigating to the catalog root ('/').
     // Opening a modal route (/package/:author/:name, /submit, /setup, /legal) must never mutate the underlying catalog filter state.
     if (!this.initialUrlSynced || !isModalRoute) {
@@ -1118,16 +1134,12 @@ export class PackageService {
         this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
         return;
       }
-    } else if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
-      const seed = (window as any).__LUANTI_INITIAL_PACKAGE__;
-      delete (window as any).__LUANTI_INITIAL_PACKAGE__;
-      if (seed?.author && seed?.name) {
-        this._isSubmitModalOpen.set(false);
-        this._isSetupModalOpen.set(false);
-        this._isLegalModalOpen.set(false);
-        this.openPackageModalById(String(seed.author), String(seed.name), true);
-        return;
-      }
+    } else if (isFirstSync && edgeSeed?.author && edgeSeed?.name) {
+      this._isSubmitModalOpen.set(false);
+      this._isSetupModalOpen.set(false);
+      this._isLegalModalOpen.set(false);
+      this.openPackageModalById(String(edgeSeed.author), String(edgeSeed.name), true);
+      return;
     } else {
       this.pendingRoutePackage = null;
     }
@@ -3922,7 +3934,11 @@ export class PackageService {
     return undefined;
   }
 
+  private modalOpenRequestSeq = 0;
+  private edgeInitialPackageSeed: { author: string; name: string; [key: string]: any } | null = null;
+
   async openPackageModalById(author: string, name: string, updateUrl = false): Promise<void> {
+    const reqSeq = ++this.modalOpenRequestSeq;
     this.pendingRoutePackage = { author, name };
     const found = this.findPackageInCatalogByRoute(author, name);
 
@@ -3936,26 +3952,29 @@ export class PackageService {
     // Immediately open the modal with an initial package object so deep links (/package/:author/:name)
     // render the dialog at 0ms while full metadata, releases, and reviews hydrate in place.
     const edgeSeed =
-      typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__
+      this.edgeInitialPackageSeed ||
+      (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__
         ? (window as any).__LUANTI_INITIAL_PACKAGE__
-        : null;
+        : null);
+    if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
+      delete (window as any).__LUANTI_INITIAL_PACKAGE__;
+    }
     const matchesSeed =
       edgeSeed &&
       String(edgeSeed.author || '').toLowerCase() === author.trim().toLowerCase() &&
       String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase();
 
+    const baseInitial = {
+      id: `${author}/${name}`,
+      author,
+      name,
+      title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
+      short_desc: '',
+      thumbnail: `https://content.luanti.org/thumbnails/1/${encodeURIComponent(author)}/${encodeURIComponent(name)}.png`
+    };
     const initialPkg = this.normalizePackage(
-      matchesSeed
-        ? edgeSeed
-        : {
-            id: `${author}/${name}`,
-            author,
-            name,
-            title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-            type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
-            short_desc: '',
-            thumbnail: `https://content.luanti.org/thumbnails/1/${encodeURIComponent(author)}/${encodeURIComponent(name)}.png`
-          }
+      matchesSeed ? { ...baseInitial, ...edgeSeed } : baseInitial
     );
 
     const currentActive = this._activePackage();
@@ -3976,8 +3995,14 @@ export class PackageService {
       for (const endpoint of endpoints) {
         try {
           const res = await fetch(endpoint, { headers: { Accept: 'application/json' } });
+          if (reqSeq !== this.modalOpenRequestSeq || (!this.pendingRoutePackage && !this._activePackage())) {
+            return;
+          }
           if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
             const item = await res.json();
+            if (reqSeq !== this.modalOpenRequestSeq || (!this.pendingRoutePackage && !this._activePackage())) {
+              return;
+            }
             if (item && (item.name || item.title)) {
               const pkg = this.normalizePackage(item);
               this._activePackage.set(pkg);
@@ -4007,7 +4032,12 @@ export class PackageService {
   }
 
   closePackageModal(updateUrl = true): void {
+    this.modalOpenRequestSeq++;
     this.pendingRoutePackage = null;
+    this.edgeInitialPackageSeed = null;
+    if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
+      delete (window as any).__LUANTI_INITIAL_PACKAGE__;
+    }
     this._activePackage.set(null);
     this.seoService?.resetToHome();
     if (updateUrl) {

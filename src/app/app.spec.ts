@@ -1566,10 +1566,13 @@ description = Mob animation and spawning framework.
       });
     }
 
-    // Simulate deep-link navigation to /package/Luanti/minetest_game BEFORE catalog boot completes
+    // Simulate deep-link navigation to /package/Luanti/minetest_game with edge-injected __LUANTI_INITIAL_PACKAGE__
+    (window as any).__LUANTI_INITIAL_PACKAGE__ = { author: 'Luanti', name: 'minetest_game' };
+    (pkgService as any).initialUrlSynced = false;
     (pkgService as any)._packages.set([]);
     (pkgService as any)._activePackage.set(null);
     (pkgService as any).syncStateFromUrl('/package/Luanti/minetest_game');
+    expect((window as any).__LUANTI_INITIAL_PACKAGE__).toBeUndefined();
     expect((pkgService as any).pendingRoutePackage).toEqual({ author: 'Luanti', name: 'minetest_game' });
     // Modal opens immediately at 0ms with initial package state while catalog/details load
     expect(pkgService.activePackage()?.name).toBe('minetest_game');
@@ -1601,6 +1604,11 @@ description = Mob animation and spawning framework.
     expect(pkgService.activePackage()?.name).toBe('minetest_game');
     expect(pkgService.activePackage()?.title).toBe('Minetest Game');
     expect(pkgService.activePackage()?.downloads).toBe(950000);
+
+    // 1st click on Close button / backdrop must immediately close the modal and NOT reopen when Router navigates to '/'
+    pkgService.closePackageModal(true);
+    (pkgService as any).syncStateFromUrl('/');
+    expect(pkgService.activePackage()).toBeNull();
 
     // Also resolve previously broken links that had short_desc concatenated onto the package name
     (pkgService as any)._activePackage.set(null);

@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, Input, OnChanges, computed, inject, signal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HeroBillboardComponent } from '../hero/hero-billboard.component';
@@ -452,22 +452,9 @@ import {
     }
   `
 })
-export class CatalogComponent implements OnChanges {
-  @Input() author?: string;
-  @Input() name?: string;
-
+export class CatalogComponent {
   readonly packageService = inject(PackageService);
   readonly isTagsExpanded = signal(false);
-
-  ngOnChanges(): void {
-    if (this.author && this.name) {
-      const current = this.packageService.activePackage();
-      const targetId = `${this.author}/${this.name}`.toLowerCase();
-      if (!current || current.id.toLowerCase() !== targetId) {
-        this.packageService.openPackageModalById(this.author, this.name, false);
-      }
-    }
-  }
 
   private readonly PRIMARY_TAG_LIMIT = 8;
 
