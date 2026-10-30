@@ -155,6 +155,7 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   readonly canScrollLeft = signal<boolean>(false);
   readonly canScrollRight = signal<boolean>(false);
 
+  private scrollRafId: number | null = null;
   private readonly resizeHandler = () => this.updateScrollState();
 
   ngAfterViewInit(): void {
@@ -166,6 +167,10 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   }
 
   ngOnDestroy(): void {
+    if (this.scrollRafId !== null) {
+      cancelAnimationFrame(this.scrollRafId);
+      this.scrollRafId = null;
+    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.resizeHandler);
     }
@@ -176,7 +181,12 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   }
 
   onTrackScroll(): void {
-    this.updateScrollState();
+    if (typeof window !== 'undefined' && window.innerWidth < 640) return;
+    if (this.scrollRafId !== null) return;
+    this.scrollRafId = requestAnimationFrame(() => {
+      this.scrollRafId = null;
+      this.updateScrollState();
+    });
   }
 
   private updateScrollState(): void {

@@ -107,9 +107,58 @@ function buildTop10FromCatalog(
   return top10;
 }
 
+const ALLOWED_IMAGE_PROXY_HOSTS = new Set([
+  'content.luanti.org',
+  'contentdb.milcho.org',
+  'raw.githubusercontent.com',
+  'avatars.githubusercontent.com',
+  'codeberg.org',
+  'gitlab.com',
+  'git.minetest.land',
+  'mese.hub'
+]);
+
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const { request, env } = context;
   const url = new URL(request.url);
+
+  const proxyImageRaw = (url.searchParams.get('proxy_image') || '').trim();
+  if (proxyImageRaw) {
+    try {
+      const targetUrl = new URL(proxyImageRaw);
+      if (
+        targetUrl.protocol !== 'https:' ||
+        !ALLOWED_IMAGE_PROXY_HOSTS.has(targetUrl.hostname.toLowerCase())
+      ) {
+        return new Response('Forbidden image host', { status: 403 });
+      }
+      const upstreamRes = await fetch(targetUrl.toString(), {
+        headers: {
+          'Accept': 'image/png,image/jpeg,image/webp,image/*;q=0.8',
+          'User-Agent': 'LuantiHub-NotificationImageProxy/1.0'
+        }
+      });
+      if (!upstreamRes.ok) {
+        return new Response('Upstream image unavailable', { status: upstreamRes.status });
+      }
+      const contentType = (upstreamRes.headers.get('content-type') || 'image/png').toLowerCase();
+      if (!contentType.startsWith('image/')) {
+        return new Response('Unsupported media type', { status: 415 });
+      }
+      const body = await upstreamRes.arrayBuffer();
+      return new Response(body, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=86400, s-maxage=604800'
+        }
+      });
+    } catch {
+      return new Response('Invalid image URL', { status: 400 });
+    }
+  }
+
   const q = (url.searchParams.get('q') || '').trim();
   const types = url.searchParams
     .getAll('type')

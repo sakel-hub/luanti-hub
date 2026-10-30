@@ -11,6 +11,7 @@
           "/logo.svg",
           "/index.html",
           "/manifest.webmanifest",
+          "/icons/**",
           "/*.css",
           "/*.js"
         ]
@@ -22,7 +23,6 @@
       "updateMode": "prefetch",
       "resources": {
         "files": [
-          "/icons/**",
           "/**/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif|otf|ttf|woff|woff2)"
         ]
       }
@@ -53,27 +53,6 @@
         "maxAge": "6h",
         "strategy": "freshness",
         "timeout": "3s"
-      }
-    },
-    {
-      "name": "package-screenshots",
-      "urls": [
-        "https://content.luanti.org/uploads/**",
-        "https://content.luanti.org/thumbnails/**",
-        "https://contentdb.milcho.org/storage/**",
-        "https://raw.githubusercontent.com/**",
-        "https://codeberg.org/**/raw/**",
-        "https://git.minetest.land/**/raw/**",
-        "https://gitlab.com/**/raw/**",
-        "https://avatars.githubusercontent.com/**",
-        "https://codeberg.org/avatars/**",
-        "https://git.minetest.land/avatars/**",
-        "https://gitlab.com/uploads/**"
-      ],
-      "cacheConfig": {
-        "maxSize": 500,
-        "maxAge": "7d",
-        "strategy": "performance"
       }
     }
   ],

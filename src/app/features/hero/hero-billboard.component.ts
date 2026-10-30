@@ -49,7 +49,7 @@ import {
         <!-- Netflix-Style Natural Ambient Backlight Glow Derived from Active Hero Artwork (Per-Slide Opacity Crossfade to Prevent [src] Swap Flicker) -->
         <div
           aria-hidden="true"
-          class="pointer-events-none select-none absolute -inset-x-10 sm:-inset-x-20 -top-12 -bottom-20 z-0 overflow-visible blur-[80px] sm:blur-[110px] saturate-[1.85]">
+          class="hidden sm:block pointer-events-none select-none absolute -inset-x-10 sm:-inset-x-20 -top-12 -bottom-20 z-0 overflow-visible blur-[80px] sm:blur-[110px] saturate-[1.85]">
           @for (glowPkg of showcase(); track glowPkg.id; let idx = $index) {
             <img
               [src]="glowPkg.banner || glowPkg.thumbnail"

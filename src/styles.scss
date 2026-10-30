@@ -12,15 +12,24 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color-scheme: dark;
   background-color: #020617;
+  color: #f8fafc;
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: smooth;
+}
+
+/* Hardware-Accelerated Viewport Ambient Background Layer (Eliminates mobile scroll repaint lag) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
   background-image:
     radial-gradient(ellipse 90% 55% at 50% -10%, rgba(14, 165, 233, 0.14) 0%, rgba(15, 23, 42, 0.5) 50%, transparent 80%),
     radial-gradient(ellipse 70% 50% at 85% 25%, rgba(56, 189, 248, 0.06) 0%, transparent 70%),
     radial-gradient(ellipse 70% 50% at 15% 40%, rgba(16, 185, 129, 0.05) 0%, transparent 70%),
     linear-gradient(180deg, #070e20 0%, #030712 45%, #020617 100%);
-  background-attachment: fixed;
-  color: #f8fafc;
-  -webkit-tap-highlight-color: transparent;
-  scroll-behavior: smooth;
+  transform: translateZ(0);
 }
 
 /* Global Pointer Cursor on All Interactive Elements (Tailwind v4 Preflight Override) */
@@ -51,6 +60,8 @@ select:disabled {
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Sleek Themed Custom Scrollbars (High Performance) */
@@ -364,6 +375,38 @@ select:disabled {
 
 .glow-purple {
   box-shadow: 0 0 25px -5px rgba(129, 140, 248, 0.3);
+}
+
+/* ==========================================================================
+   Mobile Scroll Performance & Offscreen Containment Optimizations
+   ========================================================================== */
+
+/* Automatically defer offscreen swimlanes to eliminate initial paint & layout overhead */
+.luanti-swimlane-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 380px;
+}
+
+/* Disable expensive nested multi-pass backdrop-filters on scrolling cards & inner pills for mobile GPUs */
+@media (max-width: 768px), (hover: none) and (pointer: coarse) {
+  .glass-card,
+  .glass-pill,
+  .glass-badge,
+  .glass-badge-sky,
+  .glass-badge-emerald,
+  .glass-badge-purple,
+  .glass-badge-amber,
+  .glass-badge-rose,
+  .glass-btn,
+  .glass-btn-sky,
+  .glass-btn-primary,
+  .glass-btn-amber,
+  .glass-btn-rose,
+  .glass-btn-emerald,
+  .glass-icon-btn {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
 }
 
 /* ==========================================================================

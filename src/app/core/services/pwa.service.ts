@@ -9,6 +9,7 @@ export interface NativeNotificationPayload {
   tag: string;
   category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package';
   icon?: string;
+  image?: string;
   data?: {
     targetTab?: 'moderation' | 'account' | 'packages';
     packageId?: string;
@@ -487,6 +488,7 @@ export class PwaService {
         title: `New Git Package · [${typeLabel}] ${displayTitle}`,
         body: `by ${author} — ${pkg.short_desc || 'New community Git repository published on LuantiHub.'}`,
         icon: thumb,
+        image: thumb,
         tag: `lh-new-git-pkg-${resolvedId.toLowerCase()}`,
         category: 'new_git_package',
         data: {
@@ -496,6 +498,93 @@ export class PwaService {
     }
 
     return newlyDiscovered.length;
+  }
+
+  private blobToDataUrl(blob: Blob): Promise<string | null> {
+    if (typeof FileReader === 'undefined') {
+      return Promise.resolve(null);
+    }
+    return new Promise(resolve => {
+      try {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const res = typeof reader.result === 'string' ? reader.result : null;
+          resolve(res && res.startsWith('data:image/') ? res : null);
+        };
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  private async fetchImageAsDataUrl(url: string, timeoutMs = 1500): Promise<string | null> {
+    if (typeof fetch !== 'function') return null;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const res = await fetch(url, {
+        mode: 'cors',
+        credentials: 'omit',
+        cache: 'reload',
+        signal: controller?.signal
+      });
+      if (!res || !res.ok) return null;
+      const contentType = (res.headers?.get?.('content-type') || '').toLowerCase();
+      if (contentType && (!contentType.startsWith('image/') || contentType.includes('svg'))) {
+        return null;
+      }
+      if (typeof res.blob !== 'function') return null;
+      const blob = await res.blob();
+      if (!blob || blob.size === 0 || blob.size > 5 * 1024 * 1024) return null;
+      return await this.blobToDataUrl(blob);
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Resolves an external notification icon/thumbnail into a CORS-safe `data:image/...` URL
+   * so Chromium's `NotificationImageLoader` on macOS, Android, Windows, and Linux never
+   * drops the notification attachment due to missing `Access-Control-Allow-Origin` headers
+   * or cached opaque (`no-cors`) `<img>` responses.
+   */
+  private async resolveCorsSafeNotificationImage(
+    rawUrl: string,
+    origin: string
+  ): Promise<string | null> {
+    try {
+      const parsed = new URL(rawUrl, origin || 'https://luanti-hub.pages.dev');
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return null;
+      }
+      const host = parsed.hostname.toLowerCase();
+      const supportsDirectCors =
+        host === 'raw.githubusercontent.com' || host === 'avatars.githubusercontent.com';
+
+      if (supportsDirectCors) {
+        const directDataUrl = await this.fetchImageAsDataUrl(parsed.toString());
+        if (directDataUrl) return directDataUrl;
+      }
+
+      if (origin) {
+        const proxyUrl = `${origin}/api/packages?proxy_image=${encodeURIComponent(parsed.toString())}`;
+        const proxiedDataUrl = await this.fetchImageAsDataUrl(proxyUrl);
+        if (proxiedDataUrl) return proxiedDataUrl;
+      }
+
+      if (!supportsDirectCors) {
+        const fallbackDirectDataUrl = await this.fetchImageAsDataUrl(parsed.toString());
+        if (fallbackDirectDataUrl) return fallbackDirectDataUrl;
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   async sendNativeNotification(payload: NativeNotificationPayload): Promise<boolean> {
@@ -518,21 +607,44 @@ export class PwaService {
     const origin = window.location?.origin || '';
     const defaultAppIcon = `${origin}/icons/icon-192x192.png`;
     const defaultAppBadge = `${origin}/icons/icon-72x72.png`;
-    const rawIcon = (payload.icon || '').trim();
-    const resolvedIcon =
-      !rawIcon || rawIcon === 'logo.svg' || rawIcon === '/logo.svg' || rawIcon.endsWith('/logo.svg')
-        ? defaultAppIcon
-        : rawIcon.startsWith('/')
-          ? `${origin}${rawIcon}`
-          : rawIcon;
+    const rawCandidate = (payload.icon || payload.image || '').trim();
 
-    const options: NotificationOptions = {
+    let resolvedIcon = defaultAppIcon;
+    let resolvedImage: string | undefined;
+
+    if (
+      rawCandidate &&
+      rawCandidate !== 'logo.svg' &&
+      rawCandidate !== '/logo.svg' &&
+      !rawCandidate.toLowerCase().endsWith('.svg')
+    ) {
+      if (rawCandidate.startsWith('data:image/')) {
+        resolvedIcon = rawCandidate;
+        resolvedImage = rawCandidate;
+      } else if (rawCandidate.startsWith('/')) {
+        resolvedIcon = `${origin}${rawCandidate}`;
+      } else if (origin && rawCandidate.startsWith(origin)) {
+        resolvedIcon = rawCandidate;
+      } else if (/^https?:\/\//i.test(rawCandidate)) {
+        const dataUrl = await this.resolveCorsSafeNotificationImage(rawCandidate, origin);
+        if (dataUrl) {
+          resolvedIcon = dataUrl;
+          resolvedImage = dataUrl;
+        }
+      }
+    }
+
+    const options: NotificationOptions & { image?: string } = {
       body: payload.body,
       icon: resolvedIcon,
       badge: defaultAppBadge,
       tag: payload.tag,
       data: payload.data || {}
     };
+
+    if (resolvedImage) {
+      options.image = resolvedImage;
+    }
 
     try {
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {

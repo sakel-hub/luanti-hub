@@ -422,9 +422,9 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   }
 
   onCardMouseEnter(): void {
+    if (!this.isDesktopHoverViewport()) return;
     this.isPointerHovering = true;
     this.packageService.ensurePackageHydrated(this.package, true);
-    if (!this.isDesktopHoverViewport()) return;
 
     // Zero-delay T=0ms pre-warming (preconnect, video thumbnail, and direct MP4/WebM preload)
     if (this.package?.video_url) {

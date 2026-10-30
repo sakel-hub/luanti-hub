@@ -155,7 +155,7 @@ import {
                   stroke-linejoin="miter"
                   stroke-miterlimit="10"
                   style="paint-order: stroke fill;"
-                  class="group-hover:stroke-rose-500 transition-colors duration-300 drop-shadow-2xl">
+                  class="group-hover:stroke-rose-500 transition-colors duration-300 sm:drop-shadow-2xl">
                 </path>
               </svg>
 
@@ -305,6 +305,8 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
 
   private readonly resizeHandler = () => this.updateScrollState();
 
+  private scrollRafId: number | null = null;
+
   ngAfterViewInit(): void {
     setTimeout(() => this.updateScrollState(), 100);
 
@@ -314,13 +316,22 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    if (this.scrollRafId !== null) {
+      cancelAnimationFrame(this.scrollRafId);
+      this.scrollRafId = null;
+    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.resizeHandler);
     }
   }
 
   onTrackScroll(): void {
-    this.updateScrollState();
+    if (typeof window !== 'undefined' && window.innerWidth < 640) return;
+    if (this.scrollRafId !== null) return;
+    this.scrollRafId = requestAnimationFrame(() => {
+      this.scrollRafId = null;
+      this.updateScrollState();
+    });
   }
 
   private updateScrollState(): void {
