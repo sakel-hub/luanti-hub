@@ -67,19 +67,22 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       class="group relative flex flex-col h-full min-h-[352px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
 
       <!-- Thumbnail with True 16:9 Widescreen Aspect Ratio + Desktop Hover Video Preview -->
-      <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950 overflow-hidden">
-        <img
-          [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
-          [fallbackThumbnail]="package.thumbnail"
-          appImgFallback
-          [alt]="package.title"
-          loading="lazy"
-          class="w-full h-full object-cover block"
-        />
+      <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950">
+        <!-- Isolated inner clip ends 1px above the bottom edge so the scaled <img> can never bleed past the vignette -->
+        <div class="absolute inset-x-0 top-0 bottom-px overflow-hidden">
+          <img
+            [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
+            [fallbackThumbnail]="package.thumbnail"
+            appImgFallback
+            [alt]="package.title"
+            loading="lazy"
+            class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-300"
+          />
+        </div>
 
         <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute & Enlarge Controls + Obstruction-Free Crop) -->
         @if (isHoverVideoActive() && package.video_url) {
-          <div class="absolute -inset-px z-10 bg-black overflow-hidden animate-fade-in">
+          <div class="absolute -inset-px z-20 bg-black overflow-hidden animate-fade-in">
             @if (isDirectVideo(package.video_url)) {
               <video
                 #hoverVideoEl
@@ -119,10 +122,10 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             }
 
             <!-- Subtle edge vignette to mask any residual player chrome -->
-            <div class="absolute -inset-x-px -bottom-1 -top-px bg-gradient-to-b from-slate-950/35 via-transparent to-slate-950 pointer-events-none"></div>
+            <div class="absolute -inset-x-px -bottom-1 -top-px bg-gradient-to-b from-slate-950/35 via-transparent to-slate-950 to-95% pointer-events-none"></div>
 
             <!-- Floating Enlarge & Mute/Unmute Action Buttons -->
-            <div class="absolute bottom-2 right-2 z-20 flex items-center gap-1.5">
+            <div class="absolute bottom-2 right-2 z-30 flex items-center gap-1.5">
               <button
                 type="button"
                 (click)="enlargeHoverVideo($event)"
@@ -156,11 +159,12 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
           </div>
         }
 
-        <div class="absolute -inset-x-px -bottom-1 top-0 bg-gradient-to-t from-slate-950 via-slate-950/20 to-transparent pointer-events-none"></div>
+        <!-- Unclipped z-10 vignette overlaps the inner image clip boundary with a solid 5% base band -->
+        <div class="absolute -inset-x-px -bottom-0.5 top-0 z-10 bg-gradient-to-t from-slate-950 from-5% via-slate-950/20 to-transparent pointer-events-none"></div>
 
         <!-- Rating pill on top right -->
         @if (package.score > 0) {
-          <div class="absolute top-2.5 right-2.5 flex items-center gap-1 text-[11px] font-bold text-amber-400 glass-pill px-2 py-0.5 rounded-full">
+          <div class="absolute top-2.5 right-2.5 z-20 flex items-center gap-1 text-[11px] font-bold text-amber-400 glass-pill px-2 py-0.5 rounded-full">
             <svg lucideStar class="w-3 h-3 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
             <span>{{ package.score }}</span>
           </div>
