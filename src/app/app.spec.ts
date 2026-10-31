@@ -6,7 +6,7 @@ import { routes } from './app.routes';
 import { PackageService } from './core/services/package.service';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
-import { AuthService } from './core/services/auth.service';
+import { AuthService, formatFriendlyAuthError, sanitizeUserFacingError } from './core/services/auth.service';
 import { TranslationService } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
@@ -27,7 +27,13 @@ import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../..
 import { onRequestGet as packageStatsOnRequestGet } from '../../functions/api/packages/[author]/[name]/stats';
 import { onRequestGet as authorStatsOnRequestGet } from '../../functions/api/authors/[username]/stats';
 import { onRequest as edgeMiddleware, checkEdgeRateLimit } from '../../functions/_middleware';
-import { autoResolveBrokenRepoReport, solveAnubisPowChallengeSync } from '../../functions/api/lib/upstream';
+import {
+  autoResolveBrokenRepoReport,
+  solveAnubisPowChallengeSync,
+  parseGitRepoTarget,
+  parseGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp
+} from '../../functions/api/lib/upstream';
 import {
   createSessionToken,
   createAuditProofToken,
@@ -2024,12 +2030,16 @@ description = Mob animation and spawning framework.
       cardComp.package = videoPkg;
       cardFixture.detectChanges();
 
+      expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).not.toBeNull();
+
       cardComp.onCardMouseEnter();
       await new Promise(resolve => setTimeout(resolve, 210));
       cardFixture.detectChanges();
 
       expect(cardComp.isHoverVideoActive()).toBe(true);
       expect(cardComp.isEmbedVideoReady()).toBe(false);
+      // Vignette/shadow overlay is removed while hover video is playing to prevent bottom subpixel seam
+      expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).toBeNull();
 
       // Simulate YouTube IFrame API infoDelivery postMessage indicating playback at 14.7s
       cardComp.onWindowMessage(
@@ -2045,7 +2055,10 @@ description = Mob animation and spawning framework.
 
       // Click Enlarge Video button -> stops card hover video & opens Cinema Video Theater at 14s
       cardComp.enlargeHoverVideo(new MouseEvent('click'));
+      cardFixture.detectChanges();
       expect(cardComp.isHoverVideoActive()).toBe(false);
+      // Vignette/shadow overlay is restored when hover video ends
+      expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).not.toBeNull();
       expect(pkgService.activeVideoTheater()?.pkg.id).toBe('SaKeL/voxel_cinema');
       expect(pkgService.activeVideoTheater()?.startSeconds).toBe(14);
 
@@ -3731,15 +3744,36 @@ supported_games = minetest_game, voxelibre
     (authService as any)._currentUser.set(null);
   });
 
-  it('should solve Anubis PoW SHA-256 challenges and inject SEO metadata for primary hub routes', async () => {
-    // 1. Verify Anubis PoW solver finds a valid nonce with leading zero bits
-    const challenge = 'luantihub-mesehub-test-challenge';
-    const solved = solveAnubisPowChallengeSync(challenge, 4);
-    expect(solved).toBeTruthy();
-    expect(solved?.hashHex.startsWith('0')).toBe(true);
-    expect(typeof solved?.nonce).toBe('number');
+  it('should solve Anubis PoW SHA-256 challenges (including 128-char seeds), sanitize technical errors, and inject SEO metadata for primary hub routes', async () => {
+    // 1. Verify Anubis PoW solver finds a valid nonce for both short and 128-char hex randomData (3 SHA-256 blocks)
+    const challengeShort = 'luantihub-mesehub-test-challenge';
+    const solvedShort = solveAnubisPowChallengeSync(challengeShort, 4);
+    expect(solvedShort).toBeTruthy();
+    expect(solvedShort?.hashHex.startsWith('0000')).toBe(true);
 
-    // 2. Verify PackageService maps primary categories to clean first-level hub routes
+    const challenge128 = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'.repeat(4); // 128 chars
+    const solved128 = solveAnubisPowChallengeSync(challenge128, 3);
+    expect(solved128).toBeTruthy();
+    expect(solved128?.hashHex.startsWith('000')).toBe(true);
+
+    // 2. Verify formatFriendlyAuthError & sanitizeUserFacingError hide raw technical errors
+    expect(formatFriendlyAuthError('Mesehub returned invalid token payload', 'mesehub')).toBe(
+      "We couldn't complete sign-in with Mesehub right now. Please try again in a moment, or use Direct Author / Community Sign-In below."
+    );
+    expect(formatFriendlyAuthError('provider_unavailable', 'mesehub')).toBe(
+      "We couldn't complete sign-in with Mesehub right now. Please try again in a moment, or use Direct Author / Community Sign-In below."
+    );
+    expect(formatFriendlyAuthError('session_expired', 'mesehub')).toBe(
+      'Your sign-in session expired. Please try signing in again.'
+    );
+    expect(formatFriendlyAuthError('provider_busy', 'github')).toBe(
+      'GitHub is temporarily busy. Please wait a moment and try signing in again.'
+    );
+    expect(
+      sanitizeUserFacingError('Mesehub token exchange failed (HTTP 502)', 'Friendly fallback.')
+    ).toBe('Friendly fallback.');
+
+    // 3. Verify PackageService maps primary categories to clean first-level hub routes
     const pkgService = TestBed.inject(PackageService);
     pkgService.selectPrimaryNavTab('game');
     expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/games');
@@ -4251,6 +4285,284 @@ supported_games = minetest_game, voxelibre
       expect(upstreamCalledUrls.some(u => u.includes('/packages/sakel-hub/pixie/dependencies'))).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should not fire false-positive update notifications when release_id is unchanged during D1 updated_at hydration, and should sanitize release notes & abbreviate commit SHAs', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const pkgService = TestBed.inject(PackageService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    localStorage.removeItem('luanti_known_package_versions_v1');
+    localStorage.removeItem('luanti_notified_ids_v1');
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyPackageUpdates.set(true);
+
+    // 1. Seed initial baseline (e.g. boot payload before D1 updated_at hydration)
+    const initialBootCatalog = [
+      { id: 'TenPlus1/farming', author: 'TenPlus1', name: 'farming', title: 'Farming Redo', type: 'mod', release_id: 39541 },
+      { id: 'Wuzzy/mineclone2', author: 'Wuzzy', name: 'mineclone2', title: 'VoxeLibre', type: 'game', release_id: 39534 },
+      { id: 'Zughy/soothing32', author: 'Zughy', name: 'soothing32', title: 'Soothing 32', type: 'txp', release_id: 39350 }
+    ];
+    const seedCount = await pwaService.checkAndNotifyUpdatedPackages(initialBootCatalog);
+    expect(seedCount).toBe(0);
+
+    // 2. Subsequent background refresh where D1 cache row hydrated an `updated_at` timestamp,
+    //    while `release_id` is identical (39541, 39534, 39350). Must NOT notify!
+    const hydratedSameReleaseCatalog = [
+      {
+        id: 'TenPlus1/farming',
+        author: 'TenPlus1',
+        name: 'farming',
+        title: 'Farming Redo',
+        type: 'mod',
+        release_id: 39541,
+        updated_at: new Date().toISOString()
+      },
+      {
+        id: 'Wuzzy/mineclone2',
+        author: 'Wuzzy',
+        name: 'mineclone2',
+        title: 'VoxeLibre',
+        type: 'game',
+        release_id: 39534,
+        updated_at: new Date().toISOString()
+      },
+      {
+        id: 'Zughy/soothing32',
+        author: 'Zughy',
+        name: 'soothing32',
+        title: 'Soothing 32',
+        type: 'txp',
+        release_id: 39350,
+        updated_at: new Date().toISOString()
+      }
+    ];
+    const falsePositiveCount = await pwaService.checkAndNotifyUpdatedPackages(hydratedSameReleaseCatalog);
+    expect(falsePositiveCount).toBe(0);
+
+    // 3. Verify release notes sanitization and 7-char commit SHA abbreviation
+    expect(pkgService.sanitizeReleaseNotesText('Git Tag / Release (3.3.2)', '3.3.2')).toBeUndefined();
+    expect(pkgService.sanitizeReleaseNotesText('Direct source archive from main branch', 'main')).toBeUndefined();
+    expect(pkgService.sanitizeReleaseNotesText('3.3.1', '3.3.1')).toBeUndefined();
+    expect(pkgService.sanitizeReleaseNotesText('Added new biome particles and fixed crash.', '3.3.2')).toBe(
+      'Added new biome particles and fixed crash.'
+    );
+    expect(pkgService.abbreviateGitRefLabel('bfa7ea7e76ffe5cbfd41fbeaad91ed3dc53bbe3e')).toBe('bfa7ea7');
+    expect(pkgService.abbreviateGitRefLabel('683fa2be0e64b8eb6650f282a52f7aaa5ab53439')).toBe('683fa2b');
+    expect(pkgService.abbreviateGitRefLabel('3.3.1')).toBe('3.3.1');
+
+    // 4. Verify Releases tab renders skeleton preloader while releases are being fetched in the background
+    //    instead of prematurely flashing "Latest Archive (main)"
+    const testPkg = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/x_farming',
+      author: 'sakel-hub',
+      name: 'x_farming',
+      title: 'X Farming',
+      type: 'mod',
+      default_branch: 'main'
+    });
+    (pkgService as any)._activePackage.set(testPkg);
+    const modalFix = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFix.componentInstance;
+    modalComp.package = testPkg;
+    modalComp.activeTab.set('releases');
+    modalComp.releases.set([]);
+    modalComp.isLoadingReleases.set(true);
+    modalFix.detectChanges();
+
+    const modalEl = modalFix.nativeElement as HTMLElement;
+    expect(modalEl.querySelector('[aria-label="Loading releases"]')).toBeTruthy();
+    expect(modalEl.textContent).not.toContain('Latest Archive (main)');
+
+    // Once background loading completes with 0 tagged releases, the default branch archive card is shown
+    modalComp.isLoadingReleases.set(false);
+    modalFix.detectChanges();
+    expect(modalEl.querySelector('[aria-label="Loading releases"]')).toBeNull();
+    expect(modalEl.textContent).toContain('Latest Archive (main)');
+
+    // 5. Verify multi-forge Git repository parsing & URL normalization across all supported Git services
+    expect(parseGitRepoTarget('https://github.com/luanti-org/luanti/tree/master/builtin')).toEqual({
+      provider: 'github',
+      host: 'github.com',
+      owner: 'luanti-org',
+      repo: 'luanti'
+    });
+    expect(parseGitRepoTarget('https://codeberg.org/Wuzzy/MineClone2/src/branch/master')).toEqual({
+      provider: 'codeberg',
+      host: 'codeberg.org',
+      owner: 'Wuzzy',
+      repo: 'MineClone2'
+    });
+    expect(parseGitRepoTarget('https://notabug.org/TenPlus1/farming.git')).toEqual({
+      provider: 'codeberg',
+      host: 'codeberg.org',
+      owner: 'TenPlus1',
+      repo: 'farming'
+    });
+    expect(parseGitRepoTarget('https://git.minetest.land/MineClone2/MineClone2/releases')).toEqual({
+      provider: 'codeberg',
+      host: 'git.minetest.land',
+      owner: 'MineClone2',
+      repo: 'MineClone2'
+    });
+    expect(parseGitRepoTarget('https://gitlab.com/zughy-friends-minetest/skywars/-/tree/main')).toEqual({
+      provider: 'gitlab',
+      host: 'gitlab.com',
+      owner: 'zughy-friends-minetest',
+      repo: 'skywars'
+    });
+    expect(parseGitRepoTarget('https://framagit.org/org/subgroup/my_mod.git')).toEqual({
+      provider: 'gitlab',
+      host: 'framagit.org',
+      owner: 'org/subgroup',
+      repo: 'my_mod'
+    });
+    expect(parseGitRepoTarget('https://gitea.example.org/modder/custom_mod')).toEqual({
+      provider: 'codeberg',
+      host: 'gitea.example.org',
+      owner: 'modder',
+      repo: 'custom_mod'
+    });
+
+    const normalizeRepo = (url: string) => (pkgService as any).normalizeGitRepoUrl(url);
+    expect(normalizeRepo('https://notabug.org/TenPlus1/mobs_redo.git')).toBe('https://codeberg.org/tenplus1/mobs_redo');
+    expect(normalizeRepo('https://gitlab.com/group/sub/mod/-/releases')).toBe('https://gitlab.com/group/sub/mod');
+    expect(normalizeRepo('https://git.minetest.land/author/mod/src/branch/main')).toBe('https://git.minetest.land/author/mod');
+
+    // 6. Verify universal Git Smart HTTP wire protocol (`info/refs?service=git-upload-pack`) parser
+    const sampleSmartRefs = [
+      '001e# service=git-upload-pack',
+      '000000f80222de5a9f0c8b112233445566778899aabbccdd HEAD\0multi_ack thin-pack side-band symref=HEAD:refs/heads/main agent=git/2.43.0',
+      '003f0222de5a9f0c8b112233445566778899aabbccdd refs/heads/main',
+      '003bbba7ea7e76ffe5cbfd41fbeaad91ed3dc53bbe3e refs/tags/3.3.1',
+      '003b1111111111111111111111111111111111111111 refs/tags/3.3.2',
+      '003e0222de5a9f0c8b112233445566778899aabbccdd refs/tags/3.3.2^{}',
+      '0000'
+    ].join('\n');
+    const parsedSmartRefs = parseGitSmartHttpRefs(sampleSmartRefs);
+    expect(parsedSmartRefs.defaultBranch).toBe('main');
+    expect(parsedSmartRefs.headSha).toBe('0222de5a9f0c8b112233445566778899aabbccdd');
+    expect(parsedSmartRefs.tags.length).toBe(2);
+    expect(parsedSmartRefs.tags[0]).toEqual({
+      tagName: '3.3.2',
+      commitSha: '0222de5a9f0c8b112233445566778899aabbccdd' // Peeled annotated tag commit SHA
+    });
+    expect(parsedSmartRefs.tags[1]).toEqual({
+      tagName: '3.3.1',
+      commitSha: 'bba7ea7e76ffe5cbfd41fbeaad91ed3dc53bbe3e'
+    });
+
+    // 7. Verify server-side 6h debounce (`syncDebouncedGitVersionStamp`) & client-side 12h per-package cooldown for branch-only commits
+    const d1Queries: Array<{ sql: string; args: any[] }> = [];
+    const mockGitDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async run() {
+                d1Queries.push({ sql, args });
+                return { success: true };
+              }
+            };
+          },
+          async run() {
+            return { success: true };
+          }
+        };
+      }
+    };
+    const mockPkgRow: any = {
+      id: 'modder/branch_only_mod',
+      latest_commit_sha: null,
+      updated_at: new Date().toISOString()
+    };
+    // Initial seed sets latest_commit_sha without bumping updated_at
+    const seeded = await syncDebouncedGitVersionStamp(
+      mockGitDb,
+      mockPkgRow,
+      '1111111111111111111111111111111111111111',
+      false
+    );
+    expect(seeded).toBe(false);
+    expect(mockPkgRow.latest_commit_sha).toBe('1111111111111111111111111111111111111111');
+
+    // Rapid second commit within 6h debounce window is held back
+    const debouncedRapid = await syncDebouncedGitVersionStamp(
+      mockGitDb,
+      mockPkgRow,
+      '2222222222222222222222222222222222222222',
+      false
+    );
+    expect(debouncedRapid).toBe(false);
+    expect(mockPkgRow.latest_commit_sha).toBe('1111111111111111111111111111111111111111');
+
+    // Once 6h quiet window has elapsed, the new commit advances both latest_commit_sha and updated_at
+    mockPkgRow.updated_at = new Date(Date.now() - 7 * 3600 * 1000).toISOString();
+    const advancedAfterDebounce = await syncDebouncedGitVersionStamp(
+      mockGitDb,
+      mockPkgRow,
+      '2222222222222222222222222222222222222222',
+      false
+    );
+    expect(advancedAfterDebounce).toBe(true);
+    expect(mockPkgRow.latest_commit_sha).toBe('2222222222222222222222222222222222222222');
+
+    // Verify client-side PwaService branch-only commit notification + 12h per-package cooldown
+    localStorage.removeItem('lh_known_package_versions_v1');
+    localStorage.removeItem('luantihub_pkg_notify_cooldown_v1');
+    const capturedNotifs: any[] = [];
+    const origSend = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (p: any) => {
+      capturedNotifs.push(p);
+      return true;
+    };
+    try {
+      // Seed branch-only package
+      await pwaService.checkAndNotifyUpdatedPackages([
+        {
+          id: 'modder/branch_only_mod',
+          author: 'modder',
+          name: 'branch_only_mod',
+          title: 'Branch Only Mod',
+          type: 'mod',
+          latest_commit_sha: '1111111111111111111111111111111111111111',
+          updated_at: new Date().toISOString()
+        }
+      ]);
+      expect(capturedNotifs.length).toBe(0);
+
+      // 1st commit update fires notification with abbreviated 7-char SHA (2222222)
+      await pwaService.checkAndNotifyUpdatedPackages([
+        {
+          id: 'modder/branch_only_mod',
+          author: 'modder',
+          name: 'branch_only_mod',
+          title: 'Branch Only Mod',
+          type: 'mod',
+          latest_commit_sha: '2222222222222222222222222222222222222222',
+          updated_at: new Date().toISOString()
+        }
+      ]);
+      expect(capturedNotifs.length).toBe(1);
+      expect(capturedNotifs[0].body).toContain('(2222222)');
+
+      // 2nd rapid commit within 12h cooldown window is suppressed (no spam!)
+      await pwaService.checkAndNotifyUpdatedPackages([
+        {
+          id: 'modder/branch_only_mod',
+          author: 'modder',
+          name: 'branch_only_mod',
+          title: 'Branch Only Mod',
+          type: 'mod',
+          latest_commit_sha: '3333333333333333333333333333333333333333',
+          updated_at: new Date().toISOString()
+        }
+      ]);
+      expect(capturedNotifs.length).toBe(1);
+    } finally {
+      pwaService.sendNativeNotification = origSend;
+      localStorage.removeItem('luantihub_pkg_notify_cooldown_v1');
     }
   });
 });

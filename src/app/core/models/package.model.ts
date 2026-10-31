@@ -74,6 +74,7 @@ export interface LuantiPackage {
   file_size?: string;
   download_url?: string;
   release_id?: number | string;
+  latest_commit_sha?: string;
   created_at?: string;
   updated_at?: string;
   status?: 'active' | 'flagged' | 'delisted';

@@ -31,6 +31,8 @@ export interface NativeNotificationPayload {
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
+const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
+const PACKAGE_UPDATE_COOLDOWN_MS = 12 * 3600 * 1000;
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
@@ -601,10 +603,12 @@ export class PwaService {
       release?: number | string;
       release_id?: number | string;
       release_title?: string;
+      latest_commit_sha?: string;
+      commit_sha?: string;
       created_at?: string;
       updated_at?: string;
     }>,
-    options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean }
+    options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean; cooldownMs?: number }
   ): number {
     if (!Array.isArray(candidates) || candidates.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
@@ -612,13 +616,14 @@ export class PwaService {
     const forceSet = new Set(
       (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
     );
+    const effectiveCooldownMs = options?.cooldownMs ?? PACKAGE_UPDATE_COOLDOWN_MS;
 
     const validCandidates = candidates.filter(pkg => {
       if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
       const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
       const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
       if (!author || !name) return false;
-      const rel = pkg.release_id ?? pkg.release;
+      const rel = pkg.release_id ?? pkg.release ?? pkg.latest_commit_sha ?? pkg.commit_sha;
       return Boolean(rel !== undefined && rel !== null && String(rel).trim() !== '') || Boolean(pkg.updated_at);
     });
 
@@ -634,7 +639,8 @@ export class PwaService {
     const computeStamp = (pkg: (typeof validCandidates)[number]): string => {
       const rel = pkg.release_id ?? pkg.release ?? '';
       const upd = pkg.updated_at || '';
-      return `${String(rel).trim()}|${String(upd).trim()}`;
+      const sha = pkg.latest_commit_sha || pkg.commit_sha || '';
+      return `${String(rel).trim()}|${String(upd).trim()}|${String(sha).trim()}`;
     };
 
     // First-time baseline seed: record current release_id|updated_at stamps silently without notification flood
@@ -669,6 +675,19 @@ export class PwaService {
       }
     }
 
+    let cooldownMap: Record<string, number> = {};
+    try {
+      const rawCooldown = localStorage.getItem(PACKAGE_UPDATE_COOLDOWN_KEY);
+      if (rawCooldown) {
+        const parsedCooldown = JSON.parse(rawCooldown);
+        if (parsedCooldown && typeof parsedCooldown === 'object' && !Array.isArray(parsedCooldown)) {
+          cooldownMap = parsedCooldown as Record<string, number>;
+        }
+      }
+    } catch {
+      cooldownMap = {};
+    }
+
     const updatedPackages: Array<{ pkg: (typeof validCandidates)[number]; resolvedId: string; stamp: string }> = [];
     let mapChanged = false;
 
@@ -691,27 +710,33 @@ export class PwaService {
       }
 
       if (prevStamp !== newStamp || isForced) {
-        const [prevRel, prevUpd] = prevStamp.split('|');
-        const [newRel, newUpd] = newStamp.split('|');
+        const [prevRel, prevUpd, prevSha = ''] = prevStamp.split('|');
+        const [newRel, newUpd, newSha = ''] = newStamp.split('|');
 
         let genuinelyAdvanced = isForced;
         if (!genuinelyAdvanced) {
           const prevRelNum = Number(prevRel);
           const newRelNum = Number(newRel);
-          if (
-            prevRel &&
-            newRel &&
-            Number.isFinite(prevRelNum) &&
-            Number.isFinite(newRelNum) &&
-            newRelNum > prevRelNum
-          ) {
+          const shaAdvanced =
+            Boolean(prevSha && newSha && prevSha !== newSha && newSha !== 'HEAD' && newSha !== 'latest');
+
+          if (shaAdvanced) {
             genuinelyAdvanced = true;
-          } else if (prevRel && newRel && prevRel !== newRel) {
-            genuinelyAdvanced = true;
-          } else if (newUpd && newUpd !== prevUpd) {
-            const prevMs = prevUpd ? new Date(prevUpd).getTime() : 0;
+          } else if (prevRel && newRel) {
+            // Both stamps have a release identifier: only notify when the release ID itself advanced.
+            // Never notify if `prevRel === newRel` (e.g. when `updated_at` was merely hydrated from D1 cache).
+            if (prevRel !== newRel) {
+              if (Number.isFinite(prevRelNum) && Number.isFinite(newRelNum)) {
+                genuinelyAdvanced = newRelNum > prevRelNum;
+              } else {
+                genuinelyAdvanced = true;
+              }
+            }
+          } else if (!prevRel && !newRel && prevUpd && newUpd && newUpd !== prevUpd) {
+            // Pure timestamp-tracked package: require both previous and new timestamps to exist and advance.
+            const prevMs = new Date(prevUpd).getTime();
             const newMs = new Date(newUpd).getTime();
-            if (!isNaN(newMs) && (isNaN(prevMs) || newMs > prevMs)) {
+            if (!isNaN(newMs) && !isNaN(prevMs) && newMs > prevMs) {
               genuinelyAdvanced = true;
             }
           }
@@ -726,10 +751,19 @@ export class PwaService {
           }
         }
 
+        // Per-package debounce cooldown guard: prevent notification spam during rapid multi-commit bursts
+        let withinCooldown = false;
+        if (!isForced && effectiveCooldownMs > 0) {
+          const lastNotifiedAt = Number(cooldownMap[lowerId] || 0);
+          if (lastNotifiedAt > 0 && Date.now() - lastNotifiedAt < effectiveCooldownMs) {
+            withinCooldown = true;
+          }
+        }
+
         knownMap[lowerId] = newStamp;
         mapChanged = true;
 
-        if (genuinelyAdvanced && isRecent) {
+        if (genuinelyAdvanced && isRecent && !withinCooldown) {
           updatedPackages.push({ pkg, resolvedId, stamp: newStamp });
         }
       }
@@ -759,18 +793,27 @@ export class PwaService {
     });
 
     // Cap to at most 3 notifications per check so bulk refreshes never flood the OS tray
+    let cooldownChanged = false;
     for (const item of updatedPackages.slice(0, 3)) {
       const { pkg, resolvedId, stamp } = item;
+      const lowerId = resolvedId.toLowerCase();
+      cooldownMap[lowerId] = Date.now();
+      cooldownChanged = true;
+
       const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
       const name = pkg.name || String(pkg.id).split('/')[1];
       const typeLabel = String(pkg.type || 'mod').toUpperCase();
       const displayTitle = pkg.title || name;
       const thumb = pkg.thumbnail || pkg.thumbnail_url;
+      const rawCommitSha = String(pkg.latest_commit_sha || pkg.commit_sha || '').trim();
+      const shortCommitLabel = /^[0-9a-f]{7,40}$/i.test(rawCommitSha) ? rawCommitSha.slice(0, 7) : '';
       const relLabel = pkg.release_title
         ? ` (${pkg.release_title})`
-        : pkg.release_id || pkg.release
-          ? ` (#${pkg.release_id ?? pkg.release})`
-          : '';
+        : shortCommitLabel
+          ? ` (${shortCommitLabel})`
+          : pkg.release_id || pkg.release
+            ? ` (#${pkg.release_id ?? pkg.release})`
+            : '';
 
       this.sendNativeNotification({
         title: `Package Updated · [${typeLabel}] ${displayTitle}`,
@@ -784,6 +827,16 @@ export class PwaService {
           packageId: resolvedId
         }
       });
+    }
+
+    if (cooldownChanged) {
+      try {
+        const entries = Object.entries(cooldownMap);
+        const trimmed = entries.length > 2000 ? Object.fromEntries(entries.slice(-2000)) : cooldownMap;
+        localStorage.setItem(PACKAGE_UPDATE_COOLDOWN_KEY, JSON.stringify(trimmed));
+      } catch {
+        // ignore storage errors
+      }
     }
 
     return updatedPackages.length;

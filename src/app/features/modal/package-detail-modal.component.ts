@@ -1249,7 +1249,7 @@ import {
                   (click)="activeTab.set('releases')"
                   [class]="activeTab() === 'releases' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap'"
                   class="cursor-pointer">
-                  {{ 'modal.tabReleases' | translate }} ({{ cappedReleases().length }})
+                  {{ 'modal.tabReleases' | translate }}@if (!isLoadingReleases() || cappedReleases().length > 0) { ({{ cappedReleases().length }}) }
                 </button>
                 <button
                   type="button"
@@ -1543,7 +1543,26 @@ import {
               <!-- Releases Content (Sorted Newest-First, Capped at 10, Paginated 5 per Page) -->
               @if (activeTab() === 'releases') {
                 <div class="pt-4 space-y-2.5 luanti-tab-enter">
-                  @if (cappedReleases().length === 0) {
+                  @if (isLoadingReleases() && cappedReleases().length === 0) {
+                    <div class="space-y-2.5" aria-busy="true" aria-label="Loading releases">
+                      @for (placeholder of [1, 2, 3]; track placeholder) {
+                        <div class="p-3.5 rounded-2xl glass-panel flex items-center justify-between gap-3 flex-wrap">
+                          <div class="space-y-2 min-w-[180px] flex-1">
+                            <div class="flex items-center gap-2">
+                              <div class="w-16 h-4 rounded skeleton-shimmer"></div>
+                              <div class="w-14 h-4 rounded-md skeleton-shimmer"></div>
+                              <div class="w-20 h-4 rounded skeleton-shimmer"></div>
+                            </div>
+                            <div class="w-28 h-3 rounded skeleton-shimmer"></div>
+                          </div>
+                          <div class="flex items-center gap-2 ml-auto">
+                            <div class="w-36 h-7 rounded-xl skeleton-shimmer"></div>
+                            <div class="w-32 h-7 rounded-xl skeleton-shimmer"></div>
+                          </div>
+                        </div>
+                      }
+                    </div>
+                  } @else if (cappedReleases().length === 0) {
                     <div class="p-4 rounded-2xl glass-panel flex flex-col gap-2.5 text-xs">
                       <div class="flex items-center justify-between gap-3 flex-wrap">
                         <div>
@@ -1583,7 +1602,7 @@ import {
                             <div class="flex items-center justify-between gap-2 flex-wrap">
                               <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
                                 <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
-                                <span>{{ 'modal.recentBranchCommits' | translate:{ branch: payload.head_ref || package.default_branch || 'main' } }}</span>
+                                <span>{{ 'modal.recentBranchCommits' | translate:{ branch: formatRefLabel(payload.head_ref || package.default_branch || 'main') } }}</span>
                               </span>
                               @if (payload.compare_url) {
                                 <a
@@ -1701,18 +1720,20 @@ import {
                           </div>
                         </div>
 
-                        @if ((rel.release_notes || rel.changelog) && !isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))) {
-                          <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line border-t border-white/10 pt-2 line-clamp-2">
-                            {{ rel.release_notes || rel.changelog }}
-                          </p>
+                        @if (getCleanReleaseNotes(rel); as cleanNotes) {
+                          @if (!isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))) {
+                            <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line border-t border-white/10 pt-2 line-clamp-2">
+                              {{ cleanNotes }}
+                            </p>
+                          }
                         }
 
                         @if (isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))) {
                           <div class="border-t border-white/10 pt-3 mt-1 space-y-2.5">
-                            @if (rel.release_notes || rel.changelog) {
+                            @if (getCleanReleaseNotes(rel); as cleanNotes) {
                               <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10">
                                 <p class="text-[11px] text-slate-200 leading-relaxed whitespace-pre-line">
-                                  {{ rel.release_notes || rel.changelog }}
+                                  {{ cleanNotes }}
                                 </p>
                               </div>
                             }
@@ -1727,9 +1748,9 @@ import {
                                 <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
                                   <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
                                   @if (payload.source === 'compare' && payload.base_ref) {
-                                    <span>{{ 'modal.commitsBetween' | translate:{ base: payload.base_ref, head: payload.head_ref } }}</span>
+                                    <span>{{ 'modal.commitsBetween' | translate:{ base: formatRefLabel(payload.base_ref), head: formatRefLabel(payload.head_ref) } }}</span>
                                   } @else {
-                                    <span>{{ 'modal.recentBranchCommits' | translate:{ branch: payload.head_ref || package.default_branch || 'main' } }}</span>
+                                    <span>{{ 'modal.recentBranchCommits' | translate:{ branch: formatRefLabel(payload.head_ref || package.default_branch || 'main') } }}</span>
                                   }
                                 </span>
                                 @if (payload.compare_url) {
@@ -1775,10 +1796,16 @@ import {
                                     </li>
                                   }
                                 </ul>
-                              } @else if (!rel.release_notes && !rel.changelog) {
+                              } @else if (!getCleanReleaseNotes(rel) && payload.markdown_body) {
+                                <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10">
+                                  <p class="text-[11px] text-slate-200 leading-relaxed whitespace-pre-line">
+                                    {{ payload.markdown_body }}
+                                  </p>
+                                </div>
+                              } @else if (!getCleanReleaseNotes(rel)) {
                                 <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
                               }
-                            } @else if (!rel.release_notes && !rel.changelog) {
+                            } @else if (!getCleanReleaseNotes(rel)) {
                               <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
                             }
                           </div>
@@ -1965,12 +1992,16 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.reviews().filter(r => r.source === 'contentdb').length
   );
   readonly releases = signal<PackageRelease[]>([]);
+  readonly isLoadingReleases = signal<boolean>(true);
   readonly RELEASES_PAGE_SIZE = 5;
   readonly MAX_RELEASES_CAP = 10;
   readonly releasesPage = signal<number>(1);
-  readonly cappedReleases = computed<PackageRelease[]>(() =>
-    this.packageService.sortAndCapReleases(this.releases(), this.MAX_RELEASES_CAP)
-  );
+  readonly cappedReleases = computed<PackageRelease[]>(() => {
+    const realReleases = this.releases().filter(
+      r => r && r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+    );
+    return this.packageService.sortAndCapReleases(realReleases, this.MAX_RELEASES_CAP);
+  });
   readonly totalReleasePages = computed<number>(() =>
     Math.max(1, Math.ceil(this.cappedReleases().length / this.RELEASES_PAGE_SIZE))
   );
@@ -2495,6 +2526,17 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.expandedReleaseKeys.set(new Set());
     this.loadingReleaseNotesKey.set(null);
 
+    const initialCachedReleases = this.packageService.getCachedReleases(this.package);
+    if (initialCachedReleases) {
+      this.releases.set(initialCachedReleases);
+      this.isLoadingReleases.set(false);
+    } else if (isSwitchingPackage || this.releases().length === 0) {
+      this.releases.set([]);
+      this.isLoadingReleases.set(true);
+    } else {
+      this.isLoadingReleases.set(false);
+    }
+
     const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
     if (savedState) {
       this.isSimilarNearViewport.set(savedState.isSimilarNearViewport);
@@ -2521,18 +2563,36 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
+    const bundledCachedReleases = this.packageService.getCachedReleases(this.package);
+    if (bundledCachedReleases && bundledCachedReleases.length > 0) {
+      this.releases.set(bundledCachedReleases);
+      this.isLoadingReleases.set(false);
+    }
+
     this.packageService.fetchReviews(this.package, false).then(res => {
+      if (this.loadedPackageKey !== key) return;
       this.reviews.set(res);
       if (savedState && savedState.scrollTop > 0) {
         this.restoreSavedScrollPosition(savedState.scrollTop);
       }
     });
-    this.packageService.fetchPackageReleases(this.package).then(res => {
-      this.releases.set(res);
-      if (savedState && savedState.scrollTop > 0) {
-        this.restoreSavedScrollPosition(savedState.scrollTop);
-      }
-    });
+    this.packageService
+      .fetchPackageReleases(this.package)
+      .then(res => {
+        if (this.loadedPackageKey !== key) return;
+        if (res.length > 0 || this.releases().length === 0 || isSwitchingPackage) {
+          this.releases.set(res);
+        }
+        this.isLoadingReleases.set(false);
+        if (savedState && savedState.scrollTop > 0) {
+          this.restoreSavedScrollPosition(savedState.scrollTop);
+        }
+      })
+      .catch(() => {
+        if (this.loadedPackageKey === key) {
+          this.isLoadingReleases.set(false);
+        }
+      });
   }
 
   isDirectVideoUrl(url?: string): boolean {
@@ -2797,6 +2857,18 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return this.releaseNotesByKey().get(key);
   }
 
+  getCleanReleaseNotes(rel?: PackageRelease | null): string | undefined {
+    if (!rel) return undefined;
+    return this.packageService.sanitizeReleaseNotesText(
+      rel.release_notes || rel.changelog,
+      rel.version || rel.tag_name
+    );
+  }
+
+  formatRefLabel(ref?: string | null): string {
+    return this.packageService.abbreviateGitRefLabel(ref);
+  }
+
   async toggleBranchFallbackNotes(): Promise<void> {
     const key = 'branch-fallback';
     const nextExpanded = new Set(this.expandedReleaseKeys());
@@ -2847,16 +2919,31 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const extractRef = (r?: PackageRelease): string | undefined => {
       if (!r) return undefined;
       if (r.commit_sha && r.commit_sha !== 'HEAD') return r.commit_sha;
-      const ver = (r.version || '').trim();
-      if (!ver || ver.toLowerCase().startsWith('branch')) return undefined;
-      return ver.split(/\s+/)[0];
+      const candidate = (r.tag_name || r.version || '').trim();
+      if (
+        !candidate ||
+        candidate.toLowerCase().startsWith('branch') ||
+        candidate.toLowerCase().startsWith('release') ||
+        candidate.startsWith('#') ||
+        /^\d{4}-\d{2}-\d{2}$/.test(candidate) ||
+        /^\d+$/.test(candidate)
+      ) {
+        return undefined;
+      }
+      return candidate.split(/\s+/)[0];
     };
 
     const headRef = extractRef(rel) || pkg.default_branch || 'main';
     const baseRef = extractRef(olderRelease);
 
     this.loadingReleaseNotesKey.set(key);
-    const payload = await this.packageService.fetchReleaseNotesForRelease(pkg, headRef, baseRef);
+    const payload = await this.packageService.fetchReleaseNotesForRelease(
+      pkg,
+      headRef,
+      baseRef,
+      this.getCleanReleaseNotes(rel),
+      rel.released_at
+    );
     if (this.loadingReleaseNotesKey() === key) {
       this.loadingReleaseNotesKey.set(null);
     }

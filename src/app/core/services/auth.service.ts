@@ -12,13 +12,96 @@ export function sanitizeUserFacingError(
   if (!raw) return fallbackMessage;
 
   const sensitivePattern =
-    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal)/i;
+    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal|invalid token payload|token exchange failed|user profile fetch failed|whoami fetch failed|anti-bot challenge|anubis_challenge|Invalid OAuth CSRF state|bad_verification_code|invalid_grant|invalid_client|redirect_uri_mismatch|Unexpected token|JSON\.parse|Failed to fetch|NetworkError|Load failed|AbortError|HTTP [45]\d\d)\b/i;
 
-  if (sensitivePattern.test(raw) || raw.startsWith('<!DOCTYPE') || raw.startsWith('<html')) {
+  const lower = raw.toLowerCase();
+  if (
+    sensitivePattern.test(raw) ||
+    lower.startsWith('<!doctype') ||
+    lower.startsWith('<html') ||
+    /\bat\s+[a-zA-Z0-9_.$]+\s*\(/.test(raw)
+  ) {
     return fallbackMessage;
   }
 
   return raw;
+}
+
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  contentdb: 'ContentDB',
+  github: 'GitHub',
+  codeberg: 'Codeberg',
+  gitlab: 'GitLab',
+  mesehub: 'Mesehub'
+};
+
+export function formatFriendlyAuthError(
+  rawError: string,
+  provider?: GitProvider | string | null
+): string {
+  const trimmed = (rawError || '').trim();
+  if (!trimmed) {
+    return 'We couldn\'t complete sign-in right now. Please try again in a moment.';
+  }
+  if (trimmed === 'oauth_not_configured') {
+    return 'oauth_not_configured';
+  }
+
+  const lower = trimmed.toLowerCase();
+  const providerLabel = (provider && PROVIDER_DISPLAY_NAMES[provider.toLowerCase()]) || 'the selected provider';
+
+  if (
+    lower === 'auth_cancelled' ||
+    lower.includes('no authorization code') ||
+    lower.includes('access_denied') ||
+    lower.includes('cancelled') ||
+    lower.includes('canceled')
+  ) {
+    return 'Sign-in was cancelled before completion. Please try again whenever you are ready.';
+  }
+
+  if (
+    lower === 'session_expired' ||
+    lower.includes('csrf') ||
+    lower.includes('state') ||
+    lower.includes('expired')
+  ) {
+    return 'Your sign-in session expired. Please try signing in again.';
+  }
+
+  if (
+    lower === 'provider_busy' ||
+    lower.includes('429') ||
+    lower.includes('503') ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests')
+  ) {
+    return `${providerLabel} is temporarily busy. Please wait a moment and try signing in again.`;
+  }
+
+  if (
+    lower === 'provider_unavailable' ||
+    lower.includes('token') ||
+    lower.includes('payload') ||
+    lower.includes('challenge') ||
+    lower.includes('anubis') ||
+    lower.includes('profile fetch') ||
+    lower.includes('whoami') ||
+    lower.includes('invalid_grant') ||
+    lower.includes('invalid_client') ||
+    lower.includes('bad_verification_code') ||
+    lower.includes('redirect_uri') ||
+    lower.includes('http ') ||
+    lower.includes('auth failure') ||
+    lower.includes('unsupported provider')
+  ) {
+    return `We couldn't complete sign-in with ${providerLabel} right now. Please try again in a moment, or use Direct Author / Community Sign-In below.`;
+  }
+
+  return sanitizeUserFacingError(
+    trimmed,
+    `We couldn't complete sign-in with ${providerLabel} right now. Please try again in a moment, or use Direct Author / Community Sign-In below.`
+  );
 }
 
 @Injectable({
@@ -139,7 +222,7 @@ export class AuthService {
       if (authError) {
         this.clearAuthCache();
         this._isCompletingOAuth.set(false);
-        this._authError.set(authError);
+        this._authError.set(formatFriendlyAuthError(authError, providerParam || this._selectedProvider()));
         this._isAuthModalOpen.set(true);
       } else if (authSuccess) {
         this.clearAuthCache();

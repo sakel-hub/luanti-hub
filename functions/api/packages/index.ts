@@ -1,6 +1,8 @@
 import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
+  fetchGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp,
   fetchAccurateGitZipSize,
   parseJsonArray,
   normalizeRepoKey,
@@ -504,8 +506,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       short_desc: shortDescText,
       short_description: shortDescText,
       release: releaseId,
-      updated_at: p.updated_at || matchedUpstream?.updated_at || undefined,
-      created_at: p.created_at || matchedUpstream?.created_at || undefined,
+      latest_commit_sha: p.latest_commit_sha || undefined,
+      updated_at: isGitSource
+        ? (p.updated_at || matchedUpstream?.updated_at || undefined)
+        : (matchedUpstream?.updated_at || undefined),
+      created_at: isGitSource
+        ? (p.created_at || matchedUpstream?.created_at || undefined)
+        : (matchedUpstream?.created_at || undefined),
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
       score: computeCatalogStarRating(matchedUpstream, d1StarAvg),
@@ -726,6 +733,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 );
                 if (discovered.length > 0) {
                   const newestRel = discovered[0];
+                  await syncDebouncedGitVersionStamp(
+                    env.DB,
+                    row,
+                    newestRel?.commit_sha || newestRel?.tag_name,
+                    true
+                  );
                   const newestRelTime = Date.parse(String(newestRel?.released_at || '')) || 0;
                   const prevPkgTime = Date.parse(String(row.updated_at || '')) || 0;
                   const needsSizeHeal = !row.download_size || Number(row.download_size) > 5 * 1024 * 1024;
@@ -751,6 +764,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                       sizeEst?.fileSize || null,
                       row.id
                     ).run();
+                  }
+                } else {
+                  const smartRefs = await fetchGitSmartHttpRefs(
+                    row.repo_url,
+                    row.author_name,
+                    row.name
+                  );
+                  if (smartRefs?.headSha) {
+                    await syncDebouncedGitVersionStamp(env.DB, row, smartRefs.headSha, false);
                   }
                 }
               } catch {

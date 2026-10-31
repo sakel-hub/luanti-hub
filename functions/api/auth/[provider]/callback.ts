@@ -167,7 +167,12 @@ async function exchangeOAuthTokenWithRetry(
       lastStatus = res.status;
       if (res.ok) {
         const rawText = await res.text();
-        if (rawText.includes('id="anubis_challenge"') || rawText.trim().startsWith('<!DOCTYPE')) {
+        const trimmedLower = rawText.trim().toLowerCase();
+        if (
+          rawText.includes('anubis_challenge') ||
+          trimmedLower.startsWith('<!doctype') ||
+          trimmedLower.startsWith('<html')
+        ) {
           throw new Error(`${providerLabel} returned an anti-bot challenge page instead of OAuth token JSON`);
         }
         try {
@@ -250,7 +255,7 @@ export async function onRequestGet(context: {
 
   if (!code) {
     return Response.redirect(
-      `${url.origin}/?auth_error=No+authorization+code+provided&provider=${encodeURIComponent(provider)}`,
+      `${url.origin}/?auth_error=auth_cancelled&provider=${encodeURIComponent(provider)}`,
       302
     );
   }
@@ -262,7 +267,7 @@ export async function onRequestGet(context: {
 
   if (!isCookieStateValid && !isHmacStateValid) {
     return Response.redirect(
-      `${url.origin}/?auth_error=Invalid+OAuth+CSRF+state&provider=${encodeURIComponent(provider)}`,
+      `${url.origin}/?auth_error=session_expired&provider=${encodeURIComponent(provider)}`,
       302
     );
   }
@@ -310,7 +315,7 @@ export async function onRequestGet(context: {
           redirect_uri: redirectUri
         },
         'Codeberg',
-        false,
+        true,
         checkEdgeCacheBeforeRetry
       );
       if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
@@ -343,7 +348,7 @@ export async function onRequestGet(context: {
           redirect_uri: redirectUri
         },
         'Mesehub',
-        false,
+        true,
         checkEdgeCacheBeforeRetry
       );
       if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
@@ -698,8 +703,13 @@ export async function onRequestGet(context: {
       return await buildSuccessRedirectResponse(url.origin, isHttps, existingSessionUserId, sessionSecret);
     }
 
+    console.error('[OAuth Callback Error]:', provider, errMsg);
+    const publicErrorCode = isRateLimited429 || err?.httpStatus === 503
+      ? 'provider_busy'
+      : 'provider_unavailable';
+
     return Response.redirect(
-      `${url.origin}/?auth_error=${encodeURIComponent(errMsg)}&provider=${encodeURIComponent(provider)}`,
+      `${url.origin}/?auth_error=${encodeURIComponent(publicErrorCode)}&provider=${encodeURIComponent(provider)}`,
       302
     );
   } finally {

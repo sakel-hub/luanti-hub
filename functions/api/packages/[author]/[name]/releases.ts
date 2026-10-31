@@ -2,8 +2,13 @@ import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
   fetchGitReleaseNotesBetweenRefs,
+  fetchGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp,
+  ensureExtendedPackageColumns,
   buildGitBranchArchiveUrl,
   sortAndCapReleases,
+  sanitizeReleaseNotesText,
+  scanGitRepoMetadataCached,
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 
@@ -22,8 +27,9 @@ export async function onRequestGet(context: { request: Request; params: { author
 
   // 1. Check D1 Kill Switch & local D1 releases
   if (context.env.DB) {
+    await ensureExtendedPackageColumns(context.env.DB);
     d1Pkg = await context.env.DB.prepare(
-      `SELECT id, status, repo_url, provider, default_branch, min_minetest_version, updated_at
+      `SELECT id, status, repo_url, provider, default_branch, min_minetest_version, updated_at, latest_commit_sha
        FROM packages
        WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
        LIMIT 1`
@@ -48,8 +54,10 @@ export async function onRequestGet(context: { request: Request; params: { author
     const headRef = (reqUrl.searchParams.get('head') || '').trim();
     const baseRef = (reqUrl.searchParams.get('base') || '').trim();
     const branchParam = (reqUrl.searchParams.get('branch') || d1Pkg?.default_branch || 'main').trim();
-    let repoUrl = d1Pkg?.repo_url || '';
-    let releaseBody = '';
+    const untilParam = (reqUrl.searchParams.get('until') || '').trim();
+    const repoParam = (reqUrl.searchParams.get('repo') || '').trim();
+    let repoUrl = d1Pkg?.repo_url || repoParam || '';
+    const releaseBody = '';
 
     if (!repoUrl) {
       const cdbDetail = await fetchUpstreamJsonCached<any>(
@@ -61,11 +69,23 @@ export async function onRequestGet(context: { request: Request; params: { author
       }
     }
 
+    if (!repoUrl) {
+      try {
+        const scanned = await scanGitRepoMetadataCached(author, name);
+        if (scanned?.repoUrl) {
+          repoUrl = scanned.repoUrl;
+        }
+      } catch {
+        // Non-fatal fallback
+      }
+    }
+
     const notesPayload = await fetchGitReleaseNotesBetweenRefs(repoUrl || null, author, name, {
       headRef: headRef || branchParam || 'HEAD',
       baseRef: baseRef || undefined,
       defaultBranch: branchParam || 'main',
-      releaseBody
+      releaseBody,
+      untilDate: untilParam || undefined
     });
 
     return new Response(JSON.stringify(notesPayload), {
@@ -117,8 +137,8 @@ export async function onRequestGet(context: { request: Request; params: { author
         upstream_url: fullDownloadUrl,
         size: typeof r.size === 'number' && r.size > 0 ? r.size : (r.file_size || undefined),
         downloads: typeof r.downloads === 'number' ? r.downloads : undefined,
-        release_notes: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
-        changelog: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        release_notes: sanitizeReleaseNotesText(r.release_notes, String(r.title || r.name || r.id || '')),
+        changelog: sanitizeReleaseNotesText(r.release_notes, String(r.title || r.name || r.id || '')),
         sha256: typeof r.sha256 === 'string' && r.sha256.trim() ? r.sha256.trim() : undefined,
         min_minetest_version: (rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined) || r.min_protocol_version || undefined,
         max_minetest_version: (rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined) || r.max_protocol_version || undefined,
@@ -157,8 +177,8 @@ export async function onRequestGet(context: { request: Request; params: { author
         upstream_url: r.download_url,
         min_minetest_version: r.min_minetest_version,
         max_minetest_version: r.max_minetest_version,
-        changelog: r.changelog,
-        release_notes: r.changelog || undefined,
+        changelog: sanitizeReleaseNotesText(r.changelog, tag),
+        release_notes: sanitizeReleaseNotesText(r.changelog, tag),
         release_date: r.released_at,
         released_at: r.released_at
       };
@@ -208,6 +228,12 @@ export async function onRequestGet(context: { request: Request; params: { author
               `UPDATE packages SET updated_at = ? WHERE id = ?`
             ).bind(new Date(newestRelTime).toISOString(), d1Pkg.id).run();
           }
+          await syncDebouncedGitVersionStamp(
+            context.env.DB,
+            d1Pkg,
+            discoveredGitReleases[0]?.commit_sha || discoveredGitReleases[0]?.tag_name,
+            true
+          );
         } catch {
           // Non-blocking D1 sync
         }
@@ -283,7 +309,8 @@ export async function onRequestGet(context: { request: Request; params: { author
         upstream_url: r.download_url,
         min_minetest_version: r.min_minetest_version,
         max_minetest_version: r.max_minetest_version,
-        changelog: r.changelog,
+        changelog: sanitizeReleaseNotesText(r.changelog, tag),
+        release_notes: sanitizeReleaseNotesText(r.changelog, tag),
         release_date: r.released_at,
         released_at: r.released_at
       };
@@ -293,7 +320,15 @@ export async function onRequestGet(context: { request: Request; params: { author
   }
 
   if (d1Pkg?.repo_url) {
-    const branch = d1Pkg.provider === 'contentdb' ? 'HEAD' : (d1Pkg.default_branch || 'HEAD');
+    const smartRefs = await fetchGitSmartHttpRefs(d1Pkg.repo_url, author, name);
+    const branch =
+      d1Pkg.provider === 'contentdb'
+        ? (smartRefs?.defaultBranch || 'HEAD')
+        : (d1Pkg.default_branch || smartRefs?.defaultBranch || 'HEAD');
+    const resolvedHeadSha = smartRefs?.headSha || 'HEAD';
+    if (context.env.DB && d1Pkg?.id && smartRefs?.headSha) {
+      await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
+    }
     const branchUrl = buildGitBranchArchiveUrl(d1Pkg.repo_url, author, name, branch);
     const packagedUrl = `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
     return Response.json([
@@ -302,7 +337,7 @@ export async function onRequestGet(context: { request: Request; params: { author
         version: branch,
         title: branch,
         tag_name: branch,
-        commit_sha: 'HEAD',
+        commit_sha: resolvedHeadSha,
         url: packagedUrl,
         download_url: packagedUrl,
         upstream_url: branchUrl,

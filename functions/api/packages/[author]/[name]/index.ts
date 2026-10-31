@@ -6,6 +6,8 @@ import {
   writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
   fetchGitRepoReleasesAndTags,
+  fetchGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp,
   buildGitBranchArchiveUrl,
   rewriteRelativeMarkdownUrls,
   ensureExtendedPackageColumns,
@@ -21,7 +23,10 @@ import {
   sanitizePublicErrorMessage,
   fetchAccurateGitZipSize,
   fetchRepoSizeEstimateFromUrl,
+  formatByteSize,
+  normalizeGitRepoInputUrl,
   sortAndCapReleases,
+  sanitizeReleaseNotesText,
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 import {
@@ -57,21 +62,6 @@ function parseDownloadSizeBytes(val: any): number {
     }
   }
   return 0;
-}
-
-function formatByteSize(val: any): string | undefined {
-  const bytes = parseDownloadSizeBytes(val);
-  if (bytes > 0) {
-    if (bytes >= 1024 * 1024) {
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    }
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  }
-  if (typeof val === 'string') {
-    const trimmed = val.trim();
-    if (trimmed && /[a-zA-Z]/.test(trimmed) && trimmed !== '2 KB') return trimmed;
-  }
-  return undefined;
 }
 
 /**
@@ -374,19 +364,8 @@ async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | undefin
 }
 
 function normalizeDefunctGitHost(rawUrl?: string): string | undefined {
-  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
-  const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
-  try {
-    const u = new URL(trimmed);
-    const parts = u.pathname.split('/').filter(Boolean);
-    if (u.hostname.toLowerCase().includes('notabug.org') && parts.length >= 2) {
-      // NotABug shut down; Luanti creators (e.g. TenPlus1) migrated repositories to Codeberg
-      return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1]}`;
-    }
-  } catch {
-    // Keep original if URL parsing fails
-  }
-  return trimmed;
+  const normalized = normalizeGitRepoInputUrl(rawUrl);
+  return normalized || undefined;
 }
 
 async function probeGitRepoConfAndLicense(
@@ -416,6 +395,8 @@ function buildNormalizedReleases(
           : `https://content.luanti.org/packages/${encAuthor}/${encName}/releases/${r.id}/download/`;
       const rawBytes = Number(r.size || r.file_size || r.download_size || 0);
 
+      const cleanNotes = sanitizeReleaseNotesText(r.release_notes, String(r.title || r.name || r.id || ''));
+
       return {
         id: r.id,
         version: String(r.title || r.name || r.id || 'latest'),
@@ -427,8 +408,8 @@ function buildNormalizedReleases(
         size: rawBytes > 0 ? rawBytes : undefined,
         file_size: rawBytes > 0 ? formatByteSize(rawBytes) : undefined,
         downloads: typeof r.downloads === 'number' ? r.downloads : undefined,
-        release_notes: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
-        changelog: typeof r.release_notes === 'string' && r.release_notes.trim() ? r.release_notes.trim() : undefined,
+        release_notes: cleanNotes,
+        changelog: cleanNotes,
         sha256: typeof r.sha256 === 'string' && r.sha256.trim() ? r.sha256.trim() : undefined,
         min_minetest_version: extractEngineVersionString(r.min_minetest_version) || r.min_protocol_version || undefined,
         max_minetest_version: extractEngineVersionString(r.max_minetest_version) || r.max_protocol_version || undefined,
@@ -440,23 +421,26 @@ function buildNormalizedReleases(
   }
 
   if (Array.isArray(d1Releases) && d1Releases.length > 0) {
-    const mappedD1 = d1Releases.map((r: any) => ({
-      id: r.id,
-      version: r.tag_name || r.version,
-      title: r.title || r.tag_name || r.version,
-      tag_name: r.tag_name || r.version,
-      commit_sha: r.commit_sha,
-      url: r.download_url || r.url,
-      download_url: r.download_url || r.url,
-      size: r.size || r.file_size || undefined,
-      file_size: typeof r.file_size === 'string' ? r.file_size : (Number(r.size) > 0 ? formatByteSize(Number(r.size)) : undefined),
-      min_minetest_version: r.min_minetest_version,
-      max_minetest_version: r.max_minetest_version,
-      changelog: r.changelog,
-      release_notes: r.changelog || undefined,
-      release_date: r.released_at || r.release_date,
-      released_at: r.released_at || r.release_date
-    }));
+    const mappedD1 = d1Releases.map((r: any) => {
+      const cleanNotes = sanitizeReleaseNotesText(r.changelog || r.release_notes, String(r.tag_name || r.version || ''));
+      return {
+        id: r.id,
+        version: r.tag_name || r.version,
+        title: r.title || r.tag_name || r.version,
+        tag_name: r.tag_name || r.version,
+        commit_sha: r.commit_sha,
+        url: r.download_url || r.url,
+        download_url: r.download_url || r.url,
+        size: r.size || r.file_size || undefined,
+        file_size: typeof r.file_size === 'string' ? r.file_size : (Number(r.size) > 0 ? formatByteSize(Number(r.size)) : undefined),
+        min_minetest_version: r.min_minetest_version,
+        max_minetest_version: r.max_minetest_version,
+        changelog: cleanNotes,
+        release_notes: cleanNotes,
+        release_date: r.released_at || r.release_date,
+        released_at: r.released_at || r.release_date
+      };
+    });
     return sortAndCapReleases(mappedD1, MAX_PACKAGE_RELEASES);
   }
 
@@ -792,16 +776,30 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               rel.commit_sha,
               rel.download_url,
               rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
-              rel.changelog || `Git Tag / Release (${rel.tag_name})`,
+              sanitizeReleaseNotesText(rel.changelog, rel.tag_name) || null,
               rel.released_at || null
             ).run();
           }
+          await syncDebouncedGitVersionStamp(
+            context.env.DB,
+            d1Pkg,
+            d1Releases[0]?.commit_sha || d1Releases[0]?.tag_name,
+            true
+          );
         } catch {
           // Non-fatal D1 sync error
         }
       }
     } else if (d1Releases.length === 0 && d1Pkg?.repo_url) {
-      const branch = d1Pkg.default_branch || 'main';
+      const smartRefs = await fetchGitSmartHttpRefs(
+        d1Pkg.repo_url,
+        d1Pkg.author_name || author,
+        d1Pkg.name || name
+      );
+      if (context.env.DB && d1Pkg && smartRefs?.headSha) {
+        await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
+      }
+      const branch = d1Pkg.default_branch || smartRefs?.defaultBranch || 'main';
       const fallbackUrl = buildGitBranchArchiveUrl(
         d1Pkg.repo_url,
         d1Pkg.author_name || author,
@@ -814,11 +812,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         version: branch,
         title: `${branch} branch`,
         tag_name: branch,
-        commit_sha: 'HEAD',
+        commit_sha: smartRefs?.headSha || 'HEAD',
         url: fallbackUrl,
         download_url: fallbackUrl,
         min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
-        changelog: `Direct source archive from ${branch} branch`,
+        changelog: undefined,
         released_at: d1Pkg.updated_at || d1Pkg.created_at || new Date().toISOString()
       }];
     }
@@ -933,15 +931,36 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           : undefined;
 
       if (bundledReleases.length === 0 && !isLite && resolvedRepo) {
-        const discoveredGitRels = await discoverGitReleasesCached(
+        const discoveredGitRels = await fetchGitRepoReleasesAndTags(
+          resolvedRepo,
           resolvedAuthor,
           resolvedName,
-          resolvedRepo,
-          d1Pkg?.default_branch || 'main',
           d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0'
         );
         if (discoveredGitRels.length > 0) {
-          bundledReleases = discoveredGitRels;
+          bundledReleases = sortAndCapReleases(discoveredGitRels, MAX_PACKAGE_RELEASES);
+        } else {
+          const smartRefs = await fetchGitSmartHttpRefs(resolvedRepo, resolvedAuthor, resolvedName);
+          const branch = d1Pkg?.default_branch || smartRefs?.defaultBranch || 'main';
+          const fallbackUrl = buildGitBranchArchiveUrl(
+            resolvedRepo,
+            resolvedAuthor,
+            resolvedName,
+            branch,
+            d1Pkg?.provider
+          );
+          bundledReleases = [{
+            id: 'git-branch-fallback',
+            version: branch,
+            title: `${branch} branch`,
+            tag_name: branch,
+            commit_sha: smartRefs?.headSha || 'HEAD',
+            url: fallbackUrl,
+            download_url: fallbackUrl,
+            min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
+            changelog: undefined,
+            released_at: d1Pkg?.updated_at || d1Pkg?.created_at || new Date().toISOString()
+          }];
         }
       }
 
@@ -1074,6 +1093,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         maintainers: parseJsonArray(d1Pkg?.maintainers),
         created_at: d1Pkg?.created_at || undefined,
         updated_at: d1Pkg?.updated_at || undefined,
+        latest_commit_sha: d1Pkg?.latest_commit_sha || bundledReleases[0]?.commit_sha || undefined,
         provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : 'github'),
         default_branch: d1Pkg?.default_branch || 'main',
         min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
@@ -1499,6 +1519,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     game_support: gameSupport.length > 0 ? gameSupport : undefined,
     created_at: createdAt,
     updated_at: updatedAt,
+    latest_commit_sha: d1Pkg?.latest_commit_sha || bundledReleases[0]?.commit_sha || undefined,
     screenshots,
     tags: Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean),
     contentdb_downloads: contentdbDownloads,

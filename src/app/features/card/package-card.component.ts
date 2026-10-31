@@ -82,7 +82,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
 
         <!-- Netflix-Style Desktop Hover Video Player (Muted by Default with Mute/Unmute & Enlarge Controls + Obstruction-Free Crop) -->
         @if (isHoverVideoActive() && package.video_url) {
-          <div class="absolute -inset-px z-20 bg-black overflow-hidden animate-fade-in">
+          <div class="absolute inset-0 z-20 bg-slate-950 overflow-hidden animate-fade-in">
             @if (isDirectVideo(package.video_url)) {
               <video
                 #hoverVideoEl
@@ -96,7 +96,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 disablePictureInPicture
                 (timeupdate)="onDirectVideoTimeUpdate()"
                 controlsList="nodownload nofullscreen noremoteplayback"
-                class="w-full h-full object-cover pointer-events-none">
+                class="w-full h-full object-cover block pointer-events-none">
               </video>
             } @else if (hoverEmbedSafeUrl(); as safeEmbed) {
               <!-- Vertical aspect-ratio letterbox crop pushes YouTube top title/avatar bar and bottom watermark/controls outside overflow-hidden while keeping the 16:9 video centered -->
@@ -107,7 +107,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 (load)="onHoverIframeLoad()"
                 tabindex="-1"
                 aria-hidden="true"
-                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[106%] h-[240%] border-0 pointer-events-none select-none"
+                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[108%] h-[240%] border-0 pointer-events-none select-none"
                 allow="autoplay; encrypted-media">
               </iframe>
               <!-- Smooth thumbnail curtain hides initial YouTube buffer & center play/pause icon flash -->
@@ -117,12 +117,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 appImgFallback
                 alt=""
                 aria-hidden="true"
-                [class]="'absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-200 ' + (isEmbedVideoReady() ? 'opacity-0' : 'opacity-100')"
+                [class]="'absolute inset-0 w-full h-full object-cover block pointer-events-none transition-opacity duration-200 ' + (isEmbedVideoReady() ? 'opacity-0' : 'opacity-100')"
               />
             }
-
-            <!-- Subtle edge vignette to mask any residual player chrome -->
-            <div class="absolute -inset-x-px -bottom-1 -top-px bg-gradient-to-b from-slate-950/35 via-transparent to-slate-950 to-95% pointer-events-none"></div>
 
             <!-- Floating Enlarge & Mute/Unmute Action Buttons -->
             <div class="absolute bottom-2 right-2 z-30 flex items-center gap-1.5">
@@ -159,8 +156,13 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
           </div>
         }
 
-        <!-- Unclipped z-10 vignette overlaps the inner image clip boundary with a solid 5% base band -->
-        <div class="absolute -inset-x-px -bottom-0.5 top-0 z-10 bg-gradient-to-t from-slate-950 from-5% via-slate-950/20 to-transparent pointer-events-none"></div>
+        <!-- Unclipped z-10 vignette overlaps the inner image clip boundary with a solid 5% base band (removed while hover video plays and restored on mouse leave) -->
+        @if (!(isHoverVideoActive() && package.video_url)) {
+          <div
+            data-testid="card-thumbnail-vignette"
+            class="absolute -inset-x-px -bottom-0.5 top-0 z-10 bg-gradient-to-t from-slate-950 from-5% via-slate-950/20 to-transparent pointer-events-none">
+          </div>
+        }
 
         <!-- Rating pill on top right -->
         @if (package.score > 0) {

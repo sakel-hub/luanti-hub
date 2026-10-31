@@ -881,6 +881,7 @@ export class PackageService {
       dependencies: deps,
       optional_dependencies: optDeps,
       release_id: item.release || item.release_id,
+      latest_commit_sha: item.latest_commit_sha || undefined,
       created_at: item.created_at || undefined,
       updated_at: item.updated_at || undefined,
       status: item.status || 'active'
@@ -985,6 +986,7 @@ export class PackageService {
       file_size: primary.file_size || secondary.file_size,
       provider: secondary.provider && secondary.provider !== 'contentdb' ? secondary.provider : primary.provider,
       default_branch: secondary.default_branch || primary.default_branch,
+      latest_commit_sha: secondary.latest_commit_sha || primary.latest_commit_sha,
       dependencies: mergedDeps,
       optional_dependencies: mergedOptDeps,
       tags: mergedTags,
@@ -1489,6 +1491,7 @@ export class PackageService {
                 luantihub_downloads: Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0),
                 score: freshMatch.score || curr.score,
                 release_id: freshMatch.release_id || curr.release_id,
+                latest_commit_sha: freshMatch.latest_commit_sha || curr.latest_commit_sha,
                 updated_at: freshMatch.updated_at || curr.updated_at,
                 download_size: freshMatch.download_size || curr.download_size,
                 file_size: freshMatch.file_size || curr.file_size,
@@ -2871,15 +2874,19 @@ export class PackageService {
           const parts = u.pathname.split('/').filter(Boolean);
           if (parts.length >= 2) {
             const host = u.hostname.toLowerCase();
-            const fullName = `${parts[0]}/${parts[1]}`;
+            const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+            const fullName = isGitlabHost ? parts.join('/') : `${parts[0]}/${parts[1]}`;
             if (host.includes('codeberg.org')) {
               pushUnique('codeberg', fullName, `https://codeberg.org/${fullName}`, `https://codeberg.org/api/v1/repos/${fullName}/raw`);
             } else if (host.includes('git.minetest.land')) {
               pushUnique('mesehub', fullName, `https://git.minetest.land/${fullName}`, `https://git.minetest.land/api/v1/repos/${fullName}/raw`);
-            } else if (host.includes('gitlab.com')) {
-              pushUnique('gitlab', fullName, `https://gitlab.com/${fullName}`, `https://gitlab.com/${fullName}/-/raw/HEAD`);
+            } else if (isGitlabHost) {
+              pushUnique('gitlab', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/${fullName}/-/raw/HEAD`);
             } else if (host.includes('github.com')) {
               pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
+            } else {
+              // Custom Gitea / Forgejo instance
+              pushUnique('codeberg', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/api/v1/repos/${fullName}/raw`);
             }
           }
         } catch {
@@ -3308,7 +3315,13 @@ export class PackageService {
 
   normalizeGitRepoUrl(rawUrl?: string): string | undefined {
     if (!rawUrl || typeof rawUrl !== 'string') return undefined;
-    const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+    const trimmed = rawUrl
+      .trim()
+      .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/+$/, '')
+      .replace(/\.git$/i, '')
+      .replace(/\/+$/, '');
     if (!trimmed) return undefined;
     try {
       const u = new URL(trimmed);
@@ -3801,12 +3814,14 @@ export class PackageService {
             const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
               ? rel.max_minetest_version.name
               : rel.max_minetest_version;
-            const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim()
-              ? rel.release_notes.trim()
-              : (typeof rel.changelog === 'string' && rel.changelog.trim() ? rel.changelog.trim() : undefined);
+            const verLabel = rel.title || rel.tag_name || rel.version || `Release #${rel.id}`;
+            const rawNotes = this.sanitizeReleaseNotesText(
+              rel.release_notes || rel.changelog,
+              verLabel
+            );
             return {
               id: rel.id,
-              version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
+              version: verLabel,
               tag_name: rel.tag_name || rel.commit || '',
               commit_sha: rel.commit || rel.commit_sha || '',
               download_url: rel.url
@@ -4058,6 +4073,7 @@ export class PackageService {
           download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : undefined,
           file_size: sizeFormatted,
           release_id: data.release || data.release_id || pkg.release_id,
+          latest_commit_sha: data.latest_commit_sha || pkg.latest_commit_sha,
           repo_url: repoUrl,
           git_repo_status: gitRepoStatus,
           website: data.website || pkg.website,
@@ -4172,6 +4188,11 @@ export class PackageService {
     return work;
   }
 
+  getCachedReleases(pkg?: LuantiPackage | null): PackageRelease[] | undefined {
+    if (!pkg?.id) return undefined;
+    return this.releasesCache.get(pkg.id.toLowerCase());
+  }
+
   async fetchPackageReleases(pkg: LuantiPackage): Promise<PackageRelease[]> {
     const cacheKey = pkg.id.toLowerCase();
     const cached = this.releasesCache.get(cacheKey);
@@ -4212,12 +4233,14 @@ export class PackageService {
                 const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
                   ? rel.max_minetest_version.name
                   : rel.max_minetest_version;
-                const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim()
-                  ? rel.release_notes.trim()
-                  : (typeof rel.changelog === 'string' && rel.changelog.trim() ? rel.changelog.trim() : undefined);
+                const verLabel = rel.title || rel.tag_name || rel.version || `Release #${rel.id}`;
+                const rawNotes = this.sanitizeReleaseNotesText(
+                  rel.release_notes || rel.changelog,
+                  verLabel
+                );
                 return {
                   id: rel.id,
-                  version: rel.title || rel.tag_name || rel.version || `Release #${rel.id}`,
+                  version: verLabel,
                   tag_name: rel.tag_name || rel.commit || '',
                   commit_sha: rel.commit || rel.commit_sha || '',
                   download_url: resolvedDownloadUrl,
@@ -4231,23 +4254,17 @@ export class PackageService {
                   released_at: rel.release_date || rel.released_at || ''
                 };
               });
-              const hasRealTaggedRelease = mapped.some(
-                r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
-              );
               const sortedEdgeRels = this.sortAndCapReleases(mapped, 10);
-              if (hasRealTaggedRelease) {
-                this.releasesCache.set(cacheKey, sortedEdgeRels);
-                return sortedEdgeRels;
-              }
-              edgeFallbackBranchReleases = sortedEdgeRels;
+              this.releasesCache.set(cacheKey, sortedEdgeRels);
+              return sortedEdgeRels;
             }
           }
         } catch {
-          // Proceed to ContentDB / Git releases fallback
+          // Proceed to ContentDB fallback when running local dev server without Edge Functions
         }
       }
 
-      // Check official ContentDB `/packages/:author/:name/releases/` before hitting Git forge REST APIs
+      // Local-dev fallback: Check official ContentDB `/packages/:author/:name/releases/` when Edge Functions are offline
       const isOfficialPkg = pkg.source === 'official' || pkg.sources?.includes('official') || !pkg.provider || pkg.provider === 'contentdb';
       if (isOfficialPkg) {
         try {
@@ -4268,10 +4285,11 @@ export class PackageService {
               const rawMaxVer = rel.max_minetest_version && typeof rel.max_minetest_version === 'object'
                 ? rel.max_minetest_version.name
                 : rel.max_minetest_version;
-              const rawNotes = typeof rel.release_notes === 'string' && rel.release_notes.trim() ? rel.release_notes.trim() : undefined;
+              const verLabel = String(rel.title || rel.name || rel.id || 'Release');
+              const rawNotes = this.sanitizeReleaseNotesText(rel.release_notes || rel.changelog, verLabel);
               return {
                 id: rel.id,
-                version: String(rel.title || rel.name || rel.id || 'Release'),
+                version: verLabel,
                 tag_name: String(rel.title || rel.name || rel.id || ''),
                 commit_sha: rel.commit || '',
                 download_url: resolvedDownloadUrl,
@@ -4290,132 +4308,7 @@ export class PackageService {
             return sortedCdbRels;
           }
         } catch {
-          // Proceed to Git releases/tags auto-discovery
-        }
-      }
-
-      // Fallback: Auto-detect GitHub / Codeberg / Mesehub Releases & Tags (merging both so tags are preferred before main branch)
-      const confirmedRepos = await this.discoverConfirmedRepos(pkg, pkg.repo_url);
-      for (const repo of confirmedRepos) {
-        try {
-          const relApi = repo.forge === 'codeberg'
-            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/releases?limit=15`
-            : repo.forge === 'mesehub'
-              ? `https://git.minetest.land/api/v1/repos/${repo.fullName}/releases?limit=15`
-              : repo.forge === 'gitlab'
-                ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(repo.fullName)}/releases?per_page=15`
-                : `https://api.github.com/repos/${repo.fullName}/releases?per_page=15`;
-          const tagsApi = repo.forge === 'codeberg'
-            ? `https://codeberg.org/api/v1/repos/${repo.fullName}/tags?limit=15`
-            : repo.forge === 'mesehub'
-              ? `https://git.minetest.land/api/v1/repos/${repo.fullName}/tags?limit=15`
-              : repo.forge === 'gitlab'
-                ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(repo.fullName)}/repository/tags?per_page=15`
-                : `https://api.github.com/repos/${repo.fullName}/tags?per_page=15`;
-
-          const [relRes, tagsRes] = await Promise.all([
-            fetch(relApi).catch(() => null),
-            fetch(tagsApi).catch(() => null)
-          ]);
-
-          const combined: PackageRelease[] = [];
-          const seenTags = new Set<string>();
-
-          if (relRes && relRes.ok) {
-            const rels = await relRes.json().catch(() => []);
-            if (Array.isArray(rels)) {
-              for (const [idx, r] of rels.entries()) {
-                if (!r || r.draft) continue;
-                const tagName = String(r.tag_name || r.name || '').trim();
-                if (!tagName) continue;
-                const lower = tagName.toLowerCase();
-                if (seenTags.has(lower)) continue;
-                seenTags.add(lower);
-
-                const zipAsset = Array.isArray(r.assets)
-                  ? r.assets.find((a: any) => String(a?.name || '').toLowerCase().endsWith('.zip') && a?.browser_download_url)
-                  : null;
-                const assetSizeFormatted = zipAsset && Number(zipAsset.size) > 0
-                  ? this.formatDownloadSize(Number(zipAsset.size))
-                  : pkg.file_size;
-
-                const directReleaseUrl = zipAsset?.browser_download_url || (
-                  repo.forge === 'codeberg'
-                    ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                    : repo.forge === 'mesehub'
-                      ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                      : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`
-                );
-                const useEdgePackager =
-                  this.edgeApiAvailable &&
-                  typeof window !== 'undefined' &&
-                  !window.location.hostname.includes('localhost') &&
-                  window.location.hostname !== '127.0.0.1';
-
-                combined.push({
-                  id: r.id || `rel-${idx + 1}`,
-                  version: r.name || tagName,
-                  tag_name: tagName,
-                  commit_sha: r.target_commitish || '',
-                  download_url: useEdgePackager
-                    ? `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?tag=${encodeURIComponent(tagName)}`
-                    : directReleaseUrl,
-                  file_size: assetSizeFormatted,
-                  released_at: r.published_at || r.created_at || ''
-                });
-              }
-            }
-          }
-
-          if (tagsRes && tagsRes.ok) {
-            const tags = await tagsRes.json().catch(() => []);
-            if (Array.isArray(tags)) {
-              for (const [idx, t] of tags.entries()) {
-                const tagName = String(t?.name || '').trim();
-                if (!tagName) continue;
-                const lower = tagName.toLowerCase();
-                if (seenTags.has(lower)) {
-                  const existing = combined.find(c => c.tag_name.toLowerCase() === lower);
-                  if (existing && (t?.commit?.sha || t?.id) && (!existing.commit_sha || existing.commit_sha.length < 7)) {
-                    existing.commit_sha = String(t.commit?.sha || t.id);
-                  }
-                  continue;
-                }
-                seenTags.add(lower);
-
-                const directTagUrl = repo.forge === 'codeberg'
-                  ? `https://codeberg.org/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                  : repo.forge === 'mesehub'
-                    ? `https://git.minetest.land/${repo.fullName}/archive/${encodeURIComponent(tagName)}.zip`
-                    : `https://github.com/${repo.fullName}/archive/refs/tags/${encodeURIComponent(tagName)}.zip`;
-                const useEdgePackager =
-                  this.edgeApiAvailable &&
-                  typeof window !== 'undefined' &&
-                  !window.location.hostname.includes('localhost') &&
-                  window.location.hostname !== '127.0.0.1';
-
-                combined.push({
-                  id: `tag-${idx + 1}`,
-                  version: tagName,
-                  tag_name: tagName,
-                  commit_sha: t.commit?.sha || t.id || '',
-                  download_url: useEdgePackager
-                    ? `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?tag=${encodeURIComponent(tagName)}`
-                    : directTagUrl,
-                  file_size: pkg.file_size,
-                  released_at: t.commit?.created || ''
-                });
-              }
-            }
-          }
-
-          if (combined.length > 0) {
-            const sortedCombined = this.sortAndCapReleases(combined, 10);
-            this.releasesCache.set(cacheKey, sortedCombined);
-            return sortedCombined;
-          }
-        } catch {
-          // Ignore discovery error and try next confirmed repo
+          // Ignore fallback error
         }
       }
 
@@ -4492,6 +4385,28 @@ export class PackageService {
     return limit > 0 ? sorted.slice(0, limit) : sorted;
   }
 
+  sanitizeReleaseNotesText(rawNotes?: string | null, versionOrTag?: string | null): string | undefined {
+    if (typeof rawNotes !== 'string') return undefined;
+    const trimmed = rawNotes.trim();
+    if (!trimmed) return undefined;
+    if (/^Git Tag \/ Release\s*\([^)]*\)$/i.test(trimmed)) return undefined;
+    if (/^Direct source archive from\s+.+$/i.test(trimmed)) return undefined;
+    const ver = typeof versionOrTag === 'string' ? versionOrTag.trim() : '';
+    if (ver && (trimmed.toLowerCase() === ver.toLowerCase() || trimmed.toLowerCase() === `v${ver.toLowerCase()}`)) {
+      return undefined;
+    }
+    return trimmed;
+  }
+
+  abbreviateGitRefLabel(ref?: string | null): string {
+    const clean = typeof ref === 'string' ? ref.trim() : '';
+    if (!clean) return '';
+    if (/^[0-9a-f]{12,40}$/i.test(clean)) {
+      return clean.slice(0, 7);
+    }
+    return clean;
+  }
+
   /**
    * Lazily fetches commit-by-commit release notes between `baseRef...headRef` (with automatic
    * fallback to `headRef` commit history, default branch commits, or release markdown body).
@@ -4500,13 +4415,19 @@ export class PackageService {
     pkg: LuantiPackage,
     headRef: string,
     baseRef?: string,
-    fallbackBody?: string
+    fallbackBody?: string,
+    untilDate?: string
   ): Promise<ReleaseNotesPayload> {
     const cleanHead = (headRef || pkg.default_branch || 'HEAD').trim();
     const cleanBase = (baseRef || '').trim();
-    const cacheKey = `${pkg.id.toLowerCase()}::${cleanHead}::${cleanBase || 'none'}`;
+    const cleanUntil = (untilDate || '').trim();
+    const cleanFallbackBody = this.sanitizeReleaseNotesText(fallbackBody, cleanHead);
+    const displayHead = this.abbreviateGitRefLabel(cleanHead) || cleanHead;
+    const displayBase = this.abbreviateGitRefLabel(cleanBase) || undefined;
+
+    const cacheKey = `${pkg.id.toLowerCase()}::${cleanHead}::${cleanBase || 'none'}::${cleanUntil || 'none'}`;
     const cached = this.releaseNotesCache.get(cacheKey);
-    if (cached) {
+    if (cached && (cached.commits.length > 0 || cached.markdown_body)) {
       return cached;
     }
 
@@ -4517,7 +4438,7 @@ export class PackageService {
     if (this.edgeApiAvailable) {
       try {
         const res = await fetch(
-          `/api/packages/${encAuthor}/${encName}/releases?notes=1&head=${encodeURIComponent(cleanHead)}&base=${encodeURIComponent(cleanBase)}&branch=${encodeURIComponent(branch)}`,
+          `/api/packages/${encAuthor}/${encName}/releases?notes=1&head=${encodeURIComponent(cleanHead)}&base=${encodeURIComponent(cleanBase)}&branch=${encodeURIComponent(branch)}&until=${encodeURIComponent(cleanUntil)}&repo=${encodeURIComponent(pkg.repo_url || '')}`,
           { headers: { Accept: 'application/json' } }
         );
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
@@ -4525,100 +4446,29 @@ export class PackageService {
           if (data && Array.isArray(data.commits)) {
             const enriched: ReleaseNotesPayload = {
               ...data,
-              markdown_body: data.markdown_body || fallbackBody || undefined
+              head_ref: this.abbreviateGitRefLabel(data.head_ref) || displayHead,
+              base_ref: this.abbreviateGitRefLabel(data.base_ref) || displayBase,
+              markdown_body: this.sanitizeReleaseNotesText(data.markdown_body, cleanHead) || cleanFallbackBody || undefined
             };
             this.releaseNotesCache.set(cacheKey, enriched);
             return enriched;
           }
         }
       } catch {
-        // Fall through to client-side forge fallback
-      }
-    }
-
-    // Client-side forge fallback (when running on local ng serve or if edge endpoint unavailable)
-    let commits: ReleaseCommitItem[] = [];
-    let source: ReleaseNotesPayload['source'] = fallbackBody ? 'release_notes' : 'metadata';
-    let compareUrl: string | undefined;
-
-    if (pkg.repo_url) {
-      try {
-        const u = new URL(pkg.repo_url);
-        const host = u.hostname.toLowerCase();
-        const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-        if (parts.length >= 2) {
-          const owner = parts[0];
-          const repo = parts[1].replace(/\.git$/i, '');
-          const mapCommit = (c: any): ReleaseCommitItem | null => {
-            const sha = String(c?.sha || c?.id || '').trim();
-            if (!sha) return null;
-            const msg = String(c?.commit?.message || c?.message || c?.title || '').trim();
-            const firstLine = msg.split(/\r?\n/)[0]?.trim() || sha.slice(0, 7);
-            return {
-              sha,
-              short_sha: sha.slice(0, 7),
-              title: firstLine,
-              author_name: String(c?.commit?.author?.name || c?.author?.login || c?.author_name || owner),
-              committed_at: String(c?.commit?.author?.date || c?.created_at || c?.committed_date || ''),
-              url: String(c?.html_url || c?.web_url || `https://${host}/${owner}/${repo}/commit/${sha}`)
-            };
-          };
-
-          if (host.includes('github.com')) {
-            if (cleanBase && cleanHead && cleanBase !== cleanHead && cleanHead.toUpperCase() !== 'HEAD') {
-              compareUrl = `https://github.com/${owner}/${repo}/compare/${encodeURIComponent(cleanBase)}...${encodeURIComponent(cleanHead)}`;
-              const cmpRes = await fetch(
-                `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(cleanBase)}...${encodeURIComponent(cleanHead)}`
-              ).catch(() => null);
-              if (cmpRes && cmpRes.ok) {
-                const cmpJson = await cmpRes.json().catch(() => null);
-                if (Array.isArray(cmpJson?.commits) && cmpJson.commits.length > 0) {
-                  source = 'compare';
-                  commits = [...cmpJson.commits].reverse().map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 20);
-                }
-              }
-            }
-            if (commits.length === 0) {
-              const shaQuery = cleanHead !== 'HEAD' ? `&sha=${encodeURIComponent(cleanHead)}` : '';
-              const listRes = await fetch(
-                `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?per_page=12${shaQuery}`
-              ).catch(() => null);
-              if (listRes && listRes.ok) {
-                const listJson = await listRes.json().catch(() => null);
-                if (Array.isArray(listJson) && listJson.length > 0) {
-                  source = 'commits';
-                  commits = listJson.map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 12);
-                }
-              }
-            }
-          } else if (host.includes('codeberg.org')) {
-            const shaQuery = cleanHead !== 'HEAD' ? `&sha=${encodeURIComponent(cleanHead)}` : '';
-            const listRes = await fetch(
-              `https://codeberg.org/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?limit=12${shaQuery}`
-            ).catch(() => null);
-            if (listRes && listRes.ok) {
-              const listJson = await listRes.json().catch(() => null);
-              if (Array.isArray(listJson) && listJson.length > 0) {
-                source = 'commits';
-                commits = listJson.map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 12);
-              }
-            }
-          }
-        }
-      } catch {
-        // Ignore client-side forge fetch error
+        // Fall through to metadata fallback when offline
       }
     }
 
     const fallbackResult: ReleaseNotesPayload = {
-      source,
-      head_ref: cleanHead,
-      base_ref: cleanBase || undefined,
-      compare_url: compareUrl,
-      markdown_body: fallbackBody || undefined,
-      commits
+      source: cleanFallbackBody ? 'release_notes' : 'metadata',
+      head_ref: displayHead,
+      base_ref: displayBase,
+      markdown_body: cleanFallbackBody || undefined,
+      commits: []
     };
-    this.releaseNotesCache.set(cacheKey, fallbackResult);
+    if (cleanFallbackBody) {
+      this.releaseNotesCache.set(cacheKey, fallbackResult);
+    }
     return fallbackResult;
   }
 

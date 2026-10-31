@@ -97,8 +97,12 @@ export function normalizeContentDbReviewItem(r: any, idx = 0, packageId?: string
 
 const isolateJsonCache = new Map<string, { exp: number; data: any }>();
 const MAX_ISOLATE_CACHE_ENTRIES = 250;
+const NATIVE_FETCH_REF = typeof fetch !== 'undefined' ? fetch : null;
 
 function canUseIsolateCache(): boolean {
+  if (typeof fetch !== 'undefined' && NATIVE_FETCH_REF && globalThis.fetch !== NATIVE_FETCH_REF) {
+    return false;
+  }
   return !Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
 }
 
@@ -530,7 +534,8 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
     ['provides', 'TEXT'],
     ['content_warnings', 'TEXT'],
     ['ai_disclosures', 'TEXT'],
-    ['maintainers', 'TEXT']
+    ['maintainers', 'TEXT'],
+    ['latest_commit_sha', 'TEXT']
   ];
   try {
     const info = await db.prepare(`PRAGMA table_info(packages)`).all();
@@ -602,9 +607,15 @@ export function sanitizePublicErrorMessage(
   if (!raw) return fallbackMessage;
 
   const sensitivePattern =
-    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal)/i;
+    /\b(D1_[A-Z_]*|SQLITE_[A-Z_]*|SQLITE\b|no such table|no such column|has no column named|table [a-z0-9_]+ has no|UNIQUE constraint failed|FOREIGN KEY constraint failed|NOT NULL constraint failed|CHECK constraint failed|SYNTAX_ERROR|near ".+": syntax error|PRAGMA\b|ALTER TABLE\b|INSERT INTO\b|UPDATE [a-z0-9_]+ SET|DELETE FROM\b|SELECT .+ FROM|TypeError:|ReferenceError:|SyntaxError:|RangeError:|Cannot read propert(y|ies) of|Workers? runtime|cloudflare-internal|invalid token payload|token exchange failed|user profile fetch failed|whoami fetch failed|anti-bot challenge|anubis_challenge|Invalid OAuth CSRF state|bad_verification_code|invalid_grant|invalid_client|redirect_uri_mismatch|Unexpected token|JSON\.parse|Failed to fetch|NetworkError|Load failed|AbortError|HTTP [45]\d\d)\b/i;
 
-  if (sensitivePattern.test(raw) || raw.startsWith('<!DOCTYPE') || raw.startsWith('<html')) {
+  const lower = raw.toLowerCase();
+  if (
+    sensitivePattern.test(raw) ||
+    lower.startsWith('<!doctype') ||
+    lower.startsWith('<html') ||
+    /\bat\s+[a-zA-Z0-9_.$]+\s*\(/.test(raw)
+  ) {
     console.error('[LuantiHub Internal Error]:', raw);
     return fallbackMessage;
   }
@@ -695,17 +706,31 @@ export function parseGitRepoTarget(
   if (repoUrl && typeof repoUrl === 'string' && repoUrl.trim()) {
     try {
       const u = new URL(repoUrl.trim());
-      const host = u.hostname.toLowerCase();
-      const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+      let host = u.hostname.toLowerCase();
+      // Normalize defunct NotABug URLs to Codeberg
+      if (host.includes('notabug.org')) {
+        host = 'codeberg.org';
+      }
+      // Strip deep web UI suffixes (`/-/tree/...`, `/tree/...`, `/src/branch/...`, `/releases`, `/commits`)
+      const cleanedPath = u.pathname
+        .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+        .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+        .replace(/^\/+|\/+$/g, '');
+      const parts = cleanedPath.split('/').filter(Boolean);
       if (parts.length >= 2) {
-        const owner = parts[0];
-        const repo = parts[1].replace(/\.git$/i, '');
+        const isGitlabHost =
+          host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+        const owner = isGitlabHost && parts.length > 2 ? parts.slice(0, -1).join('/') : parts[0];
+        const repo = (isGitlabHost && parts.length > 2 ? parts[parts.length - 1] : parts[1]).replace(/\.git$/i, '');
         if (owner && repo) {
-          let provider: 'github' | 'codeberg' | 'gitlab' = 'github';
-          if (host.includes('codeberg') || host.includes('minetest.land') || host.includes('mesehub') || host.includes('gitea') || host.includes('forgejo')) {
-            provider = 'codeberg';
-          } else if (host.includes('gitlab')) {
+          let provider: 'github' | 'codeberg' | 'gitlab' = 'codeberg';
+          if (host === 'github.com' || host.endsWith('.github.com')) {
+            provider = 'github';
+          } else if (isGitlabHost) {
             provider = 'gitlab';
+          } else {
+            // Codeberg, Mesehub (git.minetest.land), Gitea, Forgejo, and self-hosted Gitea/Forgejo instances
+            provider = 'codeberg';
           }
           return { provider, host, owner, repo };
         }
@@ -1190,30 +1215,27 @@ export async function getCachedNormalizedZip(
   cacheKey: string,
   request?: Request
 ): Promise<{ response: Response; byteLength: number; source: 'HIT-ISOLATE' | 'HIT-EDGE' } | null> {
-  const isMockedFetch = Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
-  if (!isMockedFetch) {
-    const memZip = sharedIsolateZipCache.get(cacheKey);
-    if (memZip) {
-      if (Date.now() <= memZip.exp) {
-        return {
-          byteLength: memZip.bytes.byteLength,
-          source: 'HIT-ISOLATE',
-          response: new Response(memZip.bytes as unknown as BodyInit, {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/zip',
-              'Content-Disposition': `attachment; filename="${memZip.fileName}.zip"`,
-              'Content-Length': String(memZip.bytes.byteLength),
-              'Access-Control-Allow-Origin': '*',
-              'Access-Control-Expose-Headers': 'Content-Length, X-LuantiHub-Cache',
-              'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400',
-              'X-LuantiHub-Cache': 'HIT-ISOLATE'
-            }
-          })
-        };
-      }
-      sharedIsolateZipCache.delete(cacheKey);
+  const memZip = sharedIsolateZipCache.get(cacheKey);
+  if (memZip) {
+    if (Date.now() <= memZip.exp) {
+      return {
+        byteLength: memZip.bytes.byteLength,
+        source: 'HIT-ISOLATE',
+        response: new Response(memZip.bytes as unknown as BodyInit, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${memZip.fileName}.zip"`,
+            'Content-Length': String(memZip.bytes.byteLength),
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Content-Length, X-LuantiHub-Cache',
+            'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400',
+            'X-LuantiHub-Cache': 'HIT-ISOLATE'
+          }
+        })
+      };
     }
+    sharedIsolateZipCache.delete(cacheKey);
   }
 
   try {
@@ -1243,8 +1265,7 @@ export async function setCachedNormalizedZip(
   safeFileName: string,
   request?: Request
 ): Promise<Response> {
-  const isMockedFetch = Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
-  if (!isMockedFetch && normalizedZip.byteLength > 0 && normalizedZip.byteLength <= MAX_SHARED_ISOLATE_ZIP_ITEM_BYTES) {
+  if (normalizedZip.byteLength > 0 && normalizedZip.byteLength <= MAX_SHARED_ISOLATE_ZIP_ITEM_BYTES) {
     if (sharedIsolateZipCache.size >= MAX_SHARED_ISOLATE_ZIP_ENTRIES) {
       const oldestKey = sharedIsolateZipCache.keys().next().value;
       if (oldestKey) sharedIsolateZipCache.delete(oldestKey);
@@ -1372,10 +1393,224 @@ export function sortAndCapReleases<T extends SortableReleaseLike>(
   return maxCap > 0 ? sorted.slice(0, maxCap) : sorted;
 }
 
+export function sanitizeReleaseNotesText(
+  rawNotes?: string | null,
+  versionOrTag?: string | null
+): string | undefined {
+  if (typeof rawNotes !== 'string') return undefined;
+  const trimmed = rawNotes.trim();
+  if (!trimmed) return undefined;
+  if (/^Git Tag \/ Release\s*\([^)]*\)$/i.test(trimmed)) return undefined;
+  if (/^Direct source archive from\s+.+$/i.test(trimmed)) return undefined;
+  const ver = typeof versionOrTag === 'string' ? versionOrTag.trim() : '';
+  if (ver && (trimmed.toLowerCase() === ver.toLowerCase() || trimmed.toLowerCase() === `v${ver.toLowerCase()}`)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+export function abbreviateGitRefLabel(ref?: string | null): string {
+  const clean = typeof ref === 'string' ? ref.trim() : '';
+  if (!clean) return '';
+  if (/^[0-9a-f]{12,40}$/i.test(clean)) {
+    return clean.slice(0, 7);
+  }
+  return clean;
+}
+
+export interface GitSmartHttpRefs {
+  defaultBranch: string;
+  headSha: string;
+  branches: Record<string, string>;
+  tags: Array<{ tagName: string; commitSha: string }>;
+}
+
 /**
- * Discovers both formal Releases and Git Tags from GitHub, Codeberg/Gitea/Forgejo, or GitLab.
- * Prefers tags and releases so repositories that tag versions (e.g. via `/tags` without formal GitHub Releases)
- * expose all tagged versions for download before falling back to the default branch.
+ * Pure parser for the universal Git Smart HTTP wire protocol (`GET <repo>.git/info/refs?service=git-upload-pack`).
+ * Extracts `HEAD` symref (`defaultBranch`), `headSha`, branch SHAs (`refs/heads/*`), and tag SHAs (`refs/tags/*`),
+ * resolving annotated tag peel lines (`refs/tags/<name>^{}`) to their underlying commit SHA.
+ */
+export function parseGitSmartHttpRefs(rawText: string): GitSmartHttpRefs {
+  let defaultBranch = '';
+  let headSha = '';
+  const branches: Record<string, string> = {};
+  const tagMap = new Map<string, string>();
+
+  if (!rawText || typeof rawText !== 'string') {
+    return { defaultBranch: 'main', headSha: '', branches, tags: [] };
+  }
+
+  const symrefMatch = rawText.match(/symref=HEAD:refs\/heads\/([^\s\0\r\n]+)/);
+  if (symrefMatch?.[1]) {
+    defaultBranch = symrefMatch[1].trim();
+  }
+
+  const lines = rawText.split(/\r?\n/);
+  for (const rawLine of lines) {
+    // Strip optional flush packets (`0000`) and single 4-hex pkt-line length prefix (e.g. `003f`, `000000f8`)
+    let line = rawLine.replace(/^(?:0000)+/, '');
+    if (/^[0-9a-f]{4}(?:[0-9a-f]{40}\s|#)/i.test(line)) {
+      line = line.slice(4);
+    }
+    if (!line || line.startsWith('#')) continue;
+
+    // Strip capabilities after NUL byte (`\0`) on the first ref line
+    const nulIdx = line.indexOf('\0');
+    const refPart = (nulIdx >= 0 ? line.slice(0, nulIdx) : line).trim();
+    const m = refPart.match(/^([0-9a-f]{40})\s+(\S+)$/i);
+    if (!m) continue;
+
+    const sha = m[1].toLowerCase();
+    const refName = m[2];
+    if (refName === 'HEAD') {
+      headSha = sha;
+    } else if (refName.startsWith('refs/heads/')) {
+      const bName = refName.slice('refs/heads/'.length);
+      if (bName) {
+        branches[bName] = sha;
+      }
+    } else if (refName.startsWith('refs/tags/')) {
+      const rawTag = refName.slice('refs/tags/'.length);
+      if (rawTag.endsWith('^{}')) {
+        const cleanTag = rawTag.slice(0, -3);
+        if (cleanTag) {
+          // Peeled annotated tag commit SHA always takes precedence over the tag object SHA
+          tagMap.set(cleanTag, sha);
+        }
+      } else if (rawTag && !tagMap.has(rawTag)) {
+        tagMap.set(rawTag, sha);
+      }
+    }
+  }
+
+  if (!defaultBranch) {
+    if (headSha) {
+      const matchingBranch = Object.entries(branches).find(([, bSha]) => bSha === headSha)?.[0];
+      defaultBranch = matchingBranch || (branches['main'] ? 'main' : branches['master'] ? 'master' : 'main');
+    } else {
+      defaultBranch = branches['main'] ? 'main' : branches['master'] ? 'master' : (Object.keys(branches)[0] || 'main');
+    }
+  }
+  if (!headSha && defaultBranch && branches[defaultBranch]) {
+    headSha = branches[defaultBranch];
+  }
+
+  const tags = Array.from(tagMap.entries())
+    .map(([tagName, commitSha]) => ({ tagName, commitSha }))
+    .sort(
+      (a, b) =>
+        compareSemanticVersionsDesc(a.tagName, b.tagName) ||
+        b.tagName.localeCompare(a.tagName, undefined, { numeric: true, sensitivity: 'base' })
+    );
+
+  return { defaultBranch, headSha, branches, tags };
+}
+
+/**
+ * Queries the universal Git Smart HTTP endpoint (`GET <repo>.git/info/refs?service=git-upload-pack`)
+ * supported by all Git servers (GitHub, Codeberg, Mesehub, GitLab, Gitea, Forgejo, cgit) with a 15-minute Edge Cache.
+ * Costs 1 lightweight (~2 KB) request and 0 REST API rate-limit quota.
+ */
+export async function fetchGitSmartHttpRefs(
+  repoUrl?: string | null,
+  fallbackOwner?: string,
+  fallbackRepo?: string
+): Promise<GitSmartHttpRefs | null> {
+  const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
+  if (!target) return null;
+
+  const { host, owner, repo } = target;
+  const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
+  const cacheKey = `/__git_smart_refs_v1/${host}/${encOwnerPath}/${encodeURIComponent(repo.toLowerCase())}`;
+  const cached = await readEdgeCacheJson<GitSmartHttpRefs>(cacheKey);
+  if (cached && (cached.headSha || cached.tags.length > 0)) {
+    return cached;
+  }
+
+  const smartUrl = `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3200);
+  try {
+    const res = await fetchWithAnubisSupport(smartUrl, {
+      headers: {
+        'User-Agent': 'git/2.43.0 LuantiHub/1.0 (+https://luantihub.org)',
+        'Accept': 'application/x-git-upload-pack-advertisement, */*'
+      },
+      signal: ctrl.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const parsed = parseGitSmartHttpRefs(text);
+    if (parsed.headSha || parsed.tags.length > 0) {
+      await writeEdgeCacheJson(cacheKey, parsed, 900);
+      return parsed;
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
+/**
+ * Synchronizes a Git package's latest version fingerprint (`latestTag || headSha`) into D1
+ * with a 6-hour trailing-edge debounce window for branch-only commit updates so rapid multi-commit
+ * pushes coalesce into a single update notification.
+ */
+export async function syncDebouncedGitVersionStamp(
+  db: any,
+  d1Pkg: any,
+  latestFingerprint?: string | null,
+  isTaggedRelease = false
+): Promise<boolean> {
+  if (!db || !d1Pkg?.id || !latestFingerprint) return false;
+  const cleanNext = String(latestFingerprint).trim();
+  if (!cleanNext || cleanNext === 'HEAD' || cleanNext === 'latest') return false;
+
+  await ensureExtendedPackageColumns(db);
+
+  const prev = String(d1Pkg.latest_commit_sha || '').trim();
+  if (!prev) {
+    // Initial seed: record fingerprint without bumping updated_at to avoid false-positive notifications
+    try {
+      await db.prepare(`UPDATE packages SET latest_commit_sha = ? WHERE id = ?`).bind(cleanNext, d1Pkg.id).run();
+      d1Pkg.latest_commit_sha = cleanNext;
+    } catch {
+      // Non-fatal
+    }
+    return false;
+  }
+
+  if (prev === cleanNext) return false;
+
+  // For branch-only commit updates (non-tag), enforce a 6-hour server debounce window
+  if (!isTaggedRelease) {
+    const prevUpdatedMs = Date.parse(String(d1Pkg.updated_at || '')) || 0;
+    const DEBOUNCE_WINDOW_MS = 6 * 3600 * 1000;
+    if (prevUpdatedMs > 0 && Date.now() - prevUpdatedMs < DEBOUNCE_WINDOW_MS) {
+      // Hold `latest_commit_sha` at `prev` until the 6h window elapses so trailing-edge coalescing triggers cleanly
+      return false;
+    }
+  }
+
+  try {
+    const nowIso = new Date().toISOString();
+    await db
+      .prepare(`UPDATE packages SET latest_commit_sha = ?, updated_at = ? WHERE id = ?`)
+      .bind(cleanNext, nowIso, d1Pkg.id)
+      .run();
+    d1Pkg.latest_commit_sha = cleanNext;
+    d1Pkg.updated_at = nowIso;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Discovers both formal Releases and Git Tags across all Git services using the universal
+ * Git Smart HTTP wire protocol (`info/refs?service=git-upload-pack`) as the primary source of truth
+ * for tags and commit SHAs, enriched with formal Release notes/dates when available.
  */
 export async function fetchGitRepoReleasesAndTags(
   repoUrl?: string | null,
@@ -1383,10 +1618,29 @@ export async function fetchGitRepoReleasesAndTags(
   fallbackRepo?: string,
   minMinetestVersion = '5.0.0'
 ): Promise<DiscoveredGitRelease[]> {
-  const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
+  let effectiveRepoUrl = repoUrl;
+  if (!effectiveRepoUrl && fallbackOwner && fallbackRepo) {
+    try {
+      const scanned = await scanGitRepoMetadataCached(fallbackOwner, fallbackRepo);
+      if (scanned?.repoUrl) {
+        effectiveRepoUrl = scanned.repoUrl;
+      }
+    } catch {
+      // Proceed with fallback target
+    }
+  }
+
+  const target = parseGitRepoTarget(effectiveRepoUrl, fallbackOwner, fallbackRepo);
   if (!target) return [];
 
   const { provider, host, owner, repo } = target;
+  const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
+  const relCacheKey = `/__git_releases_tags_v2/${host}/${encOwnerPath}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(minMinetestVersion)}`;
+  const cachedReleases = await readEdgeCacheJson<DiscoveredGitRelease[]>(relCacheKey);
+  if (Array.isArray(cachedReleases) && cachedReleases.length > 0) {
+    return cachedReleases;
+  }
+
   const headers: Record<string, string> = {
     'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
     'Accept': provider === 'github' ? 'application/vnd.github+json' : 'application/json'
@@ -1413,18 +1667,55 @@ export async function fetchGitRepoReleasesAndTags(
     releasesUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=15`;
     tagsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags?per_page=15`;
   } else if (provider === 'codeberg') {
-    releasesUrl = `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?limit=15`;
-    tagsUrl = `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags?limit=15`;
+    releasesUrl = `https://${host}/api/v1/repos/${encOwnerPath}/${encodeURIComponent(repo)}/releases?limit=15`;
+    tagsUrl = `https://${host}/api/v1/repos/${encOwnerPath}/${encodeURIComponent(repo)}/tags?limit=15`;
   } else if (provider === 'gitlab') {
     const projectPath = encodeURIComponent(`${owner}/${repo}`);
     releasesUrl = `https://${host}/api/v4/projects/${projectPath}/releases?per_page=15`;
     tagsUrl = `https://${host}/api/v4/projects/${projectPath}/repository/tags?per_page=15`;
   }
 
-  const [rawReleases, rawTags] = await Promise.all([
-    releasesUrl ? fetchJsonWithTimeout(releasesUrl) : Promise.resolve(null),
-    tagsUrl ? fetchJsonWithTimeout(tagsUrl) : Promise.resolve(null)
+  // Query universal Git Smart HTTP refs (0 REST API quota) + formal Releases metadata in parallel;
+  // only fall back to the REST `/tags` endpoint if Smart HTTP refs advertisement was not supported.
+  const [smartRefs, rawReleases] = await Promise.all([
+    fetchGitSmartHttpRefs(effectiveRepoUrl, fallbackOwner, fallbackRepo),
+    releasesUrl ? fetchJsonWithTimeout(releasesUrl) : Promise.resolve(null)
   ]);
+
+  const rawTags =
+    smartRefs && smartRefs.tags.length > 0
+      ? smartRefs.tags.map(t => ({ name: t.tagName, commit: { sha: t.commitSha } }))
+      : tagsUrl
+        ? await fetchJsonWithTimeout(tagsUrl)
+        : null;
+
+  const extractReleaseZipAsset = (relObj: any): { url?: string; size?: number } => {
+    if (!relObj) return {};
+    if (Array.isArray(relObj.assets)) {
+      const found = relObj.assets.find(
+        (a: any) =>
+          String(a?.name || a?.browser_download_url || a?.url || '').toLowerCase().endsWith('.zip') &&
+          (a?.browser_download_url || a?.url)
+      );
+      if (found) {
+        return {
+          url: String(found.browser_download_url || found.url),
+          size: Number(found.size || 0) || undefined
+        };
+      }
+    }
+    // GitLab release assets (`relObj.assets.links` / `relObj.assets.sources`)
+    if (relObj.assets && typeof relObj.assets === 'object') {
+      const links = Array.isArray(relObj.assets.links) ? relObj.assets.links : [];
+      const linkZip = links.find((l: any) =>
+        String(l?.name || l?.direct_asset_url || l?.url || '').toLowerCase().endsWith('.zip')
+      );
+      if (linkZip && (linkZip.direct_asset_url || linkZip.url)) {
+        return { url: String(linkZip.direct_asset_url || linkZip.url) };
+      }
+    }
+    return {};
+  };
 
   const tagShaMap = new Map<string, string>();
   if (Array.isArray(rawTags)) {
@@ -1460,14 +1751,23 @@ export async function fetchGitRepoReleasesAndTags(
       seenTags.add(tagName);
 
       const rel = releaseByTag.get(tagName);
-      const rawCommit = String(t?.commit?.sha || t?.commit?.id || t?.id || rel?.target_commitish || '').trim();
+      const rawCommit = String(
+        t?.commit?.sha || t?.commit?.id || rel?.commit?.id || t?.id || rel?.target_commitish || ''
+      ).trim();
       const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
-      const zipAsset = Array.isArray(rel?.assets)
-        ? rel.assets.find((a: any) => String(a?.name || '').toLowerCase().endsWith('.zip') && (a?.browser_download_url || a?.url))
-        : null;
-      const archiveUrl = zipAsset?.browser_download_url || zipAsset?.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
-      const assetSize = Number(zipAsset?.size || 0);
-      const relDate = String(rel?.published_at || rel?.released_at || rel?.created_at || t?.commit?.created_at || '');
+      const zipAsset = extractReleaseZipAsset(rel);
+      const archiveUrl = zipAsset.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const assetSize = Number(zipAsset.size || 0);
+      const relDate = String(
+        rel?.published_at ||
+          rel?.released_at ||
+          rel?.created_at ||
+          t?.commit?.committed_date ||
+          t?.commit?.created_at ||
+          t?.commit?.created ||
+          t?.commit?.author?.date ||
+          ''
+      );
       const title = String(rel?.name || tagName).trim() || tagName;
 
       results.push({
@@ -1480,7 +1780,7 @@ export async function fetchGitRepoReleasesAndTags(
         download_url: archiveUrl,
         size: assetSize > 0 ? assetSize : undefined,
         min_minetest_version: minMinetestVersion,
-        changelog: rel?.body || rel?.description || t?.message || undefined,
+        changelog: sanitizeReleaseNotesText(rel?.body || rel?.description || t?.message, title),
         release_date: relDate,
         released_at: relDate
       });
@@ -1495,13 +1795,11 @@ export async function fetchGitRepoReleasesAndTags(
       if (!tagName || seenTags.has(tagName)) continue;
       seenTags.add(tagName);
 
-      const rawCommit = String(tagShaMap.get(tagName) || r.target_commitish || '').trim();
+      const rawCommit = String(tagShaMap.get(tagName) || r.commit?.id || r.target_commitish || '').trim();
       const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
-      const zipAsset = Array.isArray(r.assets)
-        ? r.assets.find((a: any) => String(a?.name || '').toLowerCase().endsWith('.zip') && (a?.browser_download_url || a?.url))
-        : null;
-      const archiveUrl = zipAsset?.browser_download_url || zipAsset?.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
-      const assetSize = Number(zipAsset?.size || 0);
+      const zipAsset = extractReleaseZipAsset(r);
+      const archiveUrl = zipAsset.url || buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+      const assetSize = Number(zipAsset.size || 0);
       const relDate = String(r.published_at || r.released_at || r.created_at || '');
       const title = String(r.name || tagName).trim() || tagName;
 
@@ -1515,14 +1813,77 @@ export async function fetchGitRepoReleasesAndTags(
         download_url: archiveUrl,
         size: assetSize > 0 ? assetSize : undefined,
         min_minetest_version: minMinetestVersion,
-        changelog: r.body || r.description || undefined,
+        changelog: sanitizeReleaseNotesText(r.body || r.description, title),
         release_date: relDate,
         released_at: relDate
       });
     }
   }
 
-  return sortAndCapReleases(results, MAX_PACKAGE_RELEASES);
+  // 3. Graceful Atom/RSS feed fallback if REST APIs were rate-limited or disabled on the forge
+  if (results.length === 0) {
+    const feedUrls =
+      provider === 'github'
+        ? [
+            `https://github.com/${encOwnerPath}/${encodeURIComponent(repo)}/releases.atom`,
+            `https://github.com/${encOwnerPath}/${encodeURIComponent(repo)}/tags.atom`
+          ]
+        : provider === 'gitlab'
+          ? [`https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/-/tags?format=atom`]
+          : [`https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/releases.rss`];
+
+    for (const feedUrl of feedUrls) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3200);
+      try {
+        const feedRes = await fetchWithAnubisSupport(feedUrl, {
+          headers: { 'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)' },
+          signal: ctrl.signal
+        });
+        clearTimeout(timer);
+        if (!feedRes.ok) continue;
+        const xml = await feedRes.text();
+        const itemRegex = /<(?:entry|item)>([\s\S]*?)<\/(?:entry|item)>/gi;
+        let m: RegExpExecArray | null;
+        while ((m = itemRegex.exec(xml)) !== null && results.length < MAX_PACKAGE_RELEASES) {
+          const block = m[1];
+          const linkMatch =
+            block.match(/<link[^>]*href=["']([^"']+)["']/i) || block.match(/<link>([\s\S]*?)<\/link>/i);
+          const linkHref = (linkMatch?.[1] || '').trim();
+          const tagFromLink = linkHref.match(/\/(?:releases\/tag|tags|archive)\/([^/?#"'\s]+)/i)?.[1];
+          const titleMatch = block.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+          const rawTitle = (titleMatch?.[1] || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+          const tagName = decodeURIComponent(tagFromLink || rawTitle.split(/\s+/)[0] || '').trim();
+          if (!tagName || seenTags.has(tagName)) continue;
+          seenTags.add(tagName);
+          const dateMatch = block.match(/<(?:updated|pubDate)>([\s\S]*?)<\/(?:updated|pubDate)>/i);
+          const archiveUrl = buildGitTagArchiveUrl(provider, host, owner, repo, tagName);
+          results.push({
+            id: `feed-${results.length + 1}`,
+            version: rawTitle || tagName,
+            title: rawTitle || tagName,
+            tag_name: tagName,
+            commit_sha: '',
+            url: archiveUrl,
+            download_url: archiveUrl,
+            min_minetest_version: minMinetestVersion,
+            changelog: undefined,
+            release_date: (dateMatch?.[1] || '').trim(),
+            released_at: (dateMatch?.[1] || '').trim()
+          });
+        }
+        if (results.length > 0) break;
+      } catch {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  const sortedResults = sortAndCapReleases(results, MAX_PACKAGE_RELEASES);
+  if (sortedResults.length > 0) {
+    await writeEdgeCacheJson(relCacheKey, sortedResults, 900);
+  }
+  return sortedResults;
 }
 
 /**
@@ -2032,14 +2393,26 @@ export interface GitRepoScanResult {
   cdbMeta?: CdbJsonMetadata | null;
 }
 
-function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
+export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
   if (!rawUrl || typeof rawUrl !== 'string') return undefined;
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
   try {
     const u = new URL(trimmed);
-    const parts = u.pathname.split('/').filter(Boolean);
-    if (u.hostname.toLowerCase().includes('notabug.org') && parts.length >= 2) {
-      return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1]}`;
+    const host = u.hostname.toLowerCase();
+    const cleanedPath = u.pathname
+      .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/^\/+|\/+$/g, '');
+    const parts = cleanedPath.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+      if (host.includes('notabug.org')) {
+        return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1].replace(/\.git$/i, '')}`;
+      }
+      const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+      const repoPath = isGitlabHost
+        ? parts.map((p, idx) => (idx === parts.length - 1 ? p.replace(/\.git$/i, '') : p)).join('/')
+        : `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
+      return `${u.origin}/${repoPath}`;
     }
   } catch {
     // Keep original if URL parsing fails
@@ -2455,90 +2828,114 @@ export function solveAnubisPowChallengeSync(
   const fullZeroBytes = Math.floor(Math.max(1, difficulty) / 2);
   const checkHalfByte = difficulty % 2 !== 0;
 
-  const block = new Uint8Array(128);
+  // Support randomData up to 480 bytes (Anubis v1.18+ uses 128-char hex randomData = 3 SHA-256 blocks)
+  const block = new Uint8Array(512);
   const view = new DataView(block.buffer);
   const w = new Uint32Array(64);
+
+  const compressBlock = (
+    baseOffset: number,
+    state: [number, number, number, number, number, number, number, number]
+  ) => {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(baseOffset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const w15 = w[i - 15];
+      const s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+      const w2 = w[i - 2];
+      const s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+
+    let a = state[0];
+    let bReg = state[1];
+    let c = state[2];
+    let d = state[3];
+    let e = state[4];
+    let f = state[5];
+    let g = state[6];
+    let h = state[7];
+
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & bReg) ^ (a & c) ^ (bReg & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = bReg;
+      bReg = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    state[0] = (state[0] + a) >>> 0;
+    state[1] = (state[1] + bReg) >>> 0;
+    state[2] = (state[2] + c) >>> 0;
+    state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0;
+    state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0;
+    state[7] = (state[7] + h) >>> 0;
+  };
+
+  if (prefixBytes.length + 20 > block.length) {
+    return null;
+  }
+
+  block.set(prefixBytes, 0);
+  const fixedBlocks = Math.floor(prefixBytes.length / 64);
+  const midState: [number, number, number, number, number, number, number, number] = [
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19
+  ];
+  for (let b = 0; b < fixedBlocks; b++) {
+    compressBlock(b * 64, midState);
+  }
+
+  const tailClearOffset = fixedBlocks * 64;
+  const state: [number, number, number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0, 0, 0];
 
   for (let nonce = 0; nonce < maxIterations; nonce++) {
     const nonceStr = String(nonce);
     const totalLen = prefixBytes.length + nonceStr.length;
-    if (totalLen + 9 > 128) break;
+    if (totalLen + 9 > block.length) break;
 
-    block.fill(0);
-    block.set(prefixBytes, 0);
+    const numBlocks = Math.ceil((totalLen + 9) / 64);
+    block.fill(0, tailClearOffset, numBlocks * 64);
+    if (prefixBytes.length > tailClearOffset) {
+      block.set(prefixBytes.subarray(tailClearOffset), tailClearOffset);
+    }
     for (let i = 0; i < nonceStr.length; i++) {
       block[prefixBytes.length + i] = nonceStr.charCodeAt(i);
     }
     block[totalLen] = 0x80;
 
-    const numBlocks = totalLen + 9 <= 64 ? 1 : 2;
     const bitLen = totalLen * 8;
     view.setUint32(numBlocks * 64 - 4, bitLen >>> 0, false);
 
-    let h0 = 0x6a09e667;
-    let h1 = 0xbb67ae85;
-    let h2 = 0x3c6ef372;
-    let h3 = 0xa54ff53a;
-    let h4 = 0x510e527f;
-    let h5 = 0x9b05688c;
-    let h6 = 0x1f83d9ab;
-    let h7 = 0x5be0cd19;
-
-    for (let b = 0; b < numBlocks; b++) {
-      const baseOffset = b * 64;
-      for (let i = 0; i < 16; i++) {
-        w[i] = view.getUint32(baseOffset + i * 4, false);
-      }
-      for (let i = 16; i < 64; i++) {
-        const w15 = w[i - 15];
-        const s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
-        const w2 = w[i - 2];
-        const s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
-        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-      }
-
-      let a = h0;
-      let bReg = h1;
-      let c = h2;
-      let d = h3;
-      let e = h4;
-      let f = h5;
-      let g = h6;
-      let h = h7;
-
-      for (let i = 0; i < 64; i++) {
-        const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
-        const ch = (e & f) ^ (~e & g);
-        const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
-        const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
-        const maj = (a & bReg) ^ (a & c) ^ (bReg & c);
-        const temp2 = (S0 + maj) >>> 0;
-
-        h = g;
-        g = f;
-        f = e;
-        e = (d + temp1) >>> 0;
-        d = c;
-        c = bReg;
-        bReg = a;
-        a = (temp1 + temp2) >>> 0;
-      }
-
-      h0 = (h0 + a) >>> 0;
-      h1 = (h1 + bReg) >>> 0;
-      h2 = (h2 + c) >>> 0;
-      h3 = (h3 + d) >>> 0;
-      h4 = (h4 + e) >>> 0;
-      h5 = (h5 + f) >>> 0;
-      h6 = (h6 + g) >>> 0;
-      h7 = (h7 + h) >>> 0;
+    for (let i = 0; i < 8; i++) {
+      state[i] = midState[i];
+    }
+    for (let b = fixedBlocks; b < numBlocks; b++) {
+      compressBlock(b * 64, state);
     }
 
-    // Fast top-word check for difficulty <= 8 (up to 4 full zero bytes in h0)
-    const words = [h0, h1, h2, h3, h4, h5, h6, h7];
     let matched = true;
     for (let byteIdx = 0; byteIdx < fullZeroBytes; byteIdx++) {
-      const word = words[byteIdx >> 2];
+      const word = state[byteIdx >> 2];
       const shift = (3 - (byteIdx & 3)) * 8;
       if (((word >>> shift) & 0xff) !== 0) {
         matched = false;
@@ -2546,7 +2943,7 @@ export function solveAnubisPowChallengeSync(
       }
     }
     if (matched && checkHalfByte) {
-      const word = words[fullZeroBytes >> 2];
+      const word = state[fullZeroBytes >> 2];
       const shift = (3 - (fullZeroBytes & 3)) * 8;
       if ((((word >>> shift) & 0xff) >>> 4) !== 0) {
         matched = false;
@@ -2554,7 +2951,7 @@ export function solveAnubisPowChallengeSync(
     }
 
     if (matched) {
-      const hashHex = words.map(x => x.toString(16).padStart(8, '0')).join('');
+      const hashHex = state.map(x => x.toString(16).padStart(8, '0')).join('');
       return {
         nonce,
         hashHex,
@@ -2565,30 +2962,90 @@ export function solveAnubisPowChallengeSync(
   return null;
 }
 
-function extractSetCookiePairs(headers: Headers): string[] {
-  const pairs: string[] = [];
+const ANUBIS_BROWSER_UA =
+  'Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0';
+
+function applySetCookieHeaders(cookieMap: Map<string, string>, headers: Headers): void {
+  const rawCookies: string[] = [];
   const getSetCookieFn = (headers as any)?.getSetCookie;
   if (typeof getSetCookieFn === 'function') {
-    const rawList: string[] = getSetCookieFn.call(headers) || [];
-    for (const raw of rawList) {
-      const firstPart = String(raw || '').split(';')[0]?.trim();
-      if (firstPart && firstPart.includes('=')) pairs.push(firstPart);
+    const list: string[] = getSetCookieFn.call(headers) || [];
+    for (const item of list) {
+      if (item) rawCookies.push(String(item));
     }
   }
-  if (pairs.length === 0) {
+  if (rawCookies.length === 0) {
     const rawCombined = headers.get('set-cookie') || '';
     if (rawCombined) {
-      for (const chunk of rawCombined.split(/,(?=\s*[a-zA-Z0-9_-]+=)/)) {
-        const firstPart = chunk.split(';')[0]?.trim();
-        if (firstPart && firstPart.includes('=')) pairs.push(firstPart);
+      // Support dots (.) in cookie names such as `techaro.lol-anubis-auth` and `within.website-x-cmd-anubis-auth`
+      for (const chunk of rawCombined.split(/,(?=\s*[a-zA-Z0-9_.-]+=)/)) {
+        if (chunk.trim()) rawCookies.push(chunk.trim());
       }
     }
   }
-  return pairs;
+
+  for (const rawCookie of rawCookies) {
+    const parts = rawCookie.split(';').map(p => p.trim());
+    const firstPart = parts[0] || '';
+    const eqIdx = firstPart.indexOf('=');
+    if (eqIdx <= 0) continue;
+
+    const name = firstPart.slice(0, eqIdx).trim();
+    const val = firstPart.slice(eqIdx + 1).trim();
+    const isExpired = parts.slice(1).some(attr => /^max-age\s*=\s*(0|-\d+)$/i.test(attr));
+    if (!val || isExpired) {
+      cookieMap.delete(name);
+    } else {
+      cookieMap.set(name, val);
+    }
+  }
+}
+
+function serializeCookieMap(cookieMap: Map<string, string>): string {
+  return Array.from(cookieMap.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+function extractAnubisChallengeScript(html: string): {
+  challengeId: string;
+  randomData: string;
+  difficulty: number;
+  method: string;
+} | null {
+  if (!html || !html.includes('anubis_challenge')) return null;
+  const scriptMatch = html.match(
+    /<script\b[^>]*\bid=["']anubis_challenge["'][^>]*>([\s\S]*?)<\/script>/i
+  );
+  if (!scriptMatch || !scriptMatch[1]) return null;
+  try {
+    const challengePayload = JSON.parse(scriptMatch[1].trim());
+    const rawChallenge = challengePayload?.challenge ?? challengePayload;
+    const isStringChallenge = typeof rawChallenge === 'string';
+    const challengeId = isStringChallenge ? '' : String(rawChallenge?.id || '').trim();
+    const randomData = isStringChallenge
+      ? rawChallenge.trim()
+      : String(rawChallenge?.randomData || rawChallenge?.challenge || '').trim();
+    const difficulty = Number(
+      (typeof rawChallenge === 'object' ? rawChallenge?.difficulty : undefined) ??
+        challengePayload?.rules?.difficulty ??
+        4
+    );
+    const method = String(
+      (typeof rawChallenge === 'object' ? rawChallenge?.method : undefined) ??
+        challengePayload?.rules?.algorithm ??
+        'fast'
+    ).toLowerCase();
+
+    if (!randomData) return null;
+    return { challengeId, randomData, difficulty, method };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Transparently handles Techaro Anubis v1.28+ Proof-of-Work challenges on upstream community
+ * Transparently handles Techaro Anubis v1.14–v1.28+ Proof-of-Work challenges on upstream community
  * Git forges (such as Mesehub `git.minetest.land`), caching the signed JWT clearance cookie
  * in Isolate Memory + Cloudflare Edge Cache (`caches.default`) for 24 hours.
  */
@@ -2598,37 +3055,61 @@ export async function fetchWithAnubisSupport(
 ): Promise<Response> {
   let host = '';
   let origin = '';
+  let pathname = '/';
   try {
     const parsed = new URL(url);
     host = parsed.hostname.toLowerCase();
     origin = parsed.origin;
+    pathname = parsed.pathname || '/';
   } catch {
     return fetch(url, init);
   }
 
-  const isAnubisCandidate = host.includes('minetest.land') || host.includes('mesehub');
+  const isAnubisCandidate =
+    host.includes('minetest.land') ||
+    host.includes('mesehub') ||
+    host.includes('gitea') ||
+    host.includes('forgejo') ||
+    host.includes('codeberg');
   if (!isAnubisCandidate) {
     return fetch(url, init);
   }
 
-  const cookieCacheKey = `/__anubis_cookie_v1/${encodeURIComponent(host)}`;
+  const cookieCacheKey = `/__anubis_cookie_v2/${encodeURIComponent(host)}`;
   const cachedCookieObj = await readEdgeCacheJson<{ cookie: string }>(cookieCacheKey);
 
+  // Enforce a consistent browser User-Agent across the initial request, `/pass-challenge`, and
+  // the authenticated retry because Anubis binds its challenge hash and JWT signature to `User-Agent`.
   const buildHeadersWithCookie = (cookieStr?: string): Record<string, string> => {
-    const merged: Record<string, string> = {
-      'User-Agent': 'Mozilla/5.0 (compatible; LuantiHub/1.0; +https://luantihub.org)'
-    };
+    const merged: Record<string, string> = {};
     if (init.headers) {
       if (init.headers instanceof Headers) {
         init.headers.forEach((v, k) => {
-          merged[k] = v;
+          if (k.toLowerCase() !== 'user-agent' && k.toLowerCase() !== 'cookie') {
+            merged[k] = v;
+          } else if (k.toLowerCase() === 'cookie') {
+            merged['Cookie'] = v;
+          }
         });
       } else if (Array.isArray(init.headers)) {
-        for (const [k, v] of init.headers) merged[k] = v;
+        for (const [k, v] of init.headers) {
+          if (k.toLowerCase() !== 'user-agent' && k.toLowerCase() !== 'cookie') {
+            merged[k] = v;
+          } else if (k.toLowerCase() === 'cookie') {
+            merged['Cookie'] = v;
+          }
+        }
       } else {
-        Object.assign(merged, init.headers as Record<string, string>);
+        for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
+          if (k.toLowerCase() !== 'user-agent' && k.toLowerCase() !== 'cookie') {
+            merged[k] = v;
+          } else if (k.toLowerCase() === 'cookie') {
+            merged['Cookie'] = v;
+          }
+        }
       }
     }
+    merged['User-Agent'] = ANUBIS_BROWSER_UA;
     if (cookieStr) {
       merged['Cookie'] = merged['Cookie'] ? `${merged['Cookie']}; ${cookieStr}` : cookieStr;
     }
@@ -2645,48 +3126,67 @@ export async function fetchWithAnubisSupport(
     return firstRes;
   }
 
-  const clonedText = await firstRes.clone().text().catch(() => '');
-  if (!clonedText.includes('id="anubis_challenge"')) {
-    return firstRes;
+  let challengeHtml = await firstRes.clone().text().catch(() => '');
+  let parsedChallenge = extractAnubisChallengeScript(challengeHtml);
+  const cookieMap = new Map<string, string>();
+  applySetCookieHeaders(cookieMap, firstRes.headers);
+
+  // If a POST request (e.g. OAuth token exchange) was intercepted with HTML without an inline challenge script,
+  // perform a GET to the origin root to obtain a fresh Anubis challenge.
+  if (!parsedChallenge && (init.method || 'GET').toUpperCase() !== 'GET') {
+    try {
+      const getChallengeRes = await fetch(`${origin}/`, {
+        method: 'GET',
+        headers: {
+          'User-Agent': ANUBIS_BROWSER_UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      });
+      applySetCookieHeaders(cookieMap, getChallengeRes.headers);
+      const getHtml = await getChallengeRes.text().catch(() => '');
+      parsedChallenge = extractAnubisChallengeScript(getHtml);
+    } catch {
+      // Ignore fallback challenge GET failure
+    }
   }
 
-  const scriptMatch = clonedText.match(
-    /<script\s+id=["']anubis_challenge["'][^>]*>([\s\S]*?)<\/script>/i
-  );
-  if (!scriptMatch || !scriptMatch[1]) {
+  if (!parsedChallenge) {
     return firstRes;
   }
 
   try {
-    const challengePayload = JSON.parse(scriptMatch[1].trim());
-    const challenge = challengePayload?.challenge;
-    const challengeId = String(challenge?.id || '').trim();
-    const randomData = String(challenge?.randomData || '').trim();
-    const difficulty = Number(challenge?.difficulty || challengePayload?.rules?.difficulty || 4);
-
-    if (!challengeId || !randomData) {
-      return firstRes;
-    }
-
-    const solved = solveAnubisPowChallengeSync(randomData, difficulty);
+    const solved =
+      parsedChallenge.method === 'metarefresh'
+        ? { nonce: 0, hashHex: parsedChallenge.randomData, elapsedMs: 20 }
+        : solveAnubisPowChallengeSync(parsedChallenge.randomData, parsedChallenge.difficulty);
     if (!solved) {
       return firstRes;
     }
 
-    const verificationCookies = extractSetCookiePairs(firstRes.headers);
-    const passUrl = `${origin}/.within.website/x/cmd/anubis/api/pass-challenge?id=${encodeURIComponent(challengeId)}&response=${encodeURIComponent(solved.hashHex)}&nonce=${solved.nonce}&redir=${encodeURIComponent('/')}&elapsedTime=${solved.elapsedMs}`;
+    const query = new URLSearchParams();
+    if (parsedChallenge.challengeId) {
+      query.set('id', parsedChallenge.challengeId);
+    }
+    query.set('response', solved.hashHex);
+    query.set('nonce', String(solved.nonce));
+    query.set('redir', pathname);
+    query.set('elapsedTime', String(solved.elapsedMs));
+
+    const passUrl = `${origin}/.within.website/x/cmd/anubis/api/pass-challenge?${query.toString()}`;
+    const verificationCookieHeader = serializeCookieMap(cookieMap);
 
     const passRes = await fetch(passUrl, {
       method: 'GET',
       redirect: 'manual',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; LuantiHub/1.0; +https://luantihub.org)',
-        ...(verificationCookies.length > 0 ? { 'Cookie': verificationCookies.join('; ') } : {})
+        'User-Agent': ANUBIS_BROWSER_UA,
+        'Referer': url,
+        ...(verificationCookieHeader ? { 'Cookie': verificationCookieHeader } : {})
       }
     });
 
-    const authCookies = extractSetCookiePairs(passRes.headers);
-    const allCookies = Array.from(new Set([...verificationCookies, ...authCookies])).join('; ');
+    applySetCookieHeaders(cookieMap, passRes.headers);
+    const allCookies = serializeCookieMap(cookieMap);
     if (!allCookies) {
       return firstRes;
     }
@@ -2781,27 +3281,44 @@ export async function fetchGitReleaseNotesBetweenRefs(
     baseRef?: string;
     defaultBranch?: string;
     releaseBody?: string;
+    untilDate?: string;
   } = {}
 ): Promise<DiscoveredReleaseNotesPayload> {
   const headRef = (options.headRef || options.defaultBranch || 'HEAD').trim();
   const baseRef = (options.baseRef || '').trim();
-  const releaseBody = (options.releaseBody || '').trim();
+  const releaseBody = sanitizeReleaseNotesText(options.releaseBody, headRef) || '';
+  const untilDate = (options.untilDate || '').trim();
+  const displayHeadRef = abbreviateGitRefLabel(headRef) || headRef;
+  const displayBaseRef = abbreviateGitRefLabel(baseRef) || undefined;
 
-  const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
+  let effectiveRepoUrl = repoUrl;
+  if (!effectiveRepoUrl && fallbackOwner && fallbackRepo) {
+    try {
+      const scanned = await scanGitRepoMetadataCached(fallbackOwner, fallbackRepo);
+      if (scanned?.repoUrl) {
+        effectiveRepoUrl = scanned.repoUrl;
+      }
+    } catch {
+      // Proceed with fallback target
+    }
+  }
+
+  const target = parseGitRepoTarget(effectiveRepoUrl, fallbackOwner, fallbackRepo);
   if (!target) {
     return {
       source: releaseBody ? 'release_notes' : 'metadata',
-      head_ref: headRef,
-      base_ref: baseRef || undefined,
+      head_ref: displayHeadRef,
+      base_ref: displayBaseRef,
       markdown_body: releaseBody || undefined,
       commits: []
     };
   }
 
   const { provider, host, owner, repo } = target;
-  const cacheKey = `/__release_notes_v1/${provider}/${encodeURIComponent(host)}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(headRef)}/${encodeURIComponent(baseRef || 'none')}`;
+  const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
+  const cacheKey = `/__release_notes_v2/${provider}/${encodeURIComponent(host)}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(headRef)}/${encodeURIComponent(baseRef || 'none')}/${encodeURIComponent(untilDate || 'none')}`;
   const cached = await readEdgeCacheJson<DiscoveredReleaseNotesPayload>(cacheKey);
-  if (cached && Array.isArray(cached.commits)) {
+  if (cached && Array.isArray(cached.commits) && (cached.commits.length > 0 || cached.markdown_body)) {
     return cached;
   }
 
@@ -2885,13 +3402,14 @@ export async function fetchGitReleaseNotesBetweenRefs(
         ].filter(v => v !== undefined)
       )
     );
+    const untilQuery = untilDate ? `&until=${encodeURIComponent(untilDate)}` : '';
 
     for (const refCand of refCandidates) {
       const encRef = refCand ? encodeURIComponent(refCand) : '';
       let rawList: any = null;
       if (provider === 'github') {
         rawList = await fetchJsonQuick(
-          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?per_page=15${encRef ? `&sha=${encRef}` : ''}`
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?per_page=15${encRef ? `&sha=${encRef}` : ''}${!encRef ? untilQuery : ''}`
         );
       } else if (provider === 'codeberg') {
         rawList = await fetchJsonQuick(
@@ -2900,7 +3418,7 @@ export async function fetchGitReleaseNotesBetweenRefs(
       } else if (provider === 'gitlab') {
         const projectPath = encodeURIComponent(`${owner}/${repo}`);
         rawList = await fetchJsonQuick(
-          `https://${host}/api/v4/projects/${projectPath}/repository/commits?per_page=15${encRef ? `&ref_name=${encRef}` : ''}`
+          `https://${host}/api/v4/projects/${projectPath}/repository/commits?per_page=15${encRef ? `&ref_name=${encRef}` : ''}${!encRef ? untilQuery : ''}`
         );
       }
 
@@ -2915,6 +3433,92 @@ export async function fetchGitReleaseNotesBetweenRefs(
     }
   }
 
+  // Level 3b: Atom / RSS feed fallback across GitHub, Codeberg, Mesehub, Gitea/Forgejo, and GitLab
+  // when REST API quotas are rate-limited on shared Worker egress IPs or disabled on custom instances
+  if (commits.length === 0) {
+    const feedRefs = Array.from(
+      new Set([headRef !== 'HEAD' ? headRef : '', options.defaultBranch || 'main', 'master'].filter(Boolean))
+    );
+    const feedUrls: string[] = [];
+    for (const ref of feedRefs) {
+      const encRef = encodeURIComponent(ref);
+      if (provider === 'github') {
+        feedUrls.push(`https://github.com/${encOwnerPath}/${encodeURIComponent(repo)}/commits/${encRef}.atom`);
+      } else if (provider === 'gitlab') {
+        feedUrls.push(`https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/-/commits/${encRef}?format=atom`);
+      } else {
+        feedUrls.push(
+          `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/branch/${encRef}.rss`,
+          `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/tag/${encRef}.rss`
+        );
+      }
+    }
+
+    for (const feedUrl of feedUrls) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3200);
+      try {
+        const feedRes = await fetchWithAnubisSupport(feedUrl, {
+          headers: { 'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)' },
+          signal: ctrl.signal
+        });
+        clearTimeout(timer);
+        if (feedRes.ok) {
+          const xml = await feedRes.text();
+          const itemRegex = /<(?:entry|item)>([\s\S]*?)<\/(?:entry|item)>/gi;
+          const parsedEntries: DiscoveredReleaseCommitItem[] = [];
+          let m: RegExpExecArray | null;
+          while ((m = itemRegex.exec(xml)) !== null && parsedEntries.length < 15) {
+            const block = m[1];
+            const shaMatch =
+              block.match(/Commit\/([0-9a-f]{7,40})/i) ||
+              block.match(/\/-\/commit\/([0-9a-f]{7,40})/i) ||
+              block.match(/\/commit\/([0-9a-f]{7,40})/i);
+            const titleMatch = block.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            const authorMatch =
+              block.match(/<author>[\s\S]*?<name>([\s\S]*?)<\/name>/i) ||
+              block.match(/<author>([\s\S]*?)<\/author>/i) ||
+              block.match(/<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/i);
+            const dateMatch = block.match(/<(?:updated|pubDate)>([\s\S]*?)<\/(?:updated|pubDate)>/i);
+            const sha = shaMatch?.[1]?.trim() || '';
+            if (!sha) continue;
+            const rawTitle = (titleMatch?.[1] || '')
+              .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .trim();
+            const rawAuthor = (authorMatch?.[1] || owner)
+              .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+              .replace(/\s*<[^>]+>\s*/g, '')
+              .trim();
+            const webUrl =
+              provider === 'gitlab'
+                ? `https://${host}/${owner}/${repo}/-/commit/${sha}`
+                : `https://${host}/${owner}/${repo}/commit/${sha}`;
+            parsedEntries.push({
+              sha,
+              short_sha: sha.slice(0, 7),
+              title: rawTitle.split(/\r?\n/)[0]?.trim() || sha.slice(0, 7),
+              author_name: rawAuthor || owner,
+              committed_at: (dateMatch?.[1] || '').trim(),
+              url: webUrl
+            });
+          }
+          if (parsedEntries.length > 0) {
+            source = 'commits';
+            commits = parsedEntries;
+            break;
+          }
+        }
+      } catch {
+        clearTimeout(timer);
+      }
+    }
+  }
+
   // Filter out noisy merge commits if there are non-merge commits available
   if (commits.length > 2) {
     const nonMerge = commits.filter(
@@ -2925,11 +3529,23 @@ export async function fetchGitReleaseNotesBetweenRefs(
     }
   }
 
+  const effectiveRefForUrl = encodeURIComponent(
+    headRef === 'HEAD' ? (options.defaultBranch || 'main') : headRef
+  );
+  const defaultHistoryUrl =
+    provider === 'gitlab'
+      ? `https://${host}/${owner}/${repo}/-/commits/${effectiveRefForUrl}`
+      : provider === 'codeberg'
+        ? (/^[0-9a-f]{7,40}$/i.test(headRef)
+            ? `https://${host}/${owner}/${repo}/commit/${effectiveRefForUrl}`
+            : `https://${host}/${owner}/${repo}/commits/branch/${effectiveRefForUrl}`)
+        : `https://${host}/${owner}/${repo}/commits/${effectiveRefForUrl}`;
+
   const payload: DiscoveredReleaseNotesPayload = {
     source: commits.length > 0 ? source : releaseBody ? 'release_notes' : 'metadata',
-    head_ref: headRef,
-    base_ref: baseRef || undefined,
-    compare_url: compareUrl || `https://${host}/${owner}/${repo}/commits/${encodeURIComponent(headRef === 'HEAD' ? (options.defaultBranch || 'HEAD') : headRef)}`,
+    head_ref: displayHeadRef,
+    base_ref: displayBaseRef,
+    compare_url: compareUrl || defaultHistoryUrl,
     markdown_body: releaseBody || undefined,
     commits
   };

@@ -153,7 +153,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     let recentlyUpdatedPackages: any[] = [];
 
     try {
-      await ensureModerationColumns(context.env.DB);
+      await Promise.all([
+        ensureModerationColumns(context.env.DB),
+        ensureExtendedPackageColumns(context.env.DB)
+      ]);
       if (isAdmin) {
         const repCount = await context.env.DB.prepare(
           `SELECT COUNT(*) as cnt FROM moderation_reports WHERE status = 'open'`
@@ -257,11 +260,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           thumbnail_url AS thumbnail,
           provider,
           status,
+          latest_commit_sha,
           updated_at
         FROM packages
         WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(provider, 'contentdb') != 'contentdb'
           AND updated_at >= datetime('now', '-2 days')
-          AND updated_at > COALESCE(created_at, '')
+          AND created_at IS NOT NULL
+          AND updated_at > created_at
         ORDER BY updated_at DESC
         LIMIT 5
       `).all();
