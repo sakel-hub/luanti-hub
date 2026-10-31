@@ -8,6 +8,23 @@ export interface ContentDbTag {
   title: string;
 }
 
+export interface HeroPromotion {
+  id: string;
+  title: string;
+  short_desc: string;
+  banner_url: string;
+  cta_label: string;
+  cta_url: string;
+  secondary_cta_label?: string | null;
+  secondary_cta_url?: string | null;
+  badge_text: string;
+  starts_at: string; // ISO-8601 UTC timestamp
+  expires_at: string; // ISO-8601 UTC timestamp
+  priority?: number;
+  created_by?: string | null;
+  created_at?: string;
+}
+
 export interface LuantiPackage {
   id: string; // "author/name"
   author: string;
@@ -80,6 +97,7 @@ export interface LuantiPackage {
   status?: 'active' | 'flagged' | 'delisted';
   moderation_reason?: string;
   _searchBlob?: string; // Pre-computed lowercase search string for O(1) filtering
+  _promo?: HeroPromotion; // Attached when synthetic Hero Carousel slide represents an active promotion
 }
 
 export interface PackageRelease {

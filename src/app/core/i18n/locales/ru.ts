@@ -50,7 +50,9 @@ export const ru: TranslationDictionary = {
     prevSlide: 'Назад',
     nextSlide: 'Вперед',
     pauseAutoPlay: 'Пауза',
-    resumeAutoPlay: 'Продолжить'
+    resumeAutoPlay: 'Продолжить',
+    promoted: ' ПРОМО',
+    learnMore: 'Подробнее'
   },
   carousel: {
     trending: 'Популярное на этой неделе',
@@ -263,6 +265,7 @@ export const ru: TranslationDictionary = {
     tabFavorites: 'Избранное',
     tabAccount: 'Аккаунт',
     tabModeration: 'Модерация',
+    tabPromotions: 'Промоакции',
     connectedAccounts: 'Подключенные Аккаунты',
     linkedCount: '{count} привязано',
     verified: 'Подтвержден',
@@ -339,6 +342,7 @@ export const ru: TranslationDictionary = {
     notifyAppUpdatesLabel: 'Обновления приложения LuantiHub',
     notifyNewGitPackagesLabel: 'Новые опубликованные Git-пакеты сообщества',
     notifyPackageUpdatesLabel: 'Недавние обновления и новые релизы пакетов',
+    notifyPromotionsLabel: 'События, Game Jams и промоакции сообщества',
     permissionGranted: 'Активно',
     permissionBlocked: 'Заблокировано в браузере',
     permissionResetHint: 'Уведомления отключены в LuantiHub. Чтобы полностью отозвать разрешение браузера, нажмите на значок настроек сайта в адресной строке и выберите «Сбросить разрешение».'

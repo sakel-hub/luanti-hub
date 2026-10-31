@@ -295,6 +295,7 @@ export async function onRequest(context: {
     pathname.startsWith('/api/packages/top10') ||
     pathname.startsWith('/api/users/') ||
     pathname.startsWith('/api/admin/') ||
+    pathname.startsWith('/api/promotions') ||
     pathname.endsWith('/moderate');
 
   if (isStateMutating || isInternalWebEndpoint) {
@@ -324,7 +325,8 @@ export async function onRequest(context: {
       isStateMutating ||
       pathname.startsWith('/api/packages/git') ||
       pathname.startsWith('/api/users/') ||
-      pathname.startsWith('/api/admin/')
+      pathname.startsWith('/api/admin/') ||
+      pathname.startsWith('/api/promotions')
     );
 
   const rateCheck = isHeavyEndpoint

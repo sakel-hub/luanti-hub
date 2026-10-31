@@ -175,12 +175,6 @@ export function checkIsAdmin(
     .filter(Boolean);
 
   if (rawList.length > 0) {
-    const userHandle = (user.username || '').trim().toLowerCase();
-    const baseUserHandle = userHandle.replace(/_(gi|gl|co|cd|me)$/i, '');
-    if ((userHandle && rawList.includes(userHandle)) || (baseUserHandle && rawList.includes(baseUserHandle))) {
-      return true;
-    }
-
     for (const id of verifiedIdentities) {
       const handle = (id.username || '').trim().toLowerCase();
       const baseHandle = handle.replace(/_(gi|gl|co|cd|me)$/i, '');

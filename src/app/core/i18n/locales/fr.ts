@@ -50,7 +50,9 @@ export const fr: TranslationDictionary = {
     prevSlide: 'Précédent',
     nextSlide: 'Suivant',
     pauseAutoPlay: 'Pause',
-    resumeAutoPlay: 'Reprendre'
+    resumeAutoPlay: 'Reprendre',
+    promoted: 'SPONSORISÉ',
+    learnMore: 'En savoir plus'
   },
   carousel: {
     trending: 'Tendance Cette Semaine',
@@ -263,6 +265,7 @@ export const fr: TranslationDictionary = {
     tabFavorites: 'Favoris',
     tabAccount: 'Compte',
     tabModeration: 'Modération',
+    tabPromotions: 'Promotions',
     connectedAccounts: 'Comptes & Forges Connectés',
     linkedCount: '{count} lié(s)',
     verified: 'Vérifié',
@@ -339,6 +342,7 @@ export const fr: TranslationDictionary = {
     notifyAppUpdatesLabel: 'Mises à jour de l\'application LuantiHub',
     notifyNewGitPackagesLabel: 'Nouveaux paquets Git communautaires publiés',
     notifyPackageUpdatesLabel: 'Mises à jour récentes et nouvelles versions de paquets',
+    notifyPromotionsLabel: 'Événements, Game Jams et promotions de la communauté',
     permissionGranted: 'Actif',
     permissionBlocked: 'Bloqué par le navigateur',
     permissionResetHint: 'Les notifications sont désactivées dans LuantiHub. Pour révoquer complètement l\'autorisation du navigateur, cliquez sur l\'icône des paramètres du site dans la barre d\'adresse et sélectionnez « Réinitialiser l\'autorisation ».'

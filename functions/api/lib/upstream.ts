@@ -586,6 +586,26 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
       }
     }
 
+    // Ensure hero_promotions table exists for temporary time-bounded Hero Carousel promotional slides
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS hero_promotions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        short_desc TEXT NOT NULL,
+        banner_url TEXT NOT NULL,
+        cta_label TEXT NOT NULL DEFAULT 'Learn More',
+        cta_url TEXT NOT NULL,
+        secondary_cta_label TEXT,
+        secondary_cta_url TEXT,
+        badge_text TEXT NOT NULL DEFAULT 'PROMOTED',
+        starts_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 100,
+        created_by TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run().catch(() => {});
+
     if (existing.size > 0) {
       extendedColumnsEnsured = true;
     }

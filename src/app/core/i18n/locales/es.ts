@@ -50,7 +50,9 @@ export const es: TranslationDictionary = {
     prevSlide: 'Anterior',
     nextSlide: 'Siguiente',
     pauseAutoPlay: 'Pausar',
-    resumeAutoPlay: 'Reanudar'
+    resumeAutoPlay: 'Reanudar',
+    promoted: 'PROMOCIONADO',
+    learnMore: 'Más información'
   },
   carousel: {
     trending: 'Tendencias Esta Semana',
@@ -263,6 +265,7 @@ export const es: TranslationDictionary = {
     tabFavorites: 'Favoritos',
     tabAccount: 'Cuenta',
     tabModeration: 'Moderación',
+    tabPromotions: 'Promociones',
     connectedAccounts: 'Cuentas y Forjas Conectadas',
     linkedCount: '{count} vinculada(s)',
     verified: 'Verificado',
@@ -339,6 +342,7 @@ export const es: TranslationDictionary = {
     notifyAppUpdatesLabel: 'Actualizaciones de la aplicación LuantiHub',
     notifyNewGitPackagesLabel: 'Nuevos paquetes Git comunitarios publicados',
     notifyPackageUpdatesLabel: 'Actualizaciones recientes y nuevas versiones de paquetes',
+    notifyPromotionsLabel: 'Eventos destacados, Game Jams y promociones de la comunidad',
     permissionGranted: 'Activo',
     permissionBlocked: 'Bloqueado en navegador',
     permissionResetHint: 'Las notificaciones están silenciadas en LuantiHub. Para revocar por completo el permiso del navegador, haz clic en el icono de configuración del sitio en la barra de direcciones y selecciona «Restablecer permiso».'

@@ -15,7 +15,8 @@ import {
   DownloadAnalyticsData,
   AuthorPackageBreakdownItem,
   ReleaseNotesPayload,
-  ReleaseCommitItem
+  ReleaseCommitItem,
+  HeroPromotion
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
@@ -84,6 +85,9 @@ export class PackageService {
   private readonly _activeAuthorProfile = signal<PublicAuthorProfile | null>(null);
   private readonly _isLoadingAuthorProfile = signal<boolean>(false);
   private readonly _activeVideoTheater = signal<{ pkg: LuantiPackage; startSeconds: number } | null>(null);
+  private readonly _promotions = signal<HeroPromotion[]>([]);
+  private readonly _adminPromotions = signal<HeroPromotion[]>([]);
+  private readonly _promoClockTick = signal<number>(Date.now());
 
   private searchDebounceTimer: any = null;
   private bootCacheSyncTimer: any = null;
@@ -143,6 +147,24 @@ export class PackageService {
   readonly activeAuthorProfile = this._activeAuthorProfile.asReadonly();
   readonly isLoadingAuthorProfile = this._isLoadingAuthorProfile.asReadonly();
   readonly activeVideoTheater = this._activeVideoTheater.asReadonly();
+  readonly promotions = this._promotions.asReadonly();
+  readonly adminPromotions = this._adminPromotions.asReadonly();
+
+  readonly activePromotions = computed<HeroPromotion[]>(() => {
+    const nowMs = this._promoClockTick();
+    return this._promotions()
+      .filter(promo => {
+        if (!promo || !promo.title || !promo.banner_url || !promo.expires_at) return false;
+        const expMs = Date.parse(String(promo.expires_at));
+        if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+        if (promo.starts_at) {
+          const startMs = Date.parse(String(promo.starts_at));
+          if (Number.isFinite(startMs) && startMs > nowMs) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (Number(b.priority ?? 100) - Number(a.priority ?? 100)));
+  });
 
   // True whenever any search or filter is active (switches Home view to Filtered Grid)
   readonly hasActiveFilters = computed<boolean>(() => {
@@ -155,10 +177,11 @@ export class PackageService {
     );
   });
 
-  // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh)
+  // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh, with Active Promotions pinned at Slide #1)
   readonly heroShowcasePackages = computed<LuantiPackage[]>(() => {
+    const promoSlides = this.activePromotions().map(promo => this.toPromotionSlidePackage(promo));
     const list = this._packages();
-    if (list.length === 0) return [];
+    if (list.length === 0) return promoSlides;
 
     const todayRanks = new Map<string, number>();
     for (const [idx, p] of this._serverTop10Today().entries()) {
@@ -246,15 +269,45 @@ export class PackageService {
       }
     }
 
+    let organicSlides = showcase;
     if (showcase.length > 1) {
       const now = new Date();
       const dayOfYear = Math.floor((now.getTime() - Date.UTC(now.getFullYear(), 0, 0)) / 86400000);
       const shift = dayOfYear % showcase.length;
-      return [...showcase.slice(shift), ...showcase.slice(0, shift)];
+      organicSlides = [...showcase.slice(shift), ...showcase.slice(0, shift)];
     }
 
-    return showcase;
+    return [...promoSlides, ...organicSlides];
   });
+
+  private toPromotionSlidePackage(promo: HeroPromotion): LuantiPackage {
+    return {
+      id: `promo:${promo.id}`,
+      author: promo.created_by || 'LuantiHub',
+      name: promo.id,
+      title: promo.title,
+      type: 'game',
+      short_desc: promo.short_desc,
+      thumbnail: promo.banner_url,
+      banner: promo.banner_url,
+      score: 0,
+      downloads: 0,
+      license: '',
+      source: 'official',
+      tags: [],
+      featured: true,
+      _promo: promo
+    };
+  }
+
+  refreshPromoClock(customNowMs?: number): void {
+    this._promoClockTick.set(customNowMs ?? Date.now());
+  }
+
+  setPromotions(promotions: HeroPromotion[]): void {
+    this._promotions.set(Array.isArray(promotions) ? promotions : []);
+    this.refreshPromoClock();
+  }
 
   readonly featuredPackage = computed(() => {
     const list = this.heroShowcasePackages();
@@ -1452,10 +1505,16 @@ export class PackageService {
       tags?: any[];
       top10Week?: any[];
       top10Today?: any[];
+      promotions?: HeroPromotion[];
     },
     options?: { isBackgroundRefresh?: boolean }
   ): void {
     this.lastCatalogSyncAt = Date.now();
+    if (Array.isArray(payload.promotions)) {
+      this._promotions.set(payload.promotions);
+      this.refreshPromoClock();
+      this.pwaService.checkAndNotifyPromotions(payload.promotions);
+    }
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
     const combinedRaw = [...rawPackages, ...userPkgs];
@@ -1619,7 +1678,7 @@ export class PackageService {
   }
 
   private needsTileHydration(pkg: LuantiPackage | null | undefined): boolean {
-    if (!pkg || !pkg.author || !pkg.name) return false;
+    if (!pkg || pkg._promo || String(pkg.id || '').startsWith('promo:') || !pkg.author || !pkg.name) return false;
     const isOfficial = pkg.sources?.includes('official') || pkg.source === 'official';
     const hasDownloads = isOfficial ? (pkg.contentdb_downloads || 0) > 0 : (pkg.downloads || 0) > 0;
     const hasRichTags = (pkg.tags || []).some(
@@ -1686,7 +1745,8 @@ export class PackageService {
               packages: this._packages(),
               tags: this._availableTags(),
               top10Week: this.top10WeekPackages(),
-              top10Today: this.top10TodayPackages()
+              top10Today: this.top10TodayPackages(),
+              promotions: this._promotions()
             }
           })
         );
@@ -6210,5 +6270,101 @@ export class PackageService {
     });
     this.statsCache.set(cacheKey, { exp: Date.now() + 180000, data });
     return data;
+  }
+
+  async fetchAdminPromotions(): Promise<HeroPromotion[]> {
+    try {
+      const res = await fetch('/api/promotions?admin=1', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        if (Array.isArray(data?.promotions)) {
+          this._adminPromotions.set(data.promotions);
+          this._promotions.set(data.promotions);
+          this.refreshPromoClock();
+          this.scheduleBootCachePersist();
+          return data.promotions;
+        }
+      }
+    } catch {
+      // Fallback below
+    }
+    return this._adminPromotions();
+  }
+
+  async savePromotion(
+    draft: Partial<HeroPromotion>
+  ): Promise<{ success: boolean; error?: string; promotion?: HeroPromotion }> {
+    try {
+      const res = await fetch('/api/promotions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(draft)
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        const allPromos: HeroPromotion[] = Array.isArray(data?.promotions) ? data.promotions : [];
+        this._adminPromotions.set(allPromos);
+        this._promotions.set(allPromos);
+        this.refreshPromoClock();
+        this.clearBootCache();
+        this.scheduleBootCachePersist();
+        if (data?.promotion) {
+          this.pwaService.checkAndNotifyPromotions([data.promotion]);
+        }
+        return { success: true, promotion: data?.promotion };
+      }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        return {
+          success: false,
+          error: sanitizeUserFacingError(errBody?.error, 'Unable to save promotion.')
+        };
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        error: sanitizeUserFacingError(err, 'Unable to save promotion.')
+      };
+    }
+    return { success: false, error: 'Unable to save promotion.' };
+  }
+
+  async deletePromotion(id: string): Promise<{ success: boolean; error?: string }> {
+    const cleanId = (id || '').trim();
+    if (!cleanId) return { success: false, error: 'Promotion ID is required.' };
+    try {
+      const res = await fetch(`/api/promotions?id=${encodeURIComponent(cleanId)}`, {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' }
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        const allPromos: HeroPromotion[] = Array.isArray(data?.promotions)
+          ? data.promotions
+          : this._adminPromotions().filter(p => p.id !== cleanId);
+        this._adminPromotions.set(allPromos);
+        this._promotions.set(allPromos);
+        this.refreshPromoClock();
+        this.clearBootCache();
+        this.scheduleBootCachePersist();
+        return { success: true };
+      }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        return {
+          success: false,
+          error: sanitizeUserFacingError(errBody?.error, 'Unable to delete promotion.')
+        };
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        error: sanitizeUserFacingError(err, 'Unable to delete promotion.')
+      };
+    }
+    return { success: false, error: 'Unable to delete promotion.' };
   }
 }

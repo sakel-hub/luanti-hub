@@ -2,6 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
+import { HeroPromotion } from '../models/package.model';
 
 export type NotificationVariant =
   | 'resolved'
@@ -10,20 +11,22 @@ export type NotificationVariant =
   | 'admin_queue'
   | 'app_update'
   | 'new_git_package'
-  | 'package_update';
+  | 'package_update'
+  | 'promotion';
 
 export interface NativeNotificationPayload {
   title: string;
   body: string;
   tag: string;
-  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package' | 'package_update';
+  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package' | 'package_update' | 'promotion';
   variant?: NotificationVariant;
   icon?: string;
   image?: string;
   data?: {
-    targetTab?: 'moderation' | 'account' | 'packages';
+    targetTab?: 'moderation' | 'account' | 'packages' | 'promotions';
     packageId?: string;
     reportId?: string;
+    ctaUrl?: string;
     action?: 'reload_update';
   };
 }
@@ -31,6 +34,7 @@ export interface NativeNotificationPayload {
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
+const SEEN_PROMOTIONS_KEY = 'lh_seen_promotions_v1';
 const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
 const PACKAGE_UPDATE_COOLDOWN_MS = 12 * 3600 * 1000;
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
@@ -417,7 +421,90 @@ export class PwaService {
     if (category === 'app_update') return this.settingsService.notifyAppUpdates();
     if (category === 'new_git_package') return this.settingsService.notifyNewGitPackages();
     if (category === 'package_update') return this.settingsService.notifyPackageUpdates();
+    if (category === 'promotion') return this.settingsService.notifyPromotions();
     return false;
+  }
+
+  /**
+   * Notifies users once per active time-bounded Hero Carousel promotion (`lh_seen_promotions_v1`)
+   * when `notifyPromotions()` is enabled.
+   */
+  checkAndNotifyPromotions(
+    promotions: HeroPromotion[],
+    options?: { forceNotifyIds?: string[] }
+  ): number {
+    if (!Array.isArray(promotions) || promotions.length === 0) return 0;
+    if (typeof localStorage === 'undefined') return 0;
+    if (!this.settingsService.notifyPromotions()) return 0;
+
+    const nowMs = Date.now();
+    const forceSet = new Set(
+      (options?.forceNotifyIds || []).map(id => String(id || '').trim()).filter(Boolean)
+    );
+
+    const activePromos = promotions.filter(promo => {
+      if (!promo || !promo.id || !promo.title || !promo.expires_at) return false;
+      const expMs = Date.parse(String(promo.expires_at));
+      if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+      if (promo.starts_at) {
+        const startMs = Date.parse(String(promo.starts_at));
+        if (Number.isFinite(startMs) && startMs > nowMs) return false;
+      }
+      return true;
+    });
+
+    if (activePromos.length === 0) return 0;
+
+    let seenIds: string[] = [];
+    try {
+      const rawSeen = localStorage.getItem(SEEN_PROMOTIONS_KEY);
+      if (rawSeen) {
+        const parsed = JSON.parse(rawSeen);
+        if (Array.isArray(parsed)) {
+          seenIds = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      }
+    } catch {
+      seenIds = [];
+    }
+
+    const seenSet = new Set(seenIds);
+    const newlyActive: HeroPromotion[] = [];
+
+    for (const promo of activePromos) {
+      const id = String(promo.id).trim();
+      const isForced = forceSet.has(id);
+      if (!seenSet.has(id) || isForced) {
+        seenSet.add(id);
+        newlyActive.push(promo);
+      }
+    }
+
+    if (newlyActive.length === 0) return 0;
+
+    try {
+      localStorage.setItem(SEEN_PROMOTIONS_KEY, JSON.stringify(Array.from(seenSet).slice(-100)));
+    } catch {
+      // ignore storage errors
+    }
+
+    for (const promo of newlyActive.slice(0, 2)) {
+      const badge = (promo.badge_text || 'PROMOTED').trim();
+      this.sendNativeNotification({
+        title: `${badge} · ${promo.title}`,
+        body: promo.short_desc || 'Check out the featured promotion on LuantiHub.',
+        icon: promo.banner_url,
+        image: promo.banner_url,
+        tag: `lh-promo-${promo.id}`,
+        category: 'promotion',
+        variant: 'promotion',
+        data: {
+          ctaUrl: promo.cta_url
+        }
+      });
+    }
+
+    return newlyActive.length;
   }
 
   /**
@@ -956,6 +1043,7 @@ export class PwaService {
       case 'app_update':
         return '/icons/notif-app-update.png';
       case 'new_git_package':
+      case 'promotion':
         return '/icons/notif-new-package.png';
       case 'package_update':
         return '/icons/notif-package-update.png';

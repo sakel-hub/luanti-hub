@@ -50,7 +50,9 @@ export const sk: TranslationDictionary = {
     prevSlide: 'Predchádzajúci balíček',
     nextSlide: 'Nasledujúci balíček',
     pauseAutoPlay: 'Pozastaviť posúvanie',
-    resumeAutoPlay: 'Pokračovať v posúvaní'
+    resumeAutoPlay: 'Pokračovať v posúvaní',
+    promoted: 'PROPAGOVANÉ',
+    learnMore: 'Zistiť viac'
   },
   carousel: {
     trending: 'Populárne Tento Týždeň',
@@ -263,6 +265,7 @@ export const sk: TranslationDictionary = {
     tabFavorites: 'Obľúbené',
     tabAccount: 'Účet',
     tabModeration: 'Moderovanie',
+    tabPromotions: 'Propagácia',
     connectedAccounts: 'Prepojené Účty & Repozitáre',
     linkedCount: '{count} prepojených',
     verified: 'Overené',
@@ -339,6 +342,7 @@ export const sk: TranslationDictionary = {
     notifyAppUpdatesLabel: 'Aktualizácie aplikácie LuantiHub',
     notifyNewGitPackagesLabel: 'Nové publikované komunitné Git balíčky',
     notifyPackageUpdatesLabel: 'Nedávne aktualizácie a nové vydania balíčkov',
+    notifyPromotionsLabel: 'Odporúčané udalosti, Game Jamy a komunitné akcie',
     permissionGranted: 'Aktívne',
     permissionBlocked: 'Zablokované v prehliadači',
     permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.'

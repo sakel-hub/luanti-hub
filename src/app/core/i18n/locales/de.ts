@@ -50,7 +50,9 @@ export const de: TranslationDictionary = {
     prevSlide: 'Vorheriges Showcase',
     nextSlide: 'Nächstes Showcase',
     pauseAutoPlay: 'Pause',
-    resumeAutoPlay: 'Fortsetzen'
+    resumeAutoPlay: 'Fortsetzen',
+    promoted: 'GESPONSERT',
+    learnMore: 'Mehr erfahren'
   },
   carousel: {
     trending: 'Diese Woche Beliebt',
@@ -263,6 +265,7 @@ export const de: TranslationDictionary = {
     tabFavorites: 'Favoriten',
     tabAccount: 'Konto',
     tabModeration: 'Moderation',
+    tabPromotions: 'Aktionen',
     connectedAccounts: 'Verbundene Konten & Forges',
     linkedCount: '{count} verknüpft',
     verified: 'Verifiziert',
@@ -339,6 +342,7 @@ export const de: TranslationDictionary = {
     notifyAppUpdatesLabel: 'LuantiHub App- & Funktions-Updates',
     notifyNewGitPackagesLabel: 'Neue veröffentlichte Git-Community-Pakete',
     notifyPackageUpdatesLabel: 'Kürzlich aktualisierte Pakete & neue Releases',
+    notifyPromotionsLabel: 'Events, Game Jams & Community-Aktionen',
     permissionGranted: 'Aktiv',
     permissionBlocked: 'Im Browser blockiert',
     permissionResetHint: 'Benachrichtigungen sind in LuantiHub stummgeschaltet. Um die Browser-Berechtigung vollständig zurückzusetzen, klicken Sie auf das Website-Einstellungssymbol in der Adressleiste und wählen Sie „Berechtigung zurücksetzen“.'

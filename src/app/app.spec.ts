@@ -41,6 +41,13 @@ import {
   createOAuthStateToken,
   verifyOAuthStateToken
 } from '../../functions/api/auth/lib/session';
+import {
+  normalizePromoUrl,
+  filterActivePromotions,
+  onRequestGet as promotionsOnRequestGet,
+  onRequestPost as promotionsOnRequestPost,
+  onRequestDelete as promotionsOnRequestDelete
+} from '../../functions/api/promotions/index';
 
 describe('App & Core Services', () => {
   beforeEach(async () => {
@@ -867,7 +874,7 @@ description = Mob animation and spawning framework.
     const tabBar = el.querySelector('.flex.flex-wrap.gap-1\\.5') as HTMLElement;
     expect(tabBar).toBeTruthy();
     const tabButtons = Array.from(tabBar.querySelectorAll('button'));
-    expect(tabButtons.length).toBe(4);
+    expect(tabButtons.length).toBe(5);
     for (const btn of tabButtons) {
       expect(btn.querySelector('.truncate')).toBeNull();
     }
@@ -4564,5 +4571,208 @@ supported_games = minetest_game, voxelibre
       pwaService.sendNativeNotification = origSend;
       localStorage.removeItem('luantihub_pkg_notify_cooldown_v1');
     }
+  });
+
+  it('should pin active HeroPromotions at Slide #1 in addition to the 6 showcase packages, auto-expire past promotions, support relative/external URLs, notify once when notifyPromotions is enabled, and manage promotions via Admin UI + /api/promotions', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const settingsService = TestBed.inject(SettingsService);
+    const pwaService = TestBed.inject(PwaService);
+    const authService = TestBed.inject(AuthService);
+
+    // 1. Seed 6 organic game packages with banners for the daily showcase
+    const sixGames = Array.from({ length: 6 }, (_, i) =>
+      (pkgService as any).normalizePackage({
+        id: `author/game_${i + 1}`,
+        author: 'author',
+        name: `game_${i + 1}`,
+        title: `Showcase Game ${i + 1}`,
+        type: 'game',
+        short_desc: `Organic showcase game #${i + 1}`,
+        banner: `https://content.luanti.org/uploads/game_${i + 1}.png`,
+        downloads: 1000 * (i + 1)
+      })
+    );
+    (pkgService as any)._packages.set(sixGames);
+
+    const nowMs = Date.now();
+    const activePromo = {
+      id: 'promo-jam-2026',
+      title: 'Luanti Game Jam 2026',
+      short_desc: 'Submit your voxel game entry before Sunday midnight UTC!',
+      banner_url: '/promo.png',
+      badge_text: 'EVENT',
+      cta_label: 'Submit Entry',
+      cta_url: '/submit',
+      secondary_cta_label: 'Official Rules',
+      secondary_cta_url: 'https://www.luanti.org',
+      starts_at: new Date(nowMs - 3600_000).toISOString(),
+      expires_at: new Date(nowMs + 86400_000).toISOString(),
+      priority: 100
+    };
+    const expiredPromo = {
+      id: 'promo-expired-2025',
+      title: 'Old Expired Event',
+      short_desc: 'Already ended',
+      banner_url: '/old.png',
+      badge_text: 'PROMOTED',
+      cta_label: 'Learn More',
+      cta_url: '/games',
+      starts_at: new Date(nowMs - 172800_000).toISOString(),
+      expires_at: new Date(nowMs - 3600_000).toISOString(),
+      priority: 200
+    };
+    const futureScheduledPromo = {
+      id: 'promo-future-2027',
+      title: 'Future Scheduled Event',
+      short_desc: 'Starts tomorrow',
+      banner_url: '/future.png',
+      badge_text: 'UPCOMING',
+      cta_label: 'Preview',
+      cta_url: '/setup',
+      starts_at: new Date(nowMs + 86400_000).toISOString(),
+      expires_at: new Date(nowMs + 172800_000).toISOString(),
+      priority: 300
+    };
+
+    pkgService.setPromotions([activePromo, expiredPromo, futureScheduledPromo]);
+
+    // Only activePromo is currently within [starts_at, expires_at)
+    expect(pkgService.activePromotions().length).toBe(1);
+    expect(pkgService.activePromotions()[0].id).toBe('promo-jam-2026');
+
+    // Hero showcase has 1 promotional slide at index 0 + 6 organic showcase slides = 7 slides total
+    const heroList = pkgService.heroShowcasePackages();
+    expect(heroList.length).toBe(7);
+    expect(heroList[0].id).toBe('promo:promo-jam-2026');
+    expect(heroList[0]._promo?.badge_text).toBe('EVENT');
+    expect(heroList[0].banner).toBe('/promo.png');
+
+    // 2. Verify HeroBillboardComponent renders Slide #1 with custom badge, hides package ratings/downloads, and handles relative vs external CTA URLs
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    const heroComp = heroFixture.componentInstance;
+    heroFixture.detectChanges();
+
+    expect(heroComp.currentIndex()).toBe(0);
+    expect(heroComp.currentPkg()?._promo?.id).toBe('promo-jam-2026');
+    expect(heroComp.isInternalPromoUrl('/submit')).toBe(true);
+    expect(heroComp.isInternalPromoUrl('/?tag=mapgen')).toBe(true);
+    expect(heroComp.isInternalPromoUrl(`${window.location.origin}/package/mt-mods/i3`)).toBe(true);
+    expect(heroComp.isInternalPromoUrl('https://forum.luanti.org/viewtopic.php?t=1')).toBe(false);
+
+    const heroEl = heroFixture.nativeElement as HTMLElement;
+    expect(heroEl.textContent).toContain('EVENT');
+    expect(heroEl.textContent).toContain('Luanti Game Jam 2026');
+    expect(heroEl.textContent).toContain('Submit Entry');
+    expect(heroEl.textContent).toContain('Official Rules');
+
+    // 3. Verify PwaService.checkAndNotifyPromotions() respects notifyPromotions toggle and deduplicates via lh_seen_promotions_v1
+    localStorage.removeItem('lh_seen_promotions_v1');
+    const promoNotifs: any[] = [];
+    const origSendNotif = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      promoNotifs.push(payload);
+      return true;
+    };
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyPromotions.set(false);
+      await pwaService.checkAndNotifyPromotions([activePromo]);
+      expect(promoNotifs.length).toBe(0);
+
+      // Enable notifyPromotions -> fires once with banner image and ctaUrl
+      settingsService.notifyPromotions.set(true);
+      await pwaService.checkAndNotifyPromotions([activePromo]);
+      expect(promoNotifs.length).toBe(1);
+      expect(promoNotifs[0].category).toBe('promotion');
+      expect(promoNotifs[0].title).toContain('EVENT');
+      expect(promoNotifs[0].title).toContain('Luanti Game Jam 2026');
+      expect(promoNotifs[0].image).toBe('/promo.png');
+      expect(promoNotifs[0].data?.ctaUrl).toBe('/submit');
+
+      // Second call for the same promotion ID is deduplicated
+      await pwaService.checkAndNotifyPromotions([activePromo]);
+      expect(promoNotifs.length).toBe(1);
+    } finally {
+      pwaService.sendNativeNotification = origSendNotif;
+      localStorage.removeItem('lh_seen_promotions_v1');
+    }
+
+    // 4. Verify Admin ProfileDrawerComponent Promotions tab + datetime-local UI pickers + quick duration presets
+    (authService as any)._currentUser.set({
+      id: 'admin-1',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'admin',
+      identities: [{ provider: 'github', username: 'sakel-hub', verified: true }],
+      packages: []
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+
+    const drawerFixture = TestBed.createComponent(ProfileDrawerComponent);
+    const drawerComp = drawerFixture.componentInstance;
+    drawerComp.activeTab.set('promotions');
+    drawerFixture.detectChanges();
+
+    const drawerEl = drawerFixture.nativeElement as HTMLElement;
+    expect(drawerEl.textContent).toContain('Promotions');
+    const datePickers = drawerEl.querySelectorAll('input[type="datetime-local"]');
+    expect(datePickers.length).toBe(2);
+
+    drawerComp.promoStartsAtLocal = '2026-11-01T12:00';
+    drawerComp.setPromoPresetDays(7);
+    expect(drawerComp.promoExpiresAtLocal).toBe('2026-11-08T12:00');
+
+    // 5. Verify /api/promotions URL normalizer and Admin CRUD handlers
+    expect(normalizePromoUrl('promo.png', true)).toBe('/promo.png');
+    expect(normalizePromoUrl('/banners/event.webp', true)).toBe('/banners/event.webp');
+    expect(normalizePromoUrl('/submit', false)).toBe('/submit');
+    expect(normalizePromoUrl('https://luanti.org/events', false)).toBe('https://luanti.org/events');
+    expect(normalizePromoUrl('javascript:alert(1)', false)).toBeNull();
+
+    const filteredActive = filterActivePromotions([activePromo, expiredPromo, futureScheduledPromo], nowMs);
+    expect(filteredActive.length).toBe(1);
+    expect(filteredActive[0].id).toBe('promo-jam-2026');
+
+    // Non-admin GET, POST, and DELETE to /api/promotions must all return 403 Forbidden
+    const nonAdminGetRes = await promotionsOnRequestGet({
+      request: new Request('https://luantihub.org/api/promotions', { method: 'GET' }),
+      env: {}
+    });
+    expect(nonAdminGetRes.status).toBe(403);
+
+    const nonAdminPostRes = await promotionsOnRequestPost({
+      request: new Request('https://luantihub.org/api/promotions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(activePromo)
+      }),
+      env: {}
+    });
+    expect(nonAdminPostRes.status).toBe(403);
+
+    const nonAdminDeleteRes = await promotionsOnRequestDelete({
+      request: new Request('https://luantihub.org/api/promotions?id=promo-jam-2026', {
+        method: 'DELETE'
+      }),
+      env: {}
+    });
+    expect(nonAdminDeleteRes.status).toBe(403);
+
+    // Unverified identity spoofing admin handle must also be rejected as non-admin
+    (authService as any)._currentUser.set({
+      id: 'spoof-1',
+      username: 'sakel-hub',
+      display_name: 'Spoofer',
+      avatar_url: 'logo.svg',
+      role: 'admin',
+      is_admin: true,
+      identities: [{ provider: 'contentdb', username: 'sakel-hub', verified: false }],
+      packages: []
+    });
+    expect(authService.isAdmin()).toBe(false);
+    drawerComp.activeTab.set('packages');
+    drawerComp.onSelectPromotionsTab();
+    expect(drawerComp.activeTab()).toBe('packages');
   });
 });

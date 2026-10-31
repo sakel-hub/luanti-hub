@@ -10,6 +10,7 @@ import {
   NgZone
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { Router } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
 import { LuantiPackage } from '../../core/models/package.model';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
@@ -23,7 +24,8 @@ import {
   LucideInfo,
   LucideStar,
   LucideGitBranch,
-  LucideDownload
+  LucideDownload,
+  LucideExternalLink
 } from '@lucide/angular';
 
 @Component({
@@ -42,7 +44,8 @@ import {
     LucideInfo,
     LucideStar,
     LucideGitBranch,
-    LucideDownload
+    LucideDownload,
+    LucideExternalLink
   ],
   template: `
     @if (showcase().length > 0 && currentPkg(); as pkg) {
@@ -107,19 +110,27 @@ import {
                   <div
                     [class]="idx === currentIndex() ? 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
 
-                    <!-- Category & Source Badges (Consistent with Package Tiles & Detail Modal) -->
-                    <app-package-badges [package]="slidePkg">
-                      <button
-                        type="button"
-                        (click)="$event.stopPropagation()"
-                        [appTooltip]="'carousel.infoHero' | translate"
-                        [appTooltipMultiline]="true"
-                        appTooltipPlacement="right"
-                        aria-label="How this showcase is curated"
-                        class="w-5 h-5 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-                        <svg lucideInfo class="w-3 h-3"></svg>
-                      </button>
-                    </app-package-badges>
+                    <!-- Category & Source Badges (or Promotional Badge Pill) -->
+                    @if (slidePkg._promo; as promo) {
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-400/40 shadow-[0_0_16px_rgba(245,158,11,0.25)] backdrop-blur-md">
+                          {{ promo.badge_text || ('hero.promoted' | translate) }}
+                        </span>
+                      </div>
+                    } @else {
+                      <app-package-badges [package]="slidePkg">
+                        <button
+                          type="button"
+                          (click)="$event.stopPropagation()"
+                          [appTooltip]="'carousel.infoHero' | translate"
+                          [appTooltipMultiline]="true"
+                          appTooltipPlacement="right"
+                          aria-label="How this showcase is curated"
+                          class="w-5 h-5 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                          <svg lucideInfo class="w-3 h-3"></svg>
+                        </button>
+                      </app-package-badges>
+                    }
 
                     <!-- Title -->
                     <h2 class="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white drop-shadow-md">
@@ -131,57 +142,102 @@ import {
                       {{ slidePkg.short_desc }}
                     </p>
 
-                    <!-- Stats & Meta -->
-                    <div class="flex items-center gap-3 sm:gap-4 text-xs text-slate-300 flex-wrap">
-                      @if (slidePkg.score > 0) {
-                        <div class="flex items-center gap-1 text-amber-400 font-bold">
-                          <svg lucideStar class="w-4 h-4 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
-                          <span>{{ slidePkg.score }}</span>
-                        </div>
-                        <span>•</span>
-                      }
-                      <span>{{ slidePkg.downloads | compactNumber }} {{ 'hero.downloads' | translate | lowercase }}</span>
-                      @if (slidePkg.license || slidePkg.media_license) {
-                        <span>•</span>
-                        <span class="text-slate-400 font-mono">License: {{ slidePkg.license || slidePkg.media_license }}</span>
-                      }
-                    </div>
+                    <!-- Stats & Meta (Organic Packages Only) -->
+                    @if (!slidePkg._promo) {
+                      <div class="flex items-center gap-3 sm:gap-4 text-xs text-slate-300 flex-wrap">
+                        @if (slidePkg.score > 0) {
+                          <div class="flex items-center gap-1 text-amber-400 font-bold">
+                            <svg lucideStar class="w-4 h-4 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
+                            <span>{{ slidePkg.score }}</span>
+                          </div>
+                          <span>•</span>
+                        }
+                        <span>{{ slidePkg.downloads | compactNumber }} {{ 'hero.downloads' | translate | lowercase }}</span>
+                        @if (slidePkg.license || slidePkg.media_license) {
+                          <span>•</span>
+                          <span class="text-slate-400 font-mono">License: {{ slidePkg.license || slidePkg.media_license }}</span>
+                        }
+                      </div>
+                    }
 
                     <!-- Frosted Glass & High-Contrast CTA Buttons -->
-                    <div class="flex items-center gap-3 pt-2 flex-wrap">
-                      <!-- Primary Direct .zip Download Button with File Size -->
-                      <button
-                        type="button"
-                        (click)="onDownload(slidePkg)"
-                        [appTooltip]="('card.quickInstall' | translate) + (slidePkg.file_size ? ' (' + slidePkg.file_size + ')' : '')"
-                        class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
-                        <svg lucideDownload class="w-5 h-5 text-sky-300 flex-shrink-0"></svg>
-                        <span>{{ 'hero.downloadZip' | translate }}</span>
-                        @if (slidePkg.file_size) {
-                          <span class="text-slate-200 font-bold text-xs">({{ slidePkg.file_size }})</span>
+                    @if (slidePkg._promo; as promo) {
+                      <div class="flex items-center gap-3 pt-2 flex-wrap">
+                        @if (isInternalPromoUrl(promo.cta_url)) {
+                          <button
+                            type="button"
+                            (click)="onPromoCtaClick(promo.cta_url, $event)"
+                            class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
+                            <span>{{ promo.cta_label || ('hero.learnMore' | translate) }}</span>
+                            <svg lucideChevronRight class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
+                          </button>
+                        } @else {
+                          <a
+                            [href]="promo.cta_url"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
+                            <span>{{ promo.cta_label || ('hero.learnMore' | translate) }}</span>
+                            <svg lucideExternalLink class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
+                          </a>
                         }
-                      </button>
 
-                      <!-- Secondary Frosted Glass More Info Button -->
-                      <button
-                        type="button"
-                        (click)="packageService.openPackageModal(slidePkg)"
-                        [appTooltip]="'hero.viewDetails' | translate"
-                        class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
-                        <svg lucideInfo class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
-                        <span>{{ 'hero.viewDetails' | translate }}</span>
-                      </button>
+                        @if (promo.secondary_cta_label && promo.secondary_cta_url) {
+                          @if (isInternalPromoUrl(promo.secondary_cta_url)) {
+                            <button
+                              type="button"
+                              (click)="onPromoCtaClick(promo.secondary_cta_url, $event)"
+                              class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
+                              <span>{{ promo.secondary_cta_label }}</span>
+                            </button>
+                          } @else {
+                            <a
+                              [href]="promo.secondary_cta_url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
+                              <span>{{ promo.secondary_cta_label }}</span>
+                              <svg lucideExternalLink class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+                            </a>
+                          }
+                        }
+                      </div>
+                    } @else {
+                      <div class="flex items-center gap-3 pt-2 flex-wrap">
+                        <!-- Primary Direct .zip Download Button with File Size -->
+                        <button
+                          type="button"
+                          (click)="onDownload(slidePkg)"
+                          [appTooltip]="('card.quickInstall' | translate) + (slidePkg.file_size ? ' (' + slidePkg.file_size + ')' : '')"
+                          class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
+                          <svg lucideDownload class="w-5 h-5 text-sky-300 flex-shrink-0"></svg>
+                          <span>{{ 'hero.downloadZip' | translate }}</span>
+                          @if (slidePkg.file_size) {
+                            <span class="text-slate-200 font-bold text-xs">({{ slidePkg.file_size }})</span>
+                          }
+                        </button>
 
-                      <a
-                        [href]="getSlideGitUrl(slidePkg)"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        [appTooltip]="'hero.viewGit' | translate"
-                        class="h-11 w-11 rounded-xl glass-btn text-amber-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-                        [attr.aria-label]="'hero.viewGit' | translate">
-                        <svg lucideGitBranch class="w-5 h-5"></svg>
-                      </a>
-                    </div>
+                        <!-- Secondary Frosted Glass More Info Button -->
+                        <button
+                          type="button"
+                          (click)="packageService.openPackageModal(slidePkg)"
+                          [appTooltip]="'hero.viewDetails' | translate"
+                          class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
+                          <svg lucideInfo class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
+                          <span>{{ 'hero.viewDetails' | translate }}</span>
+                        </button>
+
+                        <a
+                          [href]="getSlideGitUrl(slidePkg)"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [appTooltip]="'hero.viewGit' | translate"
+                          class="h-11 w-11 rounded-xl glass-btn text-amber-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                          [attr.aria-label]="'hero.viewGit' | translate">
+                          <svg lucideGitBranch class="w-5 h-5"></svg>
+                        </a>
+                      </div>
+                    }
 
                   </div>
                 </div>
@@ -268,6 +324,7 @@ import {
 })
 export class HeroBillboardComponent implements OnInit, OnDestroy {
   readonly packageService = inject(PackageService);
+  private readonly router = inject(Router, { optional: true });
   private readonly ngZone = inject(NgZone);
 
   readonly showcase = this.packageService.heroShowcasePackages;
@@ -282,6 +339,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   });
 
   private activeSlidePkgId: string | null = null;
+  private seenPromoIds = new Set<string>();
   private intervalTimer: any = null;
   private touchStartX = 0;
 
@@ -291,6 +349,20 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
       if (list.length === 0) {
         this.activeSlidePkgId = null;
         return;
+      }
+      const firstSlide = list[0];
+      if (firstSlide?._promo && !this.seenPromoIds.has(firstSlide.id)) {
+        for (const item of list) {
+          if (item._promo) this.seenPromoIds.add(item.id);
+        }
+        this.activeSlidePkgId = firstSlide.id;
+        if (this.currentIndex() !== 0) {
+          this.currentIndex.set(0);
+        }
+        return;
+      }
+      for (const item of list) {
+        if (item._promo) this.seenPromoIds.add(item.id);
       }
       if (this.activeSlidePkgId) {
         const foundIdx = list.findIndex(p => p.id.toLowerCase() === this.activeSlidePkgId!.toLowerCase());
@@ -305,6 +377,52 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
       }
       this.activeSlidePkgId = list[safeIdx]?.id || null;
     });
+  }
+
+  isInternalPromoUrl(url?: string | null): boolean {
+    const raw = (url || '').trim();
+    if (!raw) return false;
+    if (raw.startsWith('/') && !raw.startsWith('//')) return true;
+    if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
+      try {
+        const parsed = new URL(raw);
+        return parsed.origin === window.location.origin;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  onPromoCtaClick(url?: string | null, event?: Event): void {
+    if (event) event.stopPropagation();
+    const raw = (url || '').trim();
+    if (!raw) return;
+
+    let targetPath = raw;
+    if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
+      try {
+        const parsed = new URL(raw);
+        if (parsed.origin === window.location.origin) {
+          targetPath = parsed.pathname + parsed.search + parsed.hash;
+        } else {
+          window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+
+    if (!targetPath.startsWith('/')) {
+      targetPath = `/${targetPath}`;
+    }
+
+    if (this.router) {
+      this.router.navigateByUrl(targetPath).catch(() => {});
+    } else if (typeof window !== 'undefined') {
+      window.location.href = targetPath;
+    }
   }
 
   ngOnInit(): void {
@@ -336,6 +454,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
 
   next(event?: Event): void {
     if (event) event.stopPropagation();
+    this.packageService.refreshPromoClock();
     const list = this.showcase();
     const total = list.length;
     if (total <= 1) return;
@@ -347,6 +466,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
 
   prev(event?: Event): void {
     if (event) event.stopPropagation();
+    this.packageService.refreshPromoClock();
     const list = this.showcase();
     const total = list.length;
     if (total <= 1) return;

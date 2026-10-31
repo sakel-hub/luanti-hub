@@ -50,7 +50,9 @@ export const en: TranslationDictionary = {
     prevSlide: 'Previous showcase',
     nextSlide: 'Next showcase',
     pauseAutoPlay: 'Pause auto-slide',
-    resumeAutoPlay: 'Resume auto-slide'
+    resumeAutoPlay: 'Resume auto-slide',
+    promoted: 'PROMOTED',
+    learnMore: 'Learn More'
   },
   carousel: {
     trending: 'Trending This Week',
@@ -263,6 +265,7 @@ export const en: TranslationDictionary = {
     tabFavorites: 'Favorites',
     tabAccount: 'Account',
     tabModeration: 'Moderation',
+    tabPromotions: 'Promotions',
     connectedAccounts: 'Connected Accounts & Forges',
     linkedCount: '{count} linked',
     verified: 'Verified',
@@ -339,6 +342,7 @@ export const en: TranslationDictionary = {
     notifyAppUpdatesLabel: 'LuantiHub App & Feature Updates',
     notifyNewGitPackagesLabel: 'New Git Community Packages Published',
     notifyPackageUpdatesLabel: 'Recent Package Releases & Updates (Favorites & Catalog)',
+    notifyPromotionsLabel: 'Featured Events, Game Jams & Community Promotions',
     permissionGranted: 'Active',
     permissionBlocked: 'Blocked in Browser',
     permissionResetHint: 'Notifications are muted in LuantiHub. To fully revoke browser permission and be prompted again next time, click the site settings icon in your address bar and select "Reset permission".'

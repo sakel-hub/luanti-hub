@@ -135,7 +135,7 @@ export class AuthService {
   private readonly _moderationStatusFilter = signal<'open' | 'closed' | 'delisted'>('open');
   private readonly _moderationReasonFilter = signal<string>('all');
   private readonly _closedReportsCount = signal<number>(0);
-  private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | null>(null);
+  private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions' | null>(null);
   private lastModerationFetchAt = 0;
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
@@ -172,7 +172,17 @@ export class AuthService {
   readonly requestedDrawerTab = this._requestedDrawerTab.asReadonly();
 
   readonly isLoggedIn = computed(() => this._currentUser() !== null);
-  readonly isAdmin = computed(() => Boolean(this._currentUser()?.is_admin || this._currentUser()?.role === 'admin'));
+  readonly isAdmin = computed(() => {
+    const u = this._currentUser();
+    if (!u) return false;
+    const hasAdminFlag = Boolean(u.is_admin || u.role === 'admin');
+    if (!hasAdminFlag) return false;
+    // If identities array is populated, require at least one cryptographically verified identity
+    if (Array.isArray(u.identities) && u.identities.length > 0) {
+      return u.identities.some(id => Boolean(id.verified));
+    }
+    return hasAdminFlag;
+  });
   readonly openReportsCount = computed(() => this._currentUser()?.open_reports_count || 0);
   readonly linkedIdentities = computed(() => this._currentUser()?.identities || []);
 
@@ -193,6 +203,33 @@ export class AuthService {
             window.location.href = `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
           }
           return;
+        }
+      }
+      if (data?.ctaUrl && typeof data.ctaUrl === 'string') {
+        const rawUrl = data.ctaUrl.trim();
+        if (rawUrl) {
+          this.closeProfileDrawer(false);
+          if (rawUrl.startsWith('/')) {
+            if (this.router) {
+              this.router.navigateByUrl(rawUrl).catch(() => {});
+            } else if (typeof window !== 'undefined') {
+              window.location.href = rawUrl;
+            }
+            return;
+          }
+          if (typeof window !== 'undefined') {
+            try {
+              const parsed = new URL(rawUrl, window.location.origin);
+              if (parsed.origin === window.location.origin && this.router) {
+                this.router.navigateByUrl(parsed.pathname + parsed.search + parsed.hash).catch(() => {});
+              } else {
+                window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+              }
+              return;
+            } catch {
+              // Fall through
+            }
+          }
         }
       }
       this.openProfileDrawer();
@@ -894,7 +931,7 @@ export class AuthService {
     }
   }
 
-  consumeRequestedDrawerTab(): 'packages' | 'favorites' | 'account' | 'moderation' | null {
+  consumeRequestedDrawerTab(): 'packages' | 'favorites' | 'account' | 'moderation' | 'promotions' | null {
     const tab = this._requestedDrawerTab();
     this._requestedDrawerTab.set(null);
     return tab;

@@ -66,6 +66,8 @@ export interface TranslationDictionary {
     nextSlide: string;
     pauseAutoPlay: string;
     resumeAutoPlay: string;
+    promoted: string;
+    learnMore: string;
   };
   carousel: {
     trending: string;
@@ -278,6 +280,7 @@ export interface TranslationDictionary {
     tabFavorites: string;
     tabAccount: string;
     tabModeration: string;
+    tabPromotions: string;
     connectedAccounts: string;
     linkedCount: string;
     verified: string;
@@ -354,6 +357,7 @@ export interface TranslationDictionary {
     notifyAppUpdatesLabel: string;
     notifyNewGitPackagesLabel: string;
     notifyPackageUpdatesLabel: string;
+    notifyPromotionsLabel: string;
     permissionGranted: string;
     permissionBlocked: string;
     permissionResetHint: string;

@@ -20,6 +20,7 @@ export class SettingsService {
   readonly notifyAppUpdates = signal<boolean>(true);
   readonly notifyNewGitPackages = signal<boolean>(true);
   readonly notifyPackageUpdates = signal<boolean>(true);
+  readonly notifyPromotions = signal<boolean>(true);
   readonly isAuthenticatedSession = signal<boolean>(false);
   readonly edgeApiAvailable = signal<boolean>(false);
   readonly clientId = signal<string>('anon_default');
@@ -42,7 +43,8 @@ export class SettingsService {
             adminQueue: this.notifyAdminQueue(),
             appUpdates: this.notifyAppUpdates(),
             newGitPackages: this.notifyNewGitPackages(),
-            packageUpdates: this.notifyPackageUpdates()
+            packageUpdates: this.notifyPackageUpdates(),
+            promotions: this.notifyPromotions()
           })
         );
         localStorage.setItem('lh_client_id', this.clientId());
@@ -106,6 +108,9 @@ export class SettingsService {
           }
           if (typeof parsedPrefs.packageUpdates === 'boolean') {
             this.notifyPackageUpdates.set(parsedPrefs.packageUpdates);
+          }
+          if (typeof parsedPrefs.promotions === 'boolean') {
+            this.notifyPromotions.set(parsedPrefs.promotions);
           }
         }
       }

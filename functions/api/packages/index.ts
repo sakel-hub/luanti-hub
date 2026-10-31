@@ -204,7 +204,24 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         Array.isArray(cachedCatalog.keys) ||
         (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))
     ) {
-      return new Response(JSON.stringify(cachedCatalog), {
+      let edgeBody = cachedCatalog;
+      if (isBootBundle && Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0) {
+        const nowMs = Date.now();
+        edgeBody = {
+          ...cachedCatalog,
+          promotions: cachedCatalog.promotions.filter((r: any) => {
+            if (!r || !r.expires_at) return false;
+            const expMs = Date.parse(String(r.expires_at));
+            if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+            if (r.starts_at) {
+              const startMs = Date.parse(String(r.starts_at));
+              if (Number.isFinite(startMs) && startMs > nowMs) return false;
+            }
+            return true;
+          })
+        };
+      }
+      return new Response(JSON.stringify(edgeBody), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
@@ -239,6 +256,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     today: new Map(),
     week: new Map()
   });
+  let promotionsPromise = Promise.resolve<any[]>([]);
 
   if (env.DB) {
     await ensureExtendedPackageColumns(env.DB);
@@ -327,10 +345,28 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           return { today, week };
         })
         .catch(() => ({ today: new Map(), week: new Map() }));
+
+      promotionsPromise = env.DB.prepare(
+        `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 10`
+      ).all()
+        .then((res: any) => {
+          const nowMs = Date.now();
+          return (res?.results || []).filter((r: any) => {
+            if (!r || !r.title || !r.banner_url || !r.expires_at) return false;
+            const expMs = Date.parse(String(r.expires_at));
+            if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+            if (r.starts_at) {
+              const startMs = Date.parse(String(r.starts_at));
+              if (Number.isFinite(startMs) && startMs > nowMs) return false;
+            }
+            return true;
+          });
+        })
+        .catch(() => []);
     }
   }
 
-  const [upstreamList, scoresList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity] = await Promise.all([
+  const [upstreamList, scoresList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity, activePromotions] = await Promise.all([
     upstreamPromise,
     scoresPromise,
     d1Promise,
@@ -338,7 +374,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     reviewRatingsPromise,
     lhDownloadsMapPromise,
     tagsPromise,
-    velocityPromise
+    velocityPromise,
+    promotionsPromise
   ]);
 
   // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
@@ -706,7 +743,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       packages: merged,
       tags,
       top10Week,
-      top10Today
+      top10Today,
+      promotions: activePromotions
     };
 
     if (!noCache && !q && types.length === 0 && !author) {
