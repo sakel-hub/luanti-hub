@@ -232,6 +232,14 @@ export interface TranslationDictionary {
     latestRelease: string;
     showingLatestReleases: string;
     tabAnalytics: string;
+    viewAnalyticsTooltip: string;
+    viewReleaseNotes: string;
+    hideReleaseNotes: string;
+    loadingReleaseNotes: string;
+    commitsBetween: string;
+    recentBranchCommits: string;
+    noReleaseNotesFallback: string;
+    viewFullDiffOnGit: string;
   };
   auth: {
     title: string;
@@ -345,6 +353,7 @@ export interface TranslationDictionary {
     notifyAdminQueueLabel: string;
     notifyAppUpdatesLabel: string;
     notifyNewGitPackagesLabel: string;
+    notifyPackageUpdatesLabel: string;
     permissionGranted: string;
     permissionBlocked: string;
     permissionResetHint: string;

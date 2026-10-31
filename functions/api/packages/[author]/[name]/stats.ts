@@ -129,7 +129,8 @@ export async function onRequestGet(context: {
       const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
       const lowerAuthor = author.toLowerCase();
       const baseAuthor = lowerAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      const hasVerifiedHandleMatch = verifiedIdentities.some(id => {
+      const isPureGitInD1 = Boolean(pkgRow && pkgRow.provider && pkgRow.provider !== 'contentdb');
+      const hasVerifiedHandleMatch = !isPureGitInD1 && verifiedIdentities.some(id => {
         const h = String(id.username || '').trim().toLowerCase();
         const b = h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
         return h === lowerAuthor || (b.length > 0 && b === baseAuthor);

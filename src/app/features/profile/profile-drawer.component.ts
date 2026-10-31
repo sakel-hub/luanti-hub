@@ -215,7 +215,7 @@ import {
                     {{ 'profile.myPackages' | translate }} ({{ userPackages().length }})
                   </h3>
                   <div class="flex items-center gap-2">
-                    @if (userPackages().length > 0 || authService.isAdmin()) {
+                    @if (canOpenAnalyticsDashboard()) {
                       <button
                         type="button"
                         (click)="onOpenAnalyticsDashboard()"
@@ -495,6 +495,16 @@ import {
                           type="checkbox"
                           [ngModel]="settingsService.notifyNewGitPackages()"
                           (ngModelChange)="settingsService.notifyNewGitPackages.set($event)"
+                          class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                        />
+                      </label>
+
+                      <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span>{{ 'profile.notifyPackageUpdatesLabel' | translate }}</span>
+                        <input
+                          type="checkbox"
+                          [ngModel]="settingsService.notifyPackageUpdates()"
+                          (ngModelChange)="settingsService.notifyPackageUpdates.set($event)"
                           class="rounded border-slate-700 bg-slate-900 text-sky-500"
                         />
                       </label>
@@ -1388,14 +1398,24 @@ export class ProfileDrawerComponent implements OnInit {
     this.packageService.openAuthorDrawer(user.username, true, null);
   }
 
+  canOpenAnalyticsDashboard(): boolean {
+    if (this.authService.isAdmin()) return true;
+    const user = this.authService.currentUser();
+    if (!user) return false;
+    return (
+      this.authService.canViewAuthorAnalytics(user.username) ||
+      this.userPackages().some(p => this.authService.canManagePackage(p))
+    );
+  }
+
   onOpenAnalyticsDashboard(): void {
     const user = this.authService.currentUser();
-    if (!user) return;
+    if (!user || !this.canOpenAnalyticsDashboard()) return;
     this.packageService.openAnalyticsPage(user.username);
   }
 
   onOpenPackageAnalytics(pkg: LuantiPackage): void {
-    if (!pkg) return;
+    if (!pkg || !this.authService.canManagePackage(pkg)) return;
     this.packageService.openAnalyticsPage(pkg.author, pkg.name);
   }
 }

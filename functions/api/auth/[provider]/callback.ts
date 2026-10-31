@@ -7,7 +7,7 @@ import {
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from '../lib/session';
-import { syncAuthorContentDbPackages } from '../../lib/upstream';
+import { syncAuthorContentDbPackages, fetchWithAnubisSupport } from '../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -154,7 +154,7 @@ async function exchangeOAuthTokenWithRetry(
     try {
       // Only switch to JSON body if a previous attempt failed with a non-rate-limit format error (e.g. 400/415)
       const useJson = allowJsonRetry && attempt === 1 && lastStatus !== 429 && lastStatus !== 503;
-      const res = await fetch(tokenUrl, {
+      const res = await fetchWithAnubisSupport(tokenUrl, {
         method: 'POST',
         headers: {
           'Content-Type': useJson ? 'application/json' : 'application/x-www-form-urlencoded',
@@ -167,6 +167,9 @@ async function exchangeOAuthTokenWithRetry(
       lastStatus = res.status;
       if (res.ok) {
         const rawText = await res.text();
+        if (rawText.includes('id="anubis_challenge"') || rawText.trim().startsWith('<!DOCTYPE')) {
+          throw new Error(`${providerLabel} returned an anti-bot challenge page instead of OAuth token JSON`);
+        }
         try {
           return JSON.parse(rawText);
         } catch {
@@ -347,7 +350,7 @@ export async function onRequestGet(context: {
       if (tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'Mesehub token exchange failed');
       }
-      const userRes = await fetch('https://git.minetest.land/api/v1/user', {
+      const userRes = await fetchWithAnubisSupport('https://git.minetest.land/api/v1/user', {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
           'User-Agent': USER_AGENT,

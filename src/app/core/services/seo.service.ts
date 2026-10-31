@@ -49,8 +49,14 @@ export class SeoService {
     this.meta.updateTag({ property: 'og:title', content: fullTitle });
     this.meta.updateTag({ property: 'og:description', content: routeDesc });
     this.meta.updateTag({ property: 'og:url', content: canonicalUrl });
+    this.meta.updateTag({ name: 'twitter:title', content: fullTitle });
+    this.meta.updateTag({ name: 'twitter:description', content: routeDesc });
     this.setCanonicalUrl(canonicalUrl);
-    this.removePackageJsonLd();
+    if (path && path !== '/') {
+      this.setBreadcrumbJsonLd(routeTitle, routeDesc, canonicalUrl);
+    } else {
+      this.removePackageJsonLd();
+    }
   }
 
   resetToHome(): void {
@@ -137,6 +143,42 @@ export class SeoService {
       };
     }
 
+    scriptEl.textContent = JSON.stringify(schema);
+  }
+
+  private setBreadcrumbJsonLd(routeTitle: string, routeDesc: string, canonicalUrl: string): void {
+    if (!this.doc?.head) return;
+    let scriptEl = this.doc.getElementById('luanti-pkg-jsonld') as HTMLScriptElement | null;
+    if (!scriptEl) {
+      scriptEl = this.doc.createElement('script');
+      scriptEl.id = 'luanti-pkg-jsonld';
+      scriptEl.type = 'application/ld+json';
+      this.doc.head.appendChild(scriptEl);
+    }
+    const schema = {
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      name: routeTitle,
+      description: routeDesc,
+      url: canonicalUrl,
+      breadcrumb: {
+        '@type': 'BreadcrumbList',
+        itemListElement: [
+          {
+            '@type': 'ListItem',
+            position: 1,
+            name: 'Luanti Hub',
+            item: `${this.baseUrl}/`
+          },
+          {
+            '@type': 'ListItem',
+            position: 2,
+            name: routeTitle,
+            item: canonicalUrl
+          }
+        ]
+      }
+    };
     scriptEl.textContent = JSON.stringify(schema);
   }
 

@@ -4,6 +4,13 @@
     "/api/*",
     "/package/*",
     "/packages/*",
+    "/games",
+    "/mods",
+    "/texture-packs",
+    "/git",
+    "/setup",
+    "/submit",
+    "/legal",
     "/sitemap.xml"
   ],
   "exclude": [

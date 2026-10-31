@@ -8,7 +8,12 @@ import {
   ensureExtendedPackageColumns,
   formatByteSize,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  invalidateEdgeCacheKeys,
+  fetchWithAnubisSupport,
+  buildSharedZipCacheKey,
+  getCachedNormalizedZip,
+  setCachedNormalizedZip
 } from '../../../lib/upstream';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
@@ -19,9 +24,6 @@ interface Env {
 
 const recentDownloadWrites = new Map<string, number>();
 const DOWNLOAD_WRITE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per IP + package
-const isolateZipCache = new Map<string, { exp: number; bytes: Uint8Array; fileName: string }>();
-const MAX_ISOLATE_ZIP_ENTRIES = 8;
-const MAX_ISOLATE_ZIP_ITEM_BYTES = 4 * 1024 * 1024; // 4 MB per cached item
 
 async function shouldRecordDownloadWrite(request: Request, packageId: string): Promise<boolean> {
   const method = (request.method || 'GET').toUpperCase();
@@ -80,6 +82,7 @@ export async function onRequest(context: {
   params: { author: string; name: string; release?: string };
   request: Request;
   env: Env;
+  waitUntil?: (promise: Promise<any>) => void;
 }) {
   const safeDecode = (val: string) => {
     try {
@@ -94,6 +97,14 @@ export async function onRequest(context: {
   const packageId = `${author}/${name}`;
   const { env, request } = context;
 
+  const scheduleBackground = (work: Promise<any>): Promise<void> => {
+    if (typeof context.waitUntil === 'function' && request.method !== 'POST') {
+      context.waitUntil(work.catch(() => {}));
+      return Promise.resolve();
+    }
+    return work.then(() => {}).catch(() => {});
+  };
+
   let pkgRecord: any = null;
 
   // 1. Instant Kill Switch Check & Package Metadata Lookup in Cloudflare D1
@@ -101,7 +112,7 @@ export async function onRequest(context: {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       pkgRecord = await env.DB.prepare(
-        `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+        `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size
          FROM packages
          WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
          LIMIT 1`
@@ -110,7 +121,7 @@ export async function onRequest(context: {
       if (!pkgRecord) {
         const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
         pkgRecord = await env.DB.prepare(
-          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version
+          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size
            FROM packages
            WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
              AND (
@@ -141,93 +152,117 @@ export async function onRequest(context: {
 
     const effectivePkgId = pkgRecord?.id || packageId;
 
-    // 2. Atomically record download in Cloudflare D1 (deduplicated per IP + package over 10m to protect D1 write quotas)
-    try {
-      const shouldWrite = await shouldRecordDownloadWrite(request, effectivePkgId);
-      if (shouldWrite) {
-        await ensureExtendedPackageColumns(env.DB);
-        const parsedReqUrl = new URL(request.url, 'https://luantihub.local');
-        const rawReason = (parsedReqUrl.searchParams.get('reason') || '').trim().toLowerCase();
-        const ua = (request.headers.get('User-Agent') || '').trim();
-        const isEngineUa = /^(?:luanti|minetest)\b/i.test(ua);
-        const isEngineReason = rawReason === 'new' || rawReason === 'update' || rawReason === 'dependency';
-        const platformLuanti = isEngineUa || isEngineReason ? 1 : 0;
-        const platformWeb = platformLuanti ? 0 : 1;
-        const reasonNew = rawReason === 'new' ? 1 : 0;
-        const reasonUpdate = rawReason === 'update' ? 1 : 0;
-        const reasonDependency = rawReason === 'dependency' ? 1 : 0;
-        const reasonWeb = isEngineReason ? 0 : 1;
+    // 2. Record download telemetry in Cloudflare D1 (non-blocking via waitUntil on GET downloads so .zip streams in < 5ms)
+    const recordDownloadTelemetry = async () => {
+      try {
+        const shouldWrite = await shouldRecordDownloadWrite(request, effectivePkgId);
+        if (shouldWrite) {
+          await ensureExtendedPackageColumns(env.DB);
+          const parsedReqUrl = new URL(request.url, 'https://luantihub.local');
+          const rawReason = (parsedReqUrl.searchParams.get('reason') || '').trim().toLowerCase();
+          const ua = (request.headers.get('User-Agent') || '').trim();
+          const isEngineUa = /^(?:luanti|minetest)\b/i.test(ua);
+          const isEngineReason = rawReason === 'new' || rawReason === 'update' || rawReason === 'dependency';
+          const platformLuanti = isEngineUa || isEngineReason ? 1 : 0;
+          const platformWeb = platformLuanti ? 0 : 1;
+          const reasonNew = rawReason === 'new' ? 1 : 0;
+          const reasonUpdate = rawReason === 'update' ? 1 : 0;
+          const reasonDependency = rawReason === 'dependency' ? 1 : 0;
+          const reasonWeb = isEngineReason ? 0 : 1;
 
-        await env.DB.prepare(`
-          INSERT INTO package_daily_downloads (
-            package_id, download_date, downloads_count,
-            platform_luanti, platform_web,
-            reason_new, reason_update, reason_dependency, reason_web
-          )
-          VALUES (?, DATE('now'), 1, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(package_id, download_date)
-          DO UPDATE SET
-            downloads_count = downloads_count + 1,
-            platform_luanti = COALESCE(platform_luanti, 0) + excluded.platform_luanti,
-            platform_web = COALESCE(platform_web, 0) + excluded.platform_web,
-            reason_new = COALESCE(reason_new, 0) + excluded.reason_new,
-            reason_update = COALESCE(reason_update, 0) + excluded.reason_update,
-            reason_dependency = COALESCE(reason_dependency, 0) + excluded.reason_dependency,
-            reason_web = COALESCE(reason_web, 0) + excluded.reason_web
-        `).bind(
-          effectivePkgId,
-          platformLuanti,
-          platformWeb,
-          reasonNew,
-          reasonUpdate,
-          reasonDependency,
-          reasonWeb
-        ).run();
-
-        await env.DB.prepare(`
-          UPDATE packages
-          SET
-            luantihub_downloads = COALESCE(luantihub_downloads, 0) + 1,
-            downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1
-          WHERE LOWER(id) = LOWER(?)
-        `).bind(effectivePkgId).run();
-
-        // Track per-user download count if authenticated via session cookie
-        const cookies = parseCookies(request);
-        const sessionToken = cookies['lh_session'];
-        const userId = sessionToken
-          ? await verifySessionToken(sessionToken, env.SESSION_SECRET)
-          : null;
-
-        if (userId) {
           await env.DB.prepare(`
-            CREATE TABLE IF NOT EXISTS user_downloads (
-              user_id TEXT NOT NULL,
-              package_id TEXT NOT NULL,
-              download_count INTEGER NOT NULL DEFAULT 1,
-              last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-              PRIMARY KEY (user_id, package_id)
+            INSERT INTO package_daily_downloads (
+              package_id, download_date, downloads_count,
+              platform_luanti, platform_web,
+              reason_new, reason_update, reason_dependency, reason_web
             )
-          `).run();
+            VALUES (?, DATE('now'), 1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(package_id, download_date)
+            DO UPDATE SET
+              downloads_count = downloads_count + 1,
+              platform_luanti = COALESCE(platform_luanti, 0) + excluded.platform_luanti,
+              platform_web = COALESCE(platform_web, 0) + excluded.platform_web,
+              reason_new = COALESCE(reason_new, 0) + excluded.reason_new,
+              reason_update = COALESCE(reason_update, 0) + excluded.reason_update,
+              reason_dependency = COALESCE(reason_dependency, 0) + excluded.reason_dependency,
+              reason_web = COALESCE(reason_web, 0) + excluded.reason_web
+          `).bind(
+            effectivePkgId,
+            platformLuanti,
+            platformWeb,
+            reasonNew,
+            reasonUpdate,
+            reasonDependency,
+            reasonWeb
+          ).run();
 
           await env.DB.prepare(`
-            INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
-            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, package_id)
-            DO UPDATE SET
-              download_count = download_count + 1,
-              last_downloaded_at = CURRENT_TIMESTAMP
-          `).bind(userId, effectivePkgId).run();
+            UPDATE packages
+            SET
+              luantihub_downloads = COALESCE(luantihub_downloads, 0) + 1,
+              downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1
+            WHERE LOWER(id) = LOWER(?)
+          `).bind(effectivePkgId).run();
+
+          const cookies = parseCookies(request);
+          const sessionToken = cookies['lh_session'];
+          const userId = sessionToken
+            ? await verifySessionToken(sessionToken, env.SESSION_SECRET)
+            : null;
+
+          if (userId) {
+            await env.DB.prepare(`
+              CREATE TABLE IF NOT EXISTS user_downloads (
+                user_id TEXT NOT NULL,
+                package_id TEXT NOT NULL,
+                download_count INTEGER NOT NULL DEFAULT 1,
+                last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, package_id)
+              )
+            `).run();
+
+            await env.DB.prepare(`
+              INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
+              VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+              ON CONFLICT(user_id, package_id)
+              DO UPDATE SET
+                download_count = download_count + 1,
+                last_downloaded_at = CURRENT_TIMESTAMP
+            `).bind(userId, effectivePkgId).run();
+          }
         }
+      } catch (err) {
+        console.warn('D1 download tracking error:', err);
       }
-    } catch (err) {
-      console.warn('D1 download tracking error:', err);
-    }
+    };
+
+    await scheduleBackground(recordDownloadTelemetry());
   }
 
   const effectivePkgId = pkgRecord?.id || packageId;
   const effectiveAuthor = pkgRecord?.author_name || author;
   const effectiveName = pkgRecord?.name || name;
+
+  const healPackageDownloadSizeIfChanged = async (zipBytes: number) => {
+    if (!env.DB || !pkgRecord?.id || zipBytes <= 0) return;
+    const prevSize = Number(pkgRecord.download_size || 0);
+    if (prevSize === zipBytes) return;
+    const formattedSize = formatByteSize(zipBytes);
+    if (!formattedSize) return;
+    await env.DB.prepare(`
+      UPDATE packages
+      SET download_size = ?, file_size = ?
+      WHERE LOWER(id) = LOWER(?)
+    `).bind(zipBytes, formattedSize, pkgRecord.id).run().catch(() => {});
+    const lowerA = encodeURIComponent(effectiveAuthor.toLowerCase());
+    const lowerN = encodeURIComponent(effectiveName.toLowerCase());
+    await invalidateEdgeCacheKeys([
+      '/__api_boot_catalog_bundle_v3',
+      `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
+      `https://cache.luantihub.internal/__for_client_v3/${lowerA}/${lowerN}/%3Fformspec_version%3D8`
+    ]).catch(() => {});
+  };
 
   // 3. If it is a background telemetry POST ping
   if (request.method === 'POST') {
@@ -256,41 +291,18 @@ export async function onRequest(context: {
     (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
     (/^\d+$/.test(queryRelease) ? queryRelease : '');
 
-  // Check Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary
-  const edgeZipCacheKey = `https://cache.luantihub.internal/__pkg_zip_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(requestedTag || resolvedReleaseId || 'latest')}`;
-  const isMockedFetch = Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
-  if (!isMockedFetch) {
-    const memZip = isolateZipCache.get(edgeZipCacheKey);
-    if (memZip) {
-      if (Date.now() <= memZip.exp) {
-        return new Response(memZip.bytes, {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/zip',
-            'Content-Disposition': `attachment; filename="${memZip.fileName}.zip"`,
-            'Content-Length': String(memZip.bytes.byteLength),
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400',
-            'X-LuantiHub-Cache': 'HIT-ISOLATE'
-          }
-        });
-      }
-      isolateZipCache.delete(edgeZipCacheKey);
+  // Check Shared Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary
+  const edgeZipCacheKey = buildSharedZipCacheKey(
+    effectiveAuthor,
+    effectiveName,
+    requestedTag || resolvedReleaseId || 'latest'
+  );
+  const cachedZipHit = await getCachedNormalizedZip(edgeZipCacheKey, request);
+  if (cachedZipHit) {
+    if (!requestedTag && cachedZipHit.byteLength > 0) {
+      await scheduleBackground(healPackageDownloadSizeIfChanged(cachedZipHit.byteLength));
     }
-  }
-
-  try {
-    const cache = (globalThis as any).caches?.default;
-    if (cache) {
-      const cachedZip =
-        (await cache.match(request)) ||
-        (await cache.match(new Request(edgeZipCacheKey, { method: 'GET' })));
-      if (cachedZip && cachedZip.ok) {
-        return cachedZip;
-      }
-    }
-  } catch {
-    // Proceed if Cache API unavailable in test/dev environment
+    return cachedZipHit.response;
   }
 
   let d1Releases: any[] = [];
@@ -530,7 +542,7 @@ export async function onRequest(context: {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 6500);
     try {
-      const res = await fetch(candidateUrl, {
+      const res = await fetchWithAnubisSupport(candidateUrl, {
         method: 'GET',
         redirect: 'follow',
         signal: ctrl.signal,
@@ -564,53 +576,11 @@ export async function onRequest(context: {
       }
 
       const normalizedZip = normalizeLuantiPackageZip(rawBytes, safeFileName, effectiveType);
+      const zipResponse = await setCachedNormalizedZip(edgeZipCacheKey, normalizedZip, safeFileName, request);
 
-      const zipResponse = new Response(normalizedZip, {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/zip',
-          'Content-Disposition': `attachment; filename="${safeFileName}.zip"`,
-          'Content-Length': String(normalizedZip.byteLength),
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400'
-        }
-      });
-
-      if (!isMockedFetch && normalizedZip.byteLength > 0 && normalizedZip.byteLength <= MAX_ISOLATE_ZIP_ITEM_BYTES) {
-        if (isolateZipCache.size >= MAX_ISOLATE_ZIP_ENTRIES) {
-          const oldestKey = isolateZipCache.keys().next().value;
-          if (oldestKey) isolateZipCache.delete(oldestKey);
-        }
-        isolateZipCache.set(edgeZipCacheKey, {
-          exp: Date.now() + 10 * 60 * 1000,
-          bytes: normalizedZip,
-          fileName: safeFileName
-        });
-      }
-
-      try {
-        const cache = (globalThis as any).caches?.default;
-        if (cache) {
-          await Promise.all([
-            cache.put(request, zipResponse.clone()),
-            cache.put(new Request(edgeZipCacheKey, { method: 'GET' }), zipResponse.clone())
-          ]).catch(() => {});
-        }
-      } catch {
-        // Non-blocking cache store
-      }
-
-      // Auto-persist exact zip size to packages table in D1 (overwriting any rough repo estimate without touching updated_at)
-      if (env.DB && pkgRecord?.id && normalizedZip.byteLength > 0) {
-        const zipBytes = normalizedZip.byteLength;
-        const formattedSize = formatByteSize(zipBytes);
-        if (formattedSize) {
-          env.DB.prepare(`
-            UPDATE packages
-            SET download_size = ?, file_size = ?
-            WHERE LOWER(id) = LOWER(?)
-          `).bind(zipBytes, formattedSize, pkgRecord.id).run().catch(() => {});
-        }
+      // Auto-persist exact zip size to packages table in D1 & purge stale detail/boot Edge Caches
+      if (!requestedTag && normalizedZip.byteLength > 0) {
+        await scheduleBackground(healPackageDownloadSizeIfChanged(normalizedZip.byteLength));
       }
 
       return zipResponse;

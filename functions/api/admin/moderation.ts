@@ -144,9 +144,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         .filter((i: any) => Boolean(i.verified))
         .map((i: any) => String(i.username || '').toLowerCase())
         .filter(Boolean);
-      const authorHandles = Array.from(
-        new Set([String(currentUser?.username || '').toLowerCase(), ...verifiedHandles].filter(Boolean))
-      );
+      const authorHandles = Array.from(new Set(verifiedHandles));
 
       const authorClause = authorHandles.length > 0
         ? `OR LOWER(SUBSTR(r.package_id, 1, INSTR(r.package_id, '/') - 1)) IN (${authorHandles.map(() => '?').join(', ')})`

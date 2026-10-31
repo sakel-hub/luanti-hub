@@ -4,6 +4,7 @@ import {
   inject,
   signal,
   computed,
+  effect,
   OnInit,
   OnDestroy,
   NgZone
@@ -280,8 +281,31 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
     return list[idx];
   });
 
+  private activeSlidePkgId: string | null = null;
   private intervalTimer: any = null;
   private touchStartX = 0;
+
+  constructor() {
+    effect(() => {
+      const list = this.showcase();
+      if (list.length === 0) {
+        this.activeSlidePkgId = null;
+        return;
+      }
+      if (this.activeSlidePkgId) {
+        const foundIdx = list.findIndex(p => p.id.toLowerCase() === this.activeSlidePkgId!.toLowerCase());
+        if (foundIdx >= 0 && foundIdx !== this.currentIndex()) {
+          this.currentIndex.set(foundIdx);
+          return;
+        }
+      }
+      const safeIdx = this.currentIndex() % list.length;
+      if (safeIdx !== this.currentIndex()) {
+        this.currentIndex.set(safeIdx);
+      }
+      this.activeSlidePkgId = list[safeIdx]?.id || null;
+    });
+  }
 
   ngOnInit(): void {
     this.startAutoSlide();
@@ -312,17 +336,23 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
 
   next(event?: Event): void {
     if (event) event.stopPropagation();
-    const total = this.showcase().length;
+    const list = this.showcase();
+    const total = list.length;
     if (total <= 1) return;
-    this.currentIndex.update(idx => (idx + 1) % total);
+    const nextIdx = (this.currentIndex() + 1) % total;
+    this.activeSlidePkgId = list[nextIdx]?.id || null;
+    this.currentIndex.set(nextIdx);
     this.restartAutoSlide();
   }
 
   prev(event?: Event): void {
     if (event) event.stopPropagation();
-    const total = this.showcase().length;
+    const list = this.showcase();
+    const total = list.length;
     if (total <= 1) return;
-    this.currentIndex.update(idx => (idx - 1 + total) % total);
+    const prevIdx = (this.currentIndex() - 1 + total) % total;
+    this.activeSlidePkgId = list[prevIdx]?.id || null;
+    this.currentIndex.set(prevIdx);
     this.restartAutoSlide();
   }
 
@@ -340,6 +370,10 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
 
   goTo(index: number, event?: Event): void {
     if (event) event.stopPropagation();
+    const list = this.showcase();
+    if (index >= 0 && index < list.length) {
+      this.activeSlidePkgId = list[index]?.id || null;
+    }
     this.currentIndex.set(index);
     this.restartAutoSlide();
   }

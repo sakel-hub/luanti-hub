@@ -70,6 +70,131 @@ function isSameHostOrigin(headerValue: string | null, requestHost: string): bool
   }
 }
 
+const SECTION_HUB_SEO_MAP: Record<
+  string,
+  { title: string; breadcrumbName: string; description: string }
+> = {
+  '/games': {
+    title: 'Luanti Games — Open-Source Voxel Games | Luanti Hub',
+    breadcrumbName: 'Games',
+    description:
+      'Discover and download full open-source voxel games for Luanti (formerly Minetest), from survival sandboxes to RPGs and puzzle adventures.'
+  },
+  '/mods': {
+    title: 'Luanti Mods — Gameplay, Worldgen & Mobs | Luanti Hub',
+    breadcrumbName: 'Mods',
+    description:
+      'Browse thousands of open-source Luanti mods for mapgen, technology, magic, mobs, and multiplayer servers with 1-click install.'
+  },
+  '/texture-packs': {
+    title: 'Luanti Texture Packs — HD & Pixel Art Resource Packs | Luanti Hub',
+    breadcrumbName: 'Texture Packs',
+    description:
+      'Customize your Luanti visual style with community pixel-art, HD, and stylized voxel texture packs.'
+  },
+  '/git': {
+    title: 'Decentralized Git Community Packages | Luanti Hub',
+    breadcrumbName: 'Git Community',
+    description:
+      'Direct Git repository releases from Codeberg, Mesehub, GitLab, and GitHub packaged automatically for the Luanti engine.'
+  },
+  '/setup': {
+    title: 'In-Game Repository Setup — Connect Luanti to LuantiHub | Luanti Hub',
+    breadcrumbName: 'In-Game Setup',
+    description:
+      'Configure your Luanti client in 30 seconds to browse and install LuantiHub packages directly inside the in-game Content tab.'
+  },
+  '/submit': {
+    title: 'Submit Git Mod — Publish to LuantiHub | Luanti Hub',
+    breadcrumbName: 'Submit Git Mod',
+    description:
+      'Publish your Luanti mod, game, or texture pack directly from GitHub, Codeberg, Mesehub, or GitLab with instant automated verification.'
+  },
+  '/legal': {
+    title: 'Legal, DMCA & Safe Harbor — SPDX Open-Source Governance | Luanti Hub',
+    breadcrumbName: 'Terms & Privacy',
+    description:
+      'Official Luanti trademark disclaimer, SPDX open-source license enforcement, and DMCA / EU DSA Safe Harbor policy.'
+  }
+};
+
+function escapeHtmlAttr(str: string): string {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function injectSectionSeoIntoHtml(
+  html: string,
+  sectionPath: string,
+  meta: { title: string; breadcrumbName: string; description: string }
+): string {
+  const canonicalUrl = `https://luantihub.org${sectionPath}`;
+  const safeTitle = escapeHtmlAttr(meta.title);
+  const safeDesc = escapeHtmlAttr(meta.description);
+  const breadcrumbJsonLd = JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    name: meta.breadcrumbName,
+    description: meta.description,
+    url: canonicalUrl,
+    breadcrumb: {
+      '@type': 'BreadcrumbList',
+      itemListElement: [
+        {
+          '@type': 'ListItem',
+          position: 1,
+          name: 'Luanti Hub',
+          item: 'https://luantihub.org/'
+        },
+        {
+          '@type': 'ListItem',
+          position: 2,
+          name: meta.breadcrumbName,
+          item: canonicalUrl
+        }
+      ]
+    }
+  });
+
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
+    .replace(
+      /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<link\s+rel="canonical"[^>]*?>/i,
+      `<link rel="canonical" id="canonical-link" href="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:url" content="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:description" content="${safeDesc}" />`
+    )
+    .replace(
+      '</head>',
+      `<script type="application/ld+json" id="luanti-pkg-jsonld">${breadcrumbJsonLd}</script></head>`
+    );
+}
+
 export async function onRequest(context: {
   request: Request;
   next: () => Promise<Response>;
@@ -77,7 +202,7 @@ export async function onRequest(context: {
 }): Promise<Response> {
   const { request, next } = context;
   const url = new URL(request.url);
-  const pathname = url.pathname.toLowerCase();
+  const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
 
   const isApiRoute = pathname.startsWith('/api/');
@@ -90,6 +215,7 @@ export async function onRequest(context: {
   }
 
   if (!isApiRoute && !isDownloadRoute) {
+    const sectionMeta = SECTION_HUB_SEO_MAP[pathname];
     const res = await next();
     const assetsBinding = context.env?.['ASSETS'];
     if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
@@ -100,11 +226,31 @@ export async function onRequest(context: {
           headers: { Accept: 'text/html,application/xhtml+xml' }
         })
       );
+      if (sectionMeta) {
+        const rawHtml = await spaRes.text();
+        return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'public, max-age=300, s-maxage=900'
+          }
+        });
+      }
       return new Response(spaRes.body, {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store, no-cache, must-revalidate'
+        }
+      });
+    }
+    if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+      const rawHtml = await res.text();
+      return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'public, max-age=300, s-maxage=900'
         }
       });
     }

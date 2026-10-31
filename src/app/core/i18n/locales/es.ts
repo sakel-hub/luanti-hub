@@ -216,7 +216,15 @@ export const es: TranslationDictionary = {
     similarPackagesSubtitle: 'Recomendados según etiquetas, categoría y dependencias',
     latestRelease: 'Última',
     showingLatestReleases: 'Mostrando las últimas {count} versiones',
-    tabAnalytics: 'Analítica'
+    tabAnalytics: 'Analítica',
+    viewAnalyticsTooltip: 'Ver analítica de descargas del paquete',
+    viewReleaseNotes: 'Notas de versión y Commits',
+    hideReleaseNotes: 'Ocultar notas de versión',
+    loadingReleaseNotes: 'Cargando commits de la versión...',
+    commitsBetween: 'Cambios en {head} (desde {base})',
+    recentBranchCommits: 'Commits recientes en {branch}',
+    noReleaseNotesFallback: 'No hay registro detallado de commits para esta versión.',
+    viewFullDiffOnGit: 'Ver diff completo en Git'
   },
   auth: {
     title: 'Iniciar sesión en LuantiHub',
@@ -330,6 +338,7 @@ export const es: TranslationDictionary = {
     notifyAdminQueueLabel: 'Alertas de cola de moderación (Admin)',
     notifyAppUpdatesLabel: 'Actualizaciones de la aplicación LuantiHub',
     notifyNewGitPackagesLabel: 'Nuevos paquetes Git comunitarios publicados',
+    notifyPackageUpdatesLabel: 'Actualizaciones recientes y nuevas versiones de paquetes',
     permissionGranted: 'Activo',
     permissionBlocked: 'Bloqueado en navegador',
     permissionResetHint: 'Las notificaciones están silenciadas en LuantiHub. Para revocar por completo el permiso del navegador, haz clic en el icono de configuración del sitio en la barra de direcciones y selecciona «Restablecer permiso».'

@@ -13,7 +13,9 @@ import {
   PublicAuthorProfile,
   UserIdentity,
   DownloadAnalyticsData,
-  AuthorPackageBreakdownItem
+  AuthorPackageBreakdownItem,
+  ReleaseNotesPayload,
+  ReleaseCommitItem
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
@@ -87,8 +89,12 @@ export class PackageService {
   private bootCacheSyncTimer: any = null;
   private hydratedMetaPersistTimer: any = null;
   private d1WritebackTimer: any = null;
+  private backgroundRefreshTimer: any = null;
+  private lastCatalogSyncAt = 0;
+  private isBackgroundRefreshing = false;
   private bulkScoresInFlight: Promise<void> | null = null;
   private initialUrlSynced = false;
+  private wasOnAnalyticsRoute = false;
   private pendingRoutePackage: { author: string; name: string } | null = null;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
@@ -97,6 +103,7 @@ export class PackageService {
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
   private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
+  private readonly releaseNotesCache = new Map<string, ReleaseNotesPayload>();
   private readonly reportedBrokenGitIds = new Set<string>();
   private readonly hydrationQueue: LuantiPackage[] = [];
   private activeHydrationWorkers = 0;
@@ -153,12 +160,43 @@ export class PackageService {
     const list = this._packages();
     if (list.length === 0) return [];
 
+    const todayRanks = new Map<string, number>();
+    for (const [idx, p] of this._serverTop10Today().entries()) {
+      const k = (p?.id || `${p?.author}/${p?.name}`).toLowerCase();
+      if (k) todayRanks.set(k, idx);
+    }
+    const weekRanks = new Map<string, number>();
+    for (const [idx, p] of this._serverTop10Week().entries()) {
+      const k = (p?.id || `${p?.author}/${p?.name}`).toLowerCase();
+      if (k) weekRanks.set(k, idx);
+    }
+    const nowMs = Date.now();
+
     const scoreItem = (pkg: LuantiPackage): number => {
       let score = (pkg.score || 4.5) * 20;
       score += Math.min(35, Math.log10((pkg.downloads || 1) + 1) * 7);
       if (pkg.featured) score += 35;
       if (pkg.banner && pkg.banner !== 'logo.svg') score += 15;
       if (pkg.source === 'git') score += 20;
+
+      const key = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+      const tRank = todayRanks.get(key);
+      if (tRank !== undefined) {
+        score += Math.max(20, 48 - tRank * 3);
+      } else {
+        const wRank = weekRanks.get(key);
+        if (wRank !== undefined) {
+          score += Math.max(12, 30 - wRank * 2);
+        }
+      }
+
+      if (pkg.updated_at) {
+        const updatedMs = Date.parse(String(pkg.updated_at)) || 0;
+        if (updatedMs > 0 && nowMs - updatedMs <= 7 * 86400000) {
+          score += 15;
+        }
+      }
+
       return score;
     };
 
@@ -411,6 +449,7 @@ export class PackageService {
     this.loadHydratedMetaCache();
     this.initRouterSync();
     this.initCatalog();
+    this.initBackgroundCatalogRefresh();
 
     // Ensure the logged-in user's own D1 packages (e.g. newly submitted Git packages)
     // are always merged into the catalog and search index even across refreshes or mirror fallbacks
@@ -442,7 +481,8 @@ export class PackageService {
   private loadHydratedMetaCache(): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      const raw = localStorage.getItem('lh_hydrated_meta_v1');
+      localStorage.removeItem('lh_hydrated_meta_v1');
+      const raw = localStorage.getItem('lh_hydrated_meta_v2');
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
@@ -469,7 +509,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v1', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v2', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -675,13 +715,18 @@ export class PackageService {
       banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
     }
 
-    const rawDownloadSizeBytes = this.parseDownloadSizeBytes(item.download_size ?? cachedMeta?.download_size);
-    const sanitizedItemFileSize =
+    const rawItemFileSize =
       item.download_size === undefined && String(item.file_size || '').trim() === '2 KB'
         ? undefined
-        : (item.file_size || cachedMeta?.file_size);
+        : item.file_size;
+    const explicitItemBytes = this.parseDownloadSizeBytes(item.download_size ?? rawItemFileSize);
+    const rawDownloadSizeBytes =
+      explicitItemBytes > 0
+        ? explicitItemBytes
+        : this.parseDownloadSizeBytes(cachedMeta?.download_size ?? cachedMeta?.file_size);
+    const sanitizedItemFileSize = rawItemFileSize || cachedMeta?.file_size;
     const sizeFormatted =
-      this.formatDownloadSize(item.download_size ?? cachedMeta?.download_size) ||
+      this.formatDownloadSize(rawDownloadSizeBytes) ||
       this.formatDownloadSize(sanitizedItemFileSize);
 
     const rawDeps = this.parseArrayField(item.dependencies);
@@ -1088,11 +1133,31 @@ export class PackageService {
     }
   }
 
-  private buildActiveQueryParams(): Record<string, string | null> {
+  getPrimaryCategoryRoutePath(): string {
+    if (this._showFavoritesOnly()) return '/';
+    const type = this._selectedType();
+    const source = this._selectedSource();
+    if (source === 'git' && type === 'all') return '/git';
+    if (source === 'all') {
+      if (type === 'game') return '/games';
+      if (type === 'mod') return '/mods';
+      if (type === 'txp') return '/texture-packs';
+    }
+    return '/';
+  }
+
+  private buildActiveQueryParams(targetPath?: string): Record<string, string | null> {
+    const resolvedPath = targetPath ?? (typeof window !== 'undefined' ? window.location.pathname : '/');
+    const isImplicitTypeRoute =
+      (resolvedPath === '/games' && this._selectedType() === 'game') ||
+      (resolvedPath === '/mods' && this._selectedType() === 'mod') ||
+      (resolvedPath === '/texture-packs' && this._selectedType() === 'txp');
+    const isImplicitSourceRoute = resolvedPath === '/git' && this._selectedSource() === 'git';
+
     return {
       q: this._searchQuery().trim() || null,
-      type: this._selectedType() !== 'all' ? this._selectedType() : null,
-      source: this._selectedSource() !== 'all' ? this._selectedSource() : null,
+      type: !isImplicitTypeRoute && this._selectedType() !== 'all' ? this._selectedType() : null,
+      source: !isImplicitSourceRoute && this._selectedSource() !== 'all' ? this._selectedSource() : null,
       tag: this._selectedTag() !== 'all' ? this._selectedTag() : null,
       sort: this._sortBy() !== 'downloads' ? this._sortBy() : null,
       favs: this._showFavoritesOnly() ? '1' : null
@@ -1102,11 +1167,21 @@ export class PackageService {
   private syncStateFromUrl(rawUrl: string): void {
     const [pathPart, queryPart] = rawUrl.split('?');
     const path = pathPart || '/';
+    const isAnalyticsRoute = path.startsWith('/analytics');
+    const wasAnalytics = this.wasOnAnalyticsRoute;
+    this.wasOnAnalyticsRoute = isAnalyticsRoute;
+
+    const isCategoryRoute =
+      path === '/games' ||
+      path === '/mods' ||
+      path === '/texture-packs' ||
+      path === '/git';
+
     const isModalRoute =
       path.startsWith('/package/') ||
       path.startsWith('/packages/') ||
       path.startsWith('/author/') ||
-      path.startsWith('/analytics') ||
+      isAnalyticsRoute ||
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
@@ -1124,15 +1199,25 @@ export class PackageService {
       this.edgeInitialPackageSeed = edgeSeed;
     }
 
-    // Only apply filter query params on initial page load or when navigating to the catalog root ('/').
+    // Only apply filter query params on initial page load or when navigating to a catalog route ('/', '/games', '/mods', '/texture-packs', '/git').
     // Opening a modal route (/package/:author/:name, /submit, /setup, /legal) must never mutate the underlying catalog filter state.
     if (!this.initialUrlSynced || !isModalRoute) {
       this.initialUrlSynced = true;
+      const defaultTypeForPath =
+        path === '/games'
+          ? 'game'
+          : path === '/mods'
+            ? 'mod'
+            : path === '/texture-packs'
+              ? 'txp'
+              : 'all';
+      const defaultSourceForPath = path === '/git' ? 'git' : 'all';
+
       if (queryPart !== undefined) {
         const params = new URLSearchParams(queryPart);
         const q = params.get('q') || '';
-        const type = params.get('type') || 'all';
-        const source = params.get('source') || 'all';
+        const type = params.get('type') || defaultTypeForPath;
+        const source = params.get('source') || defaultSourceForPath;
         const tag = params.get('tag') || 'all';
         const sort = (params.get('sort') as SortOption) || 'downloads';
         const favs = params.get('favs') === '1';
@@ -1147,8 +1232,8 @@ export class PackageService {
       } else if (!isModalRoute) {
         this._searchInput.set('');
         this._searchQuery.set('');
-        this._selectedType.set('all');
-        this._selectedSource.set('all');
+        this._selectedType.set(defaultTypeForPath);
+        this._selectedSource.set(defaultSourceForPath);
         this._selectedTag.set('all');
         this._sortBy.set('downloads');
         this._showFavoritesOnly.set(false);
@@ -1156,6 +1241,7 @@ export class PackageService {
     }
 
     if (path.startsWith('/package/') || path.startsWith('/packages/')) {
+      this.returnContextBeforeAnalytics = null;
       const parts = path.replace(/^\/packages?\//, '').split('/').filter(Boolean);
       if (parts[0] && parts[1]) {
         this._isSubmitModalOpen.set(false);
@@ -1166,6 +1252,7 @@ export class PackageService {
         return;
       }
     } else if (path.startsWith('/author/')) {
+      this.returnContextBeforeAnalytics = null;
       const authorPart = path.replace(/^\/author\//, '').split('/').filter(Boolean)[0];
       if (authorPart) {
         this._isSubmitModalOpen.set(false);
@@ -1210,7 +1297,7 @@ export class PackageService {
       this.authService.openProfileDrawer(false);
       this.seoService?.updateStaticRoute('Creator Profile', 'Manage your Luanti Hub packages, favorites, and connected identities.', '/profile');
       return;
-    } else if (path.startsWith('/analytics')) {
+    } else if (isAnalyticsRoute) {
       this._activePackage.set(null);
       this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
@@ -1229,11 +1316,56 @@ export class PackageService {
       return;
     }
 
+    // If the user navigated back from /analytics to a catalog route via browser Back button,
+    // restore the previously open Package Detail Modal (or Author Drawer) automatically.
+    if (wasAnalytics && this.returnContextBeforeAnalytics) {
+      const prev = this.returnContextBeforeAnalytics;
+      this.returnContextBeforeAnalytics = null;
+      if (prev.type === 'package' && prev.pkg) {
+        this.openPackageModal(prev.pkg, true);
+        return;
+      }
+      if (prev.type === 'author' && prev.username) {
+        this.openAuthorDrawer(prev.username, true);
+        return;
+      }
+    }
+
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+
+    if (isCategoryRoute) {
+      if (path === '/games') {
+        this.seoService?.updateStaticRoute(
+          'Luanti Games — Open-Source Voxel Games',
+          'Discover and download full open-source voxel games for Luanti (formerly Minetest), from survival sandboxes to RPGs and puzzle adventures.',
+          '/games'
+        );
+      } else if (path === '/mods') {
+        this.seoService?.updateStaticRoute(
+          'Luanti Mods — Gameplay, Worldgen & Mobs',
+          'Browse thousands of open-source Luanti mods for mapgen, technology, magic, mobs, and multiplayer servers with 1-click install.',
+          '/mods'
+        );
+      } else if (path === '/texture-packs') {
+        this.seoService?.updateStaticRoute(
+          'Luanti Texture Packs — HD & Pixel Art Resource Packs',
+          'Customize your Luanti visual style with community pixel-art, HD, and stylized voxel texture packs.',
+          '/texture-packs'
+        );
+      } else if (path === '/git') {
+        this.seoService?.updateStaticRoute(
+          'Decentralized Git Community Packages',
+          'Direct Git repository releases from Codeberg, Mesehub, GitLab, and GitHub packaged automatically for the Luanti engine.',
+          '/git'
+        );
+      }
+      return;
+    }
+
     this.seoService?.resetToHome();
   }
 
@@ -1249,15 +1381,16 @@ export class PackageService {
 
   private syncQueryParamsToUrl(): void {
     if (!this.router) return;
-    const queryParams = this.buildActiveQueryParams();
-    const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
-    if (currentPath !== '/' && !this._activePackage() && !this._activeAuthorUsername() && !this.pendingRoutePackage) {
-      this.router.navigate(['/'], {
+    if (!this._activePackage() && !this._activeAuthorUsername() && !this.pendingRoutePackage) {
+      const targetPath = this.getPrimaryCategoryRoutePath();
+      const queryParams = this.buildActiveQueryParams(targetPath);
+      this.router.navigate([targetPath], {
         queryParams,
         replaceUrl: true
       });
       return;
     }
+    const queryParams = this.buildActiveQueryParams();
     this.router.navigate([], {
       queryParams,
       queryParamsHandling: 'merge',
@@ -1304,18 +1437,23 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v4');
         sessionStorage.removeItem('lh_boot_cache_v5');
         sessionStorage.removeItem('lh_boot_cache_v6');
+        sessionStorage.removeItem('lh_boot_cache_v7');
       }
     } catch {
       // Ignore storage errors
     }
   }
 
-  private applyBootPayload(payload: {
-    packages: any[];
-    tags?: any[];
-    top10Week?: any[];
-    top10Today?: any[];
-  }): void {
+  private applyBootPayload(
+    payload: {
+      packages: any[];
+      tags?: any[];
+      top10Week?: any[];
+      top10Today?: any[];
+    },
+    options?: { isBackgroundRefresh?: boolean }
+  ): void {
+    this.lastCatalogSyncAt = Date.now();
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
     const combinedRaw = [...rawPackages, ...userPkgs];
@@ -1328,6 +1466,38 @@ export class PackageService {
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
     this.pwaService.checkAndNotifyNewGitPackages(normalized, { isBaselineSeedAllowed: true });
+    this.pwaService.checkAndNotifyUpdatedPackages(normalized, { isBaselineSeedAllowed: true });
+
+    // If a package detail modal is currently open during a background refresh, merge live catalog metrics
+    // (downloads, score, release_id, updated_at, download_size, file_size) without losing deep-hydrated fields
+    const currentActive = this._activePackage();
+    if (currentActive) {
+      const targetIdLower = (currentActive.id || `${currentActive.author}/${currentActive.name}`).toLowerCase();
+      const freshMatch = normalized.find(
+        p =>
+          p.id.toLowerCase() === targetIdLower ||
+          (p.author.toLowerCase() === (currentActive.author || '').toLowerCase() &&
+            p.name.toLowerCase() === (currentActive.name || '').toLowerCase())
+      );
+      if (freshMatch) {
+        this._activePackage.update(curr =>
+          curr
+            ? {
+                ...curr,
+                downloads: Math.max(curr.downloads || 0, freshMatch.downloads || 0),
+                contentdb_downloads: Math.max(curr.contentdb_downloads || 0, freshMatch.contentdb_downloads || 0),
+                luantihub_downloads: Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0),
+                score: freshMatch.score || curr.score,
+                release_id: freshMatch.release_id || curr.release_id,
+                updated_at: freshMatch.updated_at || curr.updated_at,
+                download_size: freshMatch.download_size || curr.download_size,
+                file_size: freshMatch.file_size || curr.file_size,
+                tags: freshMatch.tags?.length ? freshMatch.tags : curr.tags
+              }
+            : null
+        );
+      }
+    }
 
     if (this.pendingRoutePackage) {
       const { author: pendingAuthor, name: pendingName } = this.pendingRoutePackage;
@@ -1502,10 +1672,10 @@ export class PackageService {
     }
     this.bootCacheSyncTimer = setTimeout(() => {
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v6');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
         const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
         sessionStorage.setItem(
-          'lh_boot_cache_v6',
+          'lh_boot_cache_v7',
           JSON.stringify({
             ts: existingTs,
             edge: this.edgeApiAvailable,
@@ -1523,6 +1693,116 @@ export class PackageService {
     }, 250);
   }
 
+  private initBackgroundCatalogRefresh(): void {
+    if (typeof window === 'undefined') return;
+
+    // 1. Periodic 10-minute silent refresh when tab is visible and online
+    if (this.backgroundRefreshTimer) {
+      clearInterval(this.backgroundRefreshTimer);
+    }
+    this.backgroundRefreshTimer = setInterval(() => {
+      if (
+        typeof document !== 'undefined' &&
+        document.visibilityState === 'visible' &&
+        this.pwaService.isOnline()
+      ) {
+        this.refreshCatalogInBackground().catch(() => {});
+      }
+    }, 10 * 60 * 1000);
+
+    // 2. Refresh when user returns to tab/PWA window after >= 3 minutes
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (
+          document.visibilityState === 'visible' &&
+          this.pwaService.isOnline() &&
+          this.lastCatalogSyncAt > 0 &&
+          Date.now() - this.lastCatalogSyncAt >= 3 * 60 * 1000
+        ) {
+          this.refreshCatalogInBackground().catch(() => {});
+        }
+      });
+    }
+
+    // 3. Refresh when device reconnects to the network after >= 2 minutes
+    window.addEventListener('online', () => {
+      if (this.lastCatalogSyncAt > 0 && Date.now() - this.lastCatalogSyncAt >= 2 * 60 * 1000) {
+        this.refreshCatalogInBackground().catch(() => {});
+      }
+    });
+  }
+
+  /**
+   * Silently refreshes the package catalog, Hero Showcase, Top 10 Today/Week, and category swimlanes
+   * in the background without flipping `isLoading()` to `true` or interrupting open modals/scroll position.
+   */
+  async refreshCatalogInBackground(): Promise<boolean> {
+    if (this.isBackgroundRefreshing || this._isLoading()) {
+      return false;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return false;
+    }
+
+    this.isBackgroundRefreshing = true;
+    try {
+      const apiUrl =
+        typeof window !== 'undefined' && window.location?.origin
+          ? `${window.location.origin}/api/packages/?boot=1&ngsw-bypass=true`
+          : '/api/packages/?boot=1&ngsw-bypass=true';
+
+      const response = await fetch(apiUrl, {
+        headers: {
+          Accept: 'application/json',
+          'ngsw-bypass': 'true'
+        },
+        cache: 'no-store'
+      }).catch(() => null);
+
+      if (!response || !response.ok || !(response.headers.get('content-type') || '').includes('application/json')) {
+        return false;
+      }
+
+      const serverHeader = (response.headers.get('server') || '').toLowerCase();
+      this.edgeApiAvailable = !serverHeader.includes('apache');
+      this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
+
+      const data = await response.json().catch(() => null);
+      const bootPayload = Array.isArray(data)
+        ? { packages: data }
+        : data && typeof data === 'object' && Array.isArray(data.packages)
+          ? data
+          : null;
+
+      if (!bootPayload) {
+        return false;
+      }
+
+      this.applyBootPayload(bootPayload, { isBackgroundRefresh: true });
+
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(
+            'lh_boot_cache_v7',
+            JSON.stringify({
+              ts: Date.now(),
+              edge: this.edgeApiAvailable,
+              payload: bootPayload
+            })
+          );
+        }
+      } catch {
+        // Ignore sessionStorage quota errors
+      }
+
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.isBackgroundRefreshing = false;
+    }
+  }
+
   // Fetch Live Packages from Backend API (Bundled Boot Payload: Catalog + Tags + Top 10 Week & Today in 1 call)
   async initCatalog(forceRefresh = false): Promise<void> {
     let servedFromCache = false;
@@ -1530,7 +1810,8 @@ export class PackageService {
       if (!forceRefresh && typeof sessionStorage !== 'undefined') {
         try {
           sessionStorage.removeItem('lh_boot_cache_v5');
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v6');
+          sessionStorage.removeItem('lh_boot_cache_v6');
+          const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
           if (rawCached) {
             const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
             if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -1641,7 +1922,7 @@ export class PackageService {
           try {
             if (typeof sessionStorage !== 'undefined') {
               sessionStorage.setItem(
-                'lh_boot_cache_v6',
+                'lh_boot_cache_v7',
                 JSON.stringify({
                   ts: Date.now(),
                   edge: this.edgeApiAvailable,
@@ -2417,6 +2698,67 @@ export class PackageService {
 
     this.pwaService.showToast('common.downloadStarted');
     this.trackDownload(pkg);
+  }
+
+  /**
+   * Synchronizes an exact `.zip` byte size across `_packages`, `_activePackage`,
+   * Top 10 signals, and `hydratedMetaCache` (`lh_hydrated_meta_v2`).
+   */
+  updatePackageDownloadSize(pkg: LuantiPackage, exactBytes: number): void {
+    const cleanBytes = this.parseDownloadSizeBytes(exactBytes);
+    if (!pkg || cleanBytes <= 0) return;
+
+    const formatted = this.formatDownloadSize(cleanBytes);
+    if (!formatted) return;
+
+    const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    const targetAuthorLower = (pkg.author || '').toLowerCase();
+    const targetNameLower = (pkg.name || '').toLowerCase();
+
+    const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
+    this.hydratedMetaCache.set(targetIdLower, {
+      ...prevMeta,
+      download_size: cleanBytes,
+      file_size: formatted
+    });
+    this.scheduleHydratedMetaPersist();
+
+    const patchItem = (item: LuantiPackage): LuantiPackage => ({
+      ...item,
+      download_size: cleanBytes,
+      file_size: formatted
+    });
+
+    this._activePackage.update(curr =>
+      curr &&
+      ((curr.id || '').toLowerCase() === targetIdLower ||
+        ((curr.author || '').toLowerCase() === targetAuthorLower &&
+          (curr.name || '').toLowerCase() === targetNameLower))
+        ? patchItem(curr)
+        : curr
+    );
+
+    this._packages.update(list =>
+      list.map(item =>
+        (item.id || '').toLowerCase() === targetIdLower ||
+        ((item.author || '').toLowerCase() === targetAuthorLower &&
+          (item.name || '').toLowerCase() === targetNameLower)
+          ? patchItem(item)
+          : item
+      )
+    );
+
+    const syncTop10 = (list: LuantiPackage[]) =>
+      list.map(item =>
+        (item.id || '').toLowerCase() === targetIdLower ||
+        ((item.author || '').toLowerCase() === targetAuthorLower &&
+          (item.name || '').toLowerCase() === targetNameLower)
+          ? patchItem(item)
+          : item
+      );
+    this._serverTop10Today.update(syncTop10);
+    this._serverTop10Week.update(syncTop10);
+    this.scheduleBootCachePersist();
   }
 
   public rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: string): string {
@@ -3423,7 +3765,9 @@ export class PackageService {
               ? data.soft_dependencies.map((d: any) => (typeof d === 'string' ? d : d?.name)).filter(Boolean)
               : []);
 
-        const rawDownloadSizeBytes = this.parseDownloadSizeBytes(data.download_size || pkg.download_size || 0);
+        const rawDownloadSizeBytes = this.parseDownloadSizeBytes(
+          data.download_size ?? data.file_size ?? pkg.download_size ?? 0
+        );
         const sizeFormatted =
           this.formatDownloadSize(data.download_size) ||
           this.formatDownloadSize(data.file_size) ||
@@ -3758,6 +4102,7 @@ export class PackageService {
             downloads: resolvedDownloads || prevMeta.downloads,
             score: resolvedScore,
             tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
+            download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
             file_size: sizeFormatted || prevMeta.file_size,
             video_url: resolvedVideo.video_url || prevMeta.video_url,
             video_thumbnail_url: resolvedVideo.video_thumbnail_url || prevMeta.video_thumbnail_url,
@@ -4148,6 +4493,136 @@ export class PackageService {
   }
 
   /**
+   * Lazily fetches commit-by-commit release notes between `baseRef...headRef` (with automatic
+   * fallback to `headRef` commit history, default branch commits, or release markdown body).
+   */
+  async fetchReleaseNotesForRelease(
+    pkg: LuantiPackage,
+    headRef: string,
+    baseRef?: string,
+    fallbackBody?: string
+  ): Promise<ReleaseNotesPayload> {
+    const cleanHead = (headRef || pkg.default_branch || 'HEAD').trim();
+    const cleanBase = (baseRef || '').trim();
+    const cacheKey = `${pkg.id.toLowerCase()}::${cleanHead}::${cleanBase || 'none'}`;
+    const cached = this.releaseNotesCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const encAuthor = encodeURIComponent(pkg.author);
+    const encName = encodeURIComponent(pkg.name);
+    const branch = pkg.default_branch || 'main';
+
+    if (this.edgeApiAvailable) {
+      try {
+        const res = await fetch(
+          `/api/packages/${encAuthor}/${encName}/releases?notes=1&head=${encodeURIComponent(cleanHead)}&base=${encodeURIComponent(cleanBase)}&branch=${encodeURIComponent(branch)}`,
+          { headers: { Accept: 'application/json' } }
+        );
+        if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          const data = (await res.json()) as ReleaseNotesPayload;
+          if (data && Array.isArray(data.commits)) {
+            const enriched: ReleaseNotesPayload = {
+              ...data,
+              markdown_body: data.markdown_body || fallbackBody || undefined
+            };
+            this.releaseNotesCache.set(cacheKey, enriched);
+            return enriched;
+          }
+        }
+      } catch {
+        // Fall through to client-side forge fallback
+      }
+    }
+
+    // Client-side forge fallback (when running on local ng serve or if edge endpoint unavailable)
+    let commits: ReleaseCommitItem[] = [];
+    let source: ReleaseNotesPayload['source'] = fallbackBody ? 'release_notes' : 'metadata';
+    let compareUrl: string | undefined;
+
+    if (pkg.repo_url) {
+      try {
+        const u = new URL(pkg.repo_url);
+        const host = u.hostname.toLowerCase();
+        const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+        if (parts.length >= 2) {
+          const owner = parts[0];
+          const repo = parts[1].replace(/\.git$/i, '');
+          const mapCommit = (c: any): ReleaseCommitItem | null => {
+            const sha = String(c?.sha || c?.id || '').trim();
+            if (!sha) return null;
+            const msg = String(c?.commit?.message || c?.message || c?.title || '').trim();
+            const firstLine = msg.split(/\r?\n/)[0]?.trim() || sha.slice(0, 7);
+            return {
+              sha,
+              short_sha: sha.slice(0, 7),
+              title: firstLine,
+              author_name: String(c?.commit?.author?.name || c?.author?.login || c?.author_name || owner),
+              committed_at: String(c?.commit?.author?.date || c?.created_at || c?.committed_date || ''),
+              url: String(c?.html_url || c?.web_url || `https://${host}/${owner}/${repo}/commit/${sha}`)
+            };
+          };
+
+          if (host.includes('github.com')) {
+            if (cleanBase && cleanHead && cleanBase !== cleanHead && cleanHead.toUpperCase() !== 'HEAD') {
+              compareUrl = `https://github.com/${owner}/${repo}/compare/${encodeURIComponent(cleanBase)}...${encodeURIComponent(cleanHead)}`;
+              const cmpRes = await fetch(
+                `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(cleanBase)}...${encodeURIComponent(cleanHead)}`
+              ).catch(() => null);
+              if (cmpRes && cmpRes.ok) {
+                const cmpJson = await cmpRes.json().catch(() => null);
+                if (Array.isArray(cmpJson?.commits) && cmpJson.commits.length > 0) {
+                  source = 'compare';
+                  commits = [...cmpJson.commits].reverse().map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 20);
+                }
+              }
+            }
+            if (commits.length === 0) {
+              const shaQuery = cleanHead !== 'HEAD' ? `&sha=${encodeURIComponent(cleanHead)}` : '';
+              const listRes = await fetch(
+                `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?per_page=12${shaQuery}`
+              ).catch(() => null);
+              if (listRes && listRes.ok) {
+                const listJson = await listRes.json().catch(() => null);
+                if (Array.isArray(listJson) && listJson.length > 0) {
+                  source = 'commits';
+                  commits = listJson.map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 12);
+                }
+              }
+            }
+          } else if (host.includes('codeberg.org')) {
+            const shaQuery = cleanHead !== 'HEAD' ? `&sha=${encodeURIComponent(cleanHead)}` : '';
+            const listRes = await fetch(
+              `https://codeberg.org/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?limit=12${shaQuery}`
+            ).catch(() => null);
+            if (listRes && listRes.ok) {
+              const listJson = await listRes.json().catch(() => null);
+              if (Array.isArray(listJson) && listJson.length > 0) {
+                source = 'commits';
+                commits = listJson.map(mapCommit).filter((x): x is ReleaseCommitItem => Boolean(x)).slice(0, 12);
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore client-side forge fetch error
+      }
+    }
+
+    const fallbackResult: ReleaseNotesPayload = {
+      source,
+      head_ref: cleanHead,
+      base_ref: cleanBase || undefined,
+      compare_url: compareUrl,
+      markdown_body: fallbackBody || undefined,
+      commits
+    };
+    this.releaseNotesCache.set(cacheKey, fallbackResult);
+    return fallbackResult;
+  }
+
+  /**
    * Computes up to `limit` similar / recommended packages for the viewed package using
    * package type, shared ContentDB/custom tags, dependency/ecosystem links, keyword overlap,
    * and diversity-capped creator affinity.
@@ -4350,8 +4825,9 @@ export class PackageService {
   private navigatePreservingScroll(commands: any[]): void {
     if (!this.router) return;
     const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
+    const firstCmd = typeof commands?.[0] === 'string' ? commands[0] : '/';
     this.router.navigate(commands, {
-      queryParams: this.buildActiveQueryParams()
+      queryParams: this.buildActiveQueryParams(firstCmd)
     }).then(() => {
       if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
         window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
@@ -4385,6 +4861,13 @@ export class PackageService {
   }
 
   async updatePackageTags(pkg: LuantiPackage, customTags: string[]): Promise<{ success: boolean; tags?: string[]; message?: string }> {
+    if (!this.authService.canManagePackage(pkg)) {
+      return {
+        success: false,
+        message: 'Access denied: Only a verified package owner or administrator can edit package tags.'
+      };
+    }
+
     const resolvedAuthor =
       pkg.author ||
       (pkg as any).author_name ||
@@ -4812,7 +5295,7 @@ export class PackageService {
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -4832,7 +5315,7 @@ export class PackageService {
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -4847,7 +5330,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -4873,7 +5356,7 @@ export class PackageService {
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -4888,7 +5371,7 @@ export class PackageService {
     this._isLegalModalOpen.set(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -4925,7 +5408,7 @@ export class PackageService {
     this._isLegalModalOpen.set(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll(['/']);
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
   }
 
@@ -5435,6 +5918,12 @@ export class PackageService {
     details?: string,
     reportId?: string
   ): Promise<{ success: boolean; message?: string }> {
+    if (!this.authService.isAdmin() && !this.authService.canManagePackage(pkg as any)) {
+      return {
+        success: false,
+        message: 'Access denied: Only a verified package owner or administrator can perform moderation actions.'
+      };
+    }
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/moderate`, {
         method: 'POST',
@@ -5498,13 +5987,32 @@ export class PackageService {
     | { type: 'package'; pkg: LuantiPackage }
     | null = null;
 
-  openAnalyticsPage(username?: string, packageName?: string): void {
+  openAnalyticsPage(target?: string | { author: string; name?: string }, packageName?: string): void {
     const activePkg = this._activePackage();
     const activeAuthor = this._activeAuthorUsername();
     const isProfileOpen = this.authService.isProfileDrawerOpen();
 
+    const username = typeof target === 'object' && target !== null ? target.author : target;
+    const resolvedPackageName = typeof target === 'object' && target !== null ? target.name : packageName;
+
     if (activePkg) {
       this.returnContextBeforeAnalytics = { type: 'package', pkg: activePkg };
+      if (
+        typeof window !== 'undefined' &&
+        activePkg.author &&
+        activePkg.name &&
+        !window.location.pathname.startsWith('/package/')
+      ) {
+        try {
+          window.history.replaceState(
+            window.history.state,
+            '',
+            `/package/${encodeURIComponent(activePkg.author)}/${encodeURIComponent(activePkg.name)}`
+          );
+        } catch {
+          // Ignore history replace error
+        }
+      }
     } else if (activeAuthor) {
       this.returnContextBeforeAnalytics = { type: 'author', username: activeAuthor };
     } else if (isProfileOpen) {
@@ -5514,7 +6022,7 @@ export class PackageService {
     }
 
     const targetUser = (username || activePkg?.author || activeAuthor || this.authService.currentUser()?.username || '').trim();
-    const targetPkg = (packageName || '').trim();
+    const targetPkg = (resolvedPackageName || '').trim();
 
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
@@ -5751,6 +6259,16 @@ export class PackageService {
     const cleanName = (name || '').trim();
     if (!cleanAuthor || !cleanName) return null;
 
+    const foundPkg = this.findPackageInCatalogByRoute(cleanAuthor, cleanName);
+    if (
+      !this.authService.isAdmin() &&
+      (foundPkg
+        ? !this.authService.canManagePackage(foundPkg)
+        : !this.authService.canViewAuthorAnalytics(cleanAuthor))
+    ) {
+      return null;
+    }
+
     const cacheKey = `pkg:${cleanAuthor.toLowerCase()}/${cleanName.toLowerCase()}:${days}`;
     if (!forceRefresh) {
       const cached = this.statsCache.get(cacheKey);
@@ -5780,11 +6298,6 @@ export class PackageService {
     }
 
     // Fallback for local dev (`ng serve`) when caller is authorized author/admin
-    const foundPkg = this.findPackageInCatalogByRoute(cleanAuthor, cleanName);
-    if (foundPkg && !this.authService.canManagePackage(foundPkg) && !this.authService.isAdmin()) {
-      return null;
-    }
-
     const { prevStartDate, endDate } = this.buildUtcDateRange(days);
     const cdbStats = await this.fetchUpstreamWithMirrorFallback(
       `/packages/${encAuthor}/${encName}/stats/?start=${prevStartDate}&end=${endDate}`
@@ -5806,6 +6319,10 @@ export class PackageService {
   ): Promise<DownloadAnalyticsData | null> {
     const cleanUser = (username || '').trim();
     if (!cleanUser) return null;
+
+    if (!this.authService.canViewAuthorAnalytics(cleanUser)) {
+      return null;
+    }
 
     const cacheKey = `author:${cleanUser.toLowerCase()}:${days}`;
     if (!forceRefresh) {

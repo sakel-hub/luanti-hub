@@ -98,6 +98,25 @@ export interface PackageRelease {
   released_at: string;
 }
 
+export interface ReleaseCommitItem {
+  sha: string;
+  short_sha: string;
+  title: string;
+  message?: string;
+  author_name: string;
+  committed_at: string;
+  url?: string;
+}
+
+export interface ReleaseNotesPayload {
+  source: 'compare' | 'commits' | 'release_notes' | 'metadata';
+  head_ref: string;
+  base_ref?: string;
+  compare_url?: string;
+  markdown_body?: string;
+  commits: ReleaseCommitItem[];
+}
+
 export interface CommunityReview {
   id: string;
   package_id: string;
@@ -161,6 +180,7 @@ export interface AuthUser {
     my_reports_total?: number;
     admin_latest_open?: ModerationReport[];
     latest_git_packages?: Array<Partial<LuantiPackage>>;
+    recently_updated_packages?: Array<Partial<LuantiPackage>>;
   };
 }
 

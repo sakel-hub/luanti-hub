@@ -125,7 +125,7 @@ export async function onRequestGet(context: { request: Request; params: { author
     forwardParams.set('formspec_version', '8');
   }
   const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
-  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
+  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v3/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
   const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
   if (cachedClient) {
     if (context.env.DB) {
@@ -258,24 +258,29 @@ export async function onRequestGet(context: { request: Request; params: { author
   }
 
   if (d1Pkg) {
-    // If download_size and file_size are missing in D1, lazily query the Git forge repository size and persist to D1
+    // Verify & self-heal accurate normalized .zip archive size (7-day Edge cached + pre-warms .zip cache)
     let resolvedSizeLabel =
       (d1Pkg.download_size && Number(d1Pkg.download_size) > 0 ? formatByteSize(d1Pkg.download_size) : null) ||
       (d1Pkg.file_size && String(d1Pkg.file_size).trim() ? String(d1Pkg.file_size).trim() : null);
 
-    if (!resolvedSizeLabel && d1Pkg.repo_url) {
+    if (d1Pkg.repo_url) {
       const repoEstimate = await fetchRepoSizeEstimateFromUrl(
         d1Pkg.repo_url,
         d1Pkg.author_name || author,
-        d1Pkg.name || name
+        d1Pkg.name || name,
+        {
+          defaultBranch: d1Pkg.default_branch || 'main',
+          packageType: d1Pkg.type || 'mod'
+        }
       );
-      if (repoEstimate) {
+      if (repoEstimate && repoEstimate.downloadSize > 0) {
+        const prevSize = Number(d1Pkg.download_size || 0);
         resolvedSizeLabel = repoEstimate.fileSize;
-        if (context.env.DB && d1Pkg.id) {
+        if (context.env.DB && d1Pkg.id && (prevSize <= 0 || Math.abs(repoEstimate.downloadSize - prevSize) > Math.max(1024, prevSize * 0.05))) {
           context.env.DB.prepare(`
             UPDATE packages
             SET download_size = ?, file_size = ?
-            WHERE LOWER(id) = LOWER(?) AND (download_size IS NULL OR download_size = 0)
+            WHERE LOWER(id) = LOWER(?)
           `).bind(repoEstimate.downloadSize, repoEstimate.fileSize, d1Pkg.id).run().catch(() => {});
         }
       }

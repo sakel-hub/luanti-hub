@@ -8,6 +8,22 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'games',
+    component: CatalogComponent
+  },
+  {
+    path: 'mods',
+    component: CatalogComponent
+  },
+  {
+    path: 'texture-packs',
+    component: CatalogComponent
+  },
+  {
+    path: 'git',
+    component: CatalogComponent
+  },
+  {
     path: 'analytics',
     component: AnalyticsPageComponent
   },

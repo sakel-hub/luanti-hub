@@ -112,7 +112,10 @@ export async function onRequestGet(context: {
     const baseReq = lowerReq.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
 
     const callerHandles = new Set<string>();
-    if (callerUser.username) {
+    const hasVerifiedIdentity = callerIdentities.some(
+      id => id.verified === 1 || id.verified === true
+    );
+    if (hasVerifiedIdentity && callerUser.username) {
       const cu = String(callerUser.username).trim().toLowerCase();
       callerHandles.add(cu);
       callerHandles.add(cu.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, ''));

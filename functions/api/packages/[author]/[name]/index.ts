@@ -19,6 +19,7 @@ import {
   GitRepoScanResult,
   normalizeContentDbReviewItem,
   sanitizePublicErrorMessage,
+  fetchAccurateGitZipSize,
   fetchRepoSizeEstimateFromUrl,
   sortAndCapReleases,
   MAX_PACKAGE_RELEASES
@@ -525,7 +526,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const noCache = reqUrl?.searchParams.get('nocache') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v4/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v5/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     await recordWebPackageView(context.env.DB, context.request, pkgId);
@@ -944,22 +945,35 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         }
       }
 
-      let firstRelSize = Number(bundledReleases[0]?.size || d1Pkg?.download_size || 0);
+      const explicitReleaseSize = Number(bundledReleases[0]?.size || 0);
+      let firstRelSize = explicitReleaseSize || Number(d1Pkg?.download_size || 0);
       let gitFileSize = firstRelSize > 0
         ? formatByteSize(firstRelSize)
         : (d1Pkg?.file_size || undefined);
 
-      if (!gitFileSize && resolvedRepo) {
-        const repoEst = await fetchRepoSizeEstimateFromUrl(resolvedRepo, resolvedAuthor, resolvedName);
-        if (repoEst) {
+      // Verify & self-heal Git .zip archive size (cached for 7 days at Edge + pre-warms .zip download cache).
+      // Overwrites legacy inflated `repo.size` estimates (e.g. 18.3 MB full .git history -> 335 KB normalized .zip).
+      if (resolvedRepo && !explicitReleaseSize && (!gitFileSize || !isLite)) {
+        const repoEst = await fetchAccurateGitZipSize(resolvedRepo, resolvedAuthor, resolvedName, {
+          tag: bundledReleases[0]?.tag_name || bundledReleases[0]?.version || null,
+          defaultBranch: d1Pkg?.default_branch || 'main',
+          packageType: resolvedType
+        });
+        if (repoEst && repoEst.downloadSize > 0) {
+          const prevD1Size = Number(d1Pkg?.download_size || 0);
           firstRelSize = repoEst.downloadSize;
           gitFileSize = repoEst.fileSize;
-          if (context.env.DB && d1Pkg?.id) {
-            context.env.DB.prepare(`
+          if (
+            context.env.DB &&
+            d1Pkg?.id &&
+            (prevD1Size <= 0 || Math.abs(repoEst.downloadSize - prevD1Size) > Math.max(1024, prevD1Size * 0.05))
+          ) {
+            await context.env.DB.prepare(`
               UPDATE packages
               SET download_size = ?, file_size = ?
-              WHERE LOWER(id) = LOWER(?) AND (download_size IS NULL OR download_size = 0)
+              WHERE LOWER(id) = LOWER(?)
             `).bind(repoEst.downloadSize, repoEst.fileSize, d1Pkg.id).run().catch(() => {});
+            await invalidateEdgeCacheKeys(['/__api_boot_catalog_bundle_v3']).catch(() => {});
           }
         }
       }
@@ -1601,10 +1615,15 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     `UPDATE packages SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).bind(JSON.stringify(finalTags), pkgRow.id).run();
 
+  const lowerA = encodeURIComponent(author.toLowerCase());
+  const lowerN = encodeURIComponent(name.toLowerCase());
   await invalidateEdgeCacheKeys([
     '/__api_packages_v2',
     '/__api_packages_v2?boot=1',
-    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+    '/__api_boot_catalog_bundle_v3',
+    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
+    `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
+    `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`
   ]);
 
     return Response.json({

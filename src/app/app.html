@@ -261,13 +261,25 @@
       </div>
 
       <!-- Row 2: Full-Width Evenly Spaced Navigation Links Row -->
-      <nav aria-label="Footer navigation" class="w-full flex flex-wrap items-center justify-between gap-x-6 gap-y-2.5 pt-3.5 border-t border-white/10 text-xs whitespace-nowrap">
-        <button type="button" (click)="packageService.openSetupModal()" class="hover:text-sky-400 transition cursor-pointer">
+      <nav aria-label="Footer navigation" class="w-full flex flex-wrap items-center justify-between gap-x-5 gap-y-2.5 pt-3.5 border-t border-white/10 text-xs whitespace-nowrap">
+        <a href="/games" (click)="onFooterNavClick($event, 'game')" class="hover:text-sky-400 transition cursor-pointer no-underline">
+          {{ 'header.filterGames' | translate }}
+        </a>
+        <a href="/mods" (click)="onFooterNavClick($event, 'mod')" class="hover:text-sky-400 transition cursor-pointer no-underline">
+          {{ 'header.filterMods' | translate }}
+        </a>
+        <a href="/texture-packs" (click)="onFooterNavClick($event, 'txp')" class="hover:text-sky-400 transition cursor-pointer no-underline">
+          {{ 'header.filterTxp' | translate }}
+        </a>
+        <a href="/git" (click)="onFooterNavClick($event, 'git')" class="hover:text-sky-400 transition cursor-pointer no-underline">
+          {{ 'header.filterGit' | translate }}
+        </a>
+        <a href="/setup" (click)="onFooterNavClick($event, 'setup')" class="hover:text-sky-400 transition cursor-pointer no-underline">
           {{ 'footer.inGameSetup' | translate }}
-        </button>
-        <button type="button" (click)="packageService.openSubmitModal()" class="hover:text-sky-400 transition cursor-pointer">
+        </a>
+        <a href="/submit" (click)="onFooterNavClick($event, 'submit')" class="hover:text-sky-400 transition cursor-pointer no-underline">
           {{ 'header.submitRepo' | translate }}
-        </button>
+        </a>
         <a href="https://content.luanti.org" target="_blank" rel="noopener noreferrer" class="hover:text-sky-400 transition cursor-pointer">
           {{ 'footer.upstreamMirror' | translate }}
         </a>
@@ -284,9 +296,9 @@
           </svg>
           {{ 'footer.reportIssue' | translate }}
         </a>
-        <button type="button" (click)="packageService.openLegalModal()" class="hover:text-sky-400 transition font-semibold text-slate-300 cursor-pointer">
+        <a href="/legal" (click)="onFooterNavClick($event, 'legal')" class="hover:text-sky-400 transition font-semibold text-slate-300 cursor-pointer no-underline">
           {{ 'footer.termsPrivacy' | translate }}
-        </button>
+        </a>
       </nav>
 
       <!-- Legal & Safe Harbor Columns -->

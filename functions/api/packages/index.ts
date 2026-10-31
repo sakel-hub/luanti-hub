@@ -1,5 +1,7 @@
 import {
   fetchUpstreamJsonCached,
+  fetchGitRepoReleasesAndTags,
+  fetchAccurateGitZipSize,
   parseJsonArray,
   normalizeRepoKey,
   readEdgeCacheJson,
@@ -162,28 +164,44 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const q = (url.searchParams.get('q') || '').trim();
   const types = url.searchParams
     .getAll('type')
-    .map(t => t.trim())
+    .map(t => t.trim().toLowerCase())
     .filter(t => Boolean(t) && t !== 'all');
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
   const noCache = url.searchParams.get('nocache') === '1';
+  const requestedFmt = (url.searchParams.get('fmt') || '').trim().toLowerCase();
+  const protocolVersion = (url.searchParams.get('protocol_version') || '').trim();
+
+  const sortedUniqueTypes = Array.from(new Set(types)).sort();
+  const isAllStandardTypes =
+    sortedUniqueTypes.length === 0 ||
+    (sortedUniqueTypes.includes('mod') && sortedUniqueTypes.includes('game') && sortedUniqueTypes.includes('txp'));
+
   const upstreamParams = new URLSearchParams(url.searchParams);
   upstreamParams.delete('boot');
   upstreamParams.delete('nocache');
-  if (!upstreamParams.has('fmt')) {
-    upstreamParams.set('fmt', 'vcs');
-  }
+  // Always request `fmt=vcs` from upstream ContentDB so fetchUpstreamJsonCached receives a JSON array
+  upstreamParams.set('fmt', 'vcs');
   const upstreamQuery = upstreamParams.toString();
-  const upstreamPath = `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
+  // Reuse the canonical `/packages/?fmt=vcs` upstream cache when fetching the full catalog across all types
+  const upstreamPath = (!q && !author && isAllStandardTypes)
+    ? '/packages/?fmt=vcs'
+    : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
   const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3';
+  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v2_${encodeURIComponent(upstreamQuery)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v3_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
-    if (cachedCatalog && (Array.isArray(cachedCatalog) || (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))) {
+    if (
+      cachedCatalog &&
+      (Array.isArray(cachedCatalog) ||
+        Array.isArray(cachedCatalog.keys) ||
+        (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))
+    ) {
       return new Response(JSON.stringify(cachedCatalog), {
         headers: {
           'Content-Type': 'application/json',
@@ -486,6 +504,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       short_desc: shortDescText,
       short_description: shortDescText,
       release: releaseId,
+      updated_at: p.updated_at || matchedUpstream?.updated_at || undefined,
+      created_at: p.created_at || matchedUpstream?.created_at || undefined,
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
       score: computeCatalogStarRating(matchedUpstream, d1StarAvg),
@@ -499,6 +519,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       video_url: p.video_url || matchedUpstream?.video_url || undefined,
       video_thumbnail_url: p.video_thumbnail_url || matchedUpstream?.video_thumbnail_url || undefined,
       dev_state: p.dev_state || matchedUpstream?.dev_state || undefined,
+      download_size: Number(p.download_size) > 0 ? Number(p.download_size) : undefined,
       file_size: p.file_size || undefined,
       provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
       min_minetest_version: p.min_minetest_version || matchedUpstream?.min_minetest_version || '5.0.0',
@@ -683,6 +704,115 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     if (!noCache && !q && types.length === 0 && !author) {
       await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 120);
+    }
+
+    // Piggyback lightweight rotating Git release check (3 pure-Git packages per 5m window) via waitUntil
+    const waitUntilFn = (context as any)?.waitUntil;
+    if (env.DB && typeof waitUntilFn === 'function') {
+      const pureGitRows = d1List.filter((r: any) => r?.repo_url && r?.provider && r.provider !== 'contentdb');
+      if (pureGitRows.length > 0) {
+        const slot = Math.floor(Date.now() / 300_000) % Math.max(1, Math.ceil(pureGitRows.length / 3));
+        const sliceToCheck = pureGitRows.slice(slot * 3, slot * 3 + 3);
+        waitUntilFn.call(
+          context,
+          Promise.all(
+            sliceToCheck.map(async (row: any) => {
+              try {
+                const discovered = await fetchGitRepoReleasesAndTags(
+                  row.repo_url,
+                  row.author_name,
+                  row.name,
+                  row.min_minetest_version || '5.0.0'
+                );
+                if (discovered.length > 0) {
+                  const newestRel = discovered[0];
+                  const newestRelTime = Date.parse(String(newestRel?.released_at || '')) || 0;
+                  const prevPkgTime = Date.parse(String(row.updated_at || '')) || 0;
+                  const needsSizeHeal = !row.download_size || Number(row.download_size) > 5 * 1024 * 1024;
+                  if (newestRelTime > prevPkgTime || needsSizeHeal) {
+                    const sizeEst = await fetchAccurateGitZipSize(
+                      row.repo_url,
+                      row.author_name,
+                      row.name,
+                      {
+                        tag: newestRel?.tag_name && newestRel.tag_name !== 'HEAD' ? newestRel.tag_name : undefined
+                      }
+                    );
+                    await env.DB.prepare(
+                      `UPDATE packages
+                       SET updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
+                           download_size = COALESCE(?, download_size),
+                           file_size = COALESCE(?, file_size)
+                       WHERE id = ?`
+                    ).bind(
+                      newestRelTime > 0 ? new Date(newestRelTime).toISOString() : '',
+                      newestRelTime > 0 ? new Date(newestRelTime).toISOString() : '',
+                      sizeEst?.downloadSize || null,
+                      sizeEst?.fileSize || null,
+                      row.id
+                    ).run();
+                  }
+                }
+              } catch {
+                // Non-blocking background check
+              }
+            })
+          )
+        );
+      }
+    }
+  } else {
+    // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
+    const slimList = merged.map((pkg: any) => {
+      const item: Record<string, any> = {
+        author: pkg.author,
+        name: pkg.name,
+        title: pkg.title || pkg.name,
+        type: pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod'),
+        short_description: pkg.short_desc || pkg.short_description || '',
+        short_desc: pkg.short_desc || pkg.short_description || '',
+        release: Number(pkg.release) || 1,
+        thumbnail: pkg.thumbnail || null,
+        tags: Array.isArray(pkg.tags) ? pkg.tags : []
+      };
+      if (pkg.aliases) item['aliases'] = pkg.aliases;
+      if (pkg.featured) item['featured'] = true;
+      if (typeof pkg.score === 'number') item['score'] = pkg.score;
+      if (typeof pkg.downloads === 'number') item['downloads'] = pkg.downloads;
+      if (pkg.license) item['license'] = pkg.license;
+      return item;
+    });
+
+    if (requestedFmt === 'keys') {
+      const keys = [
+        'author',
+        'name',
+        'title',
+        'type',
+        'short_description',
+        'release',
+        'thumbnail',
+        'tags',
+        'featured'
+      ];
+      const rows = slimList.map((it: any) => [
+        it.author,
+        it.name,
+        it.title,
+        it.type,
+        it.short_description,
+        it.release,
+        it.thumbnail,
+        it.tags,
+        Boolean(it.featured)
+      ]);
+      responsePayload = {
+        keys,
+        pkgs: rows,
+        values: rows
+      };
+    } else {
+      responsePayload = slimList;
     }
   }
 

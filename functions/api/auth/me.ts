@@ -150,6 +150,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     let userAlerts: any[] = [];
     let myReportsTotal = 0;
     let latestGitPackages: any[] = [];
+    let recentlyUpdatedPackages: any[] = [];
 
     try {
       await ensureModerationColumns(context.env.DB);
@@ -179,12 +180,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         adminLatestOpen = latestOpenRes.results || [];
       }
 
-      // Fetch up to 5 recent reports submitted by this user or targeting packages owned by this user
-      const identityHandles = (identities || []).map((id: any) => String(id.username || '').toLowerCase());
-      const authorPrefixes = Array.from(new Set([
-        String(user.username || '').toLowerCase(),
-        ...identityHandles
-      ])).filter(Boolean);
+      // Fetch up to 5 recent reports submitted by this user or targeting packages owned by this user's VERIFIED identities
+      const authorPrefixes = verifiedHandles;
 
       const authorClause = authorPrefixes.length > 0
         ? `OR LOWER(SUBSTR(r.package_id, 1, INSTR(r.package_id, '/') - 1)) IN (${authorPrefixes.map(() => '?').join(', ')})`
@@ -248,6 +245,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         source: 'git',
         sources: ['git']
       }));
+
+      const recentlyUpdatedRes = await context.env.DB.prepare(`
+        SELECT
+          id,
+          author_name AS author,
+          name,
+          title,
+          type,
+          short_desc,
+          thumbnail_url AS thumbnail,
+          provider,
+          status,
+          updated_at
+        FROM packages
+        WHERE COALESCE(status, 'active') = 'active'
+          AND updated_at >= datetime('now', '-2 days')
+          AND updated_at > COALESCE(created_at, '')
+        ORDER BY updated_at DESC
+        LIMIT 5
+      `).all();
+      recentlyUpdatedPackages = (recentlyUpdatedRes.results || []).map((p: any) => ({
+        ...p,
+        release_id: Math.max(1, Math.floor(new Date(p.updated_at).getTime() / 1000) || 1)
+      }));
     } catch (err) {
       console.error('[me.ts] Failed to load moderation digest:', err);
     }
@@ -279,7 +300,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           user_alerts: userAlerts,
           my_reports_total: myReportsTotal || userAlerts.length,
           admin_latest_open: adminLatestOpen,
-          latest_git_packages: latestGitPackages
+          latest_git_packages: latestGitPackages,
+          recently_updated_packages: recentlyUpdatedPackages
         }
       },
       oauthProviders

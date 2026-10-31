@@ -242,25 +242,9 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
       return true;
     }
 
-    const target = this.effectiveUsername().toLowerCase();
+    const target = this.effectiveUsername().trim();
     if (!target) return false;
-    const baseTarget = target.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
-
-    const userHandles = new Set<string>();
-    if (user.username) {
-      const u = user.username.toLowerCase();
-      userHandles.add(u);
-      userHandles.add(u.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, ''));
-    }
-    for (const id of user.identities || []) {
-      if (id.verified !== false && id.username) {
-        const h = id.username.toLowerCase();
-        userHandles.add(h);
-        userHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, ''));
-      }
-    }
-
-    return userHandles.has(target) || (baseTarget.length > 0 && userHandles.has(baseTarget));
+    return this.authService.canViewAuthorAnalytics(target);
   });
 
   ngOnInit(): void {
@@ -305,6 +289,7 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
   }
 
   applyAdminAuthorLookup(): void {
+    if (!this.authService.isAdmin()) return;
     const clean = (this.adminLookupInput || '').trim().replace(/^@/, '');
     if (!clean) return;
     this.selectedPackageName.set('');

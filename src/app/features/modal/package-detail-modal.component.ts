@@ -17,7 +17,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
-import { LuantiPackage, CommunityReview, PackageRelease } from '../../core/models/package.model';
+import { LuantiPackage, CommunityReview, PackageRelease, ReleaseNotesPayload } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -247,8 +247,20 @@ import {
                   <svg lucideFlag class="w-4 h-4"></svg>
                 </button>
 
+                <!-- Author / Admin Package Analytics Button -->
+                @if (canModerate()) {
+                  <button
+                    type="button"
+                    (click)="onOpenPackageAnalytics()"
+                    [appTooltip]="'modal.viewAnalyticsTooltip' | translate"
+                    [attr.aria-label]="'modal.viewAnalyticsTooltip' | translate"
+                    class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-sky text-sky-200/90 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                    <svg lucideTrendingUp class="w-4 h-4"></svg>
+                  </button>
+                }
+
                 <!-- Author / Admin Delete Git Package Button (With Confirmation Prompt) -->
-                @if ((isPackageAuthor() || canModerate()) && isGitSubmittedPackage()) {
+                @if (canModerate() && isGitSubmittedPackage()) {
                   <button
                     type="button"
                     (click)="toggleConfirmRemove()"
@@ -1102,13 +1114,13 @@ import {
                 }
 
                 <!-- Tags Pills (Clickable to filter by ContentDB Tag, with inline Tag Editor for Author/Admin) -->
-                @if ((package.tags && package.tags.length > 0) || isPackageAuthor() || canModerate()) {
+                @if ((package.tags && package.tags.length > 0) || canModerate()) {
                   <div class="space-y-2">
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                         {{ 'modal.tags' | translate }}
                       </span>
-                      @if ((isPackageAuthor() || canModerate()) && !isEditingTags()) {
+                      @if (canModerate() && !isEditingTags()) {
                         <button
                           type="button"
                           (click)="openEditTags()"
@@ -1532,23 +1544,106 @@ import {
               @if (activeTab() === 'releases') {
                 <div class="pt-4 space-y-2.5 luanti-tab-enter">
                   @if (cappedReleases().length === 0) {
-                    <div class="p-4 rounded-2xl glass-panel flex items-center justify-between text-xs">
-                      <div>
-                        <span class="font-bold text-white">Latest Archive ({{ package.default_branch || 'main' }})</span>
-                        <span class="block text-[11px] text-slate-400">Ready-to-drop Luanti .zip archive</span>
+                    <div class="p-4 rounded-2xl glass-panel flex flex-col gap-2.5 text-xs">
+                      <div class="flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                          <span class="font-bold text-white">Latest Archive ({{ package.default_branch || 'main' }})</span>
+                          <span class="block text-[11px] text-slate-400">Ready-to-drop Luanti .zip archive</span>
+                        </div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            (click)="toggleBranchFallbackNotes()"
+                            [attr.aria-expanded]="isReleaseNotesExpanded('branch-fallback')"
+                            class="px-3 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                            <svg
+                              lucideChevronDown
+                              [class]="isReleaseNotesExpanded('branch-fallback') ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
+                            </svg>
+                            <span>{{ (isReleaseNotesExpanded('branch-fallback') ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
+                          </button>
+                          <button
+                            type="button"
+                            (click)="onDownloadClick()"
+                            class="px-3.5 py-1.5 rounded-xl glass-btn-primary text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer">
+                            <svg lucideDownload class="w-3.5 h-3.5 text-sky-300"></svg>
+                            <span>.zip @if (package.file_size) { ({{ package.file_size }}) }</span>
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        (click)="onDownloadClick()"
-                        class="px-3.5 py-1.5 rounded-xl glass-btn-primary text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer">
-                        <svg lucideDownload class="w-3.5 h-3.5 text-sky-300"></svg>
-                        <span>.zip @if (package.file_size) { ({{ package.file_size }}) }</span>
-                      </button>
+
+                      @if (isReleaseNotesExpanded('branch-fallback')) {
+                        <div class="border-t border-white/10 pt-3 mt-1 space-y-2.5">
+                          @if (loadingReleaseNotesKey() === 'branch-fallback') {
+                            <div class="flex items-center gap-2 text-[11px] text-slate-400 py-1">
+                              <span class="w-3.5 h-3.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"></span>
+                              <span>{{ 'modal.loadingReleaseNotes' | translate }}</span>
+                            </div>
+                          } @else if (getReleaseNotesPayload('branch-fallback'); as payload) {
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                              <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
+                                <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
+                                <span>{{ 'modal.recentBranchCommits' | translate:{ branch: payload.head_ref || package.default_branch || 'main' } }}</span>
+                              </span>
+                              @if (payload.compare_url) {
+                                <a
+                                  [href]="payload.compare_url"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition">
+                                  <span>{{ 'modal.viewFullDiffOnGit' | translate }}</span>
+                                  <svg lucideExternalLink class="w-2.5 h-2.5"></svg>
+                                </a>
+                              }
+                            </div>
+                            @if (payload.commits && payload.commits.length > 0) {
+                              <ul class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                                @for (commit of payload.commits; track commit.sha) {
+                                  <li class="p-2 rounded-xl bg-slate-950/60 border border-white/5 flex items-start justify-between gap-2 text-[11px]">
+                                    <div class="min-w-0 space-y-0.5">
+                                      <p class="text-slate-200 font-medium break-words">{{ commit.title }}</p>
+                                      <div class="flex items-center gap-2 text-[10px] text-slate-500 flex-wrap">
+                                        @if (commit.author_name) {
+                                          <span>{{ commit.author_name }}</span>
+                                        }
+                                        @if (commit.committed_at) {
+                                          <span>• {{ commit.committed_at | date:'mediumDate' }}</span>
+                                        }
+                                      </div>
+                                    </div>
+                                    @if (commit.url) {
+                                      <a
+                                        [href]="commit.url"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 hover:text-sky-300 flex-shrink-0 transition">
+                                        {{ commit.short_sha }}
+                                      </a>
+                                    } @else {
+                                      <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 flex-shrink-0">
+                                        {{ commit.short_sha }}
+                                      </code>
+                                    }
+                                  </li>
+                                }
+                              </ul>
+                            } @else if (payload.markdown_body) {
+                              <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line">
+                                {{ payload.markdown_body }}
+                              </p>
+                            } @else {
+                              <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
+                            }
+                          } @else {
+                            <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
+                          }
+                        </div>
+                      }
                     </div>
                   } @else {
                     @for (rel of paginatedReleases(); track rel.id; let idx = $index) {
                       <div class="p-3.5 rounded-2xl glass-panel flex flex-col gap-2 text-xs">
-                        <div class="flex items-center justify-between gap-3">
+                        <div class="flex items-center justify-between gap-3 flex-wrap">
                           <div class="space-y-0.5 min-w-0">
                             <div class="flex items-center gap-2 flex-wrap">
                               <span class="font-bold text-white">{{ rel.version }}</span>
@@ -1578,23 +1673,115 @@ import {
                             </div>
                           </div>
 
-                          <button
-                            type="button"
-                            (click)="onDownloadRelease(rel)"
-                            class="px-3.5 py-1.5 rounded-xl glass-btn hover:bg-white text-white hover:text-slate-950 font-bold text-xs flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
-                            <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                            <span>
-                              {{ 'card.downloadZip' | translate }}
-                              @if (rel.file_size || package.file_size) {
-                                ({{ rel.file_size || package.file_size }})
-                              }
-                            </span>
-                          </button>
+                          <div class="flex items-center gap-2 flex-wrap ml-auto">
+                            <button
+                              type="button"
+                              (click)="toggleReleaseNotes(rel, idx)"
+                              [attr.aria-expanded]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))"
+                              class="px-2.5 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
+                              <svg
+                                lucideChevronDown
+                                [class]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
+                              </svg>
+                              <span>{{ (isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              (click)="onDownloadRelease(rel)"
+                              class="px-3.5 py-1.5 rounded-xl glass-btn hover:bg-white text-white hover:text-slate-950 font-bold text-xs flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
+                              <svg lucideDownload class="w-3.5 h-3.5"></svg>
+                              <span>
+                                {{ 'card.downloadZip' | translate }}
+                                @if (rel.file_size || package.file_size) {
+                                  ({{ rel.file_size || package.file_size }})
+                                }
+                              </span>
+                            </button>
+                          </div>
                         </div>
-                        @if (rel.release_notes || rel.changelog) {
-                          <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line border-t border-white/10 pt-2">
+
+                        @if ((rel.release_notes || rel.changelog) && !isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))) {
+                          <p class="text-[11px] text-slate-300 leading-relaxed whitespace-pre-line border-t border-white/10 pt-2 line-clamp-2">
                             {{ rel.release_notes || rel.changelog }}
                           </p>
+                        }
+
+                        @if (isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))) {
+                          <div class="border-t border-white/10 pt-3 mt-1 space-y-2.5">
+                            @if (rel.release_notes || rel.changelog) {
+                              <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10">
+                                <p class="text-[11px] text-slate-200 leading-relaxed whitespace-pre-line">
+                                  {{ rel.release_notes || rel.changelog }}
+                                </p>
+                              </div>
+                            }
+
+                            @if (loadingReleaseNotesKey() === getReleaseNotesKey(rel, idx)) {
+                              <div class="flex items-center gap-2 text-[11px] text-slate-400 py-1">
+                                <span class="w-3.5 h-3.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"></span>
+                                <span>{{ 'modal.loadingReleaseNotes' | translate }}</span>
+                              </div>
+                            } @else if (getReleaseNotesPayload(getReleaseNotesKey(rel, idx)); as payload) {
+                              <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
+                                  <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
+                                  @if (payload.source === 'compare' && payload.base_ref) {
+                                    <span>{{ 'modal.commitsBetween' | translate:{ base: payload.base_ref, head: payload.head_ref } }}</span>
+                                  } @else {
+                                    <span>{{ 'modal.recentBranchCommits' | translate:{ branch: payload.head_ref || package.default_branch || 'main' } }}</span>
+                                  }
+                                </span>
+                                @if (payload.compare_url) {
+                                  <a
+                                    [href]="payload.compare_url"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition">
+                                    <span>{{ 'modal.viewFullDiffOnGit' | translate }}</span>
+                                    <svg lucideExternalLink class="w-2.5 h-2.5"></svg>
+                                  </a>
+                                }
+                              </div>
+
+                              @if (payload.commits && payload.commits.length > 0) {
+                                <ul class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                                  @for (commit of payload.commits; track commit.sha) {
+                                    <li class="p-2 rounded-xl bg-slate-950/60 border border-white/5 flex items-start justify-between gap-2 text-[11px]">
+                                      <div class="min-w-0 space-y-0.5">
+                                        <p class="text-slate-200 font-medium break-words">{{ commit.title }}</p>
+                                        <div class="flex items-center gap-2 text-[10px] text-slate-500 flex-wrap">
+                                          @if (commit.author_name) {
+                                            <span>{{ commit.author_name }}</span>
+                                          }
+                                          @if (commit.committed_at) {
+                                            <span>• {{ commit.committed_at | date:'mediumDate' }}</span>
+                                          }
+                                        </div>
+                                      </div>
+                                      @if (commit.url) {
+                                        <a
+                                          [href]="commit.url"
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 hover:text-sky-300 flex-shrink-0 transition">
+                                          {{ commit.short_sha }}
+                                        </a>
+                                      } @else {
+                                        <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 flex-shrink-0">
+                                          {{ commit.short_sha }}
+                                        </code>
+                                      }
+                                    </li>
+                                  }
+                                </ul>
+                              } @else if (!rel.release_notes && !rel.changelog) {
+                                <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
+                              }
+                            } @else if (!rel.release_notes && !rel.changelog) {
+                              <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
+                            }
+                          </div>
                         }
                       </div>
                     }
@@ -1921,6 +2108,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly isEditingTags = signal(false);
   readonly editableTags = signal<string[]>([]);
   readonly isSavingTags = signal(false);
+
+  // Expandable Release Notes state
+  readonly expandedReleaseKeys = signal<Set<string>>(new Set());
+  readonly loadingReleaseNotesKey = signal<string | null>(null);
+  readonly releaseNotesByKey = signal<Map<string, ReleaseNotesPayload>>(new Map());
 
   readonly canModerate = computed(() => {
     const pkg = this.packageService.activePackage() || this.package;
@@ -2300,6 +2492,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isVideoPlaying.set(false);
     this.lightboxImageUrl.set(null);
     this.isLightboxZoomed.set(false);
+    this.expandedReleaseKeys.set(new Set());
+    this.loadingReleaseNotesKey.set(null);
 
     const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
     if (savedState) {
@@ -2530,6 +2724,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   openEditTags(): void {
+    if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
     const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
     const currentCustom = (Array.isArray(pkg?.tags) ? pkg.tags : [])
@@ -2558,6 +2753,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onSaveTags(): Promise<void> {
+    if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
     this.isSavingTags.set(true);
@@ -2571,6 +2767,103 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.pwaService.showToast('Package tags updated!');
     } else if (res.message) {
       this.pwaService.showToast(res.message);
+    }
+  }
+
+  onOpenPackageAnalytics(): void {
+    if (!this.canModerate()) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+    const resolvedAuthor =
+      pkg.author ||
+      (pkg as any).author_name ||
+      (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+    if (!resolvedAuthor || !pkg.name) return;
+    this.packageService.openAnalyticsPage({
+      author: resolvedAuthor,
+      name: pkg.name
+    });
+  }
+
+  getReleaseNotesKey(rel: PackageRelease, pageIdx: number): string {
+    return String(rel.id || `${rel.version || 'rel'}-${pageIdx}`);
+  }
+
+  isReleaseNotesExpanded(key: string): boolean {
+    return this.expandedReleaseKeys().has(key);
+  }
+
+  getReleaseNotesPayload(key: string): ReleaseNotesPayload | undefined {
+    return this.releaseNotesByKey().get(key);
+  }
+
+  async toggleBranchFallbackNotes(): Promise<void> {
+    const key = 'branch-fallback';
+    const nextExpanded = new Set(this.expandedReleaseKeys());
+    if (nextExpanded.has(key)) {
+      nextExpanded.delete(key);
+      this.expandedReleaseKeys.set(nextExpanded);
+      return;
+    }
+    nextExpanded.add(key);
+    this.expandedReleaseKeys.set(nextExpanded);
+
+    if (this.releaseNotesByKey().has(key)) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+
+    this.loadingReleaseNotesKey.set(key);
+    const headRef = pkg.default_branch || 'main';
+    const payload = await this.packageService.fetchReleaseNotesForRelease(pkg, headRef, undefined);
+    if (this.loadingReleaseNotesKey() === key) {
+      this.loadingReleaseNotesKey.set(null);
+    }
+    if (payload) {
+      const nextMap = new Map(this.releaseNotesByKey());
+      nextMap.set(key, payload);
+      this.releaseNotesByKey.set(nextMap);
+    }
+  }
+
+  async toggleReleaseNotes(rel: PackageRelease, pageIdx: number): Promise<void> {
+    const key = this.getReleaseNotesKey(rel, pageIdx);
+    const nextExpanded = new Set(this.expandedReleaseKeys());
+    if (nextExpanded.has(key)) {
+      nextExpanded.delete(key);
+      this.expandedReleaseKeys.set(nextExpanded);
+      return;
+    }
+    nextExpanded.add(key);
+    this.expandedReleaseKeys.set(nextExpanded);
+
+    if (this.releaseNotesByKey().has(key)) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+
+    const allCapped = this.cappedReleases();
+    const globalIdx = (this.releasesPage() - 1) * this.RELEASES_PAGE_SIZE + pageIdx;
+    const olderRelease = globalIdx >= 0 && globalIdx + 1 < allCapped.length ? allCapped[globalIdx + 1] : undefined;
+
+    const extractRef = (r?: PackageRelease): string | undefined => {
+      if (!r) return undefined;
+      if (r.commit_sha && r.commit_sha !== 'HEAD') return r.commit_sha;
+      const ver = (r.version || '').trim();
+      if (!ver || ver.toLowerCase().startsWith('branch')) return undefined;
+      return ver.split(/\s+/)[0];
+    };
+
+    const headRef = extractRef(rel) || pkg.default_branch || 'main';
+    const baseRef = extractRef(olderRelease);
+
+    this.loadingReleaseNotesKey.set(key);
+    const payload = await this.packageService.fetchReleaseNotesForRelease(pkg, headRef, baseRef);
+    if (this.loadingReleaseNotesKey() === key) {
+      this.loadingReleaseNotesKey.set(null);
+    }
+    if (payload) {
+      const nextMap = new Map(this.releaseNotesByKey());
+      nextMap.set(key, payload);
+      this.releaseNotesByKey.set(nextMap);
     }
   }
 
@@ -2713,6 +3006,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onDeleteReview(rev: CommunityReview): Promise<void> {
+    if (!this.canDeleteReview(rev)) return;
     this.deletingReviewId.set(rev.id);
     const res = await this.packageService.deleteReview(this.package, rev.id);
     this.deletingReviewId.set(null);
@@ -2735,6 +3029,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   toggleConfirmRemove(): void {
+    if (!this.canModerate()) return;
     const next = !this.isConfirmingRemove();
     this.isConfirmingRemove.set(next);
     if (next) {
@@ -2754,6 +3049,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onKillSwitch(action: 'delist' | 'flag' | 'restore' | 'remove'): Promise<void> {
+    if (!this.canModerate()) return;
+    if ((action === 'delist' || action === 'flag' || action === 'restore') && !this.authService.isAdmin()) {
+      return;
+    }
     this.isModerating.set(true);
     this.isConfirmingRemove.set(false);
     await this.packageService.moderatePackage(this.package, action, `Executed ${action} from Package Detail Modal`);

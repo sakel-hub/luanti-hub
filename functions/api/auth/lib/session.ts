@@ -1,4 +1,6 @@
 // Secure session cookie & admin role management using Web Crypto API
+import { fetchWithAnubisSupport } from '../../lib/upstream';
+
 const DEFAULT_SECRET = 'luantihub-super-secret-session-key-change-in-env-32bytes';
 
 async function getKey(secret: string): Promise<CryptoKey> {
@@ -283,6 +285,35 @@ export function verifyStrictPackageAuthorOwnership(
   }
 
   return false;
+}
+
+/**
+ * Cryptographically strict author portfolio ownership verification for author-wide analytics.
+ * Requires at least one verified identity (`verified === 1 | true`) matching the target author handle.
+ */
+export function verifyStrictAuthorPortfolioOwnership(
+  user: { id?: string; username?: string } | null,
+  identities: Array<{ provider?: string; username?: string; provider_username?: string; verified?: number | boolean }> = [],
+  targetUsername?: string | null
+): boolean {
+  if (!user || !user.id || !targetUsername) return false;
+  const targetLower = targetUsername.trim().toLowerCase();
+  if (!targetLower) return false;
+
+  const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
+  if (verifiedIdentities.length === 0) return false;
+
+  const userLower = String(user.username || '').trim().toLowerCase();
+  const baseUserLower = userLower.replace(/_(gi|gl|co|cd|me)$/i, '');
+  if (userLower === targetLower || baseUserLower === targetLower) {
+    return true;
+  }
+
+  return verifiedIdentities.some(id => {
+    const idUsername = String(id.username || id.provider_username || '').trim().toLowerCase();
+    const baseIdUsername = idUsername.replace(/_(gi|gl|co|cd|me)$/i, '');
+    return idUsername === targetLower || baseIdUsername === targetLower;
+  });
 }
 
 /**
@@ -589,7 +620,7 @@ export async function verifyProviderToken(
     }
 
     if (provider === 'mesehub') {
-      const res = await fetch('https://git.minetest.land/api/v1/user', {
+      const res = await fetchWithAnubisSupport('https://git.minetest.land/api/v1/user', {
         headers: { ...headers, Authorization: `token ${cleanToken}` }
       });
       if (!res.ok) return { verified: false };

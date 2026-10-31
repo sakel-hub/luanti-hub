@@ -1,6 +1,7 @@
 import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
+  fetchGitReleaseNotesBetweenRefs,
   buildGitBranchArchiveUrl,
   sortAndCapReleases,
   MAX_PACKAGE_RELEASES
@@ -10,9 +11,11 @@ interface Env {
   DB?: any;
 }
 
-export async function onRequestGet(context: { params: { author: string; name: string }; env: Env }) {
+export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const packageId = `${author}/${name}`;
+  const reqUrl = context.request?.url ? new URL(context.request.url) : null;
+  const isNotesQuery = reqUrl?.searchParams.get('notes') === '1';
 
   let d1Pkg: any = null;
   let d1Releases: any[] = [];
@@ -20,7 +23,7 @@ export async function onRequestGet(context: { params: { author: string; name: st
   // 1. Check D1 Kill Switch & local D1 releases
   if (context.env.DB) {
     d1Pkg = await context.env.DB.prepare(
-      `SELECT id, status, repo_url, provider, default_branch, min_minetest_version
+      `SELECT id, status, repo_url, provider, default_branch, min_minetest_version, updated_at
        FROM packages
        WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
        LIMIT 1`
@@ -30,12 +33,48 @@ export async function onRequestGet(context: { params: { author: string; name: st
       return Response.json({ error: 'Package is delisted or suspended.' }, { status: 451 });
     }
 
-    const effectivePkgId = d1Pkg?.id || packageId;
-    const releases = await context.env.DB.prepare(
-      `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
-    ).bind(effectivePkgId).all();
+    if (!isNotesQuery) {
+      const effectivePkgId = d1Pkg?.id || packageId;
+      const releases = await context.env.DB.prepare(
+        `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
+      ).bind(effectivePkgId).all();
 
-    d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
+      d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
+    }
+  }
+
+  // Handle lazy-loaded expandable Release Notes & Commit Diff request (`?notes=1&head=...&base=...`)
+  if (isNotesQuery && reqUrl) {
+    const headRef = (reqUrl.searchParams.get('head') || '').trim();
+    const baseRef = (reqUrl.searchParams.get('base') || '').trim();
+    const branchParam = (reqUrl.searchParams.get('branch') || d1Pkg?.default_branch || 'main').trim();
+    let repoUrl = d1Pkg?.repo_url || '';
+    let releaseBody = '';
+
+    if (!repoUrl) {
+      const cdbDetail = await fetchUpstreamJsonCached<any>(
+        `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
+        600
+      );
+      if (cdbDetail?.repo) {
+        repoUrl = String(cdbDetail.repo).trim();
+      }
+    }
+
+    const notesPayload = await fetchGitReleaseNotesBetweenRefs(repoUrl || null, author, name, {
+      headRef: headRef || branchParam || 'HEAD',
+      baseRef: baseRef || undefined,
+      defaultBranch: branchParam || 'main',
+      releaseBody
+    });
+
+    return new Response(JSON.stringify(notesPayload), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=300, s-maxage=3600'
+      }
+    });
   }
 
   // 2. Query official ContentDB `/api/packages/<author>/<name>/releases/` first when available
@@ -161,6 +200,13 @@ export async function onRequestGet(context: { params: { author: string; name: st
               rel.changelog || null,
               rel.released_at || ''
             ).run();
+          }
+          const newestRelTime = Date.parse(String(discoveredGitReleases[0]?.released_at || '')) || 0;
+          const prevPkgTime = Date.parse(String(d1Pkg.updated_at || '')) || 0;
+          if (newestRelTime > prevPkgTime) {
+            await context.env.DB.prepare(
+              `UPDATE packages SET updated_at = ? WHERE id = ?`
+            ).bind(new Date(newestRelTime).toISOString(), d1Pkg.id).run();
           }
         } catch {
           // Non-blocking D1 sync

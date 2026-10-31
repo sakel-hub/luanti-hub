@@ -216,7 +216,15 @@ export const sk: TranslationDictionary = {
     similarPackagesSubtitle: 'Odporúčané podľa značiek, kategórie a závislostí',
     latestRelease: 'Najnovšie',
     showingLatestReleases: 'Zobrazených posledných {count} vydaní',
-    tabAnalytics: 'Analytika'
+    tabAnalytics: 'Analytika',
+    viewAnalyticsTooltip: 'Zobraziť analytiku stiahnutí balíčka',
+    viewReleaseNotes: 'Poznámky k vydaniu a commity',
+    hideReleaseNotes: 'Skryť poznámky k vydaniu',
+    loadingReleaseNotes: 'Načítavam commity vydania...',
+    commitsBetween: 'Zmeny vo verzii {head} (od {base})',
+    recentBranchCommits: 'Nedávne commity vo vetve {branch}',
+    noReleaseNotesFallback: 'Pre toto vydanie nie je dostupný podrobný zoznam zmien.',
+    viewFullDiffOnGit: 'Zobraziť celý diff na Gite'
   },
   auth: {
     title: 'Prihlásiť sa do LuantiHub',
@@ -330,6 +338,7 @@ export const sk: TranslationDictionary = {
     notifyAdminQueueLabel: 'Upozornenia frontu moderovania (Admin)',
     notifyAppUpdatesLabel: 'Aktualizácie aplikácie LuantiHub',
     notifyNewGitPackagesLabel: 'Nové publikované komunitné Git balíčky',
+    notifyPackageUpdatesLabel: 'Nedávne aktualizácie a nové vydania balíčkov',
     permissionGranted: 'Aktívne',
     permissionBlocked: 'Zablokované v prehliadači',
     permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.'

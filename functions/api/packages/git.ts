@@ -22,7 +22,9 @@ import {
   extractEmbeddedVideo,
   ensureModerationColumns,
   formatByteSize,
-  sanitizePublicErrorMessage
+  fetchAccurateGitZipSize,
+  sanitizePublicErrorMessage,
+  fetchWithAnubisSupport
 } from '../lib/upstream';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
@@ -64,7 +66,7 @@ async function fetchRepoRootEntries(
       }));
     }
     if (provider === 'codeberg' || provider === 'mesehub') {
-      const res = await fetch(
+      const res = await fetchWithAnubisSupport(
         `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
         { headers }
       );
@@ -118,7 +120,7 @@ async function fetchRepoSizeEstimate(
         }
       }
     } else if (provider === 'codeberg' || provider === 'mesehub') {
-      const res = await fetch(`https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
+      const res = await fetchWithAnubisSupport(`https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
       if (res.ok) {
         const data: any = await res.json();
         const kb = Number(data?.size);
@@ -179,13 +181,13 @@ async function verifyOrgOrRepoMembership(
         }
       }
     } else if (provider === 'codeberg' || provider === 'mesehub') {
-      const orgRes = await fetch(
+      const orgRes = await fetchWithAnubisSupport(
         `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
         { headers }
       );
       if (orgRes.status === 204 || orgRes.status === 200) return true;
 
-      const repoRes = await fetch(
+      const repoRes = await fetchWithAnubisSupport(
         `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
         { headers }
       );
@@ -562,7 +564,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
       for (const c of candidates) {
         try {
-          const r = await fetch(buildRawUrl(c.branch, c.file));
+          const r = await fetchWithAnubisSupport(buildRawUrl(c.branch, c.file));
           if (r.ok) {
             const text = await r.text();
             if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE')) {
@@ -656,7 +658,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let cdbMeta: CdbJsonMetadata | null = null;
     let rawCdbJsonText = '';
     try {
-      const cdbRes = await fetch(buildRawUrl(branch, '.cdb.json'));
+      const cdbRes = await fetchWithAnubisSupport(buildRawUrl(branch, '.cdb.json'));
       if (cdbRes.ok) {
         const cdbText = await cdbRes.text();
         rawCdbJsonText = cdbText;
@@ -746,7 +748,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const licenseCandidates = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING', 'COPYING.txt'];
       for (const licFile of licenseCandidates) {
         try {
-          const licRes = await fetch(buildRawUrl(branch, licFile));
+          const licRes = await fetchWithAnubisSupport(buildRawUrl(branch, licFile));
           if (licRes.ok) {
             const licText = await licRes.text();
             if (licText && !licText.trim().startsWith('<!DOCTYPE')) {
@@ -792,7 +794,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let luaSource = dryRun ? (customLua || '') : '';
     if (!luaSource && packageType === 'mod') {
       try {
-        const luaRes = await fetch(buildRawUrl(branch, 'init.lua'));
+        const luaRes = await fetchWithAnubisSupport(buildRawUrl(branch, 'init.lua'));
         if (luaRes.ok) {
           const text = await luaRes.text();
           if (text && !text.trim().startsWith('<!DOCTYPE')) {
@@ -914,7 +916,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const rawAssetBase = buildRawUrl(branch, '').replace(/\/+$/, '');
     let readmeMarkdown = '';
     try {
-      const readmeRes = await fetch(buildRawUrl(branch, 'README.md'));
+      const readmeRes = await fetchWithAnubisSupport(buildRawUrl(branch, 'README.md'));
       if (readmeRes.ok) {
         const md = await readmeRes.text();
         if (md && !md.trim().startsWith('<!DOCTYPE')) {
@@ -929,7 +931,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let screenshotUrl = buildRawUrl(branch, 'screenshot.png');
     let hasScreenshot = false;
     try {
-      const shotRes = await fetch(screenshotUrl, { method: 'HEAD' });
+      const shotRes = await fetchWithAnubisSupport(screenshotUrl, { method: 'HEAD' });
       hasScreenshot = shotRes.ok;
     } catch {
       hasScreenshot = false;
@@ -1404,9 +1406,25 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ? `[ADMIN] Automated Content Safety Hold: ${safetyEval.summary}`.slice(0, 500)
         : null;
 
-      const sizeEstimate = await fetchRepoSizeEstimate(provider, host, owner, repo);
+      const explicitReleaseAssetSize = Number(discoveredReleases[0]?.size || 0);
+      const sizeEstimate = explicitReleaseAssetSize > 0
+        ? {
+            downloadSize: explicitReleaseAssetSize,
+            fileSize: formatByteSize(explicitReleaseAssetSize) || `${Math.max(1, Math.round(explicitReleaseAssetSize / 1024))} KB`
+          }
+        : (await fetchAccurateGitZipSize(repoUrl.trim(), canonicalAuthor, technicalName, {
+            tag: discoveredReleases[0]?.tag_name || discoveredReleases[0]?.version || null,
+            defaultBranch: branch,
+            packageType
+          })) || (await fetchRepoSizeEstimate(provider, host, owner, repo));
       const estDownloadSize = sizeEstimate?.downloadSize || null;
       const estFileSize = sizeEstimate?.fileSize || null;
+      if (estDownloadSize) {
+        (packagePayload as any).download_size = estDownloadSize;
+      }
+      if (estFileSize) {
+        (packagePayload as any).file_size = estFileSize;
+      }
 
       const runPackageUpsert = () => context.env.DB.prepare(`
         INSERT INTO packages (
@@ -1445,8 +1463,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           dev_state = COALESCE(excluded.dev_state, packages.dev_state),
           content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
           ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures),
-          download_size = COALESCE(packages.download_size, excluded.download_size),
-          file_size = COALESCE(packages.file_size, excluded.file_size),
+          download_size = COALESCE(excluded.download_size, packages.download_size),
+          file_size = COALESCE(excluded.file_size, packages.file_size),
           status = CASE
             WHEN excluded.status = 'flagged' THEN 'flagged'
             WHEN packages.status_reason LIKE '[ADMIN]%' THEN packages.status
@@ -1574,10 +1592,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
+    const lowerA = canonicalAuthor.toLowerCase();
+    const lowerN = technicalName.toLowerCase();
     await invalidateEdgeCacheKeys([
       '/__api_packages_v2',
       '/__api_packages_v2?boot=1',
-      `/__api_pkg_detail_v2/${canonicalAuthor.toLowerCase()}/${technicalName.toLowerCase()}`
+      '/__api_boot_catalog_bundle_v3',
+      `/__api_pkg_detail_v2/${lowerA}/${lowerN}`,
+      `https://cache.luantihub.internal/pkg-detail-v4/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/pkg-detail-v4/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/pkg-detail-v5/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/pkg-detail-v5/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/__for_client_v2/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`,
+      `https://cache.luantihub.internal/__for_client_v3/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`
     ]);
 
     if (safetyEval.holdForAdminReview) {

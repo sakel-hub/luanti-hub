@@ -9,13 +9,14 @@ export type NotificationVariant =
   | 'moderation'
   | 'admin_queue'
   | 'app_update'
-  | 'new_git_package';
+  | 'new_git_package'
+  | 'package_update';
 
 export interface NativeNotificationPayload {
   title: string;
   body: string;
   tag: string;
-  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package';
+  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package' | 'package_update';
   variant?: NotificationVariant;
   icon?: string;
   image?: string;
@@ -29,6 +30,7 @@ export interface NativeNotificationPayload {
 
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
+const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
@@ -412,6 +414,7 @@ export class PwaService {
     if (category === 'admin_queue') return this.settingsService.notifyAdminQueue();
     if (category === 'app_update') return this.settingsService.notifyAppUpdates();
     if (category === 'new_git_package') return this.settingsService.notifyNewGitPackages();
+    if (category === 'package_update') return this.settingsService.notifyPackageUpdates();
     return false;
   }
 
@@ -574,6 +577,218 @@ export class PwaService {
     return newlyDiscovered.length;
   }
 
+  /**
+   * Tracks known package release IDs and `updated_at` timestamps in `localStorage` (`lh_known_package_versions_v1`).
+   * On the very first catalog load, seeds the version baseline silently without spamming notifications.
+   * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
+   * formatted as `Package Updated · [MOD] Title` with the package thumbnail image when a package's
+   * `release_id` or `updated_at` advances (within the last 48h), prioritizing Favorites and Downloaded packages.
+   */
+  checkAndNotifyUpdatedPackages(
+    candidates: Array<{
+      id?: string;
+      author?: string;
+      author_name?: string;
+      name?: string;
+      title?: string;
+      type?: string;
+      short_desc?: string;
+      thumbnail?: string;
+      thumbnail_url?: string;
+      source?: string;
+      sources?: string[];
+      status?: string;
+      release?: number | string;
+      release_id?: number | string;
+      release_title?: string;
+      created_at?: string;
+      updated_at?: string;
+    }>,
+    options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean }
+  ): number {
+    if (!Array.isArray(candidates) || candidates.length === 0) return 0;
+    if (typeof localStorage === 'undefined') return 0;
+
+    const forceSet = new Set(
+      (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
+    );
+
+    const validCandidates = candidates.filter(pkg => {
+      if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+      const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
+      const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
+      if (!author || !name) return false;
+      const rel = pkg.release_id ?? pkg.release;
+      return Boolean(rel !== undefined && rel !== null && String(rel).trim() !== '') || Boolean(pkg.updated_at);
+    });
+
+    if (validCandidates.length === 0) return 0;
+
+    let rawKnown: string | null = null;
+    try {
+      rawKnown = localStorage.getItem(KNOWN_PACKAGE_VERSIONS_KEY);
+    } catch {
+      return 0;
+    }
+
+    const computeStamp = (pkg: (typeof validCandidates)[number]): string => {
+      const rel = pkg.release_id ?? pkg.release ?? '';
+      const upd = pkg.updated_at || '';
+      return `${String(rel).trim()}|${String(upd).trim()}`;
+    };
+
+    // First-time baseline seed: record current release_id|updated_at stamps silently without notification flood
+    if (rawKnown === null && forceSet.size === 0) {
+      if (options?.isBaselineSeedAllowed === false) {
+        return 0;
+      }
+      try {
+        const initialMap: Record<string, string> = {};
+        for (const pkg of validCandidates) {
+          const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+          const name = pkg.name || String(pkg.id).split('/')[1];
+          const lowerId = (pkg.id || `${author}/${name}`).toLowerCase();
+          initialMap[lowerId] = computeStamp(pkg);
+        }
+        localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(initialMap));
+      } catch {
+        // ignore storage quota errors
+      }
+      return 0;
+    }
+
+    let knownMap: Record<string, string> = {};
+    if (rawKnown) {
+      try {
+        const parsed = JSON.parse(rawKnown);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          knownMap = parsed as Record<string, string>;
+        }
+      } catch {
+        knownMap = {};
+      }
+    }
+
+    const updatedPackages: Array<{ pkg: (typeof validCandidates)[number]; resolvedId: string; stamp: string }> = [];
+    let mapChanged = false;
+
+    for (const pkg of validCandidates) {
+      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+      const name = pkg.name || String(pkg.id).split('/')[1];
+      const resolvedId = pkg.id || `${author}/${name}`;
+      const lowerId = resolvedId.toLowerCase();
+      const newStamp = computeStamp(pkg);
+      const prevStamp = knownMap[lowerId];
+      const isForced = forceSet.has(lowerId);
+
+      if (prevStamp === undefined) {
+        knownMap[lowerId] = newStamp;
+        mapChanged = true;
+        if (isForced) {
+          updatedPackages.push({ pkg, resolvedId, stamp: newStamp });
+        }
+        continue;
+      }
+
+      if (prevStamp !== newStamp || isForced) {
+        const [prevRel, prevUpd] = prevStamp.split('|');
+        const [newRel, newUpd] = newStamp.split('|');
+
+        let genuinelyAdvanced = isForced;
+        if (!genuinelyAdvanced) {
+          const prevRelNum = Number(prevRel);
+          const newRelNum = Number(newRel);
+          if (
+            prevRel &&
+            newRel &&
+            Number.isFinite(prevRelNum) &&
+            Number.isFinite(newRelNum) &&
+            newRelNum > prevRelNum
+          ) {
+            genuinelyAdvanced = true;
+          } else if (prevRel && newRel && prevRel !== newRel) {
+            genuinelyAdvanced = true;
+          } else if (newUpd && newUpd !== prevUpd) {
+            const prevMs = prevUpd ? new Date(prevUpd).getTime() : 0;
+            const newMs = new Date(newUpd).getTime();
+            if (!isNaN(newMs) && (isNaN(prevMs) || newMs > prevMs)) {
+              genuinelyAdvanced = true;
+            }
+          }
+        }
+
+        // Recency guard: if updated_at is present and not forced, ensure it is within the last 48h
+        let isRecent = true;
+        if (!isForced && newUpd) {
+          const updMs = new Date(newUpd).getTime();
+          if (!isNaN(updMs) && Date.now() - updMs > 48 * 3600 * 1000) {
+            isRecent = false;
+          }
+        }
+
+        knownMap[lowerId] = newStamp;
+        mapChanged = true;
+
+        if (genuinelyAdvanced && isRecent) {
+          updatedPackages.push({ pkg, resolvedId, stamp: newStamp });
+        }
+      }
+    }
+
+    if (mapChanged) {
+      try {
+        const entries = Object.entries(knownMap);
+        const trimmed = entries.length > 4000 ? Object.fromEntries(entries.slice(-4000)) : knownMap;
+        localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(trimmed));
+      } catch {
+        // ignore storage errors
+      }
+    }
+
+    if (updatedPackages.length === 0 || !this.settingsService.notifyPackageUpdates()) return 0;
+
+    // Prioritize user's Favorited and previously Downloaded packages first
+    const favSet = new Set(this.settingsService.favorites().map(f => f.toLowerCase()));
+    const dlMap = this.settingsService.downloadedPackages();
+    updatedPackages.sort((a, b) => {
+      const aId = a.resolvedId.toLowerCase();
+      const bId = b.resolvedId.toLowerCase();
+      const aPriority = (favSet.has(aId) ? 2 : 0) + ((dlMap[aId] || 0) > 0 ? 1 : 0);
+      const bPriority = (favSet.has(bId) ? 2 : 0) + ((dlMap[bId] || 0) > 0 ? 1 : 0);
+      return bPriority - aPriority;
+    });
+
+    // Cap to at most 3 notifications per check so bulk refreshes never flood the OS tray
+    for (const item of updatedPackages.slice(0, 3)) {
+      const { pkg, resolvedId, stamp } = item;
+      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
+      const name = pkg.name || String(pkg.id).split('/')[1];
+      const typeLabel = String(pkg.type || 'mod').toUpperCase();
+      const displayTitle = pkg.title || name;
+      const thumb = pkg.thumbnail || pkg.thumbnail_url;
+      const relLabel = pkg.release_title
+        ? ` (${pkg.release_title})`
+        : pkg.release_id || pkg.release
+          ? ` (#${pkg.release_id ?? pkg.release})`
+          : '';
+
+      this.sendNativeNotification({
+        title: `Package Updated · [${typeLabel}] ${displayTitle}`,
+        body: `by ${author}${relLabel} — ${pkg.short_desc || 'New release available on LuantiHub.'}`,
+        icon: thumb,
+        image: thumb,
+        tag: `lh-pkg-update-${resolvedId.toLowerCase()}-${stamp}`,
+        category: 'package_update',
+        variant: 'package_update',
+        data: {
+          packageId: resolvedId
+        }
+      });
+    }
+
+    return updatedPackages.length;
+  }
+
   private blobToDataUrl(blob: Blob): Promise<string | null> {
     if (typeof FileReader === 'undefined') {
       return Promise.resolve(null);
@@ -689,6 +904,8 @@ export class PwaService {
         return '/icons/notif-app-update.png';
       case 'new_git_package':
         return '/icons/notif-new-package.png';
+      case 'package_update':
+        return '/icons/notif-package-update.png';
       default:
         return '/icons/icon-192x192.png';
     }

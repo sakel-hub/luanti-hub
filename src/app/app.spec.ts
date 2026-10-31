@@ -27,7 +27,7 @@ import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../..
 import { onRequestGet as packageStatsOnRequestGet } from '../../functions/api/packages/[author]/[name]/stats';
 import { onRequestGet as authorStatsOnRequestGet } from '../../functions/api/authors/[username]/stats';
 import { onRequest as edgeMiddleware, checkEdgeRateLimit } from '../../functions/_middleware';
-import { autoResolveBrokenRepoReport } from '../../functions/api/lib/upstream';
+import { autoResolveBrokenRepoReport, solveAnubisPowChallengeSync } from '../../functions/api/lib/upstream';
 import {
   createSessionToken,
   createAuditProofToken,
@@ -3179,7 +3179,7 @@ supported_games = minetest_game, voxelibre
     expect(secondNavRow.className).toContain('bg-white/[0.02]');
     expect(secondNavRow.className).not.toContain('bg-slate-950/80');
 
-    const navButtons = Array.from(secondNavRow.querySelectorAll('button'));
+    const navButtons = Array.from(secondNavRow.querySelectorAll('a, button'));
     expect(navButtons.length).toBe(6);
     expect(navButtons[0].className).toContain('glass-btn-sky');
     expect(navButtons[1].className).toContain('glass-btn');
@@ -3577,6 +3577,680 @@ supported_games = minetest_game, voxelibre
       if (origSwDescriptor) {
         Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
       }
+    }
+  });
+
+  it('should detect updated packages, use package thumbnail or notif-package-update.png fallback, and respect notifyPackageUpdates toggle', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'Package Updated · [MOD] Mystical Pixie',
+        body: 'v1.2.0',
+        tag: 't-pkg-upd',
+        category: 'package_update',
+        variant: 'package_update'
+      })
+    ).toBe('/icons/notif-package-update.png');
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyPackageUpdates.set(true);
+    localStorage.removeItem('lh_known_package_versions_v1');
+
+    const sentPayloads: any[] = [];
+    const origSend = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      sentPayloads.push(payload);
+      return true;
+    };
+
+    try {
+      const initialCatalog = [
+        {
+          id: 'SaKeL/pixie',
+          author: 'SaKeL',
+          name: 'pixie',
+          title: 'Mystical Pixie Companion',
+          type: 'mod' as const,
+          short_desc: 'Companion mod',
+          thumbnail: 'https://content.luanti.org/uploads/pixie-thumb.png',
+          score: 5,
+          downloads: 500,
+          license: 'MIT',
+          source: 'git' as const,
+          tags: ['mod'],
+          release_id: 'v1.0.0',
+          updated_at: '2026-10-01T10:00:00Z'
+        }
+      ];
+
+      // 1st pass seeds the baseline without firing a notification
+      const seededCount = await pwaService.checkAndNotifyUpdatedPackages(initialCatalog, {
+        isBaselineSeedAllowed: true
+      });
+      expect(seededCount).toBe(0);
+      expect(sentPayloads.length).toBe(0);
+
+      // 2nd pass with new release_id / updated_at fires notification with package thumbnail
+      const updatedCatalog = [
+        {
+          ...initialCatalog[0],
+          release_id: 'v1.1.0',
+          updated_at: '2026-10-31T12:00:00Z'
+        }
+      ];
+      const notifiedCount = await pwaService.checkAndNotifyUpdatedPackages(updatedCatalog, {
+        isBaselineSeedAllowed: false
+      });
+      expect(notifiedCount).toBe(1);
+      expect(sentPayloads.length).toBe(1);
+      expect(sentPayloads[0].category).toBe('package_update');
+      expect(sentPayloads[0].icon).toBe('https://content.luanti.org/uploads/pixie-thumb.png');
+      expect(sentPayloads[0].data?.packageId).toBe('SaKeL/pixie');
+
+      // When notifyPackageUpdates is disabled, no notification is sent
+      settingsService.notifyPackageUpdates.set(false);
+      const disabledCount = await pwaService.checkAndNotifyUpdatedPackages(
+        [
+          {
+            ...initialCatalog[0],
+            release_id: 'v1.2.0',
+            updated_at: '2026-10-31T14:00:00Z'
+          }
+        ],
+        { isBaselineSeedAllowed: false }
+      );
+      expect(disabledCount).toBe(0);
+      settingsService.notifyPackageUpdates.set(true);
+    } finally {
+      pwaService.sendNativeNotification = origSend;
+      localStorage.removeItem('lh_known_package_versions_v1');
+    }
+  });
+
+  it('should restore the previously open Package Detail Modal when navigating back from Analytics and enforce strict verified ownership', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+
+    const testPkg = {
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod' as const,
+      short_desc: 'Biomes & dimensions',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 50000,
+      license: 'LGPL-2.1',
+      source: 'official' as const,
+      tags: ['mod']
+    };
+
+    // Unverified handle sign-in must NOT grant package management or author analytics access
+    (authService as any)._currentUser.set({
+      id: 'unverified_1',
+      username: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      is_admin: false,
+      identities: [{ provider: 'handle' as any, username: 'SaKeL', verified: false }],
+      packages: []
+    });
+    expect(authService.canManagePackage(testPkg)).toBe(false);
+    expect(authService.canViewAuthorAnalytics('SaKeL')).toBe(false);
+
+    // Verified OAuth identity grants management and analytics access
+    (authService as any)._currentUser.set({
+      id: 'verified_1',
+      username: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      is_admin: false,
+      identities: [
+        { provider: 'contentdb', username: 'SaKeL', verified: true },
+        { provider: 'github', username: 'SaKeL', verified: true }
+      ],
+      packages: []
+    });
+    expect(authService.canManagePackage(testPkg)).toBe(true);
+    expect(authService.canViewAuthorAnalytics('SaKeL')).toBe(true);
+
+    // Open Package Detail Modal, then navigate to Analytics, then close Analytics -> restores modal
+    pkgService.openPackageModal(testPkg, false);
+    expect(pkgService.activePackage()?.id).toBe('SaKeL/everness');
+
+    pkgService.openAnalyticsPage({ author: 'SaKeL', name: 'everness' });
+    expect(pkgService.activePackage()).toBeNull();
+
+    pkgService.closeAnalyticsPage();
+    expect(pkgService.activePackage()?.id).toBe('SaKeL/everness');
+
+    pkgService.closePackageModal(false);
+    (authService as any)._currentUser.set(null);
+  });
+
+  it('should solve Anubis PoW SHA-256 challenges and inject SEO metadata for primary hub routes', async () => {
+    // 1. Verify Anubis PoW solver finds a valid nonce with leading zero bits
+    const challenge = 'luantihub-mesehub-test-challenge';
+    const solved = solveAnubisPowChallengeSync(challenge, 4);
+    expect(solved).toBeTruthy();
+    expect(solved?.hashHex.startsWith('0')).toBe(true);
+    expect(typeof solved?.nonce).toBe('number');
+
+    // 2. Verify PackageService maps primary categories to clean first-level hub routes
+    const pkgService = TestBed.inject(PackageService);
+    pkgService.selectPrimaryNavTab('game');
+    expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/games');
+    pkgService.selectPrimaryNavTab('mod');
+    expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/mods');
+    pkgService.selectPrimaryNavTab('txp');
+    expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/texture-packs');
+    pkgService.selectPrimaryNavTab('git');
+    expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/git');
+    pkgService.resetFilters(false);
+    expect(pkgService.getPrimaryCategoryRoutePath()).toBe('/');
+
+    // 3. Verify edge middleware rewrites title, canonical, and BreadcrumbList JSON-LD for /games
+    const baseHtml = `<!doctype html><html><head><title>Default</title><meta name="description" content="Default" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><meta property="og:title" content="Default" /><meta property="og:description" content="Default" /><meta property="og:url" content="https://luantihub.org/" /><meta name="twitter:title" content="Default" /><meta name="twitter:description" content="Default" /></head><body></body></html>`;
+    const res = await edgeMiddleware({
+      request: new Request('https://luantihub.org/games', { method: 'GET' }),
+      next: async () =>
+        new Response(baseHtml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        }),
+      env: {}
+    });
+    const html = await res.text();
+    expect(html).toContain('<title>Luanti Games — Open-Source Voxel Games | Luanti Hub</title>');
+    expect(html).toContain('href="https://luantihub.org/games"');
+    expect(html).toContain('"@type":"BreadcrumbList"');
+  });
+
+  it('should silently refresh the catalog & rankings in the background without skeleton flashes and preserve the active Hero slide when showcase re-orders', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const origFetch = globalThis.fetch;
+
+    // Seed initial catalog and open activePackage with deep-hydrated desc & readme
+    const initialList = [
+      (pkgService as any).normalizePackage({
+        id: 'Wuzzy/mineclone2',
+        author: 'Wuzzy',
+        name: 'mineclone2',
+        title: 'VoxeLibre',
+        type: 'game',
+        short_desc: 'Survival sandbox game',
+        downloads: 100000,
+        score: 4.9,
+        banner: 'https://content.luanti.org/uploads/mcl2.png'
+      }),
+      (pkgService as any).normalizePackage({
+        id: 'sakel-hub/pixie',
+        author: 'sakel-hub',
+        name: 'pixie',
+        title: 'Mystical Pixie Companion',
+        type: 'mod',
+        source: 'git',
+        provider: 'github',
+        short_desc: 'Pixie companion',
+        downloads: 120,
+        luantihub_downloads: 120,
+        score: 4.8,
+        download_size: 343040,
+        file_size: '335 KB',
+        banner: 'https://raw.githubusercontent.com/sakel-hub/pixie/main/screenshot.png'
+      }),
+      (pkgService as any).normalizePackage({
+        id: 'Jeija/mesecons',
+        author: 'Jeija',
+        name: 'mesecons',
+        title: 'Mesecons',
+        type: 'mod',
+        tags: ['automation', 'circuits'],
+        short_desc: 'Digital circuitry',
+        downloads: 80000,
+        score: 4.8,
+        banner: 'https://content.luanti.org/uploads/mesecons.png'
+      })
+    ];
+    (pkgService as any).pendingRoutePackage = null;
+    (pkgService as any)._packages.set(initialList);
+    (pkgService as any)._activePackage.set({
+      ...initialList[1],
+      desc: 'Deep hydrated long description that must be preserved',
+      readme: '# Mystical Pixie README'
+    });
+
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    const heroComp = heroFixture.componentInstance;
+    heroFixture.detectChanges();
+
+    // Move hero carousel to the slide displaying 'sakel-hub/pixie'
+    const pixieIdx = heroComp.showcase().findIndex(p => p.id === 'sakel-hub/pixie');
+    expect(pixieIdx).toBeGreaterThanOrEqual(0);
+    heroComp.goTo(pixieIdx);
+    heroFixture.detectChanges();
+    expect(heroComp.currentPkg()?.id).toBe('sakel-hub/pixie');
+
+    let sawLoadingTrue = false;
+    globalThis.fetch = (async (input: any) => {
+      if (pkgService.isLoading()) {
+        sawLoadingTrue = true;
+      }
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/packages/?boot=1')) {
+        return new Response(
+          JSON.stringify({
+            packages: [
+              {
+                id: 'Wuzzy/mineclone2',
+                author: 'Wuzzy',
+                name: 'mineclone2',
+                title: 'VoxeLibre',
+                type: 'game',
+                short_desc: 'Survival sandbox game',
+                downloads: 100500,
+                score: 4.9,
+                banner: 'https://content.luanti.org/uploads/mcl2.png'
+              },
+              {
+                id: 'sakel-hub/pixie',
+                author: 'sakel-hub',
+                name: 'pixie',
+                title: 'Mystical Pixie Companion',
+                type: 'mod',
+                source: 'git',
+                provider: 'github',
+                short_desc: 'Pixie companion',
+                downloads: 450,
+                luantihub_downloads: 450,
+                score: 5.0,
+                download_size: 343040,
+                file_size: '335 KB',
+                updated_at: new Date().toISOString(),
+                banner: 'https://raw.githubusercontent.com/sakel-hub/pixie/main/screenshot.png'
+              },
+              {
+                id: 'Jeija/mesecons',
+                author: 'Jeija',
+                name: 'mesecons',
+                title: 'Mesecons',
+                type: 'mod',
+                tags: ['automation', 'circuits'],
+                short_desc: 'Digital circuitry',
+                downloads: 80200,
+                score: 4.8,
+                banner: 'https://content.luanti.org/uploads/mesecons.png'
+              },
+              {
+                id: 'sakel-hub/everness',
+                author: 'sakel-hub',
+                name: 'everness',
+                title: 'Everness',
+                type: 'mod',
+                source: 'git',
+                provider: 'github',
+                short_desc: 'New biomes & dimensions',
+                downloads: 95000,
+                contentdb_score: 2500,
+                score: 5.0,
+                featured: true,
+                banner: 'https://content.luanti.org/uploads/everness.png'
+              }
+            ],
+            top10Today: [
+              {
+                id: 'sakel-hub/everness',
+                author: 'sakel-hub',
+                name: 'everness',
+                title: 'Everness',
+                type: 'mod',
+                source: 'git',
+                downloads: 95000,
+                score: 5.0
+              },
+              {
+                id: 'sakel-hub/pixie',
+                author: 'sakel-hub',
+                name: 'pixie',
+                title: 'Mystical Pixie Companion',
+                type: 'mod',
+                source: 'git',
+                downloads: 450,
+                score: 5.0,
+                download_size: 343040,
+                file_size: '335 KB'
+              }
+            ],
+            top10Week: [
+              {
+                id: 'sakel-hub/everness',
+                author: 'sakel-hub',
+                name: 'everness',
+                title: 'Everness',
+                type: 'mod',
+                source: 'git',
+                downloads: 95000,
+                score: 5.0
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', Server: 'cloudflare' }
+          }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    try {
+      const refreshed = await pkgService.refreshCatalogInBackground();
+      expect(refreshed).toBe(true);
+      expect(sawLoadingTrue).toBe(false);
+      expect(pkgService.isLoading()).toBe(false);
+
+      // Verify Top 10 Today & catalog updated in place
+      expect(pkgService.top10TodayPackages()[0]?.id).toBe('sakel-hub/everness');
+      expect(pkgService.packages().find(p => p.id === 'sakel-hub/pixie')?.downloads).toBe(450);
+
+      // Verify open activePackage merged new downloads & score while preserving deep-hydrated desc & readme
+      expect(pkgService.activePackage()?.downloads).toBe(450);
+      expect(pkgService.activePackage()?.score).toBe(5.0);
+      expect(pkgService.activePackage()?.desc).toBe('Deep hydrated long description that must be preserved');
+      expect(pkgService.activePackage()?.readme).toBe('# Mystical Pixie README');
+    } finally {
+      globalThis.fetch = origFetch;
+      pkgService.closePackageModal(false);
+    }
+  });
+
+  it('should compute exact normalized .zip byte sizes via fetchAccurateGitZipSize, pre-warm the shared .zip cache, and prioritize fresh server size over stale hydratedMetaCache', async () => {
+    const {
+      buildSharedZipCacheKey,
+      fetchAccurateGitZipSize,
+      getCachedNormalizedZip
+    } = await import('../../functions/api/lib/upstream');
+    const pkgService = TestBed.inject(PackageService);
+
+    // Build a real valid ZIP archive (~335 bytes) with a top-level GitHub branch folder `pixie-main/init.lua`
+    const encoder = new TextEncoder();
+    const buildMinimalZip = (files: Array<{ path: string; content: string }>): Uint8Array => {
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let offset = 0;
+      for (const f of files) {
+        const nameBytes = encoder.encode(f.path);
+        const dataBytes = encoder.encode(f.content);
+        const localHeader = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lv = new DataView(localHeader.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);
+        lv.setUint16(6, 0, true);
+        lv.setUint16(8, 0, true);
+        lv.setUint32(14, 0x12345678, true);
+        lv.setUint32(18, dataBytes.length, true);
+        lv.setUint32(22, dataBytes.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        lv.setUint16(28, 0, true);
+        localHeader.set(nameBytes, 30);
+        localHeader.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(localHeader);
+
+        const cdHeader = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(cdHeader.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint16(8, 0, true);
+        cv.setUint16(10, 0, true);
+        cv.setUint32(16, 0x12345678, true);
+        cv.setUint32(20, dataBytes.length, true);
+        cv.setUint32(24, dataBytes.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        cdHeader.set(nameBytes, 46);
+        cdParts.push(cdHeader);
+        offset += localHeader.length;
+      }
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, files.length, true);
+      ev.setUint16(10, files.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, offset, true);
+
+      const out = new Uint8Array(offset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const sampleZipBytes = buildMinimalZip([
+      { path: 'pixie-main/mod.conf', content: 'name = pixie\ntitle = Mystical Pixie Companion\n' },
+      { path: 'pixie-main/init.lua', content: '-- Mystical Pixie Companion Lua code\nminetest.register_entity("pixie:fairy", {})\n' }
+    ]);
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('https://github.com/sakel-hub/pixie/archive/refs/tags/v1.0.0.zip')) {
+        return new Response(sampleZipBytes as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const res = await fetchAccurateGitZipSize('https://github.com/sakel-hub/pixie', 'sakel-hub', 'pixie', {
+        tag: 'v1.0.0'
+      });
+      expect(res).toBeTruthy();
+      expect(res?.downloadSize).toBeGreaterThan(100);
+      expect(res?.downloadSize).toBeLessThan(1024 * 1024); // Exact KB size, never 18.3 MB!
+      expect(res?.fileSize).toBe('1 KB');
+
+      // Verify the normalized .zip was pre-warmed into the shared isolate/Edge cache so client downloads hit at 0ms
+      const zipCacheKey = buildSharedZipCacheKey('sakel-hub', 'pixie', 'v1.0.0');
+      const preWarmed = await getCachedNormalizedZip(zipCacheKey);
+      expect(preWarmed).toBeTruthy();
+      expect(preWarmed?.byteLength).toBe(res?.downloadSize);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // Verify PackageService.normalizePackage prioritizes fresh server `file_size: '335 KB'` over stale `hydratedMetaCache.download_size` (18.3 MB)
+    (pkgService as any).hydratedMetaCache.set('sakel-hub/pixie', {
+      download_size: 19188940, // Stale 18.3 MB from old repo.size estimate
+      file_size: '18.3 MB'
+    });
+
+    const normalizedFromBoot = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/pixie',
+      author: 'sakel-hub',
+      name: 'pixie',
+      title: 'Mystical Pixie Companion',
+      type: 'mod',
+      source: 'git',
+      provider: 'github',
+      file_size: '335 KB' // Fresh server boot payload with file_size
+    });
+    expect(normalizedFromBoot.file_size).toBe('335 KB');
+    expect(normalizedFromBoot.download_size).toBe(335 * 1024);
+
+    // Also verify updatePackageDownloadSize updates catalog, activePackage, and hydratedMetaCache
+    (pkgService as any)._packages.set([normalizedFromBoot]);
+    (pkgService as any)._activePackage.set(normalizedFromBoot);
+    pkgService.updatePackageDownloadSize(normalizedFromBoot, 343040);
+    expect(pkgService.activePackage()?.download_size).toBe(343040);
+    expect(pkgService.activePackage()?.file_size).toBe('335 KB');
+    expect((pkgService as any).hydratedMetaCache.get('sakel-hub/pixie')?.download_size).toBe(343040);
+  });
+
+  it('should optimize in-game Luanti client Content tab catalog (compact payload & fmt=keys) and fast-path pure-Git dependencies without upstream ContentDB 404s', async () => {
+    const { onRequestGet: packagesIndexGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: dependenciesGet } = await import(
+      '../../functions/api/packages/[author]/[name]/dependencies'
+    );
+
+    const mockDb = {
+      prepare(sql: string) {
+        return {
+          bind(..._args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM packages')) {
+                  return {
+                    id: 'sakel-hub/pixie',
+                    author_name: 'sakel-hub',
+                    name: 'pixie',
+                    title: 'Mystical Pixie Companion',
+                    type: 'mod',
+                    status: 'active',
+                    provider: 'github',
+                    repo_url: 'https://github.com/sakel-hub/pixie',
+                    dependencies: JSON.stringify(['default', 'x_mobs']),
+                    optional_dependencies: JSON.stringify(['awards'])
+                  };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM packages') && !sql.includes("status IN ('flagged'")) {
+                  return {
+                    results: [
+                      {
+                        id: 'sakel-hub/pixie',
+                        author_name: 'sakel-hub',
+                        name: 'pixie',
+                        title: 'Mystical Pixie Companion',
+                        type: 'mod',
+                        short_desc: 'A mystical fairy companion',
+                        status: 'active',
+                        provider: 'github',
+                        repo_url: 'https://github.com/sakel-hub/pixie',
+                        tags: JSON.stringify(['mobs', 'magic']),
+                        updated_at: '2026-10-31T10:00:00Z'
+                      }
+                    ]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                return { success: true };
+              }
+            };
+          },
+          async all() {
+            if (sql.includes('FROM packages') && !sql.includes("status IN ('flagged'")) {
+              return {
+                results: [
+                  {
+                    id: 'sakel-hub/pixie',
+                    author_name: 'sakel-hub',
+                    name: 'pixie',
+                    title: 'Mystical Pixie Companion',
+                    type: 'mod',
+                    short_desc: 'A mystical fairy companion',
+                    status: 'active',
+                    provider: 'github',
+                    repo_url: 'https://github.com/sakel-hub/pixie',
+                    tags: JSON.stringify(['mobs', 'magic']),
+                    updated_at: '2026-10-31T10:00:00Z'
+                  }
+                ]
+              };
+            }
+            return { results: [] };
+          },
+          async run() {
+            return { success: true };
+          }
+        };
+      }
+    };
+
+    const origFetch = globalThis.fetch;
+    const upstreamCalledUrls: string[] = [];
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      upstreamCalledUrls.push(url);
+      if (url.includes('/packages/?fmt=vcs')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Wuzzy',
+              name: 'mineclone2',
+              title: 'VoxeLibre',
+              type: 'game',
+              short_description: 'Survival sandbox game',
+              release: 29410,
+              thumbnail: 'https://content.luanti.org/uploads/mcl2.png',
+              tags: ['survival', 'sandbox']
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. Test non-boot in-game Luanti client catalog request with protocol_version & engine_version
+      const clientRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.11.0&hide=nonfree&nocache=1'
+        ),
+        env: { DB: mockDb }
+      } as any);
+      expect(clientRes.status).toBe(200);
+      const clientList = await clientRes.json();
+      expect(Array.isArray(clientList)).toBe(true);
+      expect(clientList.length).toBe(2);
+      // Verify compact ContentDB-compatible fields without redundant web-only bloat
+      const pixieItem = clientList.find((x: any) => x.name === 'pixie');
+      expect(pixieItem).toBeTruthy();
+      expect(pixieItem.author).toBe('sakel-hub');
+      expect(pixieItem.short_description).toBe('A mystical fairy companion');
+      expect(typeof pixieItem.release).toBe('number');
+      expect(pixieItem.video_thumbnail_url).toBeUndefined();
+
+      // 2. Test fmt=keys columnar response
+      const keysRes = await packagesIndexGet({
+        request: new Request('https://luantihub.org/api/packages/?type=mod&fmt=keys&nocache=1'),
+        env: { DB: mockDb }
+      } as any);
+      expect(keysRes.status).toBe(200);
+      const keysPayload = await keysRes.json();
+      expect(Array.isArray(keysPayload.keys)).toBe(true);
+      expect(Array.isArray(keysPayload.pkgs)).toBe(true);
+      expect(keysPayload.keys).toContain('author');
+      expect(keysPayload.keys).toContain('name');
+
+      // 3. Test pure-Git package dependencies fast-path (must NOT call ContentDB upstream for sakel-hub/pixie)
+      upstreamCalledUrls.length = 0;
+      const depRes = await dependenciesGet({
+        request: new Request('https://luantihub.org/api/packages/sakel-hub/pixie/dependencies/?only_hard=1&nocache=1'),
+        params: { author: 'sakel-hub', name: 'pixie' },
+        env: { DB: mockDb }
+      } as any);
+      expect(depRes.status).toBe(200);
+      const depData = await depRes.json();
+      expect(depData['sakel-hub/pixie']).toBeTruthy();
+      // Never queried ContentDB /packages/sakel-hub/pixie/dependencies/!
+      expect(upstreamCalledUrls.some(u => u.includes('/packages/sakel-hub/pixie/dependencies'))).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
     }
   });
 });

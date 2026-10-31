@@ -216,7 +216,15 @@ export const en: TranslationDictionary = {
     similarPackagesSubtitle: 'Recommended based on tags, category, and dependencies',
     latestRelease: 'Latest',
     showingLatestReleases: 'Showing latest {count} releases',
-    tabAnalytics: 'Analytics'
+    tabAnalytics: 'Analytics',
+    viewAnalyticsTooltip: 'View Package Download Analytics',
+    viewReleaseNotes: 'Release Notes & Commits',
+    hideReleaseNotes: 'Hide Release Notes',
+    loadingReleaseNotes: 'Fetching release commits...',
+    commitsBetween: 'Changes in {head} (since {base})',
+    recentBranchCommits: 'Recent Commits on {branch}',
+    noReleaseNotesFallback: 'No detailed commit log available for this release.',
+    viewFullDiffOnGit: 'View Full Diff on Git'
   },
   auth: {
     title: 'Sign in to LuantiHub',
@@ -330,6 +338,7 @@ export const en: TranslationDictionary = {
     notifyAdminQueueLabel: 'Admin Moderation Queue Alerts',
     notifyAppUpdatesLabel: 'LuantiHub App & Feature Updates',
     notifyNewGitPackagesLabel: 'New Git Community Packages Published',
+    notifyPackageUpdatesLabel: 'Recent Package Releases & Updates (Favorites & Catalog)',
     permissionGranted: 'Active',
     permissionBlocked: 'Blocked in Browser',
     permissionResetHint: 'Notifications are muted in LuantiHub. To fully revoke browser permission and be prompted again next time, click the site settings icon in your address bar and select "Reset permission".'

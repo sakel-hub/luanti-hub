@@ -201,6 +201,28 @@ export class App {
     });
   }
 
+  onFooterNavClick(
+    event: MouseEvent,
+    target: 'game' | 'mod' | 'txp' | 'git' | 'setup' | 'submit' | 'legal'
+  ): void {
+    if (event && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+    }
+    if (target === 'setup') {
+      this.packageService.openSetupModal();
+    } else if (target === 'submit') {
+      this.packageService.openSubmitModal();
+    } else if (target === 'legal') {
+      this.packageService.openLegalModal();
+    } else {
+      this.packageService.closeAllModals(false);
+      this.packageService.selectPrimaryNavTab(target);
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+  }
+
   onTheaterVideoLoadedMetadata(event: Event, startSeconds: number): void {
     if (!startSeconds || startSeconds <= 0) return;
     const videoEl = event.target as HTMLVideoElement | null;

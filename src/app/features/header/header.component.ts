@@ -93,67 +93,67 @@ import {
 
         <!-- Left: Logo & Category Tabs -->
         <div class="flex items-center gap-2.5 2xl:gap-4 flex-shrink-0 justify-start">
-          <button
-            type="button"
-            (click)="onHomeClick()"
-            class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer">
+          <a
+            href="/"
+            (click)="onHomeClick($event)"
+            class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer no-underline">
             <img src="/logo.svg" alt="Luanti Hub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
             <h1 class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap m-0 inline-block">
               Luanti<span class="text-sky-400">Hub</span>
             </h1>
-          </button>
+          </a>
 
           <!-- Category Nav Tabs (Wide Desktop 2xl+) -->
           <nav class="hidden 2xl:flex items-center gap-1.5 text-xs font-semibold flex-shrink-0" aria-label="Category navigation">
-            <button
-              type="button"
-              (click)="selectNavTab('all')"
+            <a
+              href="/"
+              (click)="selectNavTab('all', $event)"
               [appTooltip]="'header.filterAll' | translate"
               [class]="!packageService.hasActiveFilters() ? 'glass-btn-sky text-sky-200' : 'glass-btn text-slate-300 hover:text-white'"
-              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer no-underline">
               <svg lucideHouse class="w-3.5 h-3.5 text-sky-400"></svg>
               <span>{{ 'header.filterAll' | translate }}</span>
-            </button>
+            </a>
 
-            <button
-              type="button"
-              (click)="selectNavTab('game')"
+            <a
+              href="/games"
+              (click)="selectNavTab('game', $event)"
               [appTooltip]="'header.filterGames' | translate"
               [class]="selectedType() === 'game' ? 'glass-btn-emerald text-emerald-200' : 'glass-btn text-slate-300 hover:text-white'"
-              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer no-underline">
               <svg lucideGamepad2 class="w-3.5 h-3.5 text-emerald-400"></svg>
               <span>{{ 'header.filterGames' | translate }}</span>
-            </button>
+            </a>
 
-            <button
-              type="button"
-              (click)="selectNavTab('mod')"
+            <a
+              href="/mods"
+              (click)="selectNavTab('mod', $event)"
               [appTooltip]="'header.filterMods' | translate"
               [class]="selectedType() === 'mod' ? 'glass-btn-sky text-sky-200' : 'glass-btn text-slate-300 hover:text-white'"
-              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer no-underline">
               <svg lucideCpu class="w-3.5 h-3.5 text-sky-400"></svg>
               <span>{{ 'header.filterMods' | translate }}</span>
-            </button>
+            </a>
 
-            <button
-              type="button"
-              (click)="selectNavTab('txp')"
+            <a
+              href="/texture-packs"
+              (click)="selectNavTab('txp', $event)"
               [appTooltip]="'header.filterTxp' | translate"
               [class]="selectedType() === 'txp' ? 'glass-btn-purple text-purple-200' : 'glass-btn text-slate-300 hover:text-white'"
-              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer no-underline">
               <svg lucidePalette class="w-3.5 h-3.5 text-purple-400"></svg>
               <span>{{ 'header.filterTxp' | translate }}</span>
-            </button>
+            </a>
 
-            <button
-              type="button"
-              (click)="selectNavTab('git')"
+            <a
+              href="/git"
+              (click)="selectNavTab('git', $event)"
               [appTooltip]="'header.filterGit' | translate"
               [class]="selectedSource() === 'git' ? 'glass-btn-amber text-amber-200' : 'glass-btn text-slate-300 hover:text-white'"
-              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer">
+              class="px-2.5 py-1.5 rounded-lg transition flex items-center gap-1.5 whitespace-nowrap cursor-pointer no-underline">
               <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
               <span>{{ 'header.filterGit' | translate }}</span>
-            </button>
+            </a>
 
             <button
               type="button"
@@ -223,14 +223,14 @@ import {
           }
 
           <!-- Submit Mod Button (lg+) -->
-          <button
-            type="button"
-            (click)="packageService.openSubmitModal()"
+          <a
+            href="/submit"
+            (click)="onSubmitNavClick($event)"
             [appTooltip]="'header.submitRepoTooltip' | translate"
-            class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
+            class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
             <svg lucidePlus class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
             <span class="whitespace-nowrap">{{ 'header.submitRepo' | translate }}</span>
-          </button>
+          </a>
 
           <!-- Language Selector Dropdown (lg+) -->
           <div #langMenuContainer class="hidden lg:block relative flex-shrink-0">
@@ -491,50 +491,50 @@ import {
 
       <!-- Translucent Frosted-Glass Category Navigation Strip (< 2xl) -->
       <div class="2xl:hidden border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full">
-        <button
-          type="button"
-          (click)="selectNavTab('all')"
+        <a
+          href="/"
+          (click)="selectNavTab('all', $event)"
           [class]="!packageService.hasActiveFilters() ? 'glass-btn-sky text-sky-200' : 'glass-btn text-slate-300 hover:text-white'"
-          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
           <svg lucideHouse class="w-3.5 h-3.5 text-sky-400"></svg>
           <span>{{ 'header.filterAll' | translate }}</span>
-        </button>
+        </a>
 
-        <button
-          type="button"
-          (click)="selectNavTab('game')"
+        <a
+          href="/games"
+          (click)="selectNavTab('game', $event)"
           [class]="selectedType() === 'game' ? 'glass-btn-emerald text-emerald-200' : 'glass-btn text-slate-300 hover:text-white'"
-          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
           <svg lucideGamepad2 class="w-3.5 h-3.5 text-emerald-400"></svg>
           <span>{{ 'header.filterGames' | translate }}</span>
-        </button>
+        </a>
 
-        <button
-          type="button"
-          (click)="selectNavTab('mod')"
+        <a
+          href="/mods"
+          (click)="selectNavTab('mod', $event)"
           [class]="selectedType() === 'mod' ? 'glass-btn-sky text-sky-200' : 'glass-btn text-slate-300 hover:text-white'"
-          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
           <svg lucideCpu class="w-3.5 h-3.5 text-sky-400"></svg>
           <span>{{ 'header.filterMods' | translate }}</span>
-        </button>
+        </a>
 
-        <button
-          type="button"
-          (click)="selectNavTab('txp')"
+        <a
+          href="/texture-packs"
+          (click)="selectNavTab('txp', $event)"
           [class]="selectedType() === 'txp' ? 'glass-btn-purple text-purple-200' : 'glass-btn text-slate-300 hover:text-white'"
-          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
           <svg lucidePalette class="w-3.5 h-3.5 text-purple-400"></svg>
           <span>{{ 'header.filterTxp' | translate }}</span>
-        </button>
+        </a>
 
-        <button
-          type="button"
-          (click)="selectNavTab('git')"
+        <a
+          href="/git"
+          (click)="selectNavTab('git', $event)"
           [class]="selectedSource() === 'git' ? 'glass-btn-amber text-amber-200' : 'glass-btn text-slate-300 hover:text-white'"
-          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer">
+          class="px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
           <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
           <span>{{ 'header.filterGit' | translate }}</span>
-        </button>
+        </a>
 
         <button
           type="button"
@@ -734,12 +734,26 @@ export class HeaderComponent {
     return this.supportedLocales.find(l => l.id === this.currentLocale()) || this.supportedLocales[0];
   }
 
-  onHomeClick(): void {
+  onHomeClick(event?: MouseEvent): void {
+    if (event && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+    }
     this.isMobileMenuOpen.set(false);
     this.packageService.resetFilters(true);
   }
 
-  selectNavTab(tab: 'all' | 'game' | 'mod' | 'txp' | 'git' | 'favorites'): void {
+  onSubmitNavClick(event?: MouseEvent): void {
+    if (event && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+    }
+    this.isMobileMenuOpen.set(false);
+    this.packageService.openSubmitModal();
+  }
+
+  selectNavTab(tab: 'all' | 'game' | 'mod' | 'txp' | 'git' | 'favorites', event?: MouseEvent): void {
+    if (event && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+    }
     this.isMobileMenuOpen.set(false);
     if (tab === 'all') {
       this.onHomeClick();

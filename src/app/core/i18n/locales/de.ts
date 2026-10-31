@@ -216,7 +216,15 @@ export const de: TranslationDictionary = {
     similarPackagesSubtitle: 'Empfohlen basierend auf Tags, Kategorie und Abhängigkeiten',
     latestRelease: 'Aktuell',
     showingLatestReleases: 'Die neuesten {count} Versionen werden angezeigt',
-    tabAnalytics: 'Statistiken'
+    tabAnalytics: 'Statistiken',
+    viewAnalyticsTooltip: 'Paket-Download-Statistiken anzeigen',
+    viewReleaseNotes: 'Versionshinweise & Commits',
+    hideReleaseNotes: 'Versionshinweise ausblenden',
+    loadingReleaseNotes: 'Lade Release-Commits...',
+    commitsBetween: 'Änderungen in {head} (seit {base})',
+    recentBranchCommits: 'Letzte Commits auf {branch}',
+    noReleaseNotesFallback: 'Kein detailliertes Commit-Protokoll für diese Version verfügbar.',
+    viewFullDiffOnGit: 'Vollständigen Diff auf Git ansehen'
   },
   auth: {
     title: 'Bei LuantiHub anmelden',
@@ -330,6 +338,7 @@ export const de: TranslationDictionary = {
     notifyAdminQueueLabel: 'Admin-Moderations-Warteschlange',
     notifyAppUpdatesLabel: 'LuantiHub App- & Funktions-Updates',
     notifyNewGitPackagesLabel: 'Neue veröffentlichte Git-Community-Pakete',
+    notifyPackageUpdatesLabel: 'Kürzlich aktualisierte Pakete & neue Releases',
     permissionGranted: 'Aktiv',
     permissionBlocked: 'Im Browser blockiert',
     permissionResetHint: 'Benachrichtigungen sind in LuantiHub stummgeschaltet. Um die Browser-Berechtigung vollständig zurückzusetzen, klicken Sie auf das Website-Einstellungssymbol in der Adressleiste und wählen Sie „Berechtigung zurücksetzen“.'

@@ -216,7 +216,15 @@ export const fr: TranslationDictionary = {
     similarPackagesSubtitle: 'Recommandés selon les tags, la catégorie et les dépendances',
     latestRelease: 'Dernière',
     showingLatestReleases: 'Affichage des {count} dernières versions',
-    tabAnalytics: 'Analytique'
+    tabAnalytics: 'Analytique',
+    viewAnalyticsTooltip: 'Voir les statistiques de téléchargement du paquet',
+    viewReleaseNotes: 'Notes de version & Commits',
+    hideReleaseNotes: 'Masquer les notes de version',
+    loadingReleaseNotes: 'Chargement des commits de la version...',
+    commitsBetween: 'Modifications dans {head} (depuis {base})',
+    recentBranchCommits: 'Commits récents sur {branch}',
+    noReleaseNotesFallback: 'Aucun journal de commits détaillé disponible pour cette version.',
+    viewFullDiffOnGit: 'Voir le diff complet sur Git'
   },
   auth: {
     title: 'Connexion à LuantiHub',
@@ -330,6 +338,7 @@ export const fr: TranslationDictionary = {
     notifyAdminQueueLabel: 'Alertes de la file de modération (Admin)',
     notifyAppUpdatesLabel: 'Mises à jour de l\'application LuantiHub',
     notifyNewGitPackagesLabel: 'Nouveaux paquets Git communautaires publiés',
+    notifyPackageUpdatesLabel: 'Mises à jour récentes et nouvelles versions de paquets',
     permissionGranted: 'Actif',
     permissionBlocked: 'Bloqué par le navigateur',
     permissionResetHint: 'Les notifications sont désactivées dans LuantiHub. Pour révoquer complètement l\'autorisation du navigateur, cliquez sur l\'icône des paramètres du site dans la barre d\'adresse et sélectionnez « Réinitialiser l\'autorisation ».'

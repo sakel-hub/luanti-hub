@@ -268,6 +268,35 @@ export class AuthService {
     return false;
   }
 
+  /**
+   * Checks whether the current user is an administrator or holds a cryptographically verified
+   * identity matching the target author handle.
+   */
+  canViewAuthorAnalytics(username?: string | null): boolean {
+    const user = this._currentUser();
+    if (!user || !username) return false;
+    if (this.isAdmin()) return true;
+
+    const targetLower = username.trim().toLowerCase();
+    const baseTarget = targetLower.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
+    if (!targetLower) return false;
+
+    const verifiedIdentities = (user.identities || []).filter(id => Boolean(id.verified));
+    if (verifiedIdentities.length === 0) return false;
+
+    const userLower = String(user.username || '').trim().toLowerCase();
+    const baseUser = userLower.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
+    if (userLower === targetLower || (baseTarget && baseUser === baseTarget)) {
+      return true;
+    }
+
+    return verifiedIdentities.some(id => {
+      const h = String(id.username || '').trim().toLowerCase();
+      const b = h.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
+      return h === targetLower || (baseTarget && b === baseTarget);
+    });
+  }
+
   async initAuth(forceRefresh = false): Promise<void> {
     try {
       this._isLoading.set(true);
@@ -858,6 +887,12 @@ export class AuthService {
 
     if (Array.isArray(digest.latest_git_packages) && digest.latest_git_packages.length > 0) {
       this.pwaService.checkAndNotifyNewGitPackages(digest.latest_git_packages, {
+        isBaselineSeedAllowed: false
+      });
+    }
+
+    if (Array.isArray(digest.recently_updated_packages) && digest.recently_updated_packages.length > 0) {
+      this.pwaService.checkAndNotifyUpdatedPackages(digest.recently_updated_packages, {
         isBaselineSeedAllowed: false
       });
     }

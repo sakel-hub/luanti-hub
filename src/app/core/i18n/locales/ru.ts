@@ -216,7 +216,15 @@ export const ru: TranslationDictionary = {
     similarPackagesSubtitle: 'Рекомендации по тегам, категории и зависимостям',
     latestRelease: 'Последний',
     showingLatestReleases: 'Показаны последние {count} релизов',
-    tabAnalytics: 'Аналитика'
+    tabAnalytics: 'Аналитика',
+    viewAnalyticsTooltip: 'Открыть аналитику загрузок пакета',
+    viewReleaseNotes: 'Примечания к релизу и коммиты',
+    hideReleaseNotes: 'Скрыть примечания к релизу',
+    loadingReleaseNotes: 'Загрузка коммитов релиза...',
+    commitsBetween: 'Изменения в {head} (после {base})',
+    recentBranchCommits: 'Последние коммиты в ветке {branch}',
+    noReleaseNotesFallback: 'Подробный список коммитов для этого релиза недоступен.',
+    viewFullDiffOnGit: 'Открыть полный diff в Git'
   },
   auth: {
     title: 'Вход в LuantiHub',
@@ -330,6 +338,7 @@ export const ru: TranslationDictionary = {
     notifyAdminQueueLabel: 'Уведомления очереди модерации (Админ)',
     notifyAppUpdatesLabel: 'Обновления приложения LuantiHub',
     notifyNewGitPackagesLabel: 'Новые опубликованные Git-пакеты сообщества',
+    notifyPackageUpdatesLabel: 'Недавние обновления и новые релизы пакетов',
     permissionGranted: 'Активно',
     permissionBlocked: 'Заблокировано в браузере',
     permissionResetHint: 'Уведомления отключены в LuantiHub. Чтобы полностью отозвать разрешение браузера, нажмите на значок настроек сайта в адресной строке и выберите «Сбросить разрешение».'
