@@ -303,8 +303,8 @@ import {
       <app-hero-billboard></app-hero-billboard>
 
       <!-- ContentDB & Custom Git Tags Quick-Filter Bar + Expandable Drawer -->
-      <div class="relative z-10 max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-5 space-y-2.5">
-        <div class="flex items-center gap-2 flex-wrap py-1">
+      <div class="relative z-10 max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-2.5 sm:mt-3 space-y-2">
+        <div class="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar py-0.5">
           <div class="flex items-center gap-1.5 text-xs font-bold text-slate-400 pr-1 flex-shrink-0">
             <svg lucideTag class="w-3.5 h-3.5 text-sky-400"></svg>
             <span>{{ 'catalog.filterByTag' | translate }}</span>
@@ -358,7 +358,7 @@ import {
         }
       </div>
 
-      <div class="relative z-10 mt-6 sm:mt-8 space-y-8 sm:space-y-10 pb-16">
+      <div class="relative z-10 mt-2 sm:mt-3 space-y-5 sm:space-y-8 pb-16">
 
         <!-- Swimlane 1: Trending Engine Mods -->
         <app-package-carousel

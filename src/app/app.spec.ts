@@ -17,6 +17,7 @@ import { PackageDetailModalComponent } from './features/modal/package-detail-mod
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { HeaderComponent } from './features/header/header.component';
+import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
 import { PwaService } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
@@ -3110,5 +3111,36 @@ supported_games = minetest_game, voxelibre
     } finally {
       (globalThis as any).IntersectionObserver = origIO;
     }
+  });
+
+  it('should render a translucent frosted-glass second-row navigation bar (< 2xl), enforce search bar min-width, and size the Hero Billboard with a viewport-aware dvh clamp', () => {
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    headerFixture.detectChanges();
+    const headerEl = headerFixture.nativeElement as HTMLElement;
+
+    // 1. Search bar container enforces a minimum width so it never collapses at 1280x720
+    const searchInput = headerEl.querySelector('#main-search-input') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
+    const searchWrapper = searchInput.parentElement?.parentElement as HTMLElement;
+    expect(searchWrapper.className).toContain('min-w-[140px]');
+
+    // 2. Second-row category strip is visible below 2xl (including 1280x720) and uses translucent frosted-glass styling instead of opaque bg-slate-950/80
+    const secondNavRow = headerEl.querySelector('div.border-t.overflow-x-auto') as HTMLElement;
+    expect(secondNavRow).toBeTruthy();
+    expect(secondNavRow.className).toContain('2xl:hidden');
+    expect(secondNavRow.className).toContain('bg-white/[0.02]');
+    expect(secondNavRow.className).not.toContain('bg-slate-950/80');
+
+    const navButtons = Array.from(secondNavRow.querySelectorAll('button'));
+    expect(navButtons.length).toBe(6);
+    expect(navButtons[0].className).toContain('glass-btn-sky');
+    expect(navButtons[1].className).toContain('glass-btn');
+
+    // 3. HeroBillboardComponent retains 16:9 aspect-video sizing
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    heroFixture.detectChanges();
+    const heroEl = heroFixture.nativeElement as HTMLElement;
+    expect(heroEl.innerHTML).toContain('aspect-video');
+    expect(heroEl.innerHTML).toContain('lg:min-h-[600px]');
   });
 });
