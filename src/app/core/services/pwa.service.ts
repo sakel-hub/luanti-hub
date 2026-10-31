@@ -52,6 +52,7 @@ export class PwaService {
   private messageClearTimer: any = null;
   private notificationClickHandler: ((data: any) => void) | null = null;
   private latestDetectedUpdateVersion: string | null = null;
+  private bootManifestSignature: string | null = null;
 
   constructor() {
     this.initSwUpdate();
@@ -179,6 +180,12 @@ export class PwaService {
           this.notifyAppUpdateAvailable(String(hash));
         });
 
+      if ((this.swUpdate as any).unrecoverable) {
+        (this.swUpdate as any).unrecoverable.subscribe(() => {
+          this.notifyAppUpdateAvailable('unrecoverable');
+        });
+      }
+
       if (typeof window !== 'undefined') {
         // 2. Startup check shortly after boot (catches new deployments when SW serves cached index.html)
         setTimeout(() => {
@@ -193,14 +200,16 @@ export class PwaService {
             this.checkForUpdate(false);
           }
         }, 15 * 60 * 1000);
-
-        // 4. Check for updates whenever returning to the tab / PWA
-        document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible') {
-            this.checkForUpdate(false);
-          }
-        });
       }
+    }
+
+    // 4. Always check for updates whenever returning to the tab / PWA window (even if SW controller is not attached yet)
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && this.isOnline()) {
+          this.checkForUpdate(false);
+        }
+      });
     }
   }
 
@@ -944,37 +953,107 @@ export class PwaService {
   }
 
   /**
-   * Directly fetches `/ngsw.json` bypassing browser/CDN cache and checks if the deployed
-   * `main-*.js` bundle hash differs from the currently running script in the DOM.
+   * Directly fetches `/ngsw.json` bypassing the Service Worker (`ngsw-bypass=true`) and browser/CDN cache,
+   * and checks if the deployed `main-*.js`, `styles-*.css`, or manifest signature differs from the running app.
    */
-  private async checkManifestBundleChanged(): Promise<boolean> {
-    if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+  private async checkManifestBundleChanged(timeoutMs = 3500): Promise<boolean> {
+    if (typeof window === 'undefined' || typeof document === 'undefined' || typeof fetch !== 'function') {
+      return false;
+    }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const res = await fetch(`/ngsw.json?ngsw-cache-bust=${Date.now()}`, {
+      const res = await fetch(`/ngsw.json?ngsw-bypass=true&ngsw-cache-bust=${Date.now()}`, {
         cache: 'no-store',
-        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
+        headers: {
+          'ngsw-bypass': 'true',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        },
+        signal: controller?.signal
       });
-      if (!res.ok) return false;
+      if (!res || !res.ok) return false;
       const manifest = await res.json();
       const appGroup = Array.isArray(manifest?.assetGroups)
         ? manifest.assetGroups.find((g: any) => g.name === 'app')
         : null;
       const urls: string[] = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
+
+      // 1. Compare main-*.js bundle hash against DOM <script src>
       const remoteMain = urls.find((u: string) => /\/main-[A-Za-z0-9]+\.js$/.test(u));
-      if (!remoteMain) return false;
-
-      const scripts = Array.from(document.querySelectorAll('script[src]'))
-        .map(s => s.getAttribute('src') || '');
-      const currentMain = scripts.find(src => /main-[A-Za-z0-9]+\.js/.test(src));
-      if (!currentMain) return false;
-
-      const remoteFilename = remoteMain.replace(/^\//, '');
-      const currentFilename = currentMain.split('/').pop() || '';
-      const changed = Boolean(remoteFilename && currentFilename && remoteFilename !== currentFilename);
-      if (changed) {
-        this.latestDetectedUpdateVersion = remoteFilename;
+      if (remoteMain) {
+        const scripts = Array.from(document.querySelectorAll('script[src]'))
+          .map(s => s.getAttribute('src') || '');
+        const currentMain = scripts.find(src => /main-[A-Za-z0-9]+\.js/.test(src));
+        if (currentMain) {
+          const remoteFilename = remoteMain.replace(/^\//, '');
+          const currentFilename = currentMain.split('/').pop() || '';
+          if (remoteFilename && currentFilename && remoteFilename !== currentFilename) {
+            this.latestDetectedUpdateVersion = remoteFilename;
+            return true;
+          }
+        }
       }
-      return changed;
+
+      // 2. Compare styles-*.css bundle hash against DOM <link rel="stylesheet" href>
+      const remoteStyles = urls.find((u: string) => /\/styles-[A-Za-z0-9]+\.css$/.test(u));
+      if (remoteStyles) {
+        const links = Array.from(document.querySelectorAll('link[rel="stylesheet"][href]'))
+          .map(l => l.getAttribute('href') || '');
+        const currentStyles = links.find(href => /styles-[A-Za-z0-9]+\.css/.test(href));
+        if (currentStyles) {
+          const remoteStyleFile = remoteStyles.replace(/^\//, '');
+          const currentStyleFile = currentStyles.split('/').pop()?.split('?')[0] || '';
+          if (remoteStyleFile && currentStyleFile && remoteStyleFile !== currentStyleFile) {
+            this.latestDetectedUpdateVersion = remoteStyleFile;
+            return true;
+          }
+        }
+      }
+
+      // 3. Compare manifest /index.html hash or timestamp across checks in the same session
+      const indexHash = manifest?.hashTable?.['/index.html'] || '';
+      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}`;
+      if (signature !== '||') {
+        if (this.bootManifestSignature === null) {
+          this.bootManifestSignature = signature;
+        } else if (this.bootManifestSignature !== signature) {
+          this.latestDetectedUpdateVersion = indexHash || String(manifest?.timestamp || Date.now());
+          return true;
+        }
+      }
+
+      return false;
+    } catch {
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Calls `swUpdate.checkForUpdate()` with a strict timeout and controller check.
+   * Angular's `NgswCommChannel` waits indefinitely if `navigator.serviceWorker.controller` is `null`
+   * (e.g. after a domain migration, cache clear, or hard reload) or if `ngsw-worker.js` is in `SAFE_MODE`.
+   */
+  private async checkSwUpdateWithTimeout(timeoutMs = 2500): Promise<boolean> {
+    if (!this.swUpdate?.isEnabled) {
+      return false;
+    }
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator && navigator.serviceWorker) {
+      if (!navigator.serviceWorker.controller) {
+        navigator.serviceWorker
+          .getRegistration()
+          .then(reg => reg?.update())
+          .catch(() => {});
+        return false;
+      }
+    }
+    try {
+      return await Promise.race([
+        this.swUpdate.checkForUpdate(),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), timeoutMs))
+      ]);
     } catch {
       return false;
     }
@@ -982,6 +1061,9 @@ export class PwaService {
 
   async checkForUpdate(interactive = true): Promise<boolean> {
     if (this.updateAvailable()) {
+      if (interactive) {
+        this.notifyAppUpdateAvailable(this.latestDetectedUpdateVersion || undefined);
+      }
       return true;
     }
 
@@ -990,19 +1072,11 @@ export class PwaService {
         this.checkingForUpdate.set(true);
       }
 
-      let hasUpdate = false;
-      if (this.swUpdate?.isEnabled) {
-        try {
-          hasUpdate = await this.swUpdate.checkForUpdate();
-        } catch {
-          hasUpdate = false;
-        }
-      }
-
-      const manifestChanged = await this.checkManifestBundleChanged();
-      if (manifestChanged) {
-        hasUpdate = true;
-      }
+      const [swDetected, manifestChanged] = await Promise.all([
+        this.checkSwUpdateWithTimeout(2500),
+        this.checkManifestBundleChanged(3500)
+      ]);
+      const hasUpdate = Boolean(swDetected || manifestChanged);
 
       if (hasUpdate) {
         this.notifyAppUpdateAvailable(this.latestDetectedUpdateVersion || undefined);
@@ -1024,18 +1098,21 @@ export class PwaService {
   }
 
   async activateUpdate(): Promise<void> {
-    if (!this.swUpdate?.isEnabled) {
-      await this.forceClearCacheAndReload();
-      return;
+    if (
+      this.swUpdate?.isEnabled &&
+      typeof navigator !== 'undefined' &&
+      navigator.serviceWorker?.controller
+    ) {
+      try {
+        await Promise.race([
+          this.swUpdate.activateUpdate(),
+          new Promise<void>(resolve => setTimeout(() => resolve(), 1500))
+        ]);
+      } catch (err) {
+        console.warn('Could not activate update via SwUpdate, clearing cache and reloading:', err);
+      }
     }
-
-    try {
-      await this.swUpdate.activateUpdate();
-    } catch (err) {
-      console.warn('Could not activate update via SwUpdate, clearing cache and reloading:', err);
-    } finally {
-      await this.forceClearCacheAndReload();
-    }
+    await this.forceClearCacheAndReload();
   }
 
   async forceClearCacheAndReload(): Promise<void> {

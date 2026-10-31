@@ -3550,14 +3550,24 @@ supported_games = minetest_game, voxelibre
 
       try {
         pwaService.updateAvailable.set(false);
-        const hasUpdate = await pwaService.checkForUpdate(false);
+        // Simulate hung SwUpdate when navigator.serviceWorker.controller is null after domain migration
+        const origSwUpdate = (pwaService as any).swUpdate;
+        (pwaService as any).swUpdate = {
+          isEnabled: true,
+          checkForUpdate: () => new Promise<boolean>(() => {}) // never resolves
+        };
+
+        const hasUpdate = await pwaService.checkForUpdate(true);
         expect(hasUpdate).toBe(true);
+        expect(pwaService.checkingForUpdate()).toBe(false);
         expect(pwaService.updateAvailable()).toBe(true);
         await new Promise(resolve => setTimeout(resolve, 25));
         expect(swCalls.length).toBe(2);
         expect(swCalls[1].title).toBe('LuantiHub Update Available');
         expect(swCalls[1].options?.tag).toBe('lh-app-update-main-NEWHASH2.js');
         expect(swCalls[1].options?.icon).toContain('/icons/notif-app-update.png');
+
+        (pwaService as any).swUpdate = origSwUpdate;
       } finally {
         globalThis.fetch = origFetch;
         mockScript.remove();
