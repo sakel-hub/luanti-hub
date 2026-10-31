@@ -67,14 +67,13 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       class="group relative flex flex-col h-full min-h-[352px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
 
       <!-- Thumbnail with True 16:9 Widescreen Aspect Ratio + Desktop Hover Video Preview -->
-      <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950 overflow-hidden [transform:translateZ(0)]">
+      <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950 overflow-hidden">
         <img
           [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
           [fallbackThumbnail]="package.thumbnail"
           appImgFallback
           [alt]="package.title"
           loading="lazy"
-          decoding="async"
           class="w-full h-full object-cover block"
         />
 
