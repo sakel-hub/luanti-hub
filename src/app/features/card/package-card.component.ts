@@ -561,11 +561,15 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onTagClick(event: MouseEvent, tag: string): void {
     event.stopPropagation();
-    this.packageService.setTagFilter(tag);
+    if (this.packageService.activePackage()) {
+      this.packageService.filterByTagFromModal(tag);
+    } else {
+      this.packageService.setTagFilter(tag);
+    }
   }
 
   onAuthorClick(event: MouseEvent): void {
     event.stopPropagation();
-    this.packageService.openAuthorDrawer(this.package.author, true, null);
+    this.packageService.openAuthorDrawer(this.package.author, true, this.packageService.activePackage());
   }
 }

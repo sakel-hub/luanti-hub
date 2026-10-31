@@ -3108,6 +3108,37 @@ supported_games = minetest_game, voxelibre
       expect(modalComp.similarPackages().length).toBe(4);
       const renderedCards = (modalFixture.nativeElement as HTMLElement).querySelectorAll('app-package-card');
       expect(renderedCards.length).toBe(4);
+
+      // Clicking the author button on a Similar Package card opens the Author Drawer and closing it restores the Package Detail Modal with its scroll position preserved
+      const scrollContainer = (modalComp as any).modalScrollContainerRef?.nativeElement as HTMLElement;
+      expect(scrollContainer).toBeTruthy();
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 640, writable: true, configurable: true });
+      modalComp.onModalContainerScroll();
+
+      const firstSimCardAuthorBtn = renderedCards[0].querySelector('button[aria-label*="View Author Profile"]') as HTMLButtonElement;
+      expect(firstSimCardAuthorBtn).toBeTruthy();
+      firstSimCardAuthorBtn.click();
+      modalFixture.destroy();
+      expect(pkgService.activeAuthorUsername()).toBeTruthy();
+      expect(pkgService.activePackage()).toBeNull();
+
+      pkgService.closeAuthorDrawer(false, true);
+      expect(pkgService.activeAuthorUsername()).toBeNull();
+      expect(pkgService.activePackage()?.id).toBe(viewedPkg.id);
+
+      // Re-opening the Package Detail Modal restores the saved scrollTop, Similar Packages visibility, active tab, and release page
+      const reopenedModalFixture = TestBed.createComponent(PackageDetailModalComponent);
+      const reopenedModalComp = reopenedModalFixture.componentInstance;
+      reopenedModalComp.package = viewedPkg;
+      reopenedModalFixture.detectChanges();
+      const reopenedScrollContainer = (reopenedModalComp as any).modalScrollContainerRef?.nativeElement as HTMLElement;
+      expect(reopenedScrollContainer).toBeTruthy();
+      Object.defineProperty(reopenedScrollContainer, 'scrollTop', { value: 0, writable: true, configurable: true });
+      reopenedModalComp.ngAfterViewInit();
+      expect(reopenedModalComp.isSimilarNearViewport()).toBe(true);
+      expect(reopenedModalComp.activeTab()).toBe('releases');
+      expect(reopenedModalComp.releasesPage()).toBe(2);
+      expect(reopenedScrollContainer.scrollTop).toBe(640);
     } finally {
       (globalThis as any).IntersectionObserver = origIO;
     }

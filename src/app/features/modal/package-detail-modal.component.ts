@@ -575,7 +575,7 @@ import {
                     @if (mediaSlides().length > 1) {
                       <div
                         #mediaThumbStrip
-                        class="flex items-center gap-2.5 overflow-x-auto no-scrollbar pb-1 pt-0.5 scroll-smooth">
+                        class="flex items-center gap-3 overflow-x-auto no-scrollbar p-1 -mx-1 scroll-smooth">
                         @for (slide of mediaSlides(); track slide.url; let idx = $index) {
                           <button
                             type="button"
@@ -2094,7 +2094,41 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return this.package.banner || this.package.thumbnail || 'logo.svg';
   }
 
+  private static readonly savedViewStateByPkg = new Map<string, {
+    scrollTop: number;
+    isSimilarNearViewport: boolean;
+    activeTab: 'reviews' | 'releases' | 'compliance';
+    releasesPage: number;
+  }>();
+
   private loadedPackageKey = '';
+  private lastKnownScrollTop = 0;
+
+  private persistCurrentViewState(): void {
+    if (!this.loadedPackageKey) return;
+    PackageDetailModalComponent.savedViewStateByPkg.set(this.loadedPackageKey, {
+      scrollTop: this.lastKnownScrollTop,
+      isSimilarNearViewport: this.isSimilarNearViewport(),
+      activeTab: this.activeTab(),
+      releasesPage: this.releasesPage()
+    });
+  }
+
+  private restoreSavedScrollPosition(targetScrollTop: number): void {
+    this.lastKnownScrollTop = targetScrollTop;
+    const applyScroll = () => {
+      const scrollEl = this.modalScrollContainerRef?.nativeElement;
+      if (scrollEl && targetScrollTop > 0) {
+        scrollEl.scrollTop = targetScrollTop;
+      }
+    };
+    applyScroll();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => applyScroll());
+    }
+    setTimeout(() => applyScroll(), 0);
+    setTimeout(() => applyScroll(), 60);
+  }
 
   ngOnInit(): void {
     this.packageService.registerModalSubOverlayCloser(() => {
@@ -2124,25 +2158,38 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   ngAfterViewInit(): void {
+    const savedState = this.loadedPackageKey
+      ? PackageDetailModalComponent.savedViewStateByPkg.get(this.loadedPackageKey)
+      : undefined;
+    if (savedState && savedState.scrollTop > 0) {
+      this.restoreSavedScrollPosition(savedState.scrollTop);
+    }
     this.setupSimilarIntersectionObserver();
   }
 
   ngOnDestroy(): void {
+    this.persistCurrentViewState();
     this.disconnectSimilarObserver();
     this.packageService.registerModalSubOverlayCloser(null);
   }
 
   prevReleasesPage(): void {
     this.releasesPage.update(p => Math.max(1, p - 1));
+    this.persistCurrentViewState();
   }
 
   nextReleasesPage(): void {
     this.releasesPage.update(p => Math.min(this.totalReleasePages(), p + 1));
+    this.persistCurrentViewState();
   }
 
   onModalContainerScroll(): void {
-    if (this.isSimilarNearViewport()) return;
     const container = this.modalScrollContainerRef?.nativeElement;
+    if (container) {
+      this.lastKnownScrollTop = container.scrollTop;
+      this.persistCurrentViewState();
+    }
+    if (this.isSimilarNearViewport()) return;
     const sentinel = this.similarSentinelRef?.nativeElement;
     if (!container || !sentinel) return;
     const containerRect = container.getBoundingClientRect();
@@ -2190,6 +2237,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   triggerSimilarPackagesLoad(): void {
     if (this.isSimilarNearViewport()) return;
     this.isSimilarNearViewport.set(true);
+    this.persistCurrentViewState();
     this.disconnectSimilarObserver();
     const recs = this.similarPackages();
     if (recs.length > 0) {
@@ -2219,16 +2267,27 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const key = (this.package.id || `${resolvedAuthor}/${this.package.name}`).toLowerCase();
     if (this.loadedPackageKey === key) return;
     const isSwitchingPackage = Boolean(this.loadedPackageKey && this.loadedPackageKey !== key);
+    if (isSwitchingPackage) {
+      this.persistCurrentViewState();
+    }
     this.loadedPackageKey = key;
     this.activeBannerUrl.set(null);
     this.mediaCarouselIndex.set(0);
     this.isVideoPlaying.set(false);
     this.lightboxImageUrl.set(null);
     this.isLightboxZoomed.set(false);
-    this.releasesPage.set(1);
 
-    if (isSwitchingPackage) {
+    const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
+    if (savedState) {
+      this.isSimilarNearViewport.set(savedState.isSimilarNearViewport);
+      this.activeTab.set(savedState.activeTab);
+      this.releasesPage.set(savedState.releasesPage);
+      this.restoreSavedScrollPosition(savedState.scrollTop);
+    } else if (isSwitchingPackage) {
+      this.lastKnownScrollTop = 0;
       this.isSimilarNearViewport.set(false);
+      this.activeTab.set('reviews');
+      this.releasesPage.set(1);
       const scrollEl = this.modalScrollContainerRef?.nativeElement;
       if (scrollEl) {
         if (typeof scrollEl.scrollTo === 'function') {
@@ -2244,8 +2303,18 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
-    this.packageService.fetchReviews(this.package, false).then(res => this.reviews.set(res));
-    this.packageService.fetchPackageReleases(this.package).then(res => this.releases.set(res));
+    this.packageService.fetchReviews(this.package, false).then(res => {
+      this.reviews.set(res);
+      if (savedState && savedState.scrollTop > 0) {
+        this.restoreSavedScrollPosition(savedState.scrollTop);
+      }
+    });
+    this.packageService.fetchPackageReleases(this.package).then(res => {
+      this.releases.set(res);
+      if (savedState && savedState.scrollTop > 0) {
+        this.restoreSavedScrollPosition(savedState.scrollTop);
+      }
+    });
   }
 
   isDirectVideoUrl(url?: string): boolean {
