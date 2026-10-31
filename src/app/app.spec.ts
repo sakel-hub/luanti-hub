@@ -3404,4 +3404,169 @@ supported_games = minetest_game, voxelibre
     chartComp.setSeriesMode('source');
     expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['source_contentdb', 'source_luantihub']);
   });
+
+  it('should select custom badged LuantiHub icons per notification variant and await ServiceWorker ready when installing', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    localStorage.removeItem('lh_seen_notification_tags');
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyModeration.set(true);
+    settingsService.notifyAdminQueue.set(true);
+    settingsService.notifyAppUpdates.set(true);
+    settingsService.notifyNewGitPackages.set(true);
+
+    // 1. Verify variant icon mapping for all 6 notification types
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'Issue Resolved · SaKeL/everness',
+        body: 'Resolved',
+        tag: 't1',
+        category: 'moderation',
+        variant: 'resolved'
+      })
+    ).toBe('/icons/notif-resolved.png');
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'Report Dismissed · SaKeL/everness',
+        body: 'Dismissed',
+        tag: 't2',
+        category: 'moderation'
+      })
+    ).toBe('/icons/notif-dismissed.png');
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'Moderation Update · SaKeL/everness',
+        body: 'Updated',
+        tag: 't3',
+        category: 'moderation'
+      })
+    ).toBe('/icons/notif-moderation.png');
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'New Moderation Report · SaKeL/everness',
+        body: 'Admin alert',
+        tag: 't4',
+        category: 'admin_queue',
+        variant: 'admin_queue'
+      })
+    ).toBe('/icons/notif-admin-alert.png');
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'LuantiHub Update Available',
+        body: 'Update ready',
+        tag: 't5',
+        category: 'app_update',
+        variant: 'app_update'
+      })
+    ).toBe('/icons/notif-app-update.png');
+
+    expect(
+      pwaService.getNotificationVariantIconPath({
+        title: 'New Git Package · [MOD] Everness',
+        body: 'New package',
+        tag: 't6',
+        category: 'new_git_package',
+        variant: 'new_git_package'
+      })
+    ).toBe('/icons/notif-new-package.png');
+
+    // 2. Verify sendNativeNotification awaits navigator.serviceWorker.ready when SW is installing
+    const swCalls: Array<{ title: string; options?: NotificationOptions }> = [];
+    const fallbackCalls: Array<{ title: string; options?: NotificationOptions }> = [];
+    const origNotification = (window as any).Notification;
+    const origSwDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+
+    class MockNotification {
+      static permission: NotificationPermission = 'granted';
+      onclick: (() => void) | null = null;
+      constructor(public title: string, public options?: NotificationOptions) {
+        fallbackCalls.push({ title, options });
+      }
+      close(): void {}
+    }
+    (window as any).Notification = MockNotification;
+
+    const activeReg = {
+      active: { state: 'activated' },
+      installing: null,
+      waiting: null,
+      showNotification: async (title: string, options?: NotificationOptions) => {
+        swCalls.push({ title, options });
+      }
+    };
+    const installingReg = {
+      active: null,
+      installing: { state: 'installing' },
+      waiting: null,
+      showNotification: async () => {
+        throw new TypeError('No active service worker');
+      }
+    };
+
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        getRegistration: async () => installingReg,
+        ready: new Promise(resolve => setTimeout(() => resolve(activeReg), 15))
+      }
+    });
+
+    try {
+      const sent = await pwaService.sendNativeNotification({
+        title: 'Report Dismissed · SaKeL/everness',
+        body: 'Bulk dismissed automated 404 reports.',
+        tag: 'lh-test-sw-ready-dismissed',
+        category: 'moderation',
+        variant: 'dismissed'
+      });
+      expect(sent).toBe(true);
+      expect(swCalls.length).toBe(1);
+      expect(swCalls[0].options?.icon).toContain('/icons/notif-dismissed.png');
+      expect(fallbackCalls.length).toBe(0);
+
+      // 3. Verify checkForUpdate(false) fires the native "LuantiHub Update Available" notification
+      // with /icons/notif-app-update.png when /ngsw.json has a newer main-*.js bundle
+      const mockScript = document.createElement('script');
+      mockScript.setAttribute('src', 'main-OLDHASH1.js');
+      document.body.appendChild(mockScript);
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url.includes('/ngsw.json')) {
+          return new Response(
+            JSON.stringify({
+              assetGroups: [{ name: 'app', urls: ['/index.html', '/main-NEWHASH2.js'] }]
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response('', { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        pwaService.updateAvailable.set(false);
+        const hasUpdate = await pwaService.checkForUpdate(false);
+        expect(hasUpdate).toBe(true);
+        expect(pwaService.updateAvailable()).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        expect(swCalls.length).toBe(2);
+        expect(swCalls[1].title).toBe('LuantiHub Update Available');
+        expect(swCalls[1].options?.tag).toBe('lh-app-update-main-NEWHASH2.js');
+        expect(swCalls[1].options?.icon).toContain('/icons/notif-app-update.png');
+      } finally {
+        globalThis.fetch = origFetch;
+        mockScript.remove();
+      }
+    } finally {
+      (window as any).Notification = origNotification;
+      if (origSwDescriptor) {
+        Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
+      }
+    }
+  });
 });

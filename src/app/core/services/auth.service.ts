@@ -824,6 +824,11 @@ export class AuthService {
           body,
           tag,
           category: 'moderation',
+          variant: alert.status === 'resolved'
+            ? 'resolved'
+            : alert.status === 'dismissed'
+              ? 'dismissed'
+              : 'moderation',
           data: {
             targetTab: 'account',
             packageId: alert.package_id,
@@ -841,6 +846,7 @@ export class AuthService {
           body: `[${String(rep.reason || 'other').toUpperCase()}] ${rep.details || 'Requires moderator review.'}`,
           tag,
           category: 'admin_queue',
+          variant: 'admin_queue',
           data: {
             targetTab: 'moderation',
             packageId: rep.package_id,

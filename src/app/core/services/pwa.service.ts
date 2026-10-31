@@ -3,11 +3,20 @@ import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
 
+export type NotificationVariant =
+  | 'resolved'
+  | 'dismissed'
+  | 'moderation'
+  | 'admin_queue'
+  | 'app_update'
+  | 'new_git_package';
+
 export interface NativeNotificationPayload {
   title: string;
   body: string;
   tag: string;
   category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package';
+  variant?: NotificationVariant;
   icon?: string;
   image?: string;
   data?: {
@@ -42,6 +51,7 @@ export class PwaService {
   private deferredPrompt: any = null;
   private messageClearTimer: any = null;
   private notificationClickHandler: ((data: any) => void) | null = null;
+  private latestDetectedUpdateVersion: string | null = null;
 
   constructor() {
     this.initSwUpdate();
@@ -144,33 +154,47 @@ export class PwaService {
     }
   }
 
+  private notifyAppUpdateAvailable(versionIdentifier?: string): void {
+    this.updateAvailable.set(true);
+    this.statusMessage.set(null);
+    const versionKey = String(versionIdentifier || this.latestDetectedUpdateVersion || 'ready').trim();
+    this.latestDetectedUpdateVersion = versionKey;
+    this.sendNativeNotification({
+      title: 'LuantiHub Update Available',
+      body: 'A new version of LuantiHub is ready. Click to reload with the latest features.',
+      tag: `lh-app-update-${versionKey}`,
+      category: 'app_update',
+      variant: 'app_update',
+      data: { action: 'reload_update' }
+    });
+  }
+
   private initSwUpdate(): void {
     if (this.swUpdate?.isEnabled) {
       // 1. Listen for version ready
       this.swUpdate.versionUpdates
         .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
         .subscribe((evt) => {
-          this.updateAvailable.set(true);
-          this.statusMessage.set(null);
-          const hash = (evt as any).latestVersion?.hash || Date.now();
-          this.sendNativeNotification({
-            title: 'LuantiHub Update Available',
-            body: 'A new version of LuantiHub is ready. Click to reload with the latest features.',
-            tag: `lh-app-update-${hash}`,
-            category: 'app_update',
-            data: { action: 'reload_update' }
-          });
+          const hash = (evt as any).latestVersion?.hash || this.latestDetectedUpdateVersion || Date.now();
+          this.notifyAppUpdateAvailable(String(hash));
         });
 
-      // 2. Periodic background check every 30 minutes
       if (typeof window !== 'undefined') {
-        setInterval(() => {
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        // 2. Startup check shortly after boot (catches new deployments when SW serves cached index.html)
+        setTimeout(() => {
+          if (this.isOnline()) {
             this.checkForUpdate(false);
           }
-        }, 30 * 60 * 1000);
+        }, 5000);
 
-        // 3. Check for updates whenever returning to the tab / PWA
+        // 3. Periodic background check every 15 minutes (including backgrounded PWA windows)
+        setInterval(() => {
+          if (this.isOnline()) {
+            this.checkForUpdate(false);
+          }
+        }, 15 * 60 * 1000);
+
+        // 4. Check for updates whenever returning to the tab / PWA
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'visible') {
             this.checkForUpdate(false);
@@ -531,6 +555,7 @@ export class PwaService {
         image: thumb,
         tag: `lh-new-git-pkg-${resolvedId.toLowerCase()}`,
         category: 'new_git_package',
+        variant: 'new_git_package',
         data: {
           packageId: resolvedId
         }
@@ -627,6 +652,169 @@ export class PwaService {
     }
   }
 
+  /**
+   * Resolves the semantic custom badged LuantiHub icon path (`/icons/notif-*.png`)
+   * for a notification based on its `variant`, `category`, and `title`.
+   */
+  getNotificationVariantIconPath(payload: NativeNotificationPayload): string {
+    const variant: NotificationVariant =
+      payload.variant ||
+      (payload.category === 'moderation'
+        ? /^issue resolved/i.test(payload.title || '')
+          ? 'resolved'
+          : /^report dismissed/i.test(payload.title || '')
+            ? 'dismissed'
+            : 'moderation'
+        : payload.category);
+
+    switch (variant) {
+      case 'resolved':
+        return '/icons/notif-resolved.png';
+      case 'dismissed':
+        return '/icons/notif-dismissed.png';
+      case 'moderation':
+        return '/icons/notif-moderation.png';
+      case 'admin_queue':
+        return '/icons/notif-admin-alert.png';
+      case 'app_update':
+        return '/icons/notif-app-update.png';
+      case 'new_git_package':
+        return '/icons/notif-new-package.png';
+      default:
+        return '/icons/icon-192x192.png';
+    }
+  }
+
+  private loadImageElement(src: string, timeoutMs = 450): Promise<HTMLImageElement | null> {
+    if (typeof Image === 'undefined') {
+      return Promise.resolve(null);
+    }
+    return new Promise(resolve => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }, timeoutMs);
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(img.naturalWidth > 0 ? img : null);
+          }
+        };
+        img.onerror = () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(null);
+          }
+        };
+        img.src = src;
+      } catch {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      }
+    });
+  }
+
+  /**
+   * Composites a package thumbnail (`data:image/...`) with the LuantiHub voxel logo badge
+   * in the bottom-right corner on a 192×192 `<canvas>` so that even package-thumbnail
+   * notifications retain the LuantiHub PWA logo on macOS.
+   */
+  private async compositeThumbnailWithPwaBadge(
+    thumbnailDataUrl: string,
+    origin: string
+  ): Promise<string> {
+    if (typeof document === 'undefined') return thumbnailDataUrl;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 192;
+      canvas.height = 192;
+      const ctx = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
+      if (!ctx) return thumbnailDataUrl;
+
+      const [thumbImg, badgeImg] = await Promise.all([
+        this.loadImageElement(thumbnailDataUrl, 450),
+        this.loadImageElement(`${origin}/icons/icon-72x72.png`, 450)
+      ]);
+      if (!thumbImg) return thumbnailDataUrl;
+
+      // Center-crop package thumbnail into 192×192
+      const sw = thumbImg.naturalWidth || 192;
+      const sh = thumbImg.naturalHeight || 192;
+      const side = Math.min(sw, sh);
+      const sx = Math.max(0, Math.floor((sw - side) / 2));
+      const sy = Math.max(0, Math.floor((sh - side) / 2));
+      ctx.drawImage(thumbImg, sx, sy, side, side, 0, 0, 192, 192);
+
+      // Draw dark circular backing + LuantiHub voxel badge in bottom-right corner
+      if (badgeImg) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(150, 150, 38, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.92)';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(139, 92, 246, 0.9)';
+        ctx.stroke();
+        ctx.drawImage(badgeImg, 118, 118, 64, 64);
+        ctx.restore();
+      }
+
+      const out = canvas.toDataURL('image/png');
+      return out && out.startsWith('data:image/png') ? out : thumbnailDataUrl;
+    } catch {
+      return thumbnailDataUrl;
+    }
+  }
+
+  /**
+   * Resolves the active ServiceWorkerRegistration. If the Service Worker is currently
+   * installing or waiting on initial page load, waits up to `timeoutMs` for
+   * `navigator.serviceWorker.ready` so notifications are dispatched as persistent
+   * Service Worker notifications (`reg.showNotification`) eligible for macOS PWA App Shim attribution.
+   */
+  private async resolveActiveSwRegistration(
+    timeoutMs = 2500
+  ): Promise<ServiceWorkerRegistration | null> {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator) || !navigator.serviceWorker) {
+      return null;
+    }
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) return null;
+
+      // If active worker is ready (or a test mock registration without installing/waiting state), return immediately
+      if (reg.active || (!reg.installing && !reg.waiting)) {
+        return typeof reg.showNotification === 'function' ? reg : null;
+      }
+
+      // Worker is actively installing/waiting: wait for navigator.serviceWorker.ready with a bounded timeout
+      const readyPromise = navigator.serviceWorker.ready;
+      if (readyPromise && typeof readyPromise.then === 'function') {
+        const readyReg = await Promise.race([
+          readyPromise,
+          new Promise<null>(resolve => setTimeout(() => resolve(null), timeoutMs))
+        ]);
+        if (readyReg && typeof readyReg.showNotification === 'function') {
+          return readyReg;
+        }
+      }
+      return reg.active && typeof reg.showNotification === 'function' ? reg : null;
+    } catch {
+      return null;
+    }
+  }
+
   async sendNativeNotification(payload: NativeNotificationPayload): Promise<boolean> {
     if (!payload?.tag || !this.isCategoryEnabled(payload.category)) {
       return false;
@@ -645,7 +833,8 @@ export class PwaService {
     this.markNotificationTagSeen(payload.tag);
 
     const origin = window.location?.origin || '';
-    const defaultAppIcon = `${origin}/icons/icon-192x192.png`;
+    const variantIconPath = this.getNotificationVariantIconPath(payload);
+    const defaultAppIcon = `${origin}${variantIconPath}`;
     const defaultAppBadge = `${origin}/icons/icon-72x72.png`;
     const rawCandidate = (payload.icon || payload.image || '').trim();
 
@@ -659,7 +848,7 @@ export class PwaService {
       !rawCandidate.toLowerCase().endsWith('.svg')
     ) {
       if (rawCandidate.startsWith('data:image/')) {
-        resolvedIcon = rawCandidate;
+        resolvedIcon = await this.compositeThumbnailWithPwaBadge(rawCandidate, origin);
         resolvedImage = rawCandidate;
       } else if (rawCandidate.startsWith('/')) {
         resolvedIcon = `${origin}${rawCandidate}`;
@@ -668,7 +857,7 @@ export class PwaService {
       } else if (/^https?:\/\//i.test(rawCandidate)) {
         const dataUrl = await this.resolveCorsSafeNotificationImage(rawCandidate, origin);
         if (dataUrl) {
-          resolvedIcon = dataUrl;
+          resolvedIcon = await this.compositeThumbnailWithPwaBadge(dataUrl, origin);
           resolvedImage = dataUrl;
         }
       }
@@ -687,11 +876,13 @@ export class PwaService {
     }
 
     try {
-      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg && typeof reg.showNotification === 'function') {
+      const reg = await this.resolveActiveSwRegistration();
+      if (reg && typeof reg.showNotification === 'function') {
+        try {
           await reg.showNotification(payload.title, options);
           return true;
+        } catch {
+          // Fall through to window.Notification if SW showNotification rejects
         }
       }
 
@@ -779,7 +970,11 @@ export class PwaService {
 
       const remoteFilename = remoteMain.replace(/^\//, '');
       const currentFilename = currentMain.split('/').pop() || '';
-      return Boolean(remoteFilename && currentFilename && remoteFilename !== currentFilename);
+      const changed = Boolean(remoteFilename && currentFilename && remoteFilename !== currentFilename);
+      if (changed) {
+        this.latestDetectedUpdateVersion = remoteFilename;
+      }
+      return changed;
     } catch {
       return false;
     }
@@ -804,13 +999,13 @@ export class PwaService {
         }
       }
 
-      if (!hasUpdate) {
-        hasUpdate = await this.checkManifestBundleChanged();
+      const manifestChanged = await this.checkManifestBundleChanged();
+      if (manifestChanged) {
+        hasUpdate = true;
       }
 
       if (hasUpdate) {
-        this.updateAvailable.set(true);
-        this.statusMessage.set(null);
+        this.notifyAppUpdateAvailable(this.latestDetectedUpdateVersion || undefined);
       } else if (interactive) {
         this.showToast('pwa.upToDate');
       }
