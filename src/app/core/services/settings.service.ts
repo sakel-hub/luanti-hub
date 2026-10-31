@@ -5,9 +5,11 @@ import { Injectable, signal, effect } from '@angular/core';
 })
 export class SettingsService {
   readonly contentDbUrl = signal<string>(
-    typeof window !== 'undefined' && window.location?.origin
+    typeof window !== 'undefined' &&
+      window.location?.origin &&
+      !window.location.origin.includes('luanti-hub.pages.dev')
       ? window.location.origin
-      : 'https://luanti-hub.pages.dev'
+      : 'https://luantihub.org'
   );
   readonly preferredEngine = signal<string>('5.9.0');
   readonly favorites = signal<string[]>([]);
@@ -60,7 +62,9 @@ export class SettingsService {
       this.clientId.set(savedClient);
 
       const savedUrl = localStorage.getItem('lh_contentdb_url');
-      if (savedUrl) this.contentDbUrl.set(savedUrl);
+      if (savedUrl && !savedUrl.includes('luanti-hub.pages.dev')) {
+        this.contentDbUrl.set(savedUrl);
+      }
 
       const savedEngine = localStorage.getItem('lh_preferred_engine');
       if (savedEngine) this.preferredEngine.set(savedEngine);

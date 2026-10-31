@@ -55,8 +55,8 @@ function isSameHostOrigin(headerValue: string | null, requestHost: string): bool
   if (!headerValue) return true;
   try {
     const parsed = new URL(headerValue);
-    const originHost = parsed.hostname.toLowerCase();
-    const targetHost = requestHost.split(':')[0].toLowerCase();
+    const originHost = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const targetHost = requestHost.split(':')[0].toLowerCase().replace(/^www\./, '');
     if (originHost === targetHost) return true;
     if (
       (originHost === 'localhost' || originHost === '127.0.0.1') &&

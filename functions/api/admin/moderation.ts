@@ -65,7 +65,7 @@ async function probePackageGitOnline(
         method: 'HEAD',
         redirect: 'follow',
         headers: {
-          'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+          'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
         }
       });
       if (res.ok) {
@@ -76,7 +76,7 @@ async function probePackageGitOnline(
           method: 'GET',
           redirect: 'follow',
           headers: {
-            'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+            'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
           }
         });
         if (getRes.ok) {

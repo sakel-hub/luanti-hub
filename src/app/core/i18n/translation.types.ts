@@ -231,6 +231,7 @@ export interface TranslationDictionary {
     similarPackagesSubtitle: string;
     latestRelease: string;
     showingLatestReleases: string;
+    tabAnalytics: string;
   };
   auth: {
     title: string;
@@ -475,6 +476,7 @@ export interface TranslationDictionary {
     safeHarborDetail: string;
     legalSafeHarbor: string;
     legalPrivacy: string;
+    copyright: string;
   };
   author: {
     viewProfile: string;
@@ -494,6 +496,52 @@ export interface TranslationDictionary {
     editMyBio: string;
     viewPublicProfile: string;
   };
+  analytics: {
+    openDashboardBtn: string;
+    dashboardTitle: string;
+    dashboardSubtitle: string;
+    backToStore: string;
+    inspectAuthorPlaceholder: string;
+    inspectBtn: string;
+    restrictedTitle: string;
+    restrictedDesc: string;
+    scopeLabel: string;
+    allPackages: string;
+    byReason: string;
+    byPlatform: string;
+    bySource: string;
+    byPackage: string;
+    styleArea: string;
+    styleBar: string;
+    exportCsv: string;
+    expandFullPage: string;
+    loadingStats: string;
+    periodDownloads: string;
+    perDayAvg: string;
+    primaryDriver: string;
+    downloadsInPeriod: string;
+    clientPlatformRatio: string;
+    platformLuanti: string;
+    platformWeb: string;
+    inGame: string;
+    web: string;
+    viewsAndConversion: string;
+    converted: string;
+    inGameViews: string;
+    webViews: string;
+    timelineTitle: string;
+    reasonBreakdownTitle: string;
+    reasonNew: string;
+    reasonNewDesc: string;
+    reasonUpdate: string;
+    reasonUpdateDesc: string;
+    reasonDependency: string;
+    reasonDependencyDesc: string;
+    reasonWeb: string;
+    reasonWebDesc: string;
+    packageBreakdownTitle: string;
+    clickPackageToFilter: string;
+  };
 }
 
 export type TranslationKey =
@@ -510,4 +558,5 @@ export type TranslationKey =
   | `pwa.${keyof TranslationDictionary['pwa']}`
   | `common.${keyof TranslationDictionary['common']}`
   | `footer.${keyof TranslationDictionary['footer']}`
-  | `author.${keyof TranslationDictionary['author']}`;
+  | `author.${keyof TranslationDictionary['author']}`
+  | `analytics.${keyof TranslationDictionary['analytics']}`;

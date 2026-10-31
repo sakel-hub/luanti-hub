@@ -146,12 +146,43 @@ export async function onRequest(context: {
       const shouldWrite = await shouldRecordDownloadWrite(request, effectivePkgId);
       if (shouldWrite) {
         await ensureExtendedPackageColumns(env.DB);
+        const parsedReqUrl = new URL(request.url, 'https://luantihub.local');
+        const rawReason = (parsedReqUrl.searchParams.get('reason') || '').trim().toLowerCase();
+        const ua = (request.headers.get('User-Agent') || '').trim();
+        const isEngineUa = /^(?:luanti|minetest)\b/i.test(ua);
+        const isEngineReason = rawReason === 'new' || rawReason === 'update' || rawReason === 'dependency';
+        const platformLuanti = isEngineUa || isEngineReason ? 1 : 0;
+        const platformWeb = platformLuanti ? 0 : 1;
+        const reasonNew = rawReason === 'new' ? 1 : 0;
+        const reasonUpdate = rawReason === 'update' ? 1 : 0;
+        const reasonDependency = rawReason === 'dependency' ? 1 : 0;
+        const reasonWeb = isEngineReason ? 0 : 1;
+
         await env.DB.prepare(`
-          INSERT INTO package_daily_downloads (package_id, download_date, downloads_count)
-          VALUES (?, DATE('now'), 1)
+          INSERT INTO package_daily_downloads (
+            package_id, download_date, downloads_count,
+            platform_luanti, platform_web,
+            reason_new, reason_update, reason_dependency, reason_web
+          )
+          VALUES (?, DATE('now'), 1, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(package_id, download_date)
-          DO UPDATE SET downloads_count = downloads_count + 1
-        `).bind(effectivePkgId).run();
+          DO UPDATE SET
+            downloads_count = downloads_count + 1,
+            platform_luanti = COALESCE(platform_luanti, 0) + excluded.platform_luanti,
+            platform_web = COALESCE(platform_web, 0) + excluded.platform_web,
+            reason_new = COALESCE(reason_new, 0) + excluded.reason_new,
+            reason_update = COALESCE(reason_update, 0) + excluded.reason_update,
+            reason_dependency = COALESCE(reason_dependency, 0) + excluded.reason_dependency,
+            reason_web = COALESCE(reason_web, 0) + excluded.reason_web
+        `).bind(
+          effectivePkgId,
+          platformLuanti,
+          platformWeb,
+          reasonNew,
+          reasonUpdate,
+          reasonDependency,
+          reasonWeb
+        ).run();
 
         await env.DB.prepare(`
           UPDATE packages
@@ -504,7 +535,7 @@ export async function onRequest(context: {
         redirect: 'follow',
         signal: ctrl.signal,
         headers: {
-          'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luanti-hub.pages.dev)',
+          'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luantihub.org)',
           'Accept': 'application/zip, application/octet-stream, */*'
         }
       });

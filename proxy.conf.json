@@ -1,12 +1,12 @@
 {
   "/api": {
-    "target": "https://luanti-hub.pages.dev",
+    "target": "https://luantihub.org",
     "secure": true,
     "changeOrigin": true,
     "logLevel": "info",
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
     }
   },
   "/mirror-api": {
@@ -18,7 +18,7 @@
     },
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
     }
   },
   "/cdb-api": {
@@ -30,7 +30,7 @@
     },
     "headers": {
       "Accept": "application/json",
-      "User-Agent": "LuantiHub/1.0 (+https://luanti-hub.pages.dev)"
+      "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
     }
   }
 }

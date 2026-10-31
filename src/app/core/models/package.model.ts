@@ -222,3 +222,63 @@ export interface ModerationReport {
   package_name?: string;
   package_status?: 'active' | 'flagged' | 'delisted';
 }
+
+export interface AnalyticsSummary {
+  periodDownloads: number;
+  prevPeriodDownloads: number;
+  trendPercent: number;
+  avgPerDay: number;
+  totalViews: number;
+  viewsLuanti: number;
+  viewsWeb: number;
+  conversionRatePercent: number;
+  reasonsTotal: {
+    new: number;
+    update: number;
+    dependency: number;
+    web: number;
+  };
+  platformsTotal: {
+    luanti: number;
+    web: number;
+  };
+  sourcesTotal: {
+    contentdb: number;
+    luantihub: number;
+  };
+}
+
+export interface AuthorPackageBreakdownItem {
+  id: string;
+  author: string;
+  name: string;
+  title: string;
+  type: string;
+  totalPeriodDownloads: number;
+  sharePercent: number;
+  daily: number[];
+}
+
+export interface DownloadAnalyticsData {
+  package_id?: string;
+  username?: string;
+  author?: string;
+  name?: string;
+  title?: string;
+  days: number;
+  dates: string[];
+  total: number[];
+  source_contentdb: number[];
+  source_luantihub: number[];
+  platform_luanti: number[];
+  platform_web: number[];
+  reason_new: number[];
+  reason_update: number[];
+  reason_dependency: number[];
+  reason_web: number[];
+  views_luanti: number[];
+  views_web: number[];
+  package_breakdown?: AuthorPackageBreakdownItem[];
+  summary: AnalyticsSummary;
+}
+

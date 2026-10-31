@@ -15,7 +15,7 @@ export class SeoService {
     'Luanti Hub (LuantiHub) – Mods & Packages for Luanti (Minetest)';
   private readonly defaultDesc =
     'Luanti Hub (LuantiHub) is the open package registry and mod repository for Luanti (Minetest). Discover, search, and download mods, games, and texture packs directly from Git repositories and ContentDB with instant failover.';
-  private readonly baseUrl = 'https://luanti-hub.pages.dev';
+  private readonly baseUrl = 'https://luantihub.org';
 
   updateForPackage(pkg: LuantiPackage): void {
     const typeLabel =

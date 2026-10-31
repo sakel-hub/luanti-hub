@@ -11,7 +11,9 @@ import {
   GitAuditReport,
   ContentDbTag,
   PublicAuthorProfile,
-  UserIdentity
+  UserIdentity,
+  DownloadAnalyticsData,
+  AuthorPackageBreakdownItem
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService } from './pwa.service';
@@ -1025,7 +1027,7 @@ export class PackageService {
     if (typeof window === 'undefined') return;
 
     // 1. Web App Launch Handler API (`window.launchQueue`) for installed PWAs
-    // When the OS/browser captures a shared link (`https://luanti-hub.pages.dev/package/:author/:name`)
+    // When the OS/browser captures a shared link (`https://luantihub.org/package/:author/:name`)
     // and launches or focuses the existing standalone PWA window, route directly to that package modal.
     try {
       const launchQueue = (window as any).launchQueue;
@@ -1104,6 +1106,7 @@ export class PackageService {
       path.startsWith('/package/') ||
       path.startsWith('/packages/') ||
       path.startsWith('/author/') ||
+      path.startsWith('/analytics') ||
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
@@ -1206,6 +1209,15 @@ export class PackageService {
       this._isLegalModalOpen.set(false);
       this.authService.openProfileDrawer(false);
       this.seoService?.updateStaticRoute('Creator Profile', 'Manage your Luanti Hub packages, favorites, and connected identities.', '/profile');
+      return;
+    } else if (path.startsWith('/analytics')) {
+      this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
+      this._isSubmitModalOpen.set(false);
+      this._isSetupModalOpen.set(false);
+      this._isLegalModalOpen.set(false);
+      this.authService.closeProfileDrawer(false);
+      this.seoService?.updateStaticRoute('Download Analytics', 'Author and package download telemetry, reasons, platforms, and time-series charts.', path);
       return;
     } else if (path === '/legal') {
       this._activePackage.set(null);
@@ -2313,7 +2325,7 @@ export class PackageService {
     );
 
     if (!this.edgeApiAvailable) return;
-    const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download`;
+    const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?reason=web`;
     try {
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
         navigator.sendBeacon(url);
@@ -2343,9 +2355,17 @@ export class PackageService {
       pkg.sources?.includes('git') ||
       Boolean(pkg.provider && pkg.provider !== 'contentdb');
 
-    let targetUrl =
+    const withWebReason = (rawUrl: string): string => {
+      if (!rawUrl || !rawUrl.startsWith('/api/packages/')) return rawUrl;
+      return rawUrl.includes('reason=')
+        ? rawUrl
+        : `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}reason=web`;
+    };
+
+    let targetUrl = withWebReason(
       customDownloadUrl ||
-      `/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download`;
+      `/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download?reason=web`
+    );
 
     // When running without Edge API (e.g. static mirror fallback or local ng serve without wrangler),
     // resolve directly to the preferred Git tag/release/branch archive or ContentDB download URL
@@ -5466,5 +5486,362 @@ export class PackageService {
         message: sanitizeUserFacingError(err, 'Network error executing moderation action.')
       };
     }
+  }
+
+  // ===========================================================================
+  // AUTHOR & PACKAGE GRANULAR DOWNLOAD ANALYTICS
+  // ===========================================================================
+  private readonly statsCache = new Map<string, { exp: number; data: DownloadAnalyticsData }>();
+  private returnContextBeforeAnalytics:
+    | { type: 'profile' }
+    | { type: 'author'; username: string }
+    | { type: 'package'; pkg: LuantiPackage }
+    | null = null;
+
+  openAnalyticsPage(username?: string, packageName?: string): void {
+    const activePkg = this._activePackage();
+    const activeAuthor = this._activeAuthorUsername();
+    const isProfileOpen = this.authService.isProfileDrawerOpen();
+
+    if (activePkg) {
+      this.returnContextBeforeAnalytics = { type: 'package', pkg: activePkg };
+    } else if (activeAuthor) {
+      this.returnContextBeforeAnalytics = { type: 'author', username: activeAuthor };
+    } else if (isProfileOpen) {
+      this.returnContextBeforeAnalytics = { type: 'profile' };
+    } else {
+      this.returnContextBeforeAnalytics = null;
+    }
+
+    const targetUser = (username || activePkg?.author || activeAuthor || this.authService.currentUser()?.username || '').trim();
+    const targetPkg = (packageName || '').trim();
+
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this.authService.closeProfileDrawer(false);
+
+    if (targetUser && targetPkg) {
+      this.router?.navigate(['/analytics', targetUser, targetPkg]);
+    } else if (targetUser) {
+      this.router?.navigate(['/analytics', targetUser]);
+    } else {
+      this.router?.navigate(['/analytics']);
+    }
+  }
+
+  closeAnalyticsPage(): void {
+    const prev = this.returnContextBeforeAnalytics;
+    this.returnContextBeforeAnalytics = null;
+    if (prev?.type === 'package' && prev.pkg) {
+      this.openPackageModal(prev.pkg, true);
+      return;
+    }
+    if (prev?.type === 'author' && prev.username) {
+      this.openAuthorDrawer(prev.username, true);
+      return;
+    }
+    if (prev?.type === 'profile') {
+      this.router?.navigate(['/profile']);
+      return;
+    }
+    this.router?.navigate(['/']);
+  }
+
+  private buildUtcDateRange(days: number): {
+    dates: string[];
+    prevDates: string[];
+    prevStartDate: string;
+    endDate: string;
+  } {
+    const now = new Date();
+    const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const totalDays = Math.min(365, Math.max(1, Math.round(days) || 30));
+    const fmt = (dt: Date) => {
+      const y = dt.getUTCFullYear();
+      const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(dt.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+    const allDates: string[] = [];
+    for (let i = totalDays * 2 - 1; i >= 0; i--) {
+      allDates.push(fmt(new Date(todayUtc.getTime() - i * 86400000)));
+    }
+    const prevDates = allDates.slice(0, totalDays);
+    const dates = allDates.slice(totalDays);
+    return {
+      dates,
+      prevDates,
+      prevStartDate: prevDates[0],
+      endDate: dates[dates.length - 1]
+    };
+  }
+
+  private mapRawContentDbStatsToAnalytics(
+    cdbStats: any,
+    days: number,
+    meta: { package_id?: string; username?: string; author?: string; name?: string; title?: string }
+  ): DownloadAnalyticsData {
+    const { dates, prevDates } = this.buildUtcDateRange(days);
+    const offset = prevDates.length;
+
+    const cdbPlatLuanti: number[] = Array.isArray(cdbStats?.downloads?.platform?.minetest)
+      ? cdbStats.downloads.platform.minetest
+      : [];
+    const cdbPlatOther: number[] = Array.isArray(cdbStats?.downloads?.platform?.other)
+      ? cdbStats.downloads.platform.other
+      : [];
+    const cdbReasonNew: number[] = Array.isArray(cdbStats?.downloads?.reason?.new)
+      ? cdbStats.downloads.reason.new
+      : [];
+    const cdbReasonUpd: number[] = Array.isArray(cdbStats?.downloads?.reason?.update)
+      ? cdbStats.downloads.reason.update
+      : [];
+    const cdbReasonDep: number[] = Array.isArray(cdbStats?.downloads?.reason?.dependency)
+      ? cdbStats.downloads.reason.dependency
+      : [];
+    const cdbReasonOther: number[] = Array.isArray(cdbStats?.downloads?.reason?.other)
+      ? cdbStats.downloads.reason.other
+      : [];
+    const cdbViews: number[] = Array.isArray(cdbStats?.views) ? cdbStats.views : [];
+
+    let prevPeriodDownloads = 0;
+    for (let i = 0; i < prevDates.length; i++) {
+      prevPeriodDownloads += (Number(cdbPlatLuanti[i]) || 0) + (Number(cdbPlatOther[i]) || 0);
+    }
+
+    const total: number[] = [];
+    const source_contentdb: number[] = [];
+    const source_luantihub: number[] = [];
+    const platform_luanti: number[] = [];
+    const platform_web: number[] = [];
+    const reason_new: number[] = [];
+    const reason_update: number[] = [];
+    const reason_dependency: number[] = [];
+    const reason_web: number[] = [];
+    const views_luanti: number[] = [];
+    const views_web: number[] = [];
+
+    for (let j = 0; j < dates.length; j++) {
+      const idx = offset + j;
+      const pL = Number(cdbPlatLuanti[idx]) || 0;
+      const pW = Number(cdbPlatOther[idx]) || 0;
+      const rN = Number(cdbReasonNew[idx]) || 0;
+      const rU = Number(cdbReasonUpd[idx]) || 0;
+      const rD = Number(cdbReasonDep[idx]) || 0;
+      const dayTot = pL + pW;
+      const rW =
+        cdbReasonOther[idx] !== undefined
+          ? Number(cdbReasonOther[idx]) || 0
+          : Math.max(0, dayTot - (rN + rU + rD));
+      const vL = Number(cdbViews[idx]) || 0;
+
+      total.push(dayTot);
+      source_contentdb.push(dayTot);
+      source_luantihub.push(0);
+      platform_luanti.push(pL);
+      platform_web.push(pW);
+      reason_new.push(rN);
+      reason_update.push(rU);
+      reason_dependency.push(rD);
+      reason_web.push(rW);
+      views_luanti.push(vL);
+      views_web.push(0);
+    }
+
+    const sum = (arr: number[]) => arr.reduce((a, b) => a + (Number(b) || 0), 0);
+    const periodDownloads = sum(total);
+    const sumNew = sum(reason_new);
+    const sumUpdate = sum(reason_update);
+    const sumDep = sum(reason_dependency);
+    const sumWeb = sum(reason_web);
+    const sumPlatLuanti = sum(platform_luanti);
+    const sumPlatWeb = sum(platform_web);
+    const sumViewsLuanti = sum(views_luanti);
+    const totalViews = sumViewsLuanti;
+    const trendPercent =
+      prevPeriodDownloads > 0
+        ? Number((((periodDownloads - prevPeriodDownloads) / prevPeriodDownloads) * 100).toFixed(1))
+        : periodDownloads > 0
+          ? 100
+          : 0;
+    const avgPerDay = Number((periodDownloads / Math.max(1, dates.length)).toFixed(1));
+    const conversionRatePercent =
+      totalViews > 0 ? Number(Math.min(100, (periodDownloads / totalViews) * 100).toFixed(1)) : 0;
+
+    let package_breakdown: AuthorPackageBreakdownItem[] | undefined;
+    if (cdbStats?.package_downloads && typeof cdbStats.package_downloads === 'object') {
+      const authorPkgs = meta.username ? this.getAuthorPackages(meta.username) : [];
+      package_breakdown = Object.entries(cdbStats.package_downloads)
+        .map(([rawTitle, arr]) => {
+          const rawArr = Array.isArray(arr) ? arr : [];
+          const daily = dates.map((_, j) => Number(rawArr[offset + j]) || 0);
+          const totalPeriodDownloads = sum(daily);
+          const sharePercent =
+            periodDownloads > 0 ? Number(((totalPeriodDownloads / periodDownloads) * 100).toFixed(1)) : 0;
+          const cleanLower = rawTitle.trim().toLowerCase();
+          const matchedPkg = authorPkgs.find(
+            p => p.title.trim().toLowerCase() === cleanLower || p.name.trim().toLowerCase() === cleanLower
+          );
+          const slug = matchedPkg?.name || cleanLower.replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+          const pAuthor = matchedPkg?.author || meta.username || '';
+          return {
+            id: matchedPkg?.id || `${pAuthor}/${slug}`,
+            author: pAuthor,
+            name: slug,
+            title: matchedPkg?.title || rawTitle,
+            type: matchedPkg?.type || 'mod',
+            totalPeriodDownloads,
+            sharePercent,
+            daily
+          };
+        })
+        .sort((a, b) => b.totalPeriodDownloads - a.totalPeriodDownloads);
+    }
+
+    return {
+      ...meta,
+      days,
+      dates,
+      total,
+      source_contentdb,
+      source_luantihub,
+      platform_luanti,
+      platform_web,
+      reason_new,
+      reason_update,
+      reason_dependency,
+      reason_web,
+      views_luanti,
+      views_web,
+      package_breakdown,
+      summary: {
+        periodDownloads,
+        prevPeriodDownloads,
+        trendPercent,
+        avgPerDay,
+        totalViews,
+        viewsLuanti: sumViewsLuanti,
+        viewsWeb: 0,
+        conversionRatePercent,
+        reasonsTotal: {
+          new: sumNew,
+          update: sumUpdate,
+          dependency: sumDep,
+          web: sumWeb
+        },
+        platformsTotal: {
+          luanti: sumPlatLuanti,
+          web: sumPlatWeb
+        },
+        sourcesTotal: {
+          contentdb: periodDownloads,
+          luantihub: 0
+        }
+      }
+    };
+  }
+
+  async fetchPackageStats(
+    author: string,
+    name: string,
+    days = 30,
+    forceRefresh = false
+  ): Promise<DownloadAnalyticsData | null> {
+    const cleanAuthor = (author || '').trim();
+    const cleanName = (name || '').trim();
+    if (!cleanAuthor || !cleanName) return null;
+
+    const cacheKey = `pkg:${cleanAuthor.toLowerCase()}/${cleanName.toLowerCase()}:${days}`;
+    if (!forceRefresh) {
+      const cached = this.statsCache.get(cacheKey);
+      if (cached && cached.exp > Date.now()) {
+        return cached.data;
+      }
+    }
+
+    const encAuthor = encodeURIComponent(cleanAuthor);
+    const encName = encodeURIComponent(cleanName);
+
+    try {
+      const res = await fetch(`/api/packages/${encAuthor}/${encName}/stats?days=${days}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      }).catch(() => null);
+
+      if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = (await res.json()) as DownloadAnalyticsData;
+        if (data && Array.isArray(data.dates)) {
+          this.statsCache.set(cacheKey, { exp: Date.now() + 180000, data });
+          return data;
+        }
+      }
+    } catch {
+      // Fall back to direct ContentDB stats if authorized
+    }
+
+    // Fallback for local dev (`ng serve`) when caller is authorized author/admin
+    const foundPkg = this.findPackageInCatalogByRoute(cleanAuthor, cleanName);
+    if (foundPkg && !this.authService.canManagePackage(foundPkg) && !this.authService.isAdmin()) {
+      return null;
+    }
+
+    const { prevStartDate, endDate } = this.buildUtcDateRange(days);
+    const cdbStats = await this.fetchUpstreamWithMirrorFallback(
+      `/packages/${encAuthor}/${encName}/stats/?start=${prevStartDate}&end=${endDate}`
+    );
+    const data = this.mapRawContentDbStatsToAnalytics(cdbStats || {}, days, {
+      package_id: `${cleanAuthor}/${cleanName}`,
+      author: cleanAuthor,
+      name: cleanName,
+      title: foundPkg?.title || cleanName
+    });
+    this.statsCache.set(cacheKey, { exp: Date.now() + 180000, data });
+    return data;
+  }
+
+  async fetchAuthorStats(
+    username: string,
+    days = 30,
+    forceRefresh = false
+  ): Promise<DownloadAnalyticsData | null> {
+    const cleanUser = (username || '').trim();
+    if (!cleanUser) return null;
+
+    const cacheKey = `author:${cleanUser.toLowerCase()}:${days}`;
+    if (!forceRefresh) {
+      const cached = this.statsCache.get(cacheKey);
+      if (cached && cached.exp > Date.now()) {
+        return cached.data;
+      }
+    }
+
+    const encUser = encodeURIComponent(cleanUser);
+
+    try {
+      const res = await fetch(`/api/authors/${encUser}/stats?days=${days}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      }).catch(() => null);
+
+      if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = (await res.json()) as DownloadAnalyticsData;
+        if (data && Array.isArray(data.dates)) {
+          this.statsCache.set(cacheKey, { exp: Date.now() + 180000, data });
+          return data;
+        }
+      }
+    } catch {
+      // Fall back to direct ContentDB user stats if authorized
+    }
+
+    const { prevStartDate, endDate } = this.buildUtcDateRange(days);
+    const cdbUserStats = await this.fetchUpstreamWithMirrorFallback(
+      `/users/${encUser}/stats/?start=${prevStartDate}&end=${endDate}`
+    );
+    const data = this.mapRawContentDbStatsToAnalytics(cdbUserStats || {}, days, {
+      username: cleanUser
+    });
+    this.statsCache.set(cacheKey, { exp: Date.now() + 180000, data });
+    return data;
   }
 }

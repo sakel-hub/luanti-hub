@@ -47,7 +47,7 @@ async function fetchRepoRootEntries(
 ): Promise<RepoEntry[] | null> {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
   try {
     if (provider === 'github') {
@@ -104,7 +104,7 @@ async function fetchRepoSizeEstimate(
 ): Promise<{ downloadSize: number; fileSize: string } | null> {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
   try {
     if (provider === 'github') {
@@ -157,7 +157,7 @@ async function verifyOrgOrRepoMembership(
 
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
 
   try {

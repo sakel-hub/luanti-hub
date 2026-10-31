@@ -105,11 +105,19 @@ CREATE TABLE IF NOT EXISTS reviews (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 6. Daily Download Metrics (Top 10 Today & Week Rollups)
+-- 6. Daily Download & View Metrics (Top 10 Rollups & Author Time-Series Analytics)
 CREATE TABLE IF NOT EXISTS package_daily_downloads (
     package_id TEXT NOT NULL,                         -- "author/name"
     download_date DATE NOT NULL DEFAULT (DATE('now')), -- YYYY-MM-DD
     downloads_count INTEGER NOT NULL DEFAULT 1,
+    platform_luanti INTEGER NOT NULL DEFAULT 0,       -- Luanti / Minetest in-game client
+    platform_web INTEGER NOT NULL DEFAULT 0,          -- Web browser / PWA / other
+    reason_new INTEGER NOT NULL DEFAULT 0,            -- ?reason=new (in-game install)
+    reason_update INTEGER NOT NULL DEFAULT 0,         -- ?reason=update (in-game update)
+    reason_dependency INTEGER NOT NULL DEFAULT 0,     -- ?reason=dependency (auto dependency)
+    reason_web INTEGER NOT NULL DEFAULT 0,            -- ?reason=web or browser download
+    views_luanti INTEGER NOT NULL DEFAULT 0,          -- In-game detail views (/for-client/)
+    views_web INTEGER NOT NULL DEFAULT 0,             -- Web modal detail views
     PRIMARY KEY (package_id, download_date)
 );
 

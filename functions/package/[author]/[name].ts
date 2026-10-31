@@ -21,8 +21,9 @@ export async function onRequestGet(context: {
 }) {
   const { author, name } = context.params;
   const reqUrl = new URL(context.request.url);
-  const origin = reqUrl.origin || 'https://luanti-hub.pages.dev';
-  const canonicalUrl = `${origin}/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+  const origin = reqUrl.origin || 'https://luantihub.org';
+  const canonicalOrigin = origin.includes('luanti-hub.pages.dev') ? 'https://luantihub.org' : origin;
+  const canonicalUrl = `${canonicalOrigin}/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
 
   // Fetch SPA shell from Cloudflare Pages static assets using '/' (not '/index.html', which triggers a 308 redirect to '/' on Cloudflare Pages)
   const assetUrl = new URL('/', origin);
@@ -51,7 +52,7 @@ export async function onRequestGet(context: {
 
   let pkgTitle = `${name} by ${author}`;
   let pkgDesc = `Download and install ${name} by ${author} for Luanti (Minetest) on Luanti Hub.`;
-  let pkgThumb = `${origin}/icons/icon-512x512.png`;
+  let pkgThumb = `${canonicalOrigin}/icons/icon-512x512.png`;
   let pkgType = 'mod';
   let pkgDownloads = 0;
   let pkgScore = 0;

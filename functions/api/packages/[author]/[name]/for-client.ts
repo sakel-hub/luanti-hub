@@ -13,6 +13,36 @@ interface Env {
 }
 
 const HYPERTEXT_HEAD = '<tag name=code color=#7bf font=mono> <tag name=action color=#4CDAFA hovercolor=#97EAFC>';
+const recentClientViewWrites = new Map<string, number>();
+const VIEW_WRITE_COOLDOWN_MS = 10 * 60 * 1000;
+
+async function recordLuantiClientView(db: any, request: Request | undefined, packageId: string): Promise<void> {
+  if (!db || !request || !packageId) return;
+  const ua = (request.headers.get('User-Agent') || '').trim();
+  if (!/^(?:luanti|minetest)\b/i.test(ua)) return;
+
+  const clientIp =
+    request.headers.get('CF-Connecting-IP') ||
+    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'anonymous';
+  const key = `${clientIp}:${packageId.toLowerCase()}`;
+  const now = Date.now();
+  const exp = recentClientViewWrites.get(key);
+  if (exp && exp > now) return;
+  recentClientViewWrites.set(key, now + VIEW_WRITE_COOLDOWN_MS);
+
+  try {
+    await ensureExtendedPackageColumns(db);
+    await db.prepare(`
+      INSERT INTO package_daily_downloads (package_id, download_date, downloads_count, views_luanti)
+      VALUES (?, DATE('now'), 0, 1)
+      ON CONFLICT(package_id, download_date)
+      DO UPDATE SET views_luanti = COALESCE(views_luanti, 0) + 1
+    `).bind(packageId).run();
+  } catch {
+    // Non-blocking view telemetry
+  }
+}
 
 function escapeHypertext(text: string): string {
   return String(text || '')
@@ -89,7 +119,7 @@ export async function onRequestGet(context: { request: Request; params: { author
   const encName = encodeURIComponent(name);
   const pkgId = `${author}/${name}`;
 
-  const reqUrl = context.request ? new URL(context.request.url) : new URL(`https://luanti-hub.pages.dev/api/packages/${encAuthor}/${encName}/for-client/`);
+  const reqUrl = context.request ? new URL(context.request.url) : new URL(`https://luantihub.org/api/packages/${encAuthor}/${encName}/for-client/`);
   const forwardParams = new URLSearchParams(reqUrl.searchParams);
   if (!forwardParams.has('formspec_version')) {
     forwardParams.set('formspec_version', '8');
@@ -98,6 +128,9 @@ export async function onRequestGet(context: { request: Request; params: { author
   const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
   const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
   if (cachedClient) {
+    if (context.env.DB) {
+      await recordLuantiClientView(context.env.DB, context.request, pkgId);
+    }
     return new Response(JSON.stringify(cachedClient), {
       headers: {
         'Content-Type': 'application/json',
@@ -139,6 +172,8 @@ export async function onRequestGet(context: { request: Request; params: { author
           headers: { 'Access-Control-Allow-Origin': '*' }
         });
       }
+
+      await recordLuantiClientView(context.env.DB, context.request, d1Pkg?.id || pkgId);
 
       const [dailySumRow, reviewRowsRes] = await Promise.all([
         context.env.DB.prepare(

@@ -24,7 +24,8 @@ import {
   LucideRefreshCw,
   LucideMessageSquare,
   LucideChevronLeft,
-  LucideChevronRight
+  LucideChevronRight,
+  LucideTrendingUp
 } from '@lucide/angular';
 
 @Component({
@@ -51,7 +52,8 @@ import {
     LucideRefreshCw,
     LucideMessageSquare,
     LucideChevronLeft,
-    LucideChevronRight
+    LucideChevronRight,
+    LucideTrendingUp
   ],
   template: `
     @if (authService.currentUser(); as user) {
@@ -208,17 +210,28 @@ import {
 
               <!-- User's Published Packages -->
               <div class="space-y-2.5">
-                <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center justify-between gap-2 flex-wrap">
                   <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
                     {{ 'profile.myPackages' | translate }} ({{ userPackages().length }})
                   </h3>
-                  <button
-                    type="button"
-                    (click)="onOpenSubmitModal()"
-                    class="text-xs font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
-                    <svg lucidePlus class="w-3.5 h-3.5"></svg>
-                    <span>{{ 'profile.submitGitBtn' | translate }}</span>
-                  </button>
+                  <div class="flex items-center gap-2">
+                    @if (userPackages().length > 0 || authService.isAdmin()) {
+                      <button
+                        type="button"
+                        (click)="onOpenAnalyticsDashboard()"
+                        class="px-2.5 py-1 rounded-lg glass-btn-sky text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer">
+                        <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
+                        <span>{{ 'analytics.openDashboardBtn' | translate }}</span>
+                      </button>
+                    }
+                    <button
+                      type="button"
+                      (click)="onOpenSubmitModal()"
+                      class="text-xs font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5"></svg>
+                      <span>{{ 'profile.submitGitBtn' | translate }}</span>
+                    </button>
+                  </div>
                 </div>
 
                 @if (userPackages().length === 0) {
@@ -262,6 +275,14 @@ import {
 
                           <div class="flex items-center gap-1.5 flex-shrink-0">
                             @if (authService.canManagePackage(pkg)) {
+                              <button
+                                type="button"
+                                (click)="onOpenPackageAnalytics(pkg)"
+                                class="p-2 rounded-xl glass-icon-btn text-emerald-400 hover:text-white transition cursor-pointer"
+                                [attr.title]="'modal.tabAnalytics' | translate"
+                                [attr.aria-label]="'modal.tabAnalytics' | translate">
+                                <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
+                              </button>
                               <button
                                 type="button"
                                 (click)="openPackageAndEditTags(pkg)"
@@ -1365,5 +1386,16 @@ export class ProfileDrawerComponent implements OnInit {
     if (!user) return;
     this.authService.closeProfileDrawer(false);
     this.packageService.openAuthorDrawer(user.username, true, null);
+  }
+
+  onOpenAnalyticsDashboard(): void {
+    const user = this.authService.currentUser();
+    if (!user) return;
+    this.packageService.openAnalyticsPage(user.username);
+  }
+
+  onOpenPackageAnalytics(pkg: LuantiPackage): void {
+    if (!pkg) return;
+    this.packageService.openAnalyticsPage(pkg.author, pkg.name);
   }
 }

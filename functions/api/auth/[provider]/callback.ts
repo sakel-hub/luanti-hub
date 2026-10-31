@@ -30,7 +30,7 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
-const USER_AGENT = 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)';
+const USER_AGENT = 'LuantiHub/1.0 (+https://luantihub.org)';
 
 // Deduplicate concurrent/retried OAuth callback requests within the same Worker isolate
 const inFlightOAuthCodes = new Map<string, Promise<string>>();
@@ -38,6 +38,21 @@ const completedOAuthCodes = new Map<string, { userId: string; expiresAt: number 
 
 function cleanEnvValue(val?: string): string {
   return (val || '').trim().replace(/^["']|["']$/g, '').trim();
+}
+
+function resolveRedirectUri(envValue: string | undefined, requestOrigin: string, provider: string): string {
+  const fallback = `${requestOrigin}/api/auth/${provider}/callback`;
+  const cleaned = cleanEnvValue(envValue);
+  if (!cleaned) return fallback;
+  if (
+    cleaned.includes('luanti-hub.pages.dev') &&
+    !requestOrigin.includes('luanti-hub.pages.dev') &&
+    !requestOrigin.includes('localhost') &&
+    !requestOrigin.includes('127.0.0.1')
+  ) {
+    return fallback;
+  }
+  return cleaned;
 }
 
 function getOAuthCodeEdgeCacheUrl(provider: string, code: string): string {
@@ -222,11 +237,11 @@ export async function onRequestGet(context: {
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
-    codeberg: cleanEnvValue(context.env.CODEBERG_REDIRECT_URI) || undefined,
-    mesehub: cleanEnvValue(context.env.MESEHUB_REDIRECT_URI) || undefined,
-    gitlab: cleanEnvValue(context.env.GITLAB_REDIRECT_URI) || undefined,
-    github: cleanEnvValue(context.env.GITHUB_REDIRECT_URI) || undefined,
-    contentdb: cleanEnvValue(context.env.CONTENTDB_REDIRECT_URI) || undefined
+    codeberg: resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
+    mesehub: resolveRedirectUri(context.env.MESEHUB_REDIRECT_URI, url.origin, 'mesehub'),
+    gitlab: resolveRedirectUri(context.env.GITLAB_REDIRECT_URI, url.origin, 'gitlab'),
+    github: resolveRedirectUri(context.env.GITHUB_REDIRECT_URI, url.origin, 'github'),
+    contentdb: resolveRedirectUri(context.env.CONTENTDB_REDIRECT_URI, url.origin, 'contentdb')
   };
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 

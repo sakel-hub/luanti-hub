@@ -2,25 +2,30 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
         xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>https://luanti-hub.pages.dev/</loc>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://luanti-hub.pages.dev/" />
-    <xhtml:link rel="alternate" hreflang="en" href="https://luanti-hub.pages.dev/?lang=en" />
-    <xhtml:link rel="alternate" hreflang="sk" href="https://luanti-hub.pages.dev/?lang=sk" />
-    <xhtml:link rel="alternate" hreflang="de" href="https://luanti-hub.pages.dev/?lang=de" />
-    <xhtml:link rel="alternate" hreflang="es" href="https://luanti-hub.pages.dev/?lang=es" />
-    <xhtml:link rel="alternate" hreflang="fr" href="https://luanti-hub.pages.dev/?lang=fr" />
-    <xhtml:link rel="alternate" hreflang="ru" href="https://luanti-hub.pages.dev/?lang=ru" />
+    <loc>https://luantihub.org/</loc>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://luantihub.org/" />
+    <xhtml:link rel="alternate" hreflang="en" href="https://luantihub.org/?lang=en" />
+    <xhtml:link rel="alternate" hreflang="sk" href="https://luantihub.org/?lang=sk" />
+    <xhtml:link rel="alternate" hreflang="de" href="https://luantihub.org/?lang=de" />
+    <xhtml:link rel="alternate" hreflang="es" href="https://luantihub.org/?lang=es" />
+    <xhtml:link rel="alternate" hreflang="fr" href="https://luantihub.org/?lang=fr" />
+    <xhtml:link rel="alternate" hreflang="ru" href="https://luantihub.org/?lang=ru" />
     <changefreq>daily</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://luanti-hub.pages.dev/submit</loc>
+    <loc>https://luantihub.org/submit</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://luanti-hub.pages.dev/setup</loc>
+    <loc>https://luantihub.org/setup</loc>
     <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://luantihub.org/analytics</loc>
+    <changefreq>daily</changefreq>
     <priority>0.8</priority>
   </url>
 </urlset>

@@ -222,7 +222,7 @@ async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | 
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)'
+        'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)'
       }
     });
     clearTimeout(timeoutId);
@@ -333,7 +333,7 @@ async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | undefin
       const res = await fetch(cand.url, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)',
+          'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)',
           ...(cand.headers || {})
         }
       });
@@ -487,6 +487,38 @@ function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null,
   );
 }
 
+const recentWebViewWrites = new Map<string, number>();
+const WEB_VIEW_COOLDOWN_MS = 10 * 60 * 1000;
+
+async function recordWebPackageView(db: any, request: Request | undefined, packageId: string): Promise<void> {
+  if (!db || !request || !packageId) return;
+  const ua = (request.headers.get('User-Agent') || '').toLowerCase();
+  if (/(?:bot|crawler|spider|slurp|bingpreview|facebookexternalhit|discordbot|telegrambot|slackbot|whatsapp|headlesschrome|lighthouse)/i.test(ua)) {
+    return;
+  }
+  const clientIp =
+    request.headers.get('CF-Connecting-IP') ||
+    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'anonymous';
+  const key = `${clientIp}:${packageId.toLowerCase()}`;
+  const now = Date.now();
+  const exp = recentWebViewWrites.get(key);
+  if (exp && exp > now) return;
+  recentWebViewWrites.set(key, now + WEB_VIEW_COOLDOWN_MS);
+
+  try {
+    await ensureExtendedPackageColumns(db);
+    await db.prepare(`
+      INSERT INTO package_daily_downloads (package_id, download_date, downloads_count, views_web)
+      VALUES (?, DATE('now'), 0, 1)
+      ON CONFLICT(package_id, download_date)
+      DO UPDATE SET views_web = COALESCE(views_web, 0) + 1
+    `).bind(packageId).run();
+  } catch {
+    // Non-blocking view telemetry
+  }
+}
+
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
@@ -494,6 +526,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const noCache = reqUrl?.searchParams.get('nocache') === '1';
   const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v4/${isLite ? 'lite' : 'full'}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+
+  if (!isLite && context.env.DB) {
+    await recordWebPackageView(context.env.DB, context.request, pkgId);
+  }
 
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);

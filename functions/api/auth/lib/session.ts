@@ -547,7 +547,7 @@ export async function verifyProviderToken(
 
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
 
   try {

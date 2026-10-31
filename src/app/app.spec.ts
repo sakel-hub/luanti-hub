@@ -18,13 +18,18 @@ import { ProfileDrawerComponent } from './features/profile/profile-drawer.compon
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { HeaderComponent } from './features/header/header.component';
 import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
+import { AnalyticsPageComponent } from './features/analytics/analytics-page.component';
+import { DownloadAnalyticsChartComponent } from './shared/components/download-analytics-chart.component';
 import { PwaService } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
 import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../../functions/api/packages/git';
+import { onRequestGet as packageStatsOnRequestGet } from '../../functions/api/packages/[author]/[name]/stats';
+import { onRequestGet as authorStatsOnRequestGet } from '../../functions/api/authors/[username]/stats';
 import { onRequest as edgeMiddleware, checkEdgeRateLimit } from '../../functions/_middleware';
 import { autoResolveBrokenRepoReport } from '../../functions/api/lib/upstream';
 import {
+  createSessionToken,
   createAuditProofToken,
   verifyAuditProofToken,
   createOAuthStateToken,
@@ -54,6 +59,8 @@ describe('App & Core Services', () => {
     const compiled = fixture.nativeElement as HTMLElement;
     expect(compiled.textContent).toContain('LuantiHub');
     expect(compiled.textContent).toContain('DMCA');
+    expect(compiled.textContent).toContain(`© ${new Date().getFullYear()}`);
+    expect(compiled.textContent).toContain('LGPL-2.1+');
   });
 
   it('should provide In-Game Setup and GitHub issue tracker link inside header gear menu and footer', async () => {
@@ -718,7 +725,7 @@ description = Mob animation and spawning framework.
 
   it('should guard edge API against cross-origin hotlinking, bots, rate abuse, and unauthenticated git audits', async () => {
     // 1. Block known scraper bots on /api/*
-    const botReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+    const botReq = new Request('https://luantihub.org/api/packages', {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.0)' }
     });
     const botRes = await edgeMiddleware({
@@ -729,7 +736,7 @@ description = Mob animation and spawning framework.
     expect(botRes.status).toBe(403);
 
     // 2. Block cross-origin browser hotlinking on /api/*
-    const crossOriginReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+    const crossOriginReq = new Request('https://luantihub.org/api/packages', {
       headers: { Origin: 'https://evil-scraper.example.com' }
     });
     const crossOriginRes = await edgeMiddleware({
@@ -740,7 +747,7 @@ description = Mob animation and spawning framework.
     expect(crossOriginRes.status).toBe(403);
 
     // 3. Allow legitimate Luanti in-game client requests (no Origin header)
-    const luantiClientReq = new Request('https://luanti-hub.pages.dev/api/packages', {
+    const luantiClientReq = new Request('https://luantihub.org/api/packages', {
       headers: { 'User-Agent': 'Luanti/5.10.0' }
     });
     const luantiClientRes = await edgeMiddleware({
@@ -751,7 +758,7 @@ description = Mob animation and spawning framework.
     expect(luantiClientRes.status).toBe(200);
 
     // 3b. Allow cross-site OAuth callback redirects from identity providers (e.g. GitHub, GitLab, Codeberg)
-    const oauthCallbackReq = new Request('https://luanti-hub.pages.dev/api/auth/github/callback?code=abc123xyz&state=hmac_state', {
+    const oauthCallbackReq = new Request('https://luantihub.org/api/auth/github/callback?code=abc123xyz&state=hmac_state', {
       headers: {
         'Sec-Fetch-Site': 'cross-site',
         'Sec-Fetch-Mode': 'navigate',
@@ -767,7 +774,7 @@ description = Mob animation and spawning framework.
     expect(await oauthCallbackRes.text()).toBe('oauth_ok');
 
     // 3c. Block cross-site state mutations on internal auth endpoints
-    const crossSiteAuthReq = new Request('https://luanti-hub.pages.dev/api/auth/me', {
+    const crossSiteAuthReq = new Request('https://luantihub.org/api/auth/me', {
       method: 'POST',
       headers: {
         'Sec-Fetch-Site': 'cross-site',
@@ -791,7 +798,7 @@ description = Mob animation and spawning framework.
     expect(throttled.retryAfterSeconds).toBeGreaterThan(0);
 
     // 5. Reject unauthenticated POST /api/packages/git (including dryRun) with 401
-    const unauthGitReq = new Request('https://luanti-hub.pages.dev/api/packages/git', {
+    const unauthGitReq = new Request('https://luantihub.org/api/packages/git', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repoUrl: 'https://codeberg.org/user/mod', dryRun: true })
@@ -1576,7 +1583,7 @@ description = Mob animation and spawning framework.
     });
 
     try {
-      const targetUrl = 'https://luanti-hub.pages.dev/package/mt-mods/i3';
+      const targetUrl = 'https://luantihub.org/package/mt-mods/i3';
       await pwaService.sharePackage('i3', 'A Next Generation Inventory', targetUrl);
 
       // Must copy only the clean URL to clipboard and omit `text` from navigator.share so OS share sheets never concatenate url + text
@@ -2088,7 +2095,7 @@ description = Mob animation and spawning framework.
     }) as typeof fetch;
 
     try {
-      const callbackUrl = `https://luanti-hub.pages.dev/api/auth/github/callback?code=gh_switch_code_429&state=${encodeURIComponent(state)}`;
+      const callbackUrl = `https://luantihub.org/api/auth/github/callback?code=gh_switch_code_429&state=${encodeURIComponent(state)}`;
       const req = new Request(callbackUrl, {
         headers: {
           Cookie: `lh_oauth_state=${state}`
@@ -2106,7 +2113,7 @@ description = Mob animation and spawning framework.
       });
 
       expect(res.status).toBe(302);
-      expect(res.headers.get('Location')).toBe('https://luanti-hub.pages.dev/?auth_success=1');
+      expect(res.headers.get('Location')).toBe('https://luantihub.org/?auth_success=1');
       expect(tokenExchangeCalls).toBe(2);
       // Both attempts must preserve application/x-www-form-urlencoded rather than switching to JSON on 429
       expect(tokenContentTypes).toEqual([
@@ -2131,7 +2138,7 @@ description = Mob animation and spawning framework.
         }
       });
       expect(duplicateRes.status).toBe(302);
-      expect(duplicateRes.headers.get('Location')).toBe('https://luanti-hub.pages.dev/?auth_success=1');
+      expect(duplicateRes.headers.get('Location')).toBe('https://luantihub.org/?auth_success=1');
       expect(tokenExchangeCalls).toBe(2);
     } finally {
       globalThis.fetch = origFetch;
@@ -3173,5 +3180,218 @@ supported_games = minetest_game, voxelibre
     const heroEl = heroFixture.nativeElement as HTMLElement;
     expect(heroEl.innerHTML).toContain('aspect-video');
     expect(heroEl.innerHTML).toContain('lg:min-h-[600px]');
+  });
+
+  it('should enforce strict author/admin access control on package & author analytics endpoints and render granular download reasons, platforms, and timeframes', async () => {
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+    const secret = 'test-analytics-secret-32-bytes-key!!';
+
+    const ownerToken = await createSessionToken('u_owner', secret);
+    const strangerToken = await createSessionToken('u_stranger', secret);
+    const adminToken = await createSessionToken('u_admin', secret);
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const mockDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM users WHERE id = ?')) {
+                  if (args[0] === 'u_owner') {
+                    return { id: 'u_owner', username: 'sakel', display_name: 'SaKeL', role: 'user' };
+                  }
+                  if (args[0] === 'u_stranger') {
+                    return { id: 'u_stranger', username: 'other_user', display_name: 'Other', role: 'user' };
+                  }
+                  if (args[0] === 'u_admin') {
+                    return { id: 'u_admin', username: 'hub_admin', display_name: 'Admin', role: 'admin' };
+                  }
+                }
+                if (sql.includes('FROM packages')) {
+                  return {
+                    id: 'sakel/x_farming',
+                    author_id: 'u_owner',
+                    author_name: 'sakel',
+                    name: 'x_farming',
+                    title: 'X Farming',
+                    type: 'mod',
+                    provider: 'codeberg',
+                    repo_url: 'https://codeberg.org/sakel/x_farming'
+                  };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM user_identities WHERE user_id = ?')) {
+                  if (args[0] === 'u_owner') {
+                    return {
+                      results: [{ provider: 'codeberg', username: 'sakel', verified: 1 }]
+                    };
+                  }
+                  if (args[0] === 'u_stranger') {
+                    return {
+                      results: [{ provider: 'github', username: 'other_user', verified: 1 }]
+                    };
+                  }
+                  if (args[0] === 'u_admin') {
+                    return {
+                      results: [{ provider: 'github', username: 'hub_admin', verified: 1 }]
+                    };
+                  }
+                }
+                if (sql.includes('FROM package_daily_downloads')) {
+                  return {
+                    results: [
+                      {
+                        package_id: 'sakel/x_farming',
+                        download_date: todayStr,
+                        downloads_count: 14,
+                        platform_luanti: 10,
+                        platform_web: 4,
+                        reason_new: 6,
+                        reason_update: 3,
+                        reason_dependency: 1,
+                        reason_web: 4,
+                        views_luanti: 25,
+                        views_web: 15
+                      }
+                    ]
+                  };
+                }
+                if (sql.includes('FROM packages')) {
+                  return {
+                    results: [
+                      {
+                        id: 'sakel/x_farming',
+                        author_name: 'sakel',
+                        name: 'x_farming',
+                        title: 'X Farming',
+                        type: 'mod',
+                        provider: 'codeberg'
+                      }
+                    ]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                return { success: true };
+              }
+            };
+          },
+          async all() {
+            return { results: [] };
+          },
+          async run() {
+            return { success: true };
+          }
+        };
+      }
+    };
+
+    // 1. Unauthenticated request to /api/packages/sakel/x_farming/stats -> 401
+    const unauthRes = await packageStatsOnRequestGet({
+      request: new Request('https://luantihub.local/api/packages/sakel/x_farming/stats?days=7'),
+      params: { author: 'sakel', name: 'x_farming' },
+      env: { DB: mockDb, SESSION_SECRET: secret }
+    });
+    expect(unauthRes.status).toBe(401);
+
+    // 2. Non-owner request -> 403 Forbidden
+    const strangerRes = await packageStatsOnRequestGet({
+      request: new Request('https://luantihub.local/api/packages/sakel/x_farming/stats?days=7', {
+        headers: { Cookie: `lh_session=${strangerToken}` }
+      }),
+      params: { author: 'sakel', name: 'x_farming' },
+      env: { DB: mockDb, SESSION_SECRET: secret }
+    });
+    expect(strangerRes.status).toBe(403);
+
+    // 3. Verified Package Author request -> 200 OK with granular reasons, platforms & views
+    const ownerRes = await packageStatsOnRequestGet({
+      request: new Request('https://luantihub.local/api/packages/sakel/x_farming/stats?days=7', {
+        headers: { Cookie: `lh_session=${ownerToken}` }
+      }),
+      params: { author: 'sakel', name: 'x_farming' },
+      env: { DB: mockDb, SESSION_SECRET: secret }
+    });
+    expect(ownerRes.status).toBe(200);
+    const ownerStats = await ownerRes.json();
+    expect(ownerStats.days).toBe(7);
+    expect(ownerStats.dates.length).toBe(7);
+    expect(ownerStats.summary.periodDownloads).toBe(14);
+    expect(ownerStats.summary.reasonsTotal).toEqual({
+      new: 6,
+      update: 3,
+      dependency: 1,
+      web: 4
+    });
+    expect(ownerStats.summary.platformsTotal).toEqual({
+      luanti: 10,
+      web: 4
+    });
+    expect(ownerStats.summary.totalViews).toBe(40);
+    expect(ownerStats.summary.conversionRatePercent).toBe(35);
+
+    // 4. Admin request to /api/authors/sakel/stats -> 200 OK with package_breakdown
+    const adminAuthorRes = await authorStatsOnRequestGet({
+      request: new Request('https://luantihub.local/api/authors/sakel/stats?days=30', {
+        headers: { Cookie: `lh_session=${adminToken}` }
+      }),
+      params: { username: 'sakel' },
+      env: { DB: mockDb, SESSION_SECRET: secret, ADMIN_USERS: 'hub_admin' }
+    });
+    expect(adminAuthorRes.status).toBe(200);
+    const authorStats = await adminAuthorRes.json();
+    expect(authorStats.username).toBe('sakel');
+    expect(authorStats.package_breakdown.length).toBeGreaterThan(0);
+    expect(authorStats.package_breakdown[0].name).toBe('x_farming');
+    expect(authorStats.package_breakdown[0].totalPeriodDownloads).toBe(14);
+
+    // 5. Verify PackageDetailModalComponent hides Analytics tab for non-authors and shows it for the author
+    const pkg = (pkgService as any).normalizePackage({
+      id: 'sakel/x_farming',
+      author: 'sakel',
+      name: 'x_farming',
+      title: 'X Farming',
+      type: 'mod',
+      provider: 'codeberg',
+      repo_url: 'https://codeberg.org/sakel/x_farming'
+    });
+
+    (authService as any)._currentUser.set(null);
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    modalFixture.componentInstance.package = pkg;
+    modalFixture.detectChanges();
+    expect((modalFixture.nativeElement as HTMLElement).textContent).not.toContain('Analytics');
+
+    // Now sign in as verified author 'sakel'
+    (authService as any)._currentUser.set({
+      id: 'u_owner',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      identities: [{ provider: 'codeberg', username: 'sakel', verified: true }]
+    });
+    modalFixture.detectChanges();
+    expect((modalFixture.nativeElement as HTMLElement).textContent).toContain('Analytics');
+
+    // 6. Verify DownloadAnalyticsChartComponent renders KPI cards, reason breakdown, and series toggles
+    const chartFixture = TestBed.createComponent(DownloadAnalyticsChartComponent);
+    const chartComp = chartFixture.componentInstance;
+    chartComp.statsData.set(ownerStats);
+    chartFixture.detectChanges();
+
+    expect(chartComp.luantiPlatformPercent()).toBe(71.4);
+    expect(chartComp.primaryDriver().label).toBe('analytics.reasonNew');
+    expect(chartComp.reasonBreakdownItems().length).toBe(4);
+
+    chartComp.setSeriesMode('platform');
+    expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['platform_luanti', 'platform_web']);
+    chartComp.setSeriesMode('source');
+    expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['source_contentdb', 'source_luantihub']);
   });
 });

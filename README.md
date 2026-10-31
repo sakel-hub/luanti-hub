@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://luanti-hub.pages.dev/">
+  <a href="https://luantihub.org/">
     <img src="public/logo.svg" alt="LuantiHub Logo" width="140" height="140">
   </a>
 </p>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://luanti-hub.pages.dev/"><strong>🚀 Launch Live Web App</strong></a> &bull;
+  <a href="https://luantihub.org/"><strong>🚀 Launch Live Web App</strong></a> &bull;
   <a href="#key-features">Key Features</a> &bull;
   <a href="#in-game-luanti-setup">In-Game Setup</a> &bull;
   <a href="#getting-started-local-development">Getting Started</a> &bull;
@@ -23,8 +23,8 @@
 </p>
 
 <p align="center">
-  <a href="https://luanti-hub.pages.dev/">
-    <img src="https://img.shields.io/badge/Live_Web_App-luanti--hub.pages.dev-0284c7.svg?style=flat-square&logo=cloudflare&logoColor=white" alt="Live Web App">
+  <a href="https://luantihub.org/">
+    <img src="https://img.shields.io/badge/Live_Web_App-luantihub.org-0284c7.svg?style=flat-square&logo=cloudflare&logoColor=white" alt="Live Web App">
   </a>
   <a href="https://www.luanti.org">
     <img src="https://img.shields.io/badge/Luanti_Engine-5.0+-38bdf8.svg?style=flat-square&logo=lua&logoColor=white" alt="Luanti Engine">
@@ -69,7 +69,7 @@ Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a *
 ## ✨ Key Features
 
 ### 🎮 In-Game Luanti Client Drop-In Replacement (`contentdb_url`)
-- **Native In-Engine Compatibility:** Drop-in replacement for Luanti's built-in ContentDB client. Point your client to `https://luanti-hub.pages.dev` to browse, search, and install mods, games, and texture packs directly inside the game client.
+- **Native In-Engine Compatibility:** Drop-in replacement for Luanti's built-in ContentDB client. Point your client to `https://luantihub.org` to browse, search, and install mods, games, and texture packs directly inside the game client.
 - **Automated Dependency Resolution:** Full support for `/api/packages/` endpoints, enabling the Luanti engine to parse dependencies, download releases as `.zip` packages, and install them into your local worlds with zero manual unzipping.
 - **Backward & Forward Compatible:** Works seamlessly with Luanti 5.0+ and legacy Minetest 5.x releases.
 
@@ -114,11 +114,11 @@ Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a *
 - **Web Share Target API (OS Share Sheet Integration):** When LuantiHub is installed as a PWA, it registers with Android and Windows as an OS-level Share Target for URLs and text. When browsing any mod repository on GitHub, Codeberg, or GitLab on your phone or PC, tap the native **Share** button &rarr; choose **LuantiHub**, and the app opens instantly with the repository URL prefilled in the submission dialog!
 - **1-Click Pre-Filled Submission Deep Links:** Anyone can construct direct URLs that immediately open LuantiHub, launch the "Submit Git Package" modal, and prefill the Git repository URL:
   ```text
-  https://luanti-hub.pages.dev/submit?url=https://github.com/owner/repository
+  https://luantihub.org/submit?url=https://github.com/owner/repository
   ```
 - **Mod Author README Badges:** Mod developers can add a 1-click submission badge to their GitHub, GitLab, or Codeberg README so community members or server operators can instantly index and audit their mod on LuantiHub:
   ```markdown
-  [![Submit to LuantiHub](https://img.shields.io/badge/Submit_to-LuantiHub-0284c7?style=flat-square&logo=cloudflare&logoColor=white)](https://luanti-hub.pages.dev/submit?url=https://github.com/YOUR_USERNAME/YOUR_REPOSITORY)
+  [![Submit to LuantiHub](https://img.shields.io/badge/Submit_to-LuantiHub-0284c7?style=flat-square&logo=cloudflare&logoColor=white)](https://luantihub.org/submit?url=https://github.com/YOUR_USERNAME/YOUR_REPOSITORY)
   ```
 - **Custom Protocol Handlers (`web+luanti://`):** Registered URL protocol handler allowing external sites and community chat apps to deep-link directly into installed LuantiHub packages (`web+luanti://author/package_name`).
 - **Reactive Offline Experience:** Built with Angular Service Worker (`@angular/service-worker`), proactive asset caching, and reactive online/offline state detection with an accessible offline mode indicator and automated catalog synchronization upon reconnection.
@@ -136,7 +136,7 @@ You can browse, install, and update packages from LuantiHub directly inside your
 Add the following line to your `luanti.conf` (or `minetest.conf` on older versions):
 
 ```ini
-contentdb_url = https://luanti-hub.pages.dev
+contentdb_url = https://luantihub.org
 ```
 
 #### Where to find `luanti.conf`:
@@ -152,7 +152,7 @@ contentdb_url = https://luanti-hub.pages.dev
 1. Launch your **Luanti** client.
 2. Click **Settings** &rarr; **All Settings**.
 3. In the search box, type `contentdb_url`.
-4. Double-click the setting and set the value to `https://luanti-hub.pages.dev`.
+4. Double-click the setting and set the value to `https://luantihub.org`.
 5. Click **Save**.
 6. Switch to the **Content** tab in the main menu &ndash; you are now browsing LuantiHub!
 

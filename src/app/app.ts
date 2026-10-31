@@ -47,6 +47,7 @@ export class App {
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
   private readonly sanitizer = inject(DomSanitizer);
+  readonly currentYear = new Date().getFullYear();
 
   // Animated enter/exit state for all dialogs & drawers
   readonly displayedPackage = signal<LuantiPackage | null>(null);

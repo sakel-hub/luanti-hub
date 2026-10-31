@@ -26,6 +26,7 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
+import { DownloadAnalyticsChartComponent } from '../../shared/components/download-analytics-chart.component';
 import { PackageCardComponent } from '../card/package-card.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
@@ -52,7 +53,8 @@ import {
   LucideChevronLeft,
   LucideChevronRight,
   LucideTag,
-  LucideTrash2
+  LucideTrash2,
+  LucideTrendingUp
 } from '@lucide/angular';
 
 @Component({
@@ -66,6 +68,7 @@ import {
     TooltipDirective,
     CompactNumberPipe,
     PackageBadgesComponent,
+    DownloadAnalyticsChartComponent,
     PackageCardComponent,
     TranslatePipe,
     LucideX,
@@ -91,7 +94,8 @@ import {
     LucideChevronLeft,
     LucideChevronRight,
     LucideTag,
-    LucideTrash2
+    LucideTrash2,
+    LucideTrendingUp
   ],
   template: `
     @if (package) {
@@ -1242,6 +1246,16 @@ import {
                   class="cursor-pointer">
                   {{ 'modal.tabCompliance' | translate }}
                 </button>
+                @if (authService.canManagePackage(package) || authService.isAdmin()) {
+                  <button
+                    type="button"
+                    (click)="activeTab.set('analytics')"
+                    [class]="activeTab() === 'analytics' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap flex items-center gap-1.5' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap flex items-center gap-1.5'"
+                    class="cursor-pointer">
+                    <svg lucideTrendingUp class="w-3.5 h-3.5 text-sky-400"></svg>
+                    <span>{{ 'modal.tabAnalytics' | translate }}</span>
+                  </button>
+                }
               </div>
 
               <!-- Reviews Content (Always shows interactive Rate & Review box!) -->
@@ -1645,6 +1659,16 @@ import {
                   </p>
                 </div>
               }
+
+              <!-- Author / Admin Package Download Analytics Tab -->
+              @if (activeTab() === 'analytics' && (authService.canManagePackage(package) || authService.isAdmin())) {
+                <div class="pt-4 luanti-tab-enter">
+                  <app-download-analytics-chart
+                    [package]="package"
+                    [showExpandButton]="true">
+                  </app-download-analytics-chart>
+                </div>
+              }
             </div>
 
           </div>
@@ -1745,7 +1769,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly authService = inject(AuthService);
   private readonly sanitizer = inject(DomSanitizer);
 
-  readonly activeTab = signal<'reviews' | 'releases' | 'compliance'>('reviews');
+  readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
   readonly luantiHubReviewsCount = computed(() =>
     this.reviews().filter(r => r.source !== 'contentdb').length
@@ -2097,7 +2121,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private static readonly savedViewStateByPkg = new Map<string, {
     scrollTop: number;
     isSimilarNearViewport: boolean;
-    activeTab: 'reviews' | 'releases' | 'compliance';
+    activeTab: 'reviews' | 'releases' | 'compliance' | 'analytics';
     releasesPage: number;
   }>();
 

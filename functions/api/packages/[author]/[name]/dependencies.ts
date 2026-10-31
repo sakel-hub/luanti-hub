@@ -16,7 +16,7 @@ export async function onRequestGet(context: {
 
   const reqUrl = context.request
     ? new URL(context.request.url)
-    : new URL(`https://luanti-hub.pages.dev/api/packages/${encAuthor}/${encName}/dependencies/`);
+    : new URL(`https://luantihub.org/api/packages/${encAuthor}/${encName}/dependencies/`);
   const forwardParams = new URLSearchParams(reqUrl.searchParams);
   const onlyHard =
     forwardParams.get('only_hard') === '1' ||

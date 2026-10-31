@@ -1,10 +1,23 @@
 import { Routes } from '@angular/router';
 import { CatalogComponent } from './features/catalog/catalog.component';
+import { AnalyticsPageComponent } from './features/analytics/analytics-page.component';
 
 export const routes: Routes = [
   {
     path: '',
     component: CatalogComponent
+  },
+  {
+    path: 'analytics',
+    component: AnalyticsPageComponent
+  },
+  {
+    path: 'analytics/:username',
+    component: AnalyticsPageComponent
+  },
+  {
+    path: 'analytics/:username/:packageName',
+    component: AnalyticsPageComponent
   },
   {
     path: 'package/:author/:name',

@@ -597,7 +597,7 @@ export class PwaService {
     origin: string
   ): Promise<string | null> {
     try {
-      const parsed = new URL(rawUrl, origin || 'https://luanti-hub.pages.dev');
+      const parsed = new URL(rawUrl, origin || 'https://luantihub.org');
       if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
         return null;
       }
@@ -891,10 +891,14 @@ export class PwaService {
   }
 
   private getCanonicalAppUrl(): string {
-    if (typeof window !== 'undefined' && window.location?.origin) {
+    if (
+      typeof window !== 'undefined' &&
+      window.location?.origin &&
+      !window.location.origin.includes('luanti-hub.pages.dev')
+    ) {
       return window.location.origin;
     }
-    return 'https://luanti-hub.pages.dev';
+    return 'https://luantihub.org';
   }
 
   async copyAppLink(): Promise<boolean> {

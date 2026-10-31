@@ -64,5 +64,17 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE packages ADD COLUMN maintainers TEXT;
 -- ALTER TABLE packages ADD COLUMN max_minetest_version TEXT;
 
+-- 7. Granular daily download & view telemetry columns for Author Analytics Dashboard
+-- (Also auto-initialized at runtime by the Worker via ensureExtendedPackageColumns)
+-- ALTER TABLE package_daily_downloads ADD COLUMN platform_luanti INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN platform_web INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN reason_new INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN reason_update INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN reason_dependency INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN reason_web INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN views_luanti INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE package_daily_downloads ADD COLUMN views_web INTEGER NOT NULL DEFAULT 0;
+
+
 
 

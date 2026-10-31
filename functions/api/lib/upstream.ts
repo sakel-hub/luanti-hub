@@ -12,7 +12,7 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
   // Use a transparent Web User-Agent so ContentDB does not mistake automated proxy fetches
   // for in-game Luanti client views (which would trigger PackageDailyStats.notify_view DB writes on ContentDB).
   const defaultHeaders = {
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)',
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
     'Accept': 'application/json'
   };
 
@@ -542,6 +542,45 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
         await db.prepare(`ALTER TABLE packages ADD COLUMN ${colName} ${colDef}`).run().catch(() => {});
       }
     }
+
+    // Ensure package_daily_downloads table and granular analytics columns exist
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS package_daily_downloads (
+        package_id TEXT NOT NULL,
+        download_date DATE NOT NULL DEFAULT (DATE('now')),
+        downloads_count INTEGER NOT NULL DEFAULT 1,
+        platform_luanti INTEGER NOT NULL DEFAULT 0,
+        platform_web INTEGER NOT NULL DEFAULT 0,
+        reason_new INTEGER NOT NULL DEFAULT 0,
+        reason_update INTEGER NOT NULL DEFAULT 0,
+        reason_dependency INTEGER NOT NULL DEFAULT 0,
+        reason_web INTEGER NOT NULL DEFAULT 0,
+        views_luanti INTEGER NOT NULL DEFAULT 0,
+        views_web INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (package_id, download_date)
+      )
+    `).run().catch(() => {});
+
+    const dailyCols: Array<[string, string]> = [
+      ['platform_luanti', 'INTEGER NOT NULL DEFAULT 0'],
+      ['platform_web', 'INTEGER NOT NULL DEFAULT 0'],
+      ['reason_new', 'INTEGER NOT NULL DEFAULT 0'],
+      ['reason_update', 'INTEGER NOT NULL DEFAULT 0'],
+      ['reason_dependency', 'INTEGER NOT NULL DEFAULT 0'],
+      ['reason_web', 'INTEGER NOT NULL DEFAULT 0'],
+      ['views_luanti', 'INTEGER NOT NULL DEFAULT 0'],
+      ['views_web', 'INTEGER NOT NULL DEFAULT 0']
+    ];
+    const dailyInfo = await db.prepare(`PRAGMA table_info(package_daily_downloads)`).all().catch(() => ({ results: [] }));
+    const existingDaily = new Set<string>(
+      (dailyInfo?.results || []).map((r: any) => String(r?.name || '').toLowerCase())
+    );
+    for (const [colName, colDef] of dailyCols) {
+      if (!existingDaily.has(colName)) {
+        await db.prepare(`ALTER TABLE package_daily_downloads ADD COLUMN ${colName} ${colDef}`).run().catch(() => {});
+      }
+    }
+
     if (existing.size > 0) {
       extendedColumnsEnsured = true;
     }
@@ -1228,7 +1267,7 @@ export async function fetchGitRepoReleasesAndTags(
 
   const { provider, host, owner, repo } = target;
   const headers: Record<string, string> = {
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)',
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
     'Accept': provider === 'github' ? 'application/vnd.github+json' : 'application/json'
   };
 
@@ -1435,7 +1474,7 @@ export async function fetchRepoSizeEstimateFromUrl(
 
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luanti-hub.pages.dev)'
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2500);
@@ -2032,7 +2071,7 @@ export async function scanGitRepoMetadataCached(
 
     try {
       const cbRes = await fetch(`https://codeberg.org/api/v1/repos/search?q=${encodeURIComponent(name)}&limit=8`, {
-        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
+        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)' }
       });
       if (cbRes.ok) {
         const cbJson: any = await cbRes.json();
@@ -2053,7 +2092,7 @@ export async function scanGitRepoMetadataCached(
 
     try {
       const ghRes = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(name)}+in:name&per_page=5`, {
-        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luanti-hub.pages.dev)' }
+        headers: { 'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)' }
       });
       if (ghRes.ok) {
         const ghJson: any = await ghRes.json();

@@ -25,7 +25,7 @@ export async function onRequestGet(context: {
 
   const reqUrl = context.request
     ? new URL(context.request.url)
-    : new URL(`https://luanti-hub.pages.dev/api/packages/${encAuthor}/${encName}/for-client/reviews/`);
+    : new URL(`https://luantihub.org/api/packages/${encAuthor}/${encName}/for-client/reviews/`);
   const forwardParams = new URLSearchParams(reqUrl.searchParams);
   if (!forwardParams.has('formspec_version')) {
     forwardParams.set('formspec_version', '8');
@@ -57,7 +57,7 @@ export async function onRequestGet(context: {
   }
 
   const links: Record<string, string> = {
-    link_review: `https://luanti-hub.pages.dev/package/${encAuthor}/${encName}`
+    link_review: `https://luantihub.org/package/${encAuthor}/${encName}`
   };
   const leaveReviewAction = `<action name=link_review>Leave a review on Luanti Hub</action>\n\n`;
 
