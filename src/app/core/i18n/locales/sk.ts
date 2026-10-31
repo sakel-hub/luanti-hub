@@ -211,7 +211,11 @@ export const sk: TranslationDictionary = {
     flagReviewPrompt: 'Dôvod nahlásenia tohto komentára (spam, nevhodný obsah)...',
     reviewFlagged: 'Nahlásené',
     removeReview: 'Odstrániť',
-    reportSubmitted: 'Hlásenie bolo odoslané na kontrolu moderátorom.'
+    reportSubmitted: 'Hlásenie bolo odoslané na kontrolu moderátorom.',
+    similarPackagesTitle: 'Podobné Balíčky',
+    similarPackagesSubtitle: 'Odporúčané podľa značiek, kategórie a závislostí',
+    latestRelease: 'Najnovšie',
+    showingLatestReleases: 'Zobrazených posledných {count} vydaní'
   },
   auth: {
     title: 'Prihlásiť sa do LuantiHub',

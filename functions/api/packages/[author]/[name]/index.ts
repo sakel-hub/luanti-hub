@@ -19,7 +19,9 @@ import {
   GitRepoScanResult,
   normalizeContentDbReviewItem,
   sanitizePublicErrorMessage,
-  fetchRepoSizeEstimateFromUrl
+  fetchRepoSizeEstimateFromUrl,
+  sortAndCapReleases,
+  MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -404,7 +406,7 @@ function buildNormalizedReleases(
   if (Array.isArray(upstreamReleases) && upstreamReleases.length > 0) {
     const encAuthor = encodeURIComponent(author);
     const encName = encodeURIComponent(name);
-    return upstreamReleases.map((r: any) => {
+    const mappedUpstream = upstreamReleases.map((r: any) => {
       const rawUrl = r.url || '';
       const fullDownloadUrl = rawUrl.startsWith('http')
         ? rawUrl
@@ -430,13 +432,14 @@ function buildNormalizedReleases(
         min_minetest_version: extractEngineVersionString(r.min_minetest_version) || r.min_protocol_version || undefined,
         max_minetest_version: extractEngineVersionString(r.max_minetest_version) || r.max_protocol_version || undefined,
         release_date: r.release_date || undefined,
-        released_at: r.release_date || new Date().toISOString()
+        released_at: r.release_date || ''
       };
     });
+    return sortAndCapReleases(mappedUpstream, MAX_PACKAGE_RELEASES);
   }
 
   if (Array.isArray(d1Releases) && d1Releases.length > 0) {
-    return d1Releases.map((r: any) => ({
+    const mappedD1 = d1Releases.map((r: any) => ({
       id: r.id,
       version: r.tag_name || r.version,
       title: r.title || r.tag_name || r.version,
@@ -453,6 +456,7 @@ function buildNormalizedReleases(
       release_date: r.released_at || r.release_date,
       released_at: r.released_at || r.release_date
     }));
+    return sortAndCapReleases(mappedD1, MAX_PACKAGE_RELEASES);
   }
 
   return [];
@@ -736,11 +740,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       d1Pkg?.min_minetest_version || '5.0.0'
     );
     if (discoveredGitReleases.length > 0) {
-      d1Releases = discoveredGitReleases;
+      d1Releases = sortAndCapReleases(discoveredGitReleases, MAX_PACKAGE_RELEASES);
       if (context.env.DB && d1Pkg) {
         try {
           await context.env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(d1Pkg.id).run();
-          for (const rel of discoveredGitReleases.slice(0, 25)) {
+          for (const rel of d1Releases) {
             await context.env.DB.prepare(`
               INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -752,7 +756,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               rel.download_url,
               rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
               rel.changelog || `Git Tag / Release (${rel.tag_name})`,
-              rel.released_at || new Date().toISOString()
+              rel.released_at || null
             ).run();
           }
         } catch {

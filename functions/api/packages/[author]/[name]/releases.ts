@@ -1,7 +1,9 @@
 import {
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
-  buildGitBranchArchiveUrl
+  buildGitBranchArchiveUrl,
+  sortAndCapReleases,
+  MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 
 interface Env {
@@ -30,10 +32,10 @@ export async function onRequestGet(context: { params: { author: string; name: st
 
     const effectivePkgId = d1Pkg?.id || packageId;
     const releases = await context.env.DB.prepare(
-      `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id ASC`
+      `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
     ).bind(effectivePkgId).all();
 
-    d1Releases = releases.results || [];
+    d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
   }
 
   // 2. Query official ContentDB `/api/packages/<author>/<name>/releases/` first when available
@@ -82,11 +84,11 @@ export async function onRequestGet(context: { params: { author: string; name: st
         min_minetest_version: (rawMinVer && String(rawMinVer).toLowerCase() !== 'none' ? String(rawMinVer) : undefined) || r.min_protocol_version || undefined,
         max_minetest_version: (rawMaxVer && String(rawMaxVer).toLowerCase() !== 'none' ? String(rawMaxVer) : undefined) || r.max_protocol_version || undefined,
         release_date: r.release_date || undefined,
-        released_at: r.release_date || new Date().toISOString()
+        released_at: r.release_date || ''
       };
     });
 
-    return new Response(JSON.stringify(normalized), {
+    return new Response(JSON.stringify(sortAndCapReleases(normalized, MAX_PACKAGE_RELEASES)), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
@@ -145,10 +147,10 @@ export async function onRequestGet(context: { params: { author: string; name: st
           await context.env.DB.prepare(
             `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
           ).bind(d1Pkg.id).run();
-          for (const rel of discoveredGitReleases) {
+          for (const rel of discoveredGitReleases.slice(0, MAX_PACKAGE_RELEASES)) {
             await context.env.DB.prepare(`
               INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+              VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
             `).bind(
               d1Pkg.id,
               rel.version,

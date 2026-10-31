@@ -1713,6 +1713,13 @@ export class PackageService {
     this.drainHydrationQueue();
   }
 
+  prioritizeVisiblePackages(packages: LuantiPackage[]): void {
+    if (!Array.isArray(packages) || packages.length === 0) return;
+    for (const pkg of packages) {
+      this.ensurePackageHydrated(pkg, true);
+    }
+  }
+
   private drainHydrationQueue(): void {
     const MAX_CONCURRENT = 6;
     if (this.edgeApiAvailable && this.hydrationQueue.length >= 2 && this.activeHydrationWorkers < MAX_CONCURRENT) {
@@ -3456,7 +3463,7 @@ export class PackageService {
             r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
           );
           if (hasTaggedRelease) {
-            this.releasesCache.set(cacheKey, mappedReleases);
+            this.releasesCache.set(cacheKey, this.sortAndCapReleases(mappedReleases, 10));
           }
         }
 
@@ -3862,11 +3869,12 @@ export class PackageService {
               const hasRealTaggedRelease = mapped.some(
                 r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
               );
+              const sortedEdgeRels = this.sortAndCapReleases(mapped, 10);
               if (hasRealTaggedRelease) {
-                this.releasesCache.set(cacheKey, mapped);
-                return mapped;
+                this.releasesCache.set(cacheKey, sortedEdgeRels);
+                return sortedEdgeRels;
               }
-              edgeFallbackBranchReleases = mapped;
+              edgeFallbackBranchReleases = sortedEdgeRels;
             }
           }
         } catch {
@@ -3912,8 +3920,9 @@ export class PackageService {
                 released_at: rel.release_date || ''
               };
             });
-            this.releasesCache.set(cacheKey, mappedCdbRels);
-            return mappedCdbRels;
+            const sortedCdbRels = this.sortAndCapReleases(mappedCdbRels, 10);
+            this.releasesCache.set(cacheKey, sortedCdbRels);
+            return sortedCdbRels;
           }
         } catch {
           // Proceed to Git releases/tags auto-discovery
@@ -4036,8 +4045,9 @@ export class PackageService {
           }
 
           if (combined.length > 0) {
-            this.releasesCache.set(cacheKey, combined);
-            return combined;
+            const sortedCombined = this.sortAndCapReleases(combined, 10);
+            this.releasesCache.set(cacheKey, sortedCombined);
+            return sortedCombined;
           }
         } catch {
           // Ignore discovery error and try next confirmed repo
@@ -4057,6 +4067,264 @@ export class PackageService {
 
     this.releasesPromiseCache.set(cacheKey, promise);
     return promise;
+  }
+
+  /**
+   * Sorts package releases newest-first (by semantic version X.Y.Z descending and release timestamp descending)
+   * and caps the returned array to `limit` (default: 10 latest releases).
+   */
+  sortAndCapReleases(releases: PackageRelease[], limit = 10): PackageRelease[] {
+    if (!Array.isArray(releases) || releases.length === 0) return [];
+    const extractSemver = (raw?: string): number[] | null => {
+      if (!raw || typeof raw !== 'string') return null;
+      const m = raw.trim().match(/^(?:v|ver|version|rel|release)?[\s_-]*(\d+)\.(\d+)(?:\.(\d+))?(?:[.-](\d+))?/i);
+      if (!m) return null;
+      return [
+        parseInt(m[1], 10) || 0,
+        parseInt(m[2], 10) || 0,
+        m[3] !== undefined ? parseInt(m[3], 10) || 0 : 0,
+        m[4] !== undefined ? parseInt(m[4], 10) || 0 : 0
+      ];
+    };
+
+    const sorted = [...releases].sort((a, b) => {
+      const aIsFallback = a.commit_sha === 'HEAD' || String(a.id) === 'git-branch-fallback';
+      const bIsFallback = b.commit_sha === 'HEAD' || String(b.id) === 'git-branch-fallback';
+      if (aIsFallback !== bIsFallback) {
+        return aIsFallback ? 1 : -1;
+      }
+
+      const verA = String(a.tag_name || a.version || '');
+      const verB = String(b.tag_name || b.version || '');
+      const tupleA = extractSemver(verA);
+      const tupleB = extractSemver(verB);
+      if (tupleA && tupleB) {
+        for (let i = 0; i < 4; i++) {
+          if (tupleA[i] !== tupleB[i]) {
+            return tupleB[i] - tupleA[i];
+          }
+        }
+      }
+
+      const timeA = Date.parse(String(a.released_at || '')) || 0;
+      const timeB = Date.parse(String(b.released_at || '')) || 0;
+      if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 1000) {
+        return timeB - timeA;
+      }
+      if (timeA !== timeB) {
+        return timeB - timeA;
+      }
+
+      const idA = Number(a.id);
+      const idB = Number(b.id);
+      if (Number.isFinite(idA) && Number.isFinite(idB) && idA !== idB) {
+        return idB - idA;
+      }
+
+      return verB.localeCompare(verA, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    return limit > 0 ? sorted.slice(0, limit) : sorted;
+  }
+
+  /**
+   * Computes up to `limit` similar / recommended packages for the viewed package using
+   * package type, shared ContentDB/custom tags, dependency/ecosystem links, keyword overlap,
+   * and diversity-capped creator affinity.
+   */
+  getSimilarPackages(pkg: LuantiPackage | null | undefined, limit = 4): LuantiPackage[] {
+    if (!pkg) return [];
+    const catalog = this._packages();
+    if (catalog.length === 0) return [];
+
+    const SYSTEM_TAGS = new Set([
+      'git',
+      'github',
+      'codeberg',
+      'gitlab',
+      'mesehub',
+      'contentdb',
+      'mod',
+      'game',
+      'txp',
+      'modpack'
+    ]);
+    const STOP_WORDS = new Set([
+      'mod',
+      'mods',
+      'game',
+      'games',
+      'luanti',
+      'minetest',
+      'pack',
+      'adds',
+      'with',
+      'from',
+      'that',
+      'this',
+      'your',
+      'into',
+      'more',
+      'some',
+      'very',
+      'simple',
+      'basic'
+    ]);
+
+    const selfId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    const selfAuthor = (pkg.author || '').toLowerCase();
+    const selfName = (pkg.name || '').toLowerCase();
+    const selfType = pkg.type || 'mod';
+
+    const selfTags = new Set(
+      (pkg.tags || [])
+        .map(t => String(t).toLowerCase().trim())
+        .filter(t => Boolean(t) && !SYSTEM_TAGS.has(t))
+    );
+
+    const selfDeps = new Set(
+      [...(pkg.dependencies || []), ...(pkg.optional_dependencies || []), ...(pkg.provides || [])]
+        .map(d => String(d).toLowerCase().trim())
+        .filter(d => Boolean(d) && d !== 'default')
+    );
+
+    const selfGames = new Set(
+      (pkg.game_support || [])
+        .map(gs => String(gs?.game?.id || gs?.game?.name || '').toLowerCase().trim())
+        .filter(Boolean)
+    );
+
+    const extractTokens = (text: string): string[] =>
+      text
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/g, ' ')
+        .split(/[_\s]+/)
+        .filter(tok => tok.length >= 4 && !STOP_WORDS.has(tok));
+
+    const selfKeywords = new Set(
+      extractTokens(`${pkg.title || ''} ${pkg.name || ''} ${pkg.short_desc || ''}`)
+    );
+
+    const scored: Array<{ item: LuantiPackage; score: number; sameAuthor: boolean }> = [];
+
+    for (const cand of catalog) {
+      if (!cand || cand.status === 'delisted' || cand.status === 'flagged') continue;
+      const candId = (cand.id || `${cand.author}/${cand.name}`).toLowerCase();
+      if (candId === selfId) continue;
+      if ((cand.author || '').toLowerCase() === selfAuthor && (cand.name || '').toLowerCase() === selfName) {
+        continue;
+      }
+
+      let score = 0;
+
+      // 1. Package Type Affinity
+      if (cand.type === selfType) {
+        score += 40;
+      } else if (
+        (selfType === 'mod' && cand.type === 'modpack') ||
+        (selfType === 'modpack' && cand.type === 'mod')
+      ) {
+        score += 20;
+      }
+
+      // 2. Shared Content Tags
+      let sharedTagCount = 0;
+      if (selfTags.size > 0 && Array.isArray(cand.tags)) {
+        for (const t of cand.tags) {
+          const clean = String(t).toLowerCase().trim();
+          if (selfTags.has(clean)) {
+            sharedTagCount++;
+          }
+        }
+      }
+      if (sharedTagCount > 0) {
+        score += Math.min(85, sharedTagCount * 25);
+      }
+
+      // 3. Direct & Shared Dependency / Game Ecosystem Affinity
+      const candDeps = [
+        ...(cand.dependencies || []),
+        ...(cand.optional_dependencies || []),
+        ...(cand.provides || [])
+      ].map(d => String(d).toLowerCase().trim());
+
+      const candName = (cand.name || '').toLowerCase();
+      if (candDeps.includes(selfName) || selfDeps.has(candName)) {
+        score += 30;
+      }
+      let sharedDepCount = 0;
+      for (const d of candDeps) {
+        if (d && d !== 'default' && selfDeps.has(d)) {
+          sharedDepCount++;
+        }
+      }
+      if (sharedDepCount > 0) {
+        score += Math.min(45, sharedDepCount * 15);
+      }
+
+      if (selfGames.size > 0 && Array.isArray(cand.game_support)) {
+        for (const gs of cand.game_support) {
+          const gKey = String(gs?.game?.id || gs?.game?.name || '').toLowerCase().trim();
+          if (gKey && selfGames.has(gKey)) {
+            score += 12;
+            break;
+          }
+        }
+      }
+
+      // 4. Title / Name / Short Description Keyword Overlap
+      let sharedKeywordCount = 0;
+      if (selfKeywords.size > 0) {
+        const candTokens = extractTokens(`${cand.title || ''} ${cand.name || ''} ${cand.short_desc || ''}`);
+        const seenCandTok = new Set<string>();
+        for (const tok of candTokens) {
+          if (!seenCandTok.has(tok) && selfKeywords.has(tok)) {
+            seenCandTok.add(tok);
+            sharedKeywordCount++;
+          }
+        }
+      }
+      if (sharedKeywordCount > 0) {
+        score += Math.min(40, sharedKeywordCount * 10);
+      }
+
+      // 5. Same Author / Creator Affinity
+      const sameAuthor = Boolean(selfAuthor && (cand.author || '').toLowerCase() === selfAuthor);
+      if (sameAuthor) {
+        score += 15;
+      }
+
+      // 6. Quality & Popularity Tie-Breaker
+      score += Math.min(12, Math.log10((cand.downloads || 1) + 1) * 2.5) + (cand.score || 0);
+
+      scored.push({ item: cand, score, sameAuthor });
+    }
+
+    scored.sort((a, b) => b.score - a.score || (b.item.downloads || 0) - (a.item.downloads || 0));
+
+    // Select top `limit` packages while capping same-author entries to max 1 if other matches exist
+    const selected: LuantiPackage[] = [];
+    const deferredSameAuthor: LuantiPackage[] = [];
+    let sameAuthorCount = 0;
+
+    for (const entry of scored) {
+      if (selected.length >= limit) break;
+      if (entry.sameAuthor && sameAuthorCount >= 1) {
+        deferredSameAuthor.push(entry.item);
+        continue;
+      }
+      if (entry.sameAuthor) {
+        sameAuthorCount++;
+      }
+      selected.push(entry.item);
+    }
+
+    for (const fallback of deferredSameAuthor) {
+      if (selected.length >= limit) break;
+      selected.push(fallback);
+    }
+
+    return selected;
   }
 
   private navigatePreservingScroll(commands: any[]): void {

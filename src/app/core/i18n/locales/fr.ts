@@ -211,7 +211,11 @@ export const fr: TranslationDictionary = {
     flagReviewPrompt: 'Motif du signalement de ce commentaire (spam, inapproprié)...',
     reviewFlagged: 'Signalé',
     removeReview: 'Supprimer',
-    reportSubmitted: 'Signalement envoyé aux modérateurs.'
+    reportSubmitted: 'Signalement envoyé aux modérateurs.',
+    similarPackagesTitle: 'Paquets Similaires',
+    similarPackagesSubtitle: 'Recommandés selon les tags, la catégorie et les dépendances',
+    latestRelease: 'Dernière',
+    showingLatestReleases: 'Affichage des {count} dernières versions'
   },
   auth: {
     title: 'Connexion à LuantiHub',

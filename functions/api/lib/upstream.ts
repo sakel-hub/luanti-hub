@@ -1127,6 +1127,91 @@ export function buildGitTagArchiveUrl(
   return `https://github.com/${owner}/${repo}/archive/refs/tags/${encTag}.zip`;
 }
 
+export const MAX_PACKAGE_RELEASES = 10;
+
+function extractSemverTuple(raw?: string | null): number[] | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  const m = trimmed.match(/^(?:v|ver|version|rel|release)?[\s_-]*(\d+)\.(\d+)(?:\.(\d+))?(?:[.-](\d+))?/i);
+  if (!m) return null;
+  return [
+    parseInt(m[1], 10) || 0,
+    parseInt(m[2], 10) || 0,
+    m[3] !== undefined ? parseInt(m[3], 10) || 0 : 0,
+    m[4] !== undefined ? parseInt(m[4], 10) || 0 : 0
+  ];
+}
+
+/**
+ * Compares two version/tag strings in descending semantic version order (`2.0.4` > `2.0.3` > `2.0.0` > `v1.0.0`).
+ * Returns negative if `a` is newer than `b`, positive if `b` is newer than `a`, or `0` if incomparable/equal.
+ */
+export function compareSemanticVersionsDesc(aRaw?: string | null, bRaw?: string | null): number {
+  const tupleA = extractSemverTuple(aRaw);
+  const tupleB = extractSemverTuple(bRaw);
+  if (!tupleA || !tupleB) return 0;
+  for (let i = 0; i < 4; i++) {
+    if (tupleA[i] !== tupleB[i]) {
+      return tupleB[i] - tupleA[i];
+    }
+  }
+  return 0;
+}
+
+export interface SortableReleaseLike {
+  id?: string | number | null;
+  tag_name?: string | null;
+  version?: string | null;
+  title?: string | null;
+  commit_sha?: string | null;
+  release_date?: string | null;
+  released_at?: string | null;
+}
+
+/**
+ * Sorts package releases newest-first (by semantic version X.Y.Z descending and release timestamp descending)
+ * and caps the returned array to `maxCap` (default: 10 latest releases).
+ */
+export function sortAndCapReleases<T extends SortableReleaseLike>(
+  releases: T[],
+  maxCap: number = MAX_PACKAGE_RELEASES
+): T[] {
+  if (!Array.isArray(releases) || releases.length === 0) return [];
+  const sorted = [...releases].sort((a, b) => {
+    const aIsFallback = a?.commit_sha === 'HEAD' || String(a?.id) === 'git-branch-fallback';
+    const bIsFallback = b?.commit_sha === 'HEAD' || String(b?.id) === 'git-branch-fallback';
+    if (aIsFallback !== bIsFallback) {
+      return aIsFallback ? 1 : -1;
+    }
+
+    const verA = String(a?.tag_name || a?.version || a?.title || '');
+    const verB = String(b?.tag_name || b?.version || b?.title || '');
+    const semverCmp = compareSemanticVersionsDesc(verA, verB);
+    if (semverCmp !== 0) {
+      return semverCmp;
+    }
+
+    const timeA = Date.parse(String(a?.release_date || a?.released_at || '')) || 0;
+    const timeB = Date.parse(String(b?.release_date || b?.released_at || '')) || 0;
+    if (timeA > 0 && timeB > 0 && Math.abs(timeA - timeB) > 1000) {
+      return timeB - timeA;
+    }
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+
+    const idA = Number(a?.id);
+    const idB = Number(b?.id);
+    if (Number.isFinite(idA) && Number.isFinite(idB) && idA !== idB) {
+      return idB - idA;
+    }
+
+    return verB.localeCompare(verA, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  return maxCap > 0 ? sorted.slice(0, maxCap) : sorted;
+}
+
 /**
  * Discovers both formal Releases and Git Tags from GitHub, Codeberg/Gitea/Forgejo, or GitLab.
  * Prefers tags and releases so repositories that tag versions (e.g. via `/tags` without formal GitHub Releases)
@@ -1277,7 +1362,7 @@ export async function fetchGitRepoReleasesAndTags(
     }
   }
 
-  return results;
+  return sortAndCapReleases(results, MAX_PACKAGE_RELEASES);
 }
 
 /**

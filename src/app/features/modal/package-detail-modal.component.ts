@@ -10,6 +10,7 @@ import {
   HostListener,
   OnInit,
   OnChanges,
+  AfterViewInit,
   OnDestroy
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
@@ -25,6 +26,7 @@ import { ImgFallbackDirective } from '../../shared/directives/img-fallback.direc
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
+import { PackageCardComponent } from '../card/package-card.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideX,
@@ -64,6 +66,7 @@ import {
     TooltipDirective,
     CompactNumberPipe,
     PackageBadgesComponent,
+    PackageCardComponent,
     TranslatePipe,
     LucideX,
     LucideShare2,
@@ -103,7 +106,10 @@ import {
           (click)="$event.stopPropagation()"
           class="relative w-full max-w-5xl xl:max-w-[1120px] max-h-screen sm:max-h-[94vh] glass-modal rounded-none sm:rounded-3xl overflow-hidden flex flex-col luanti-dialog-panel my-auto">
 
-          <div class="overflow-y-auto flex-1 flex flex-col">
+          <div
+            #modalScrollContainer
+            (scroll)="onModalContainerScroll()"
+            class="overflow-y-auto flex-1 flex flex-col">
 
             <!-- Admin-Only Package Moderation Bar (Delist, Restore & Safe Permanent Removal) -->
             @if (authService.isAdmin()) {
@@ -205,8 +211,8 @@ import {
                   [appTooltip]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
                   [attr.aria-label]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
                   [class]="settingsService.isFavorite(package.id)
-                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-rose-400/50 !bg-rose-500/20 text-rose-400 hover:text-rose-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
-                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-200 hover:text-rose-400 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
+                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-rose-active text-rose-300 hover:text-rose-200 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-rose text-rose-200/90 hover:text-rose-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
                   <svg
                     lucideHeart
                     [class]="settingsService.isFavorite(package.id) ? 'w-4 h-4 fill-rose-500 text-rose-400 transition-colors' : 'w-4 h-4 transition-colors'"
@@ -221,7 +227,7 @@ import {
                   (click)="pwaService.sharePackage(package.title, package.short_desc, shareUrl)"
                   [appTooltip]="'modal.shareTooltip' | translate"
                   [attr.aria-label]="'modal.shareTooltip' | translate"
-                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-200 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-sky text-sky-200/90 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
                   <svg lucideShare2 class="w-4 h-4"></svg>
                 </button>
 
@@ -232,8 +238,8 @@ import {
                   [appTooltip]="'modal.reportPackage' | translate"
                   [attr.aria-label]="'modal.reportPackage' | translate"
                   [class]="isReportOpen()
-                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-amber-400/50 !bg-amber-500/20 text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
-                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn text-slate-300 hover:text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
+                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber-active text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber text-amber-200/90 hover:text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
                   <svg lucideFlag class="w-4 h-4"></svg>
                 </button>
 
@@ -246,8 +252,8 @@ import {
                     appTooltip="Remove Package"
                     aria-label="Remove Package"
                     [class]="isConfirmingRemove()
-                      ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-btn-rose text-white flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'
-                      : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn !border-rose-400/40 !bg-rose-500/15 text-rose-300 hover:text-white hover:!border-rose-400/70 hover:!bg-rose-500/30 flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'">
+                      ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-rose-active text-white flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'
+                      : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-btn-rose text-rose-200 hover:text-white flex items-center justify-center transition hover:scale-105 cursor-pointer disabled:opacity-50'">
                     <svg lucideTrash2 class="w-4 h-4"></svg>
                   </button>
                 }
@@ -1168,6 +1174,50 @@ import {
 
             </div>
 
+            <!-- Lazy-Loaded "Similar Packages" Recommendation Row (Hydrated & Rendered When Close to Viewport) -->
+            <section
+              #similarSectionSentinel
+              aria-labelledby="modal-similar-packages-heading"
+              class="pt-6 border-t border-white/10 space-y-4">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <h3 id="modal-similar-packages-heading" class="text-sm sm:text-base font-black text-white tracking-tight">
+                    {{ 'modal.similarPackagesTitle' | translate }}
+                  </h3>
+                  <p class="text-[11px] text-slate-400">
+                    {{ 'modal.similarPackagesSubtitle' | translate }}
+                  </p>
+                </div>
+              </div>
+
+              @if (isSimilarNearViewport()) {
+                @if (similarPackages().length > 0) {
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 luanti-tab-enter">
+                    @for (simPkg of similarPackages(); track simPkg.id; let first = $first; let last = $last) {
+                      <app-package-card
+                        [package]="simPkg"
+                        [isFirst]="first"
+                        [isLast]="last">
+                      </app-package-card>
+                    }
+                  </div>
+                }
+              } @else {
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" aria-hidden="true">
+                  @for (placeholder of [1, 2, 3, 4]; track placeholder) {
+                    <div class="h-64 rounded-2xl glass-panel p-3.5 flex flex-col justify-between">
+                      <div class="w-full aspect-video rounded-xl skeleton-shimmer"></div>
+                      <div class="space-y-2 mt-3">
+                        <div class="w-3/4 h-3.5 rounded skeleton-shimmer"></div>
+                        <div class="w-full h-2.5 rounded skeleton-shimmer"></div>
+                        <div class="w-2/3 h-2.5 rounded skeleton-shimmer"></div>
+                      </div>
+                    </div>
+                  }
+                </div>
+              }
+            </section>
+
             <!-- Tabbed Navigation: Reviews, Releases & Legal License -->
             <div class="pt-4 border-t border-white/10">
               <div class="flex items-center gap-5 border-b border-white/10 text-xs font-semibold overflow-x-auto no-scrollbar">
@@ -1183,7 +1233,7 @@ import {
                   (click)="activeTab.set('releases')"
                   [class]="activeTab() === 'releases' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap'"
                   class="cursor-pointer">
-                  {{ 'modal.tabReleases' | translate }} ({{ releases().length }})
+                  {{ 'modal.tabReleases' | translate }} ({{ cappedReleases().length }})
                 </button>
                 <button
                   type="button"
@@ -1408,7 +1458,7 @@ import {
                                     (click)="toggleFlagReviewPrompt(rev.id)"
                                     [appTooltip]="'modal.flagReview' | translate"
                                     [attr.aria-label]="'modal.flagReview' | translate"
-                                    class="p-1 rounded-lg glass-icon-btn text-slate-400 hover:text-amber-300 transition cursor-pointer">
+                                    class="p-1.5 rounded-lg glass-icon-btn-amber text-amber-200/80 hover:text-amber-300 transition cursor-pointer">
                                     <svg lucideFlag class="w-3 h-3"></svg>
                                   </button>
                                 }
@@ -1464,10 +1514,10 @@ import {
                 </div>
               }
 
-              <!-- Releases Content -->
+              <!-- Releases Content (Sorted Newest-First, Capped at 10, Paginated 5 per Page) -->
               @if (activeTab() === 'releases') {
                 <div class="pt-4 space-y-2.5 luanti-tab-enter">
-                  @if (releases().length === 0) {
+                  @if (cappedReleases().length === 0) {
                     <div class="p-4 rounded-2xl glass-panel flex items-center justify-between text-xs">
                       <div>
                         <span class="font-bold text-white">Latest Archive ({{ package.default_branch || 'main' }})</span>
@@ -1482,12 +1532,17 @@ import {
                       </button>
                     </div>
                   } @else {
-                    @for (rel of releases(); track rel.id) {
+                    @for (rel of paginatedReleases(); track rel.id; let idx = $index) {
                       <div class="p-3.5 rounded-2xl glass-panel flex flex-col gap-2 text-xs">
                         <div class="flex items-center justify-between gap-3">
                           <div class="space-y-0.5 min-w-0">
                             <div class="flex items-center gap-2 flex-wrap">
                               <span class="font-bold text-white">{{ rel.version }}</span>
+                              @if (releasesPage() === 1 && idx === 0 && rel.commit_sha !== 'HEAD') {
+                                <span class="px-1.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold text-[10px] uppercase tracking-wider">
+                                  {{ 'modal.latestRelease' | translate }}
+                                </span>
+                              }
                               @if (rel.commit_sha) {
                                 <code class="text-[10px] text-sky-400 bg-slate-950/80 px-1.5 py-0.5 rounded font-mono border border-white/10">
                                   {{ rel.commit_sha | slice:0:8 }}
@@ -1527,6 +1582,37 @@ import {
                             {{ rel.release_notes || rel.changelog }}
                           </p>
                         }
+                      </div>
+                    }
+
+                    @if (totalReleasePages() > 1) {
+                      <div class="pt-2 flex items-center justify-between gap-3 flex-wrap text-xs">
+                        <span class="text-[11px] text-slate-400 font-medium">
+                          {{ 'modal.showingLatestReleases' | translate:{ count: cappedReleases().length } }}
+                        </span>
+                        <div class="flex items-center gap-2 ml-auto">
+                          <button
+                            type="button"
+                            (click)="prevReleasesPage()"
+                            [disabled]="releasesPage() <= 1"
+                            aria-label="Previous releases page"
+                            class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 disabled:pointer-events-none font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                            <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
+                            <span>{{ 'profile.prevPage' | translate }}</span>
+                          </button>
+                          <span class="px-2.5 py-1 rounded-lg bg-slate-950/60 border border-white/10 text-[11px] font-mono text-slate-300">
+                            {{ 'profile.pageLabel' | translate }} {{ releasesPage() }} / {{ totalReleasePages() }}
+                          </span>
+                          <button
+                            type="button"
+                            (click)="nextReleasesPage()"
+                            [disabled]="releasesPage() >= totalReleasePages()"
+                            aria-label="Next releases page"
+                            class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 disabled:pointer-events-none font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                            <span>{{ 'profile.nextPage' | translate }}</span>
+                            <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
+                          </button>
+                        </div>
                       </div>
                     }
                   }
@@ -1650,7 +1736,7 @@ import {
     }
   `
 })
-export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy {
+export class PackageDetailModalComponent implements OnInit, OnChanges, AfterViewInit, OnDestroy {
   @Input({ required: true }) package!: LuantiPackage;
 
   readonly packageService = inject(PackageService);
@@ -1668,6 +1754,33 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     this.reviews().filter(r => r.source === 'contentdb').length
   );
   readonly releases = signal<PackageRelease[]>([]);
+  readonly RELEASES_PAGE_SIZE = 5;
+  readonly MAX_RELEASES_CAP = 10;
+  readonly releasesPage = signal<number>(1);
+  readonly cappedReleases = computed<PackageRelease[]>(() =>
+    this.packageService.sortAndCapReleases(this.releases(), this.MAX_RELEASES_CAP)
+  );
+  readonly totalReleasePages = computed<number>(() =>
+    Math.max(1, Math.ceil(this.cappedReleases().length / this.RELEASES_PAGE_SIZE))
+  );
+  readonly paginatedReleases = computed<PackageRelease[]>(() => {
+    const list = this.cappedReleases();
+    const page = Math.min(Math.max(1, this.releasesPage()), this.totalReleasePages());
+    const start = (page - 1) * this.RELEASES_PAGE_SIZE;
+    return list.slice(start, start + this.RELEASES_PAGE_SIZE);
+  });
+
+  // Lazy-Loaded "Similar Packages" state (triggered when within 240px of viewport)
+  @ViewChild('modalScrollContainer') modalScrollContainerRef?: ElementRef<HTMLDivElement>;
+  @ViewChild('similarSectionSentinel') similarSentinelRef?: ElementRef<HTMLElement>;
+  readonly isSimilarNearViewport = signal<boolean>(false);
+  private similarObserver: IntersectionObserver | null = null;
+  readonly similarPackages = computed<LuantiPackage[]>(() => {
+    if (!this.isSimilarNearViewport()) return [];
+    const pkg = this.packageService.activePackage() || this.package;
+    return this.packageService.getSimilarPackages(pkg, 4);
+  });
+
   readonly copied = signal(false);
   readonly copiedUrl = signal(false);
   readonly copiedTechId = signal(false);
@@ -2010,8 +2123,78 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     this.ensureExtraDataLoaded();
   }
 
+  ngAfterViewInit(): void {
+    this.setupSimilarIntersectionObserver();
+  }
+
   ngOnDestroy(): void {
+    this.disconnectSimilarObserver();
     this.packageService.registerModalSubOverlayCloser(null);
+  }
+
+  prevReleasesPage(): void {
+    this.releasesPage.update(p => Math.max(1, p - 1));
+  }
+
+  nextReleasesPage(): void {
+    this.releasesPage.update(p => Math.min(this.totalReleasePages(), p + 1));
+  }
+
+  onModalContainerScroll(): void {
+    if (this.isSimilarNearViewport()) return;
+    const container = this.modalScrollContainerRef?.nativeElement;
+    const sentinel = this.similarSentinelRef?.nativeElement;
+    if (!container || !sentinel) return;
+    const containerRect = container.getBoundingClientRect();
+    const sentinelRect = sentinel.getBoundingClientRect();
+    if (sentinelRect.top - containerRect.bottom <= 240) {
+      this.triggerSimilarPackagesLoad();
+    }
+  }
+
+  private disconnectSimilarObserver(): void {
+    if (this.similarObserver) {
+      this.similarObserver.disconnect();
+      this.similarObserver = null;
+    }
+  }
+
+  private setupSimilarIntersectionObserver(): void {
+    this.disconnectSimilarObserver();
+    if (this.isSimilarNearViewport()) return;
+
+    const sentinel = this.similarSentinelRef?.nativeElement;
+    if (!sentinel) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      this.triggerSimilarPackagesLoad();
+      return;
+    }
+
+    const rootEl = this.modalScrollContainerRef?.nativeElement || null;
+    this.similarObserver = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting || e.intersectionRatio > 0)) {
+          this.triggerSimilarPackagesLoad();
+        }
+      },
+      {
+        root: rootEl,
+        rootMargin: '240px 0px',
+        threshold: 0.01
+      }
+    );
+    this.similarObserver.observe(sentinel);
+  }
+
+  triggerSimilarPackagesLoad(): void {
+    if (this.isSimilarNearViewport()) return;
+    this.isSimilarNearViewport.set(true);
+    this.disconnectSimilarObserver();
+    const recs = this.similarPackages();
+    if (recs.length > 0) {
+      this.packageService.prioritizeVisiblePackages(recs);
+    }
   }
 
   @HostListener('window:keydown', ['$event'])
@@ -2035,12 +2218,27 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, OnDestroy
     const resolvedAuthor = this.package.author || (this.package as any).author_name || '';
     const key = (this.package.id || `${resolvedAuthor}/${this.package.name}`).toLowerCase();
     if (this.loadedPackageKey === key) return;
+    const isSwitchingPackage = Boolean(this.loadedPackageKey && this.loadedPackageKey !== key);
     this.loadedPackageKey = key;
     this.activeBannerUrl.set(null);
     this.mediaCarouselIndex.set(0);
     this.isVideoPlaying.set(false);
     this.lightboxImageUrl.set(null);
     this.isLightboxZoomed.set(false);
+    this.releasesPage.set(1);
+
+    if (isSwitchingPackage) {
+      this.isSimilarNearViewport.set(false);
+      const scrollEl = this.modalScrollContainerRef?.nativeElement;
+      if (scrollEl) {
+        if (typeof scrollEl.scrollTo === 'function') {
+          scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
+        } else {
+          scrollEl.scrollTop = 0;
+        }
+      }
+      setTimeout(() => this.setupSimilarIntersectionObserver(), 0);
+    }
 
     // Wait for bundled package details first (which populates reviewsCache & releasesCache in 1 request)
     await this.packageService.loadPackageDetails(this.package, true);

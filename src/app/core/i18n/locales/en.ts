@@ -211,7 +211,11 @@ export const en: TranslationDictionary = {
     flagReviewPrompt: 'Reason for flagging this comment (spam, harassment, inappropriate)...',
     reviewFlagged: 'Flagged',
     removeReview: 'Remove',
-    reportSubmitted: 'Report submitted for moderator review.'
+    reportSubmitted: 'Report submitted for moderator review.',
+    similarPackagesTitle: 'Similar Packages',
+    similarPackagesSubtitle: 'Recommended based on tags, category, and dependencies',
+    latestRelease: 'Latest',
+    showingLatestReleases: 'Showing latest {count} releases'
   },
   auth: {
     title: 'Sign in to LuantiHub',

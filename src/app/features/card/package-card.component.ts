@@ -188,7 +188,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
               (click)="onFavoriteClick($event)"
               [attr.aria-label]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
               [appTooltip]="settingsService.isFavorite(package.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
-              class="w-8 h-8 rounded-full glass-icon-btn text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
+              [class]="settingsService.isFavorite(package.id)
+                ? 'w-8 h-8 rounded-full glass-icon-btn-rose-active text-rose-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                : 'w-8 h-8 rounded-full glass-icon-btn-rose text-rose-200/90 hover:text-rose-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
               <svg
                 lucideHeart
                 [class]="settingsService.isFavorite(package.id) ? 'w-3.5 h-3.5 fill-rose-500 text-rose-500 transition-colors' : 'w-3.5 h-3.5 transition-colors'"
@@ -208,7 +210,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
               (click)="openDetails($event)"
               [appTooltip]="'card.moreInfo' | translate"
               aria-label="More Information"
-              class="w-8 h-8 rounded-full glass-icon-btn text-white flex items-center justify-center ml-auto transition hover:scale-105 cursor-pointer">
+              class="w-8 h-8 rounded-full glass-icon-btn-sky text-sky-200/90 hover:text-white flex items-center justify-center ml-auto transition hover:scale-105 cursor-pointer">
               <svg lucideChevronDown class="w-4 h-4"></svg>
             </button>
           </div>

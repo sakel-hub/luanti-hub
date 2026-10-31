@@ -211,7 +211,11 @@ export const ru: TranslationDictionary = {
     flagReviewPrompt: 'Причина жалобы на комментарий (спам, оскорбления)...',
     reviewFlagged: 'Отправлено',
     removeReview: 'Удалить',
-    reportSubmitted: 'Жалоба отправлена на рассмотрение модераторам.'
+    reportSubmitted: 'Жалоба отправлена на рассмотрение модераторам.',
+    similarPackagesTitle: 'Похожие пакеты',
+    similarPackagesSubtitle: 'Рекомендации по тегам, категории и зависимостям',
+    latestRelease: 'Последний',
+    showingLatestReleases: 'Показаны последние {count} релизов'
   },
   auth: {
     title: 'Вход в LuantiHub',

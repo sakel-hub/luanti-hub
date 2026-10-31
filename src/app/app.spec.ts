@@ -2909,4 +2909,206 @@ supported_games = minetest_game, voxelibre
       fetchSpy.mockRestore();
     }
   });
+
+  it('should sort releases newest-first by semantic version, cap at 10 with 5-per-page pagination, and lazily load Similar Packages when scrolled near the viewport', async () => {
+    const { sortAndCapReleases, compareSemanticVersionsDesc } = await import('../../functions/api/lib/upstream');
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. Verify semantic version descending comparison and backend + frontend release sorting & 10-cap
+    expect(compareSemanticVersionsDesc('2.0.4', '2.0.0')).toBeLessThan(0);
+    expect(compareSemanticVersionsDesc('2.0.0', 'v1.0.0')).toBeLessThan(0);
+
+    // Simulate 14 Git tags returned with identical/missing timestamps (as in screenshot: 2.0.0 .. 2.0.4, v1.0.0, etc.)
+    const rawUnorderedReleases = [
+      { id: '1', version: '2.0.0', title: '2.0.0', commit_sha: '433fbd63', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/1' },
+      { id: '2', version: '2.0.1', title: '2.0.1', commit_sha: 'ea69469f', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/2' },
+      { id: '3', version: '2.0.2', title: '2.0.2', commit_sha: '60d05595', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/3' },
+      { id: '4', version: '2.0.3', title: '2.0.3', commit_sha: 'f3fa0d31', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/4' },
+      { id: '5', version: '2.0.4', title: '2.0.4', commit_sha: 'cac8d996', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/5' },
+      { id: '6', version: 'v1.0.0', title: 'v1.0.0', commit_sha: '4cfab85f', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/6' },
+      { id: '7', version: 'v1.1.0', title: 'v1.1.0', commit_sha: '11111111', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/7' },
+      { id: '8', version: 'v1.2.0', title: 'v1.2.0', commit_sha: '22222222', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/8' },
+      { id: '9', version: 'v1.3.0', title: 'v1.3.0', commit_sha: '33333333', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/9' },
+      { id: '10', version: 'v1.4.0', title: 'v1.4.0', commit_sha: '44444444', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/10' },
+      { id: '11', version: 'v0.9.0', title: 'v0.9.0', commit_sha: '09090909', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/11' },
+      { id: '12', version: 'v0.8.0', title: 'v0.8.0', commit_sha: '08080808', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/12' },
+      { id: '13', version: 'v0.7.0', title: 'v0.7.0', commit_sha: '07070707', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/13' },
+      { id: '14', version: 'v0.6.0', title: 'v0.6.0', commit_sha: '06060606', release_date: '2026-10-30T10:00:00Z', released_at: '2026-10-30T10:00:00Z', download_url: '/dl/14' }
+    ];
+
+    const backendSorted = sortAndCapReleases(rawUnorderedReleases, 10);
+    expect(backendSorted.length).toBe(10);
+    expect(backendSorted.slice(0, 5).map(r => r.version)).toEqual([
+      '2.0.4',
+      '2.0.3',
+      '2.0.2',
+      '2.0.1',
+      '2.0.0'
+    ]);
+    expect(backendSorted[5].version).toBe('v1.4.0');
+
+    const frontendSorted = pkgService.sortAndCapReleases(rawUnorderedReleases as any, 10);
+    expect(frontendSorted.length).toBe(10);
+    expect(frontendSorted[0].version).toBe('2.0.4');
+
+    // 2. Seed catalog packages to test getSimilarPackages multi-signal scoring & diversity cap
+    const viewedPkg = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/mystical_pixie_companion',
+      author: 'sakel-hub',
+      name: 'mystical_pixie_companion',
+      title: 'Mystical Pixie Companion',
+      type: 'mod',
+      short_desc: 'A magical fairy companion that brightens dark caves and warns of monsters.',
+      tags: ['mobs', 'magic', 'survival'],
+      dependencies: ['default', 'x_mobs'],
+      downloads: 500,
+      score: 4.9
+    });
+    const simMobMagic = (pkgService as any).normalizePackage({
+      id: 'elceejo/x_mobs',
+      author: 'elceejo',
+      name: 'x_mobs',
+      title: 'X Mobs',
+      type: 'mod',
+      short_desc: 'Adds magical creatures and monsters to caves.',
+      tags: ['mobs', 'magic', 'survival'],
+      dependencies: ['default'],
+      downloads: 8000,
+      score: 4.8
+    });
+    const simCaveGlow = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs_monster',
+      author: 'TenPlus1',
+      name: 'mobs_monster',
+      title: 'Mobs Monster',
+      type: 'mod',
+      short_desc: 'Cave monsters and dungeon companions.',
+      tags: ['mobs', 'survival'],
+      dependencies: ['default', 'mobs'],
+      downloads: 95000,
+      score: 4.7
+    });
+    const sameAuthor1 = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/x_farming',
+      author: 'sakel-hub',
+      name: 'x_farming',
+      title: 'X Farming',
+      type: 'mod',
+      short_desc: 'Magical crops and survival food.',
+      tags: ['survival', 'magic'],
+      dependencies: ['default'],
+      downloads: 40000,
+      score: 4.9
+    });
+    const sameAuthor2 = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/x_bows',
+      author: 'sakel-hub',
+      name: 'x_bows',
+      title: 'X Bows',
+      type: 'mod',
+      short_desc: 'Archery and magic arrows.',
+      tags: ['survival', 'magic'],
+      dependencies: ['default'],
+      downloads: 35000,
+      score: 4.8
+    });
+    const otherMod = (pkgService as any).normalizePackage({
+      id: 'Wuzzy/hudbars',
+      author: 'Wuzzy',
+      name: 'hudbars',
+      title: 'HUD Bars',
+      type: 'mod',
+      short_desc: 'Survival health and magic mana bars.',
+      tags: ['survival', 'hud'],
+      dependencies: ['default'],
+      downloads: 120000,
+      score: 4.6
+    });
+    const unrelatedTxp = (pkgService as any).normalizePackage({
+      id: 'pixel/modern_txp',
+      author: 'pixel',
+      name: 'modern_txp',
+      title: 'Modern Texture Pack',
+      type: 'txp',
+      short_desc: 'Clean 64px textures.',
+      tags: ['64px'],
+      downloads: 1000,
+      score: 4.0
+    });
+
+    (pkgService as any)._packages.set([
+      viewedPkg,
+      simMobMagic,
+      simCaveGlow,
+      sameAuthor1,
+      sameAuthor2,
+      otherMod,
+      unrelatedTxp
+    ]);
+
+    const recommendations = pkgService.getSimilarPackages(viewedPkg, 4);
+    expect(recommendations.length).toBe(4);
+    // Top match should be elceejo/x_mobs (shared tags + direct dependency + keyword overlap)
+    expect(recommendations[0].id).toBe('elceejo/x_mobs');
+    // Must not include viewedPkg itself or unrelated texture pack when 4 matching mods exist
+    expect(recommendations.some(r => r.id === viewedPkg.id)).toBe(false);
+    expect(recommendations.some(r => r.id === unrelatedTxp.id)).toBe(false);
+    // Same-author diversity cap: at most 1 of sakel-hub's other mods is included when other strong matches exist
+    expect(recommendations.filter(r => r.author === 'sakel-hub').length).toBe(1);
+
+    // 3. Verify PackageDetailModalComponent 5-per-page release pagination + Latest badge + lazy IntersectionObserver loading
+    const origIO = (globalThis as any).IntersectionObserver;
+    let observerInstance: any = null;
+    (globalThis as any).IntersectionObserver = class MockIntersectionObserver {
+      callback: IntersectionObserverCallback;
+      constructor(cb: IntersectionObserverCallback) {
+        this.callback = cb;
+        observerInstance = this;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+    };
+
+    try {
+      const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+      const modalComp = modalFixture.componentInstance;
+      (pkgService as any)._activePackage.set(viewedPkg);
+      modalComp.package = viewedPkg;
+      modalComp.releases.set(rawUnorderedReleases as any);
+      modalComp.activeTab.set('releases');
+      modalFixture.detectChanges();
+
+      // Releases are capped at 10, sorted newest-first (2.0.4 at index 0), and paginated 5 per page (2 pages total)
+      expect(modalComp.cappedReleases().length).toBe(10);
+      expect(modalComp.totalReleasePages()).toBe(2);
+      expect(modalComp.paginatedReleases().length).toBe(5);
+      expect(modalComp.paginatedReleases()[0].version).toBe('2.0.4');
+      expect((modalFixture.nativeElement as HTMLElement).textContent).toContain('Latest');
+
+      // Advance to Page 2 of Releases
+      modalComp.nextReleasesPage();
+      modalFixture.detectChanges();
+      expect(modalComp.releasesPage()).toBe(2);
+      expect(modalComp.paginatedReleases().length).toBe(5);
+      expect(modalComp.paginatedReleases()[0].version).toBe('v1.4.0');
+
+      // Before scrolling near the Similar Packages sentinel, isSimilarNearViewport is false and cards are not rendered
+      expect(modalComp.isSimilarNearViewport()).toBe(false);
+      expect(modalComp.similarPackages().length).toBe(0);
+
+      // Simulate IntersectionObserver firing when the user scrolls within 240px of the Similar Packages section
+      expect(observerInstance).toBeTruthy();
+      observerInstance.callback([{ isIntersecting: true, intersectionRatio: 0.1 } as any], observerInstance);
+      modalFixture.detectChanges();
+
+      expect(modalComp.isSimilarNearViewport()).toBe(true);
+      expect(modalComp.similarPackages().length).toBe(4);
+      const renderedCards = (modalFixture.nativeElement as HTMLElement).querySelectorAll('app-package-card');
+      expect(renderedCards.length).toBe(4);
+    } finally {
+      (globalThis as any).IntersectionObserver = origIO;
+    }
+  });
 });

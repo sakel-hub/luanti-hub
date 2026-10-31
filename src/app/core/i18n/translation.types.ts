@@ -227,6 +227,10 @@ export interface TranslationDictionary {
     reviewFlagged: string;
     removeReview: string;
     reportSubmitted: string;
+    similarPackagesTitle: string;
+    similarPackagesSubtitle: string;
+    latestRelease: string;
+    showingLatestReleases: string;
   };
   auth: {
     title: string;

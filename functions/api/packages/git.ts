@@ -1518,10 +1518,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ).bind(packageId).run();
 
       if (discoveredReleases.length > 0) {
-        for (const rel of discoveredReleases) {
+        for (const rel of discoveredReleases.slice(0, 10)) {
           await context.env.DB.prepare(`
             INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
           `).bind(
             packageId,
             rel.version,

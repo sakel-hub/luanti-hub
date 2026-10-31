@@ -211,7 +211,11 @@ export const es: TranslationDictionary = {
     flagReviewPrompt: 'Motivo para reportar este comentario (spam, inapropiado)...',
     reviewFlagged: 'Reportado',
     removeReview: 'Eliminar',
-    reportSubmitted: 'Reporte enviado para revisión de los moderadores.'
+    reportSubmitted: 'Reporte enviado para revisión de los moderadores.',
+    similarPackagesTitle: 'Paquetes Similares',
+    similarPackagesSubtitle: 'Recomendados según etiquetas, categoría y dependencias',
+    latestRelease: 'Última',
+    showingLatestReleases: 'Mostrando las últimas {count} versiones'
   },
   auth: {
     title: 'Iniciar sesión en LuantiHub',

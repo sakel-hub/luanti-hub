@@ -211,7 +211,11 @@ export const de: TranslationDictionary = {
     flagReviewPrompt: 'Grund für die Meldung dieses Kommentars (Spam, unangemessen)...',
     reviewFlagged: 'Gemeldet',
     removeReview: 'Entfernen',
-    reportSubmitted: 'Meldung zur Überprüfung an die Moderation gesendet.'
+    reportSubmitted: 'Meldung zur Überprüfung an die Moderation gesendet.',
+    similarPackagesTitle: 'Ähnliche Pakete',
+    similarPackagesSubtitle: 'Empfohlen basierend auf Tags, Kategorie und Abhängigkeiten',
+    latestRelease: 'Aktuell',
+    showingLatestReleases: 'Die neuesten {count} Versionen werden angezeigt'
   },
   auth: {
     title: 'Bei LuantiHub anmelden',
