@@ -195,7 +195,9 @@ import {
                     (click)="onFavoriteClick($event, pkg)"
                     [attr.aria-label]="settingsService.isFavorite(pkg.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
                     [appTooltip]="settingsService.isFavorite(pkg.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
-                    class="p-1.5 rounded-full glass-icon-btn text-slate-200 hover:text-rose-400 transition shadow cursor-pointer">
+                    [class]="settingsService.isFavorite(pkg.id)
+                      ? 'p-1.5 rounded-full glass-icon-btn-rose-active text-rose-300 transition shadow cursor-pointer'
+                      : 'p-1.5 rounded-full glass-icon-btn-rose text-rose-200/90 hover:text-rose-300 transition shadow cursor-pointer'">
                     <svg
                       lucideHeart
                       [class]="settingsService.isFavorite(pkg.id) ? 'w-3.5 h-3.5 fill-rose-500 text-rose-500 transition-colors' : 'w-3.5 h-3.5 transition-colors'"
@@ -206,7 +208,7 @@ import {
                 </div>
 
                 <!-- Gradient Vignette at Bottom -->
-                <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/50 to-transparent z-10 pointer-events-none"></div>
+                <div class="absolute -inset-x-px -bottom-1 top-0 bg-gradient-to-t from-slate-950 via-slate-950/50 to-transparent z-10 pointer-events-none"></div>
 
                 <!-- Info Overlay at Bottom -->
                 <div class="relative p-2.5 sm:p-3 z-20 space-y-1">
