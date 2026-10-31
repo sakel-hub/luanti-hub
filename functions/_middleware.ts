@@ -83,6 +83,12 @@ export async function onRequest(context: {
   const isApiRoute = pathname.startsWith('/api/');
   const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
+  // Redirect legacy *.pages.dev web/crawler requests to canonical https://luantihub.org
+  // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
+  if (url.hostname.toLowerCase() === 'luanti-hub.pages.dev' && !isApiRoute && !isDownloadRoute) {
+    return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
+  }
+
   if (!isApiRoute && !isDownloadRoute) {
     const res = await next();
     const assetsBinding = context.env?.['ASSETS'];

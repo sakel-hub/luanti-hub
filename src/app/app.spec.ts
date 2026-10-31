@@ -724,6 +724,16 @@ description = Mob animation and spawning framework.
   });
 
   it('should guard edge API against cross-origin hotlinking, bots, rate abuse, and unauthenticated git audits', async () => {
+    // 0. 301-redirect legacy luanti-hub.pages.dev web routes to canonical https://luantihub.org
+    const legacyPageReq = new Request('https://luanti-hub.pages.dev/package/sakel/x_farming?lang=en');
+    const legacyPageRes = await edgeMiddleware({
+      request: legacyPageReq,
+      next: async () => new Response('ok'),
+      env: {}
+    });
+    expect(legacyPageRes.status).toBe(301);
+    expect(legacyPageRes.headers.get('Location')).toBe('https://luantihub.org/package/sakel/x_farming?lang=en');
+
     // 1. Block known scraper bots on /api/*
     const botReq = new Request('https://luantihub.org/api/packages', {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GPTBot/1.0)' }
