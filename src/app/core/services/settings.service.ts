@@ -1,4 +1,5 @@
 import { Injectable, signal, effect } from '@angular/core';
+import { enqueueBackgroundSyncMutation } from './pwa.service';
 
 @Injectable({
   providedIn: 'root'
@@ -237,20 +238,41 @@ export class SettingsService {
   }
 
   private syncFavoriteAction(action: 'add' | 'remove', packageId: string): void {
-    if (typeof window === 'undefined' || typeof fetch === 'undefined' || !this.edgeApiAvailable()) return;
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Client-Id': this.clientId()
+    };
+    const body = {
+      action,
+      packageId,
+      clientId: this.clientId()
+    };
+    const outboxId = `fav:${packageId.toLowerCase()}`;
+    const queueFavoriteMutation = () => {
+      enqueueBackgroundSyncMutation({
+        id: outboxId,
+        url: '/api/auth/favorites',
+        method: 'POST',
+        headers,
+        body
+      }).catch(() => {});
+    };
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      queueFavoriteMutation();
+      return;
+    }
+
+    if (!this.edgeApiAvailable()) return;
+
     fetch('/api/auth/favorites', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Client-Id': this.clientId()
-      },
-      body: JSON.stringify({
-        action,
-        packageId,
-        clientId: this.clientId()
-      })
+      headers,
+      body: JSON.stringify(body)
     }).catch(() => {
-      // Offline - localStorage keeps state
+      // Queue for W3C Background Sync / online replay
+      queueFavoriteMutation();
     });
   }
 }

@@ -151,7 +151,7 @@ export async function onRequestGet(context: {
       ? daysParam
       : Math.min(365, Math.max(7, Math.round(daysParam) || 30));
 
-    const { dates, prevDates, allDates, prevStartDate, endDate } = buildDateRange(days);
+    const { dates, prevDates, prevStartDate, endDate } = buildDateRange(days);
     const effectivePkgId = pkgRow?.id || packageId;
     const encAuthor = encodeURIComponent(pkgRow?.author_name || author);
     const encName = encodeURIComponent(pkgRow?.name || name);

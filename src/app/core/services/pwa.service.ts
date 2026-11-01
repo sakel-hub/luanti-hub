@@ -40,6 +40,227 @@ const PACKAGE_UPDATE_COOLDOWN_MS = 12 * 3600 * 1000;
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
+export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
+export const BOOT_SYNC_CACHE_URL = '/api/packages/?boot=1';
+export const PERIODIC_SYNC_TAG = 'lh-periodic-catalog-sync';
+export const PERIODIC_SYNC_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours suggested interval
+export const ONE_OFF_OUTBOX_SYNC_TAG = 'lh-sync-outbox';
+export const ONE_OFF_CATALOG_SYNC_TAG = 'lh-sync-catalog';
+export const PWA_SYNC_BROADCAST_CHANNEL = 'lh-pwa-sync';
+
+const OUTBOX_DB_NAME = 'lh_sync_outbox_db';
+const OUTBOX_STORE_NAME = 'outbox';
+const OUTBOX_FALLBACK_STORAGE_KEY = 'lh_sync_outbox_fallback_v1';
+const MAX_OUTBOX_ITEMS = 100;
+
+export interface BackgroundSyncOutboxItem {
+  id: string;
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: any;
+  tag?: string;
+  createdAt: number;
+}
+
+function openOutboxIndexedDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined' || !indexedDB || typeof indexedDB.open !== 'function') {
+    return Promise.resolve(null);
+  }
+  return new Promise(resolve => {
+    try {
+      const request = indexedDB.open(OUTBOX_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(OUTBOX_STORE_NAME)) {
+          db.createObjectStore(OUTBOX_STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function readFallbackOutbox(): BackgroundSyncOutboxItem[] {
+  if (typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(OUTBOX_FALLBACK_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x: any) => x && typeof x.id === 'string' && typeof x.url === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeFallbackOutbox(items: BackgroundSyncOutboxItem[]): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const trimmed = items.slice(-MAX_OUTBOX_ITEMS);
+    if (trimmed.length === 0) {
+      localStorage.removeItem(OUTBOX_FALLBACK_STORAGE_KEY);
+    } else {
+      localStorage.setItem(OUTBOX_FALLBACK_STORAGE_KEY, JSON.stringify(trimmed));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function closeOutboxIndexedDb(db: IDBDatabase | null | undefined): void {
+  try {
+    db?.close();
+  } catch {
+    // ignore
+  }
+}
+
+async function saveItemToOutboxStorage(item: BackgroundSyncOutboxItem): Promise<void> {
+  const existing = readFallbackOutbox().filter(x => x.id !== item.id);
+  existing.push(item);
+  writeFallbackOutbox(existing);
+
+  const db = await openOutboxIndexedDb();
+  if (!db) return;
+  await new Promise<void>(resolve => {
+    const finish = () => {
+      closeOutboxIndexedDb(db);
+      resolve();
+    };
+    try {
+      const tx = db.transaction(OUTBOX_STORE_NAME, 'readwrite');
+      tx.objectStore(OUTBOX_STORE_NAME).put(item);
+      tx.oncomplete = finish;
+      tx.onerror = finish;
+    } catch {
+      finish();
+    }
+  });
+}
+
+async function readAllItemsFromOutboxStorage(): Promise<BackgroundSyncOutboxItem[]> {
+  const byId = new Map<string, BackgroundSyncOutboxItem>();
+  for (const item of readFallbackOutbox()) {
+    byId.set(item.id, item);
+  }
+
+  const db = await openOutboxIndexedDb();
+  if (db) {
+    const idbItems = await new Promise<BackgroundSyncOutboxItem[]>(resolve => {
+      try {
+        const tx = db.transaction(OUTBOX_STORE_NAME, 'readonly');
+        const req = tx.objectStore(OUTBOX_STORE_NAME).getAll();
+        req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+        req.onerror = () => resolve([]);
+        tx.oncomplete = () => closeOutboxIndexedDb(db);
+        tx.onerror = () => closeOutboxIndexedDb(db);
+      } catch {
+        closeOutboxIndexedDb(db);
+        resolve([]);
+      }
+    });
+    for (const item of idbItems) {
+      if (item && typeof item.id === 'string' && typeof item.url === 'string') {
+        byId.set(item.id, item);
+      }
+    }
+  }
+
+  return Array.from(byId.values()).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+}
+
+async function removeItemFromOutboxStorage(id: string): Promise<void> {
+  const remaining = readFallbackOutbox().filter(x => x.id !== id);
+  writeFallbackOutbox(remaining);
+
+  const db = await openOutboxIndexedDb();
+  if (!db) return;
+  await new Promise<void>(resolve => {
+    const finish = () => {
+      closeOutboxIndexedDb(db);
+      resolve();
+    };
+    try {
+      const tx = db.transaction(OUTBOX_STORE_NAME, 'readwrite');
+      tx.objectStore(OUTBOX_STORE_NAME).delete(id);
+      tx.oncomplete = finish;
+      tx.onerror = finish;
+    } catch {
+      finish();
+    }
+  });
+}
+
+/**
+ * Queues a failed or offline mutation (e.g. `POST /api/auth/favorites` or `POST /api/packages/hydrate`)
+ * into IndexedDB (`lh_sync_outbox_db`) + localStorage fallback and registers a W3C Background Sync
+ * (`registration.sync.register('lh-sync-outbox')`) so the Service Worker replays it when online.
+ */
+export async function enqueueBackgroundSyncMutation(
+  spec: Omit<BackgroundSyncOutboxItem, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
+): Promise<boolean> {
+  if (!spec?.url) return false;
+  const item: BackgroundSyncOutboxItem = {
+    id: spec.id || `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    url: spec.url,
+    method: spec.method || 'POST',
+    headers: spec.headers || { 'Content-Type': 'application/json' },
+    body: typeof spec.body === 'string' ? spec.body : JSON.stringify(spec.body ?? {}),
+    tag: spec.tag || ONE_OFF_OUTBOX_SYNC_TAG,
+    createdAt: spec.createdAt ?? Date.now()
+  };
+
+  await saveItemToOutboxStorage(item);
+
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator && navigator.serviceWorker) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg && 'sync' in reg && typeof (reg as any).sync?.register === 'function') {
+        await (reg as any).sync.register(item.tag || ONE_OFF_OUTBOX_SYNC_TAG);
+        return true;
+      }
+    } catch {
+      // Fallback to online event listener when SyncManager registration is unavailable
+    }
+  }
+  return false;
+}
+
+/**
+ * Flushes all queued mutations in the Background Sync outbox.
+ * Used both as a foreground online fallback (for Safari/Firefox) and in unit tests.
+ */
+export async function flushBackgroundSyncOutbox(): Promise<number> {
+  if (typeof fetch !== 'function') return 0;
+  const items = await readAllItemsFromOutboxStorage();
+  if (items.length === 0) return 0;
+
+  let flushed = 0;
+  for (const item of items) {
+    try {
+      const res = await fetch(item.url, {
+        method: item.method || 'POST',
+        headers: item.headers || { 'Content-Type': 'application/json' },
+        body: typeof item.body === 'string' ? item.body : JSON.stringify(item.body ?? {}),
+        credentials: 'same-origin'
+      });
+      if (res && (res.ok || (res.status >= 400 && res.status < 500))) {
+        await removeItemFromOutboxStorage(item.id);
+        if (res.ok) {
+          flushed++;
+        }
+      }
+    } catch {
+      // Stop on network failure and keep remaining items queued for next sync
+      break;
+    }
+  }
+  return flushed;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -55,10 +276,18 @@ export class PwaService {
   readonly checkingForUpdate = signal<boolean>(false);
   readonly statusMessage = signal<string | null>(null);
   readonly notificationPermission = signal<NotificationPermission>(this.readBrowserNotificationPermission());
+  readonly periodicSyncRegistered = signal<boolean>(false);
+  readonly backgroundSyncSupported = signal<boolean>(
+    typeof window !== 'undefined' && 'SyncManager' in window
+  );
 
   private deferredPrompt: any = null;
   private messageClearTimer: any = null;
   private notificationClickHandler: ((data: any) => void) | null = null;
+  private readonly catalogSyncHandlers: Array<
+    (event: { source: 'sw-broadcast' | 'online' | 'visibility'; payload?: any; ts?: number }) => void
+  > = [];
+  private syncBroadcastChannel: BroadcastChannel | null = null;
   private latestDetectedUpdateVersion: string | null = null;
   private bootManifestSignature: string | null = null;
 
@@ -68,6 +297,8 @@ export class PwaService {
     this.initNotificationClickRouting();
     this.initPermissionStatusWatcher();
     this.initNetworkStatusWatcher();
+    this.initBroadcastChannelSyncWatcher();
+    this.initBackgroundAndPeriodicSync();
   }
 
   private initNetworkStatusWatcher(): void {
@@ -76,12 +307,168 @@ export class PwaService {
     window.addEventListener('online', () => {
       this.isOnline.set(true);
       this.showToast('pwa.backOnline', 3000);
+      this.flushOutboxMutations().catch(() => {});
+      this.notifyCatalogSyncListeners({ source: 'online', ts: Date.now() });
     });
 
     window.addEventListener('offline', () => {
       this.isOnline.set(false);
       this.showToast('pwa.offlineModeToast', 4000);
     });
+  }
+
+  /**
+   * Listens for background sync and periodic sync completion messages from the Service Worker
+   * via `BroadcastChannel('lh-pwa-sync')` and `navigator.serviceWorker` `message` events.
+   */
+  private initBroadcastChannelSyncWatcher(): void {
+    if (typeof window === 'undefined') return;
+
+    const handleSyncMessage = (data: any) => {
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'LH_BOOT_SYNC_UPDATED' && data.payload) {
+        this.notifyCatalogSyncListeners({
+          source: 'sw-broadcast',
+          payload: data.payload,
+          ts: Number(data.ts || Date.now())
+        });
+      } else if (data.type === 'LH_OUTBOX_SYNC_COMPLETED') {
+        writeFallbackOutbox([]);
+      }
+    };
+
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        this.syncBroadcastChannel = new BroadcastChannel(PWA_SYNC_BROADCAST_CHANNEL);
+        this.syncBroadcastChannel.onmessage = (event: MessageEvent) => {
+          handleSyncMessage(event?.data);
+        };
+      }
+    } catch {
+      // BroadcastChannel not supported in this environment
+    }
+
+    try {
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator && navigator.serviceWorker) {
+        if (typeof navigator.serviceWorker.addEventListener === 'function') {
+          navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
+            handleSyncMessage(event?.data);
+          });
+        }
+      }
+    } catch {
+      // Ignore SW message listener errors
+    }
+  }
+
+  /**
+   * Registers W3C Periodic Background Sync (`periodicsync`) and detects One-Off Background Sync (`sync`)
+   * capabilities on the active ServiceWorkerRegistration.
+   */
+  async initBackgroundAndPeriodicSync(): Promise<boolean> {
+    const reg = await this.resolveActiveSwRegistration(2500);
+    if (!reg) return false;
+
+    if ('sync' in reg || (typeof window !== 'undefined' && 'SyncManager' in window)) {
+      this.backgroundSyncSupported.set(true);
+    }
+
+    return await this.registerPeriodicCatalogSync(reg);
+  }
+
+  /**
+   * Registers Periodic Background Sync (`lh-periodic-catalog-sync`) so the Service Worker can
+   * periodically fetch `/api/packages/?boot=1` in the background when the PWA is not open.
+   */
+  async registerPeriodicCatalogSync(
+    registration?: ServiceWorkerRegistration | null,
+    minIntervalMs = PERIODIC_SYNC_MIN_INTERVAL_MS
+  ): Promise<boolean> {
+    const reg = registration ?? (await this.resolveActiveSwRegistration(2500));
+    if (!reg || !('periodicSync' in reg) || typeof (reg as any).periodicSync?.register !== 'function') {
+      this.periodicSyncRegistered.set(false);
+      return false;
+    }
+
+    try {
+      const perms = typeof navigator !== 'undefined' ? (navigator as any).permissions : null;
+      if (perms && typeof perms.query === 'function') {
+        const status = await perms.query({ name: 'periodic-background-sync' as PermissionName });
+        if (status && status.state !== 'granted') {
+          this.periodicSyncRegistered.set(false);
+          return false;
+        }
+      }
+
+      if (typeof (reg as any).periodicSync.getTags === 'function') {
+        const existingTags = await (reg as any).periodicSync.getTags();
+        if (Array.isArray(existingTags) && existingTags.includes(PERIODIC_SYNC_TAG)) {
+          this.periodicSyncRegistered.set(true);
+          return true;
+        }
+      }
+
+      await (reg as any).periodicSync.register(PERIODIC_SYNC_TAG, {
+        minInterval: minIntervalMs
+      });
+      this.periodicSyncRegistered.set(true);
+      return true;
+    } catch {
+      this.periodicSyncRegistered.set(false);
+      return false;
+    }
+  }
+
+  /**
+   * Requests a one-off Service Worker Background Sync (`lh-sync-catalog`) to refresh the catalog
+   * and Top 10 rows as soon as network connectivity is restored.
+   */
+  async requestCatalogBackgroundSync(): Promise<boolean> {
+    const reg = await this.resolveActiveSwRegistration(1500);
+    if (!reg || !('sync' in reg) || typeof (reg as any).sync?.register !== 'function') {
+      return false;
+    }
+    try {
+      await (reg as any).sync.register(ONE_OFF_CATALOG_SYNC_TAG);
+      this.backgroundSyncSupported.set(true);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async queueBackgroundMutation(
+    spec: Omit<BackgroundSyncOutboxItem, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
+  ): Promise<boolean> {
+    return await enqueueBackgroundSyncMutation(spec);
+  }
+
+  async flushOutboxMutations(): Promise<number> {
+    return await flushBackgroundSyncOutbox();
+  }
+
+  async getQueuedOutboxMutations(): Promise<BackgroundSyncOutboxItem[]> {
+    return await readAllItemsFromOutboxStorage();
+  }
+
+  registerCatalogSyncHandler(
+    handler: (event: { source: 'sw-broadcast' | 'online' | 'visibility'; payload?: any; ts?: number }) => void
+  ): void {
+    this.catalogSyncHandlers.push(handler);
+  }
+
+  private notifyCatalogSyncListeners(event: {
+    source: 'sw-broadcast' | 'online' | 'visibility';
+    payload?: any;
+    ts?: number;
+  }): void {
+    for (const handler of this.catalogSyncHandlers) {
+      try {
+        handler(event);
+      } catch {
+        // Ignore handler errors
+      }
+    }
   }
 
   private initPermissionStatusWatcher(): void {
@@ -216,6 +603,7 @@ export class PwaService {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && this.isOnline()) {
           this.checkForUpdate(false);
+          this.notifyCatalogSyncListeners({ source: 'visibility', ts: Date.now() });
         }
       });
     }
@@ -270,6 +658,7 @@ export class PwaService {
         } catch {
           // ignore
         }
+        this.initBackgroundAndPeriodicSync().catch(() => {});
         this.showToast('pwa.installSuccess');
       });
     }
@@ -1499,10 +1888,6 @@ export class PwaService {
         window.location.reload();
       }
     }
-  }
-
-  dismissBanner(): void {
-    this.updateAvailable.set(false);
   }
 
   applyUpdate(): void {

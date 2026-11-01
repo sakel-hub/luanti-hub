@@ -18,9 +18,8 @@ import { ProfileDrawerComponent } from './features/profile/profile-drawer.compon
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { HeaderComponent } from './features/header/header.component';
 import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
-import { AnalyticsPageComponent } from './features/analytics/analytics-page.component';
 import { DownloadAnalyticsChartComponent } from './shared/components/download-analytics-chart.component';
-import { PwaService } from './core/services/pwa.service';
+import { PwaService, PERIODIC_SYNC_TAG, ONE_OFF_OUTBOX_SYNC_TAG, ONE_OFF_CATALOG_SYNC_TAG } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
 import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../../functions/api/packages/git';
@@ -4774,5 +4773,144 @@ supported_games = minetest_game, voxelibre
     drawerComp.activeTab.set('packages');
     drawerComp.onSelectPromotionsTab();
     expect(drawerComp.activeTab()).toBe('packages');
+  });
+
+  it('should register Periodic Background Sync, queue offline mutations for Background Sync, and update Home/Top 10 from Service Worker sync broadcasts', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const pkgService = TestBed.inject(PackageService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    // 1. Verify Periodic Background Sync (`periodicsync`) registration when permission is granted
+    const registeredPeriodicTags: Array<{ tag: string; options: any }> = [];
+    const registeredOneOffTags: string[] = [];
+    const mockSwRegistration: any = {
+      active: {},
+      showNotification: () => Promise.resolve(),
+      periodicSync: {
+        getTags: async () => registeredPeriodicTags.map(t => t.tag),
+        register: async (tag: string, options: any) => {
+          registeredPeriodicTags.push({ tag, options });
+        }
+      },
+      sync: {
+        register: async (tag: string) => {
+          registeredOneOffTags.push(tag);
+        }
+      }
+    };
+
+    const origServiceWorker = navigator.serviceWorker;
+    const origPermissions = (navigator as any).permissions;
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        getRegistration: async () => mockSwRegistration,
+        ready: Promise.resolve(mockSwRegistration)
+      }
+    });
+    Object.defineProperty(navigator, 'permissions', {
+      configurable: true,
+      value: {
+        query: async ({ name }: { name: string }) => ({
+          state: name === 'periodic-background-sync' ? 'granted' : 'prompt'
+        })
+      }
+    });
+
+    try {
+      const registered = await pwaService.initBackgroundAndPeriodicSync();
+      expect(registered).toBe(true);
+      expect(pwaService.periodicSyncRegistered()).toBe(true);
+      expect(pwaService.backgroundSyncSupported()).toBe(true);
+      expect(registeredPeriodicTags.length).toBe(1);
+      expect(registeredPeriodicTags[0].tag).toBe(PERIODIC_SYNC_TAG);
+
+      // 3. Verify One-Off Background Sync (`sync`) for catalog refresh and offline mutations
+      const catalogSyncRequested = await pwaService.requestCatalogBackgroundSync();
+      expect(catalogSyncRequested).toBe(true);
+      expect(registeredOneOffTags).toContain(ONE_OFF_CATALOG_SYNC_TAG);
+
+      // Queue an offline favorite mutation and verify it is stored in the outbox and registers 'lh-sync-outbox'
+      localStorage.removeItem('lh_sync_outbox_fallback_v1');
+      const queued = await pwaService.queueBackgroundMutation({
+        id: 'fav:rubenwardy/crafting',
+        url: '/api/auth/favorites',
+        method: 'POST',
+        body: { action: 'add', packageId: 'rubenwardy/crafting', clientId: settingsService.clientId() }
+      });
+      expect(queued).toBe(true);
+      expect(registeredOneOffTags).toContain(ONE_OFF_OUTBOX_SYNC_TAG);
+
+      const pendingBeforeFlush = await pwaService.getQueuedOutboxMutations();
+      expect(pendingBeforeFlush.some(item => item.id === 'fav:rubenwardy/crafting')).toBe(true);
+
+      // Flush the outbox when online and verify the queued POST is replayed and removed
+      const flushedUrls: string[] = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        flushedUrls.push(String(input));
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }) as typeof fetch;
+
+      try {
+        const flushedCount = await pwaService.flushOutboxMutations();
+        expect(flushedCount).toBeGreaterThanOrEqual(1);
+        expect(flushedUrls).toContain('/api/auth/favorites');
+
+        const pendingAfterFlush = await pwaService.getQueuedOutboxMutations();
+        expect(pendingAfterFlush.some(item => item.id === 'fav:rubenwardy/crafting')).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+
+      // 4. Verify Service Worker `LH_BOOT_SYNC_UPDATED` broadcast updates Home Page tiles & Top 10 Today/Week
+      (pwaService as any).notifyCatalogSyncListeners({
+        source: 'sw-broadcast',
+        ts: Date.now(),
+        payload: {
+          packages: [
+            {
+              id: 'Wuzzy/mineclone2',
+              author: 'Wuzzy',
+              name: 'mineclone2',
+              title: 'VoxeLibre (Synced via SW)',
+              type: 'game',
+              short_desc: 'Updated in background via Periodic Sync',
+              downloads: 950000,
+              score: 4.9,
+              source: 'official'
+            }
+          ],
+          top10Today: [
+            {
+              id: 'Wuzzy/mineclone2',
+              author: 'Wuzzy',
+              name: 'mineclone2',
+              title: 'VoxeLibre (Synced via SW)',
+              type: 'game',
+              short_desc: 'Updated in background via Periodic Sync',
+              downloads: 950000,
+              score: 4.9,
+              source: 'official'
+            }
+          ]
+        }
+      });
+
+      expect(pkgService.packages().some(p => p.title === 'VoxeLibre (Synced via SW)')).toBe(true);
+      expect(pkgService.top10TodayPackages()[0]?.title).toBe('VoxeLibre (Synced via SW)');
+    } finally {
+      Object.defineProperty(navigator, 'serviceWorker', {
+        configurable: true,
+        value: origServiceWorker
+      });
+      Object.defineProperty(navigator, 'permissions', {
+        configurable: true,
+        value: origPermissions
+      });
+    }
   });
 });

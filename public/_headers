@@ -4,8 +4,15 @@
 /ngsw-worker.js
   Cache-Control: no-cache, no-store, must-revalidate
 
+/custom-sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
 /index.html
   Cache-Control: no-cache, no-store, must-revalidate
 
 /manifest.webmanifest
   Cache-Control: no-cache, no-store, must-revalidate
+
+/.well-known/web-app-origin-association
+  Content-Type: application/json
+  Cache-Control: public, max-age=3600

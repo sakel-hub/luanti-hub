@@ -344,11 +344,6 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
     this.canScrollRight.set(el.scrollLeft < (el.scrollWidth - el.clientWidth - 10));
   }
 
-  setTimeframe(timeframe: 'today' | 'week'): void {
-    this.packageService.setTop10Timeframe(timeframe);
-    setTimeout(() => this.updateScrollState(), 100);
-  }
-
   openDetails(pkg: LuantiPackage): void {
     this.packageService.openPackageModal(pkg);
   }

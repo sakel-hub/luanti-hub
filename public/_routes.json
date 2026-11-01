@@ -21,8 +21,10 @@
     "/manifest.webmanifest",
     "/ngsw.json",
     "/ngsw-worker.js",
+    "/custom-sw.js",
     "/safety-worker.js",
     "/worker-basic.min.js",
-    "/robots.txt"
+    "/robots.txt",
+    "/.well-known/*"
   ]
 }

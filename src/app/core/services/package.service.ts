@@ -15,11 +15,10 @@ import {
   DownloadAnalyticsData,
   AuthorPackageBreakdownItem,
   ReleaseNotesPayload,
-  ReleaseCommitItem,
   HeroPromotion
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
-import { PwaService } from './pwa.service';
+import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
 import { AuthService, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 
@@ -309,11 +308,6 @@ export class PackageService {
     this.refreshPromoClock();
   }
 
-  readonly featuredPackage = computed(() => {
-    const list = this.heroShowcasePackages();
-    return list.length > 0 ? list[0] : null;
-  });
-
   // High-performance O(1) per-package filtered & sorted list
   readonly filteredPackages = computed<LuantiPackage[]>(() => {
     const q = this._searchQuery().trim().toLowerCase();
@@ -388,7 +382,6 @@ export class PackageService {
   });
 
   // Netflix Swimlanes (All Capped to CAROUSEL_CAP for 60fps DOM performance)
-  readonly top10Timeframe = signal<'today' | 'week'>('week');
   private readonly _serverTop10Today = signal<LuantiPackage[]>([]);
   private readonly _serverTop10Week = signal<LuantiPackage[]>([]);
 
@@ -448,10 +441,6 @@ export class PackageService {
         return scoreB - scoreA;
       })
       .slice(0, 10);
-  });
-
-  readonly top10Packages = computed<LuantiPackage[]>(() => {
-    return this.top10Timeframe() === 'today' ? this.top10TodayPackages() : this.top10WeekPackages();
   });
 
   readonly trendingPackages = computed(() => {
@@ -611,14 +600,35 @@ export class PackageService {
     for (const item of batch) {
       this.pendingD1Writeback.delete(String(item.id).toLowerCase());
     }
+    const outboxId = `hydrate:${batch.map(b => String(b.id).toLowerCase()).join(',')}`;
+    const queueHydrateMutation = () => {
+      this.pwaService
+        .queueBackgroundMutation({
+          id: outboxId,
+          url: '/api/packages/hydrate',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: { items: batch }
+        })
+        .catch(() => {});
+    };
+
+    if (!this.pwaService.isOnline()) {
+      queueHydrateMutation();
+      return;
+    }
     try {
-      await fetch('/api/packages/hydrate', {
+      const res = await fetch('/api/packages/hydrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ items: batch })
       });
+      if (!res || (!res.ok && res.status >= 500)) {
+        throw new Error('D1 writeback failed');
+      }
     } catch {
-      // Best-effort background D1 writeback
+      // Queue failed D1 writeback batch for Service Worker Background Sync
+      queueHydrateMutation();
     }
     if (this.pendingD1Writeback.size > 0) {
       this.d1WritebackTimer = setTimeout(() => this.flushD1WritebackBatch(), 1500);
@@ -1506,8 +1516,7 @@ export class PackageService {
       top10Week?: any[];
       top10Today?: any[];
       promotions?: HeroPromotion[];
-    },
-    options?: { isBackgroundRefresh?: boolean }
+    }
   ): void {
     this.lastCatalogSyncAt = Date.now();
     if (Array.isArray(payload.promotions)) {
@@ -1727,33 +1736,114 @@ export class PackageService {
     }
   }
 
+  private extractBootPayload(data: any): {
+    packages: any[];
+    tags?: any[];
+    top10Week?: any[];
+    top10Today?: any[];
+    promotions?: HeroPromotion[];
+  } | null {
+    if (Array.isArray(data)) {
+      return { packages: data };
+    }
+    if (data && typeof data === 'object' && Array.isArray(data.packages)) {
+      return data;
+    }
+    return null;
+  }
+
   private scheduleBootCachePersist(): void {
     if (typeof sessionStorage === 'undefined') return;
     if (this.bootCacheSyncTimer) {
       clearTimeout(this.bootCacheSyncTimer);
     }
     this.bootCacheSyncTimer = setTimeout(() => {
+      const payload = {
+        packages: this._packages(),
+        tags: this._availableTags(),
+        top10Week: this.top10WeekPackages(),
+        top10Today: this.top10TodayPackages(),
+        promotions: this._promotions()
+      };
+      let existingTs = Date.now();
       try {
         const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
-        const existingTs = rawCached ? (JSON.parse(rawCached)?.ts || Date.now()) : Date.now();
+        if (rawCached) {
+          existingTs = JSON.parse(rawCached)?.ts || existingTs;
+        }
+      } catch {
+        // Ignore sessionStorage parse errors
+      }
+      this.persistBootPayloadCaches(payload, existingTs);
+    }, 250);
+  }
+
+  /**
+   * Reads the persistent Service Worker CacheStorage (`lh-boot-sync-v1`) populated by
+   * Periodic Background Sync (`periodicsync`), One-Off Background Sync (`sync`), or previous sessions.
+   */
+  private async readWarmBootCache(): Promise<{ ts: number; edge: boolean; payload: any } | null> {
+    if (typeof caches === 'undefined' || !caches || typeof caches.open !== 'function') {
+      return null;
+    }
+    try {
+      const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
+      const match = await cache.match(BOOT_SYNC_CACHE_URL);
+      if (!match || !match.ok) return null;
+      const syncedAtHeader = match.headers?.get?.('X-LuantiHub-Synced-At');
+      const ts = syncedAtHeader ? Number(syncedAtHeader) : Date.now();
+      const data = await match.json();
+      const payload = this.extractBootPayload(data);
+      if (!payload) return null;
+      return {
+        ts: Number.isFinite(ts) && ts > 0 ? ts : Date.now(),
+        edge: true,
+        payload
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Writes the latest boot payload into the shared Service Worker CacheStorage (`lh-boot-sync-v1`)
+   * so cold PWA launches have instant access to the latest catalog & Top 10 rows.
+   */
+  private async writeWarmBootCache(payload: any, ts = Date.now()): Promise<void> {
+    if (typeof caches === 'undefined' || !caches || typeof caches.open !== 'function' || typeof Response === 'undefined') {
+      return;
+    }
+    try {
+      const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
+      const res = new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-LuantiHub-Synced-At': String(ts)
+        }
+      });
+      await cache.put(BOOT_SYNC_CACHE_URL, res);
+    } catch {
+      // Ignore CacheStorage quota or security errors
+    }
+  }
+
+  private persistBootPayloadCaches(bootPayload: any, ts = Date.now()): void {
+    try {
+      if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
           'lh_boot_cache_v7',
           JSON.stringify({
-            ts: existingTs,
+            ts,
             edge: this.edgeApiAvailable,
-            payload: {
-              packages: this._packages(),
-              tags: this._availableTags(),
-              top10Week: this.top10WeekPackages(),
-              top10Today: this.top10TodayPackages(),
-              promotions: this._promotions()
-            }
+            payload: bootPayload
           })
         );
-      } catch {
-        // Ignore sessionStorage quota errors
       }
-    }, 250);
+    } catch {
+      // Ignore sessionStorage quota errors
+    }
+    this.writeWarmBootCache(bootPayload, ts).catch(() => {});
   }
 
   private initBackgroundCatalogRefresh(): void {
@@ -1773,23 +1863,28 @@ export class PackageService {
       }
     }, 10 * 60 * 1000);
 
-    // 2. Refresh when user returns to tab/PWA window after >= 3 minutes
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', () => {
-        if (
-          document.visibilityState === 'visible' &&
-          this.pwaService.isOnline() &&
-          this.lastCatalogSyncAt > 0 &&
-          Date.now() - this.lastCatalogSyncAt >= 3 * 60 * 1000
-        ) {
-          this.refreshCatalogInBackground().catch(() => {});
+    // 2. Unified Service Worker Broadcast (`periodicsync` / `sync`) & Wakeup Listener via PwaService
+    this.pwaService.registerCatalogSyncHandler((event) => {
+      if (event.source === 'sw-broadcast' && event.payload) {
+        const bootPayload = this.extractBootPayload(event.payload);
+        if (bootPayload) {
+          this.applyBootPayload(bootPayload);
+          this.persistBootPayloadCaches(bootPayload, event.ts || Date.now());
         }
-      });
-    }
+        return;
+      }
 
-    // 3. Refresh when device reconnects to the network after >= 2 minutes
-    window.addEventListener('online', () => {
-      if (this.lastCatalogSyncAt > 0 && Date.now() - this.lastCatalogSyncAt >= 2 * 60 * 1000) {
+      if (
+        event.source === 'visibility' &&
+        this.lastCatalogSyncAt > 0 &&
+        Date.now() - this.lastCatalogSyncAt >= 3 * 60 * 1000
+      ) {
+        this.refreshCatalogInBackground().catch(() => {});
+      } else if (
+        event.source === 'online' &&
+        this.lastCatalogSyncAt > 0 &&
+        Date.now() - this.lastCatalogSyncAt >= 2 * 60 * 1000
+      ) {
         this.refreshCatalogInBackground().catch(() => {});
       }
     });
@@ -1804,6 +1899,7 @@ export class PackageService {
       return false;
     }
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.pwaService.requestCatalogBackgroundSync().catch(() => {});
       return false;
     }
 
@@ -1823,6 +1919,7 @@ export class PackageService {
       }).catch(() => null);
 
       if (!response || !response.ok || !(response.headers.get('content-type') || '').includes('application/json')) {
+        this.pwaService.requestCatalogBackgroundSync().catch(() => {});
         return false;
       }
 
@@ -1831,35 +1928,18 @@ export class PackageService {
       this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
 
       const data = await response.json().catch(() => null);
-      const bootPayload = Array.isArray(data)
-        ? { packages: data }
-        : data && typeof data === 'object' && Array.isArray(data.packages)
-          ? data
-          : null;
+      const bootPayload = this.extractBootPayload(data);
 
       if (!bootPayload) {
         return false;
       }
 
-      this.applyBootPayload(bootPayload, { isBackgroundRefresh: true });
-
-      try {
-        if (typeof sessionStorage !== 'undefined') {
-          sessionStorage.setItem(
-            'lh_boot_cache_v7',
-            JSON.stringify({
-              ts: Date.now(),
-              edge: this.edgeApiAvailable,
-              payload: bootPayload
-            })
-          );
-        }
-      } catch {
-        // Ignore sessionStorage quota errors
-      }
+      this.applyBootPayload(bootPayload);
+      this.persistBootPayloadCaches(bootPayload, Date.now());
 
       return true;
     } catch {
+      this.pwaService.requestCatalogBackgroundSync().catch(() => {});
       return false;
     } finally {
       this.isBackgroundRefreshing = false;
@@ -1870,27 +1950,45 @@ export class PackageService {
   async initCatalog(forceRefresh = false): Promise<void> {
     let servedFromCache = false;
     try {
-      if (!forceRefresh && typeof sessionStorage !== 'undefined') {
-        try {
-          sessionStorage.removeItem('lh_boot_cache_v5');
-          sessionStorage.removeItem('lh_boot_cache_v6');
-          const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
-          if (rawCached) {
-            const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
-            if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
-              this.edgeApiAvailable = Boolean(parsed.edge);
-              this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
-              this.applyBootPayload(parsed.payload);
-              this._isLoading.set(false);
-              servedFromCache = true;
-              // Fresh within 60s: skip network completely to preserve Cloudflare Worker & D1 quota
-              if (Date.now() - parsed.ts < 60_000) {
-                return;
+      if (!forceRefresh) {
+        if (typeof sessionStorage !== 'undefined') {
+          try {
+            sessionStorage.removeItem('lh_boot_cache_v5');
+            sessionStorage.removeItem('lh_boot_cache_v6');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
+            if (rawCached) {
+              const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
+              if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
+                this.edgeApiAvailable = Boolean(parsed.edge);
+                this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
+                this.applyBootPayload(parsed.payload);
+                this._isLoading.set(false);
+                servedFromCache = true;
+                // Fresh within 60s: skip network completely to preserve Cloudflare Worker & D1 quota
+                if (Date.now() - parsed.ts < 60_000) {
+                  return;
+                }
               }
             }
+          } catch {
+            // Proceed to CacheStorage / network fetch
           }
-        } catch {
-          // Proceed to network fetch
+        }
+
+        // Check persistent Service Worker CacheStorage (`lh-boot-sync-v1`) populated by `periodicsync` / `sync`
+        if (!servedFromCache) {
+          const warmCache = await this.readWarmBootCache();
+          const maxWarmAgeMs = this.pwaService.isOnline() ? 6 * 3600 * 1000 : 7 * 24 * 3600 * 1000;
+          if (warmCache && warmCache.payload && Date.now() - warmCache.ts < maxWarmAgeMs) {
+            this.edgeApiAvailable = Boolean(warmCache.edge);
+            this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
+            this.applyBootPayload(warmCache.payload);
+            this._isLoading.set(false);
+            servedFromCache = true;
+            if (Date.now() - warmCache.ts < 60_000 || !this.pwaService.isOnline()) {
+              return;
+            }
+          }
         }
       }
 
@@ -1975,27 +2073,11 @@ export class PackageService {
           }
         }
 
-        const bootPayload = Array.isArray(data)
-          ? { packages: data }
-          : (data && typeof data === 'object' && Array.isArray(data.packages) ? data : null);
+        const bootPayload = this.extractBootPayload(data);
 
         if (bootPayload) {
           this.applyBootPayload(bootPayload);
-
-          try {
-            if (typeof sessionStorage !== 'undefined') {
-              sessionStorage.setItem(
-                'lh_boot_cache_v7',
-                JSON.stringify({
-                  ts: Date.now(),
-                  edge: this.edgeApiAvailable,
-                  payload: bootPayload
-                })
-              );
-            }
-          } catch {
-            // Ignore sessionStorage quota errors
-          }
+          this.persistBootPayloadCaches(bootPayload, Date.now());
 
           // Only fetch tags/top10 separately if the endpoint returned a legacy unbundled array
           if (this.edgeApiAvailable && Array.isArray(data)) {
@@ -2004,8 +2086,11 @@ export class PackageService {
             this.fetchTop10('today');
           }
         }
+      } else {
+        this.pwaService.requestCatalogBackgroundSync().catch(() => {});
       }
     } catch {
+      this.pwaService.requestCatalogBackgroundSync().catch(() => {});
       if (!servedFromCache) {
         this._packages.set([]);
       }
@@ -2319,28 +2404,6 @@ export class PackageService {
     }
   }
 
-  setTypeFilter(type: string): void {
-    this._selectedType.set(type);
-    if (type !== 'all') {
-      this._selectedSource.set('all');
-      this._showFavoritesOnly.set(false);
-    }
-    this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
-  }
-
-  setSourceFilter(source: string): void {
-    const current = this._selectedSource();
-    const next = current === source ? 'all' : source;
-    this._selectedSource.set(next);
-    if (next !== 'all') {
-      this._selectedType.set('all');
-      this._showFavoritesOnly.set(false);
-    }
-    this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
-  }
-
   setTagFilter(tag: string): void {
     const current = this._selectedTag();
     const next = tag === 'all' ? 'all' : (current.toLowerCase() === tag.toLowerCase() ? 'all' : tag);
@@ -2356,17 +2419,6 @@ export class PackageService {
     if (updateUrl) {
       this.syncQueryParamsToUrl();
     }
-  }
-
-  toggleFavoritesFilter(forceValue?: boolean): void {
-    const next = forceValue !== undefined ? forceValue : !this._showFavoritesOnly();
-    this._showFavoritesOnly.set(next);
-    if (next) {
-      this._selectedType.set('all');
-      this._selectedSource.set('all');
-    }
-    this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
   }
 
   resetFilters(navigateToRoot = false): void {
@@ -2418,21 +2470,15 @@ export class PackageService {
     this._visibleCount.update(c => c + PAGE_SIZE);
   }
 
-  setTop10Timeframe(timeframe: 'today' | 'week'): void {
-    this.top10Timeframe.set(timeframe);
-    this.fetchTop10(timeframe);
-  }
-
-  async fetchTop10(timeframe?: 'today' | 'week'): Promise<void> {
+  async fetchTop10(timeframe: 'today' | 'week' = 'week'): Promise<void> {
     if (!this.edgeApiAvailable) return;
-    const tf = timeframe || this.top10Timeframe();
     try {
-      const res = await fetch(`/api/packages/top10?timeframe=${tf}`);
+      const res = await fetch(`/api/packages/top10?timeframe=${timeframe}`);
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
           const normalized = data.map(item => this.normalizePackage(item));
-          if (tf === 'today') {
+          if (timeframe === 'today') {
             this._serverTop10Today.set(normalized);
           } else {
             this._serverTop10Week.set(normalized);

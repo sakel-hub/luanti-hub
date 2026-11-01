@@ -3,11 +3,24 @@
   "name": "LuantiHub – Decentralized Package Registry & Content Hub",
   "short_name": "LuantiHub",
   "description": "Discover, install, and share decentralized Luanti (Minetest) mods, games, and texture packs directly from Git repositories and ContentDB.",
+  "lang": "en",
+  "dir": "ltr",
   "display": "standalone",
   "display_override": ["standalone", "window-controls-overlay"],
   "orientation": "any",
   "scope": "/",
   "start_url": "/",
+  "prefer_related_applications": false,
+  "related_applications": [],
+  "scope_extensions": [
+    { "origin": "https://luantihub.org" },
+    { "origin": "https://luanti-hub.pages.dev" },
+    { "origin": "https://content.luanti.org" },
+    { "origin": "https://contentdb.milcho.org" }
+  ],
+  "edge_side_panel": {
+    "preferred_width": 420
+  },
   "handle_links": "preferred",
   "launch_handler": {
     "client_mode": ["focus-existing", "navigate-existing", "auto"]
