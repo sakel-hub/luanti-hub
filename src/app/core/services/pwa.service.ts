@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, effect, inject, signal } from '@angular/core';
 import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
@@ -62,6 +62,97 @@ const OUTBOX_DB_NAME = 'lh_sync_outbox_db';
 const OUTBOX_STORE_NAME = 'outbox';
 const OUTBOX_FALLBACK_STORAGE_KEY = 'lh_sync_outbox_fallback_v1';
 const MAX_OUTBOX_ITEMS = 100;
+const NOTIF_STATE_DB_NAME = 'lh_pwa_notif_state_db';
+const NOTIF_STATE_STORE_NAME = 'state';
+
+function openNotifStateIndexedDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined' || !indexedDB || typeof indexedDB.open !== 'function') {
+    return Promise.resolve(null);
+  }
+  return new Promise(resolve => {
+    try {
+      const request = indexedDB.open(NOTIF_STATE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(NOTIF_STATE_STORE_NAME)) {
+          db.createObjectStore(NOTIF_STATE_STORE_NAME, { keyPath: 'key' });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function writeNotifStateEntries(entries: Record<string, any>): Promise<void> {
+  const db = await openNotifStateIndexedDb();
+  if (!db) return;
+  await new Promise<void>(resolve => {
+    try {
+      const tx = db.transaction(NOTIF_STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(NOTIF_STATE_STORE_NAME);
+      for (const [key, value] of Object.entries(entries)) {
+        store.put({ key, value, updatedAt: Date.now() });
+      }
+      tx.oncomplete = () => {
+        try {
+          db.close();
+        } catch {}
+        resolve();
+      };
+      tx.onerror = () => {
+        try {
+          db.close();
+        } catch {}
+        resolve();
+      };
+    } catch {
+      try {
+        db.close();
+      } catch {}
+      resolve();
+    }
+  });
+}
+
+async function readAllNotifStateEntries(): Promise<Record<string, any>> {
+  const db = await openNotifStateIndexedDb();
+  if (!db) return {};
+  return await new Promise<Record<string, any>>(resolve => {
+    try {
+      const tx = db.transaction(NOTIF_STATE_STORE_NAME, 'readonly');
+      const store = tx.objectStore(NOTIF_STATE_STORE_NAME);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const out: Record<string, any> = {};
+        for (const item of Array.isArray(req.result) ? req.result : []) {
+          if (item && typeof item.key === 'string') {
+            out[item.key] = item.value;
+          }
+        }
+        resolve(out);
+      };
+      req.onerror = () => resolve({});
+      tx.oncomplete = () => {
+        try {
+          db.close();
+        } catch {}
+      };
+      tx.onerror = () => {
+        try {
+          db.close();
+        } catch {}
+      };
+    } catch {
+      try {
+        db.close();
+      } catch {}
+      resolve({});
+    }
+  });
+}
 
 export interface BackgroundSyncOutboxItem {
   id: string;
@@ -300,6 +391,8 @@ export class PwaService {
   private syncBroadcastChannel: BroadcastChannel | null = null;
   private latestDetectedUpdateVersion: string | null = null;
   private bootManifestSignature: string | null = null;
+  private lastNotificationClickSig = '';
+  private lastNotificationClickAt = 0;
   private readonly localAssetDataUrlCache = new Map<string, string>();
 
   constructor() {
@@ -311,6 +404,153 @@ export class PwaService {
     this.initBroadcastChannelSyncWatcher();
     this.initBackgroundAndPeriodicSync();
     this.initLocalNotificationIconsCache();
+    this.reconcileNotifStateFromIndexedDb().catch(() => {});
+
+    effect(() => {
+      const prefs = {
+        notificationsEnabled: this.settingsService.notificationsEnabled(),
+        notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
+        notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
+        notifyNewReviews: this.settingsService.notifyNewReviews(),
+        notifyPromotions: this.settingsService.notifyPromotions(),
+        favorites: this.settingsService.favorites(),
+        downloadedPackages: this.settingsService.downloadedPackages()
+      };
+      this.syncNotificationStateToIndexedDb(prefs).catch(() => {});
+    });
+  }
+
+  /**
+   * Synchronizes notification preferences and deduplication stamps from `localStorage` into
+   * IndexedDB (`lh_pwa_notif_state_db`) so the Service Worker can evaluate and dispatch
+   * background notifications when all app windows are minimized or closed.
+   */
+  async syncNotificationStateToIndexedDb(customPrefs?: Record<string, any>): Promise<void> {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const parseJsonSafe = (key: string, fallback: any) => {
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : fallback;
+        } catch {
+          return fallback;
+        }
+      };
+      const prefs = customPrefs || {
+        notificationsEnabled: this.settingsService.notificationsEnabled(),
+        notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
+        notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
+        notifyNewReviews: this.settingsService.notifyNewReviews(),
+        notifyPromotions: this.settingsService.notifyPromotions(),
+        favorites: this.settingsService.favorites(),
+        downloadedPackages: this.settingsService.downloadedPackages()
+      };
+      await writeNotifStateEntries({
+        prefs,
+        seenTags: parseJsonSafe(SEEN_NOTIFICATION_TAGS_KEY, []),
+        knownGitPackages: parseJsonSafe(KNOWN_GIT_PACKAGES_KEY, null),
+        knownPackageVersions: parseJsonSafe(KNOWN_PACKAGE_VERSIONS_KEY, null),
+        seenPromotions: parseJsonSafe(SEEN_PROMOTIONS_KEY, []),
+        seenReviews: parseJsonSafe(SEEN_REVIEWS_KEY, null),
+        packageUpdateCooldown: parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {})
+      });
+    } catch {
+      // Ignore IndexedDB sync errors
+    }
+  }
+
+  /**
+   * Reconciles any notification tags or package stamps recorded by the Service Worker in
+   * IndexedDB (`lh_pwa_notif_state_db`) back into `localStorage` so focusing/restoring a
+   * minimized window never re-fires duplicate notifications.
+   */
+  async reconcileNotifStateFromIndexedDb(): Promise<void> {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      const state = await readAllNotifStateEntries();
+      if (!state || Object.keys(state).length === 0) return;
+
+      if (Array.isArray(state['seenTags']) && state['seenTags'].length > 0) {
+        for (const tag of state['seenTags']) {
+          if (typeof tag === 'string' && tag) {
+            this.markNotificationTagSeen(tag, false);
+          }
+        }
+      }
+
+      if (Array.isArray(state['seenPromotions']) && state['seenPromotions'].length > 0) {
+        try {
+          const raw = localStorage.getItem(SEEN_PROMOTIONS_KEY);
+          const existing = raw ? JSON.parse(raw) : [];
+          const merged = Array.from(
+            new Set([
+              ...(Array.isArray(existing) ? existing : []),
+              ...state['seenPromotions'].filter((id: any) => typeof id === 'string')
+            ])
+          ).slice(-100);
+          localStorage.setItem(SEEN_PROMOTIONS_KEY, JSON.stringify(merged));
+        } catch {}
+      }
+
+      if (Array.isArray(state['knownGitPackages']) && state['knownGitPackages'].length > 0) {
+        try {
+          const raw = localStorage.getItem(KNOWN_GIT_PACKAGES_KEY);
+          const existing = raw ? JSON.parse(raw) : [];
+          const merged = Array.from(
+            new Set([
+              ...(Array.isArray(existing) ? existing : []),
+              ...state['knownGitPackages'].filter((id: any) => typeof id === 'string')
+            ])
+          ).slice(-2000);
+          localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(merged));
+        } catch {}
+      }
+
+      if (
+        state['knownPackageVersions'] &&
+        typeof state['knownPackageVersions'] === 'object' &&
+        !Array.isArray(state['knownPackageVersions'])
+      ) {
+        try {
+          const raw = localStorage.getItem(KNOWN_PACKAGE_VERSIONS_KEY);
+          const existing = raw ? JSON.parse(raw) : {};
+          const merged = {
+            ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
+            ...state['knownPackageVersions']
+          };
+          localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(merged));
+        } catch {}
+      }
+    } catch {
+      // Ignore IndexedDB reconciliation errors
+    }
+  }
+
+  /**
+   * Triggers an unthrottled background catalog fetch inside the Service Worker (`LH_TRIGGER_BG_SYNC`),
+   * ensuring catalog updates and native notifications continue smoothly even when the app window is minimized.
+   */
+  triggerSwBackgroundCatalogCheck(): void {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator) || !navigator.serviceWorker) {
+      return;
+    }
+    try {
+      const msg = { type: 'LH_TRIGGER_BG_SYNC', ts: Date.now() };
+      if (navigator.serviceWorker.controller && typeof navigator.serviceWorker.controller.postMessage === 'function') {
+        navigator.serviceWorker.controller.postMessage(msg);
+        return;
+      }
+      navigator.serviceWorker
+        .getRegistration()
+        .then(reg => {
+          if (reg?.active && typeof reg.active.postMessage === 'function') {
+            reg.active.postMessage(msg);
+          }
+        })
+        .catch(() => {});
+    } catch {
+      // Ignore SW postMessage errors
+    }
   }
 
   private initNetworkStatusWatcher(): void {
@@ -339,6 +579,14 @@ export class PwaService {
     const handleSyncMessage = (data: any) => {
       if (!data || typeof data !== 'object') return;
       if (data.type === 'LH_BOOT_SYNC_UPDATED' && data.payload) {
+        if (Array.isArray(data.notifiedTags)) {
+          for (const tag of data.notifiedTags) {
+            if (typeof tag === 'string' && tag) {
+              this.markNotificationTagSeen(tag, false);
+            }
+          }
+        }
+        this.reconcileNotifStateFromIndexedDb().catch(() => {});
         this.notifyCatalogSyncListeners({
           source: 'sw-broadcast',
           payload: data.payload,
@@ -346,6 +594,8 @@ export class PwaService {
         });
       } else if (data.type === 'LH_OUTBOX_SYNC_COMPLETED') {
         writeFallbackOutbox([]);
+      } else if (data.type === 'LH_NOTIFICATION_CLICK' && data.data) {
+        this.handleNotificationAction(data.data);
       }
     };
 
@@ -614,8 +864,12 @@ export class PwaService {
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && this.isOnline()) {
-          this.checkForUpdate(false);
-          this.notifyCatalogSyncListeners({ source: 'visibility', ts: Date.now() });
+          this.reconcileNotifStateFromIndexedDb()
+            .catch(() => {})
+            .finally(() => {
+              this.checkForUpdate(false);
+              this.notifyCatalogSyncListeners({ source: 'visibility', ts: Date.now() });
+            });
         }
       });
     }
@@ -689,6 +943,14 @@ export class PwaService {
   }
 
   private handleNotificationAction(data: any): void {
+    const sig = JSON.stringify(data || {});
+    const now = Date.now();
+    if (sig === this.lastNotificationClickSig && now - this.lastNotificationClickAt < 500) {
+      return;
+    }
+    this.lastNotificationClickSig = sig;
+    this.lastNotificationClickAt = now;
+
     if (typeof window !== 'undefined' && typeof window.focus === 'function') {
       try {
         window.focus();
@@ -799,7 +1061,7 @@ export class PwaService {
     }
   }
 
-  markNotificationTagSeen(tag: string): void {
+  markNotificationTagSeen(tag: string, syncToIdb = true): void {
     if (!tag) return;
     try {
       const raw = localStorage.getItem(SEEN_NOTIFICATION_TAGS_KEY);
@@ -810,6 +1072,9 @@ export class PwaService {
       }
       const trimmed = list.slice(-MAX_SEEN_TAGS);
       localStorage.setItem(SEEN_NOTIFICATION_TAGS_KEY, JSON.stringify(trimmed));
+      if (syncToIdb) {
+        this.syncNotificationStateToIndexedDb().catch(() => {});
+      }
     } catch {
       // ignore storage errors
     }
@@ -886,6 +1151,7 @@ export class PwaService {
 
     try {
       localStorage.setItem(SEEN_PROMOTIONS_KEY, JSON.stringify(Array.from(seenSet).slice(-100)));
+      this.syncNotificationStateToIndexedDb().catch(() => {});
     } catch {
       // ignore storage errors
     }
@@ -1037,6 +1303,7 @@ export class PwaService {
           )
         ).slice(-2000);
         localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(initialIds));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage quota errors
       }
@@ -1096,6 +1363,7 @@ export class PwaService {
     try {
       const updatedIds = Array.from(knownSet).slice(-2000);
       localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(updatedIds));
+      this.syncNotificationStateToIndexedDb().catch(() => {});
     } catch {
       // ignore storage errors
     }
@@ -1215,6 +1483,7 @@ export class PwaService {
           initialMap[lowerId] = computeStamp(pkg);
         }
         localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(initialMap));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage quota errors
       }
@@ -1361,6 +1630,7 @@ export class PwaService {
         const entries = Object.entries(knownMap);
         const trimmed = entries.length > 4000 ? Object.fromEntries(entries.slice(-4000)) : knownMap;
         localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(trimmed));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage errors
       }
@@ -1421,6 +1691,7 @@ export class PwaService {
         const entries = Object.entries(cooldownMap);
         const trimmed = entries.length > 2000 ? Object.fromEntries(entries.slice(-2000)) : cooldownMap;
         localStorage.setItem(PACKAGE_UPDATE_COOLDOWN_KEY, JSON.stringify(trimmed));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage errors
       }
@@ -1584,6 +1855,7 @@ export class PwaService {
     if (seenChanged) {
       try {
         localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(Array.from(seenSet).slice(-500)));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage errors
       }
@@ -1667,9 +1939,27 @@ export class PwaService {
     }, 1500);
   }
 
-  private blobToDataUrl(blob: Blob): Promise<string | null> {
+  private async blobToDataUrl(blob: Blob, fallbackMimeType = 'image/png'): Promise<string | null> {
+    if (blob && typeof blob.arrayBuffer === 'function') {
+      try {
+        const buffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        if (bytes.length > 0) {
+          let binary = '';
+          const chunkSize = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+          }
+          const mime = (blob.type || fallbackMimeType || 'image/png').split(';')[0].trim();
+          const normalizedMime = mime.startsWith('image/') ? mime : 'image/png';
+          return `data:${normalizedMime};base64,${btoa(binary)}`;
+        }
+      } catch {
+        // Fall back to FileReader below
+      }
+    }
     if (typeof FileReader === 'undefined') {
-      return Promise.resolve(null);
+      return null;
     }
     return new Promise(resolve => {
       try {
@@ -1743,7 +2033,7 @@ export class PwaService {
   }
 
   private isCanvas2dSupported(): boolean {
-    if (typeof document === 'undefined') return false;
+    if (typeof document === 'undefined' || document.visibilityState === 'hidden') return false;
     if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '')) {
       return false;
     }

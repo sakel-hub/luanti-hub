@@ -26,6 +26,7 @@ import {
   formatByteSize,
   normalizeGitRepoInputUrl,
   sortAndCapReleases,
+  mergeUpstreamAndGitReleases,
   sanitizeReleaseNotesText,
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES
@@ -266,12 +267,16 @@ function buildNormalizedReleases(
   author: string,
   name: string,
   d1Releases: any[],
-  upstreamReleases: any[] | null
+  upstreamReleases: any[] | null,
+  gitReleases: any[] = []
 ): any[] {
-  if (Array.isArray(upstreamReleases) && upstreamReleases.length > 0) {
+  const hasUpstream = Array.isArray(upstreamReleases) && upstreamReleases.length > 0;
+  let baseList: any[] = [];
+
+  if (hasUpstream) {
     const encAuthor = encodeURIComponent(author);
     const encName = encodeURIComponent(name);
-    const mappedUpstream = upstreamReleases.map((r: any) => {
+    baseList = upstreamReleases!.map((r: any) => {
       const rawUrl = r.url || '';
       const fullDownloadUrl = rawUrl.startsWith('http')
         ? rawUrl
@@ -302,11 +307,8 @@ function buildNormalizedReleases(
         released_at: r.release_date || ''
       };
     });
-    return sortAndCapReleases(mappedUpstream, MAX_PACKAGE_RELEASES);
-  }
-
-  if (Array.isArray(d1Releases) && d1Releases.length > 0) {
-    const mappedD1 = d1Releases.map((r: any) => {
+  } else if (Array.isArray(d1Releases) && d1Releases.length > 0) {
+    baseList = d1Releases.map((r: any) => {
       const cleanNotes = sanitizeReleaseNotesText(r.changelog || r.release_notes, String(r.tag_name || r.version || ''));
       return {
         id: r.id,
@@ -326,10 +328,16 @@ function buildNormalizedReleases(
         released_at: r.released_at || r.release_date
       };
     });
-    return sortAndCapReleases(mappedD1, MAX_PACKAGE_RELEASES);
   }
 
-  return [];
+  if (Array.isArray(gitReleases) && gitReleases.length > 0) {
+    return mergeUpstreamAndGitReleases(baseList, gitReleases, author, name, {
+      usePackagedDownloadUrls: false,
+      isOfficialContentDbBase: hasUpstream
+    });
+  }
+
+  return sortAndCapReleases(baseList, MAX_PACKAGE_RELEASES);
 }
 
 function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null, packageId?: string): any[] {
@@ -360,32 +368,86 @@ function buildNormalizedReviews(d1Reviews: any[], upstreamReviews: any[] | null,
 const recentWebViewWrites = new Map<string, number>();
 const WEB_VIEW_COOLDOWN_MS = 10 * 60 * 1000;
 
-async function recordWebPackageView(db: any, request: Request | undefined, packageId: string): Promise<void> {
-  if (!db || !request || !packageId) return;
+async function recordWebPackageView(
+  db: any,
+  request: Request | undefined,
+  packageId: string,
+  sessionSecret?: string
+): Promise<boolean> {
+  if (!db || !request || !packageId) return false;
+  const purpose = (
+    request.headers.get('Sec-Purpose') ||
+    request.headers.get('Purpose') ||
+    request.headers.get('X-Purpose') ||
+    request.headers.get('X-Moz') ||
+    ''
+  ).toLowerCase();
+  if (purpose.includes('prefetch') || purpose.includes('preview') || purpose.includes('prerender')) {
+    return false;
+  }
   const ua = (request.headers.get('User-Agent') || '').toLowerCase();
   if (/(?:bot|crawler|spider|slurp|bingpreview|facebookexternalhit|discordbot|telegrambot|slackbot|whatsapp|headlesschrome|lighthouse)/i.test(ua)) {
-    return;
+    return false;
   }
   const clientIp =
     request.headers.get('CF-Connecting-IP') ||
     request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
     'anonymous';
-  const key = `${clientIp}:${packageId.toLowerCase()}`;
+  const normalizedPkg = packageId.toLowerCase();
+  const key = `${clientIp}:${normalizedPkg}`;
   const now = Date.now();
+  if (recentWebViewWrites.size > 2000) {
+    for (const [k, exp] of recentWebViewWrites.entries()) {
+      if (exp <= now) recentWebViewWrites.delete(k);
+    }
+  }
   const exp = recentWebViewWrites.get(key);
-  if (exp && exp > now) return;
+  if (exp && exp > now) return false;
+
+  const edgeDedupKey = `/dedup/webview/${encodeURIComponent(clientIp)}/${encodeURIComponent(normalizedPkg)}`;
+  const cachedHit = await readEdgeCacheJson<{ ts: number }>(edgeDedupKey);
+  if (cachedHit) {
+    recentWebViewWrites.set(key, now + WEB_VIEW_COOLDOWN_MS);
+    return false;
+  }
+
   recentWebViewWrites.set(key, now + WEB_VIEW_COOLDOWN_MS);
+  await writeEdgeCacheJson(edgeDedupKey, { ts: now }, 600);
 
   try {
     await ensureExtendedPackageColumns(db);
+    const canonicalRow = await db.prepare(
+      `SELECT id FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+    ).bind(packageId).first().catch(() => null);
+    const effectivePkgId = canonicalRow?.id || packageId;
+
     await db.prepare(`
       INSERT INTO package_daily_downloads (package_id, download_date, downloads_count, views_web)
       VALUES (?, DATE('now'), 0, 1)
       ON CONFLICT(package_id, download_date)
       DO UPDATE SET views_web = COALESCE(views_web, 0) + 1
-    `).bind(packageId).run();
+    `).bind(effectivePkgId).run();
+
+    const cookies = parseCookies(request);
+    const sessionToken = cookies['lh_session'];
+    const userId = sessionToken
+      ? await verifySessionToken(sessionToken, sessionSecret)
+      : null;
+
+    if (userId) {
+      await db.prepare(`
+        INSERT INTO user_views (user_id, package_id, view_count, last_viewed_at)
+        VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, package_id)
+        DO UPDATE SET
+          view_count = view_count + 1,
+          last_viewed_at = CURRENT_TIMESTAMP
+      `).bind(userId, effectivePkgId).run().catch(() => {});
+    }
+    return true;
   } catch {
     // Non-blocking view telemetry
+    return false;
   }
 }
 
@@ -394,20 +456,50 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const pkgId = `${author}/${name}`;
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
-  const noCache = reqUrl?.searchParams.get('nocache') === '1';
+  const noCache =
+    reqUrl?.searchParams.get('nocache') === '1' || reqUrl?.searchParams.get('refresh') === '1';
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v6/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v8/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
-    await recordWebPackageView(context.env.DB, context.request, pkgId);
+    const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
+    if (typeof (context as any).waitUntil === 'function') {
+      (context as any).waitUntil(viewTask);
+    } else {
+      await viewTask;
+    }
   }
 
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
     if (cachedEdge) {
-      // Always merge fresh D1 reviews on full detail requests so newly posted or moderated reviews appear immediately on refresh
+      // Always merge fresh D1 reviews and live 2-minute cached Git tags on full detail requests
       if (!isLite) {
         try {
+          if (cachedEdge.repo_url) {
+            const liveGitTags = await fetchGitRepoReleasesAndTags(
+              cachedEdge.repo_url,
+              cachedEdge.author || author,
+              cachedEdge.name || name,
+              cachedEdge.min_minetest_version || '5.0.0',
+              false
+            ).catch(() => []);
+            if (liveGitTags.length > 0) {
+              cachedEdge.releases_list = mergeUpstreamAndGitReleases(
+                Array.isArray(cachedEdge.releases_list) ? cachedEdge.releases_list : [],
+                liveGitTags,
+                cachedEdge.author || author,
+                cachedEdge.name || name,
+                {
+                  usePackagedDownloadUrls: false,
+                  isOfficialContentDbBase: cachedEdge.source === 'official'
+                }
+              );
+              if (cachedEdge.releases_list[0]?.commit_sha) {
+                cachedEdge.latest_commit_sha = cachedEdge.releases_list[0].commit_sha;
+              }
+            }
+          }
           let freshLocalReviews: any[] = [];
           if (context.env.DB) {
             const freshLocalRevRes = await context.env.DB.prepare(`
@@ -517,9 +609,33 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       (!isOfficialFast && Number(d1Pkg?.downloads_count || 0) > 0);
 
     if (isLite && d1Pkg && d1Pkg.license && hasHydratedDownloads) {
-      const revAvgFast = await context.env.DB.prepare(
-        `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-      ).bind(effectivePkgId).first().catch(() => null);
+      const [revAvgFast, liteGitScan] = await Promise.all([
+        context.env.DB.prepare(
+          `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
+        ).bind(effectivePkgId).first().catch(() => null),
+        !d1Pkg.video_url && d1Pkg.repo_url
+          ? scanGitRepoMetadataCached(
+              d1Pkg.author_name || author,
+              d1Pkg.name || name,
+              d1Pkg.type || 'mod',
+              d1Pkg.repo_url,
+              21600
+            ).catch(() => null)
+          : Promise.resolve(null)
+      ]);
+      const liteVideo = extractEmbeddedVideo(
+        d1Pkg.video_url || liteGitScan?.cdbMeta?.video_url,
+        d1Pkg.video_thumbnail_url,
+        d1Pkg.long_desc
+      );
+      if (!d1Pkg.video_url && liteVideo.video_url) {
+        context.env.DB.prepare(`
+          UPDATE packages
+          SET video_url = COALESCE(video_url, ?),
+              video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+          WHERE id = ?
+        `).bind(liteVideo.video_url, liteVideo.video_thumbnail_url || null, d1Pkg.id).run().catch(() => {});
+      }
       const fastStarScore = revAvgFast && Number(revAvgFast.cnt) > 0 && revAvgFast.avg_rating != null
         ? Number(Number(revAvgFast.avg_rating).toFixed(1))
         : 0;
@@ -547,8 +663,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         score: fastStarScore,
         download_size: Number(d1Pkg.download_size || 0) > 0 ? Number(d1Pkg.download_size) : undefined,
         file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size),
-        video_url: d1Pkg.video_url || undefined,
-        video_thumbnail_url: d1Pkg.video_thumbnail_url || undefined,
+        video_url: liteVideo.video_url || undefined,
+        video_thumbnail_url: liteVideo.video_thumbnail_url || undefined,
         tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
         source: isGitFast ? 'git' : 'official',
         sources: fastSources,
@@ -613,17 +729,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         d1Releases = relRowsRes?.results || [];
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
 
-        // D1-First Full Detail Fast Path: when D1 already holds hydrated metadata + screenshots, serve directly in <15ms
+        // D1-First Full Detail Fast Path: when D1 already holds genuinely hydrated full detail metadata + screenshots, serve directly in <15ms
+        const d1Screenshots = d1Pkg ? parseJsonArray(d1Pkg.screenshots) : [];
+        const hasHydratedFullDetail =
+          Boolean(d1Pkg?.long_desc && String(d1Pkg.long_desc).trim().length > 0) ||
+          (!isOfficialFast && d1Screenshots.length > 0);
+
         if (
           !noCache &&
           !wantsReadme &&
           d1Pkg &&
           d1Pkg.license &&
-          d1Pkg.screenshots !== null &&
-          d1Pkg.screenshots !== undefined &&
-          (d1Pkg.long_desc || d1Pkg.short_desc)
+          hasHydratedFullDetail
         ) {
-          const d1Screenshots = parseJsonArray(d1Pkg.screenshots);
           const d1GameSupport = parseJsonArray(d1Pkg.game_support);
           let parsedRevCounts: { positive: number; neutral: number; negative: number } | undefined;
           if (typeof d1Pkg.review_thread_counts === 'string' && d1Pkg.review_thread_counts.trim()) {
@@ -644,20 +762,105 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             Number(parsedRevCounts?.positive || 0) +
             Number(parsedRevCounts?.neutral || 0) +
             Number(parsedRevCounts?.negative || 0);
-          let cdbRevPayload: any[] | null = null;
-          if (expectedCdbCount > 0) {
-            cdbRevPayload = await fetchUpstreamJsonCached<any[]>(
-              `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/reviews/`,
-              600
-            ).catch(() => null);
+          const [cdbRevPayload, fastGitReleases, fastGitScan] = await Promise.all([
+            expectedCdbCount > 0
+              ? fetchUpstreamJsonCached<any[]>(
+                  `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/reviews/`,
+                  600
+                ).catch(() => null)
+              : Promise.resolve(null),
+            d1Pkg.repo_url
+              ? fetchGitRepoReleasesAndTags(
+                  d1Pkg.repo_url,
+                  d1Pkg.author_name || author,
+                  d1Pkg.name || name,
+                  d1Pkg.min_minetest_version || '5.0.0',
+                  false
+                ).catch(() => [])
+              : Promise.resolve([]),
+            !d1Pkg.video_url && d1Pkg.repo_url
+              ? scanGitRepoMetadataCached(
+                  d1Pkg.author_name || author,
+                  d1Pkg.name || name,
+                  d1Pkg.type || 'mod',
+                  d1Pkg.repo_url,
+                  21600
+                ).catch(() => null)
+              : Promise.resolve(null)
+          ]);
+          const fastVideo = extractEmbeddedVideo(
+            d1Pkg.video_url || fastGitScan?.cdbMeta?.video_url,
+            d1Pkg.video_thumbnail_url,
+            d1Pkg.long_desc
+          );
+          if (!d1Pkg.video_url && fastVideo.video_url) {
+            context.env.DB.prepare(`
+              UPDATE packages
+              SET video_url = COALESCE(video_url, ?),
+                video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+              WHERE id = ?
+            `).bind(fastVideo.video_url, fastVideo.video_thumbnail_url || null, d1Pkg.id).run().catch(() => {});
           }
           const fastBundledReviews = buildNormalizedReviews(d1Reviews, cdbRevPayload, effectivePkgId);
           const fastBundledReleases = buildNormalizedReleases(
             d1Pkg.author_name || author,
             d1Pkg.name || name,
             d1Releases,
-            null
+            null,
+            fastGitReleases
           );
+          if (
+            context.env.DB &&
+            d1Pkg.id &&
+            fastGitReleases.length > 0 &&
+            fastBundledReleases.length > d1Releases.length
+          ) {
+            try {
+              const existingTagKeys = new Set(
+                d1Releases.map((r: any) => String(r.tag_name || r.version || '').toLowerCase())
+              );
+              const newRels = fastBundledReleases.filter(
+                (r: any) =>
+                  r.commit_sha !== 'HEAD' &&
+                  r.id !== 'git-branch-fallback' &&
+                  !existingTagKeys.has(String(r.tag_name || r.version || '').toLowerCase())
+              );
+              const insertStmts = newRels.map((rel: any) =>
+                context.env.DB.prepare(`
+                  INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                `).bind(
+                  d1Pkg.id,
+                  rel.version,
+                  rel.tag_name,
+                  rel.commit_sha,
+                  rel.download_url || rel.url,
+                  rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
+                  sanitizeReleaseNotesText(rel.changelog, rel.tag_name) || null,
+                  rel.released_at || null
+                )
+              );
+              if (insertStmts.length > 0) {
+                if (typeof context.env.DB.batch === 'function') {
+                  await context.env.DB.batch(insertStmts);
+                } else {
+                  for (const stmt of insertStmts) {
+                    await stmt.run();
+                  }
+                }
+              }
+              if (newRels.length > 0) {
+                await syncDebouncedGitVersionStamp(
+                  context.env.DB,
+                  d1Pkg,
+                  fastBundledReleases[0]?.commit_sha || fastBundledReleases[0]?.tag_name,
+                  true
+                );
+              }
+            } catch {
+              // Non-fatal D1 sync error
+            }
+          }
           const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
           const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum);
           const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
@@ -670,6 +873,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             d1Pkg.score,
             d1ReviewAvg
           );
+
+          const newestFastReleaseDate = fastBundledReleases[0]?.released_at;
+          const resolvedFastUpdatedAt =
+            newestFastReleaseDate &&
+            (!d1Pkg.updated_at || new Date(newestFastReleaseDate).getTime() > new Date(d1Pkg.updated_at).getTime())
+              ? newestFastReleaseDate
+              : (d1Pkg.updated_at || undefined);
 
           const fastFullPayload = {
             id: effectivePkgId,
@@ -694,8 +904,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             forums: d1Pkg.forum_url || undefined,
             donate_url: d1Pkg.donate_url || undefined,
             translation_url: d1Pkg.translation_url || undefined,
-            video_url: d1Pkg.video_url || undefined,
-            video_thumbnail_url: d1Pkg.video_thumbnail_url || undefined,
+            video_url: fastVideo.video_url || undefined,
+            video_thumbnail_url: fastVideo.video_thumbnail_url || undefined,
             dev_state: d1Pkg.dev_state || undefined,
             provides: parseJsonArray(d1Pkg.provides),
             content_warnings: parseJsonArray(d1Pkg.content_warnings),
@@ -704,8 +914,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             review_thread_counts: parsedRevCounts,
             game_support: d1GameSupport.length > 0 ? d1GameSupport : undefined,
             created_at: d1Pkg.created_at || undefined,
-            updated_at: d1Pkg.updated_at || undefined,
-            latest_commit_sha: d1Pkg.latest_commit_sha || fastBundledReleases[0]?.commit_sha || undefined,
+            updated_at: resolvedFastUpdatedAt,
+            latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
             tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
@@ -754,17 +964,28 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   ]);
   let forClientData: any = null;
 
-  // Ensure Git tags/releases are discovered before falling back to a default branch ('HEAD') row
+  // Ensure Git tags/releases are always discovered & merged alongside ContentDB/D1 releases
   const hasRealTaggedD1Releases = d1Releases.some(
     (r: any) => r.commit_sha !== 'HEAD' && r.version !== 'latest'
   );
+  const candidateRepoUrl =
+    d1Pkg?.repo_url ||
+    (upstreamData && typeof (upstreamData.repo || upstreamData.repo_url) === 'string'
+      ? (upstreamData.repo || upstreamData.repo_url)
+      : undefined);
+
+  let discoveredGitReleases: any[] = [];
+  if (!isLite && candidateRepoUrl) {
+    discoveredGitReleases = await fetchGitRepoReleasesAndTags(
+      candidateRepoUrl,
+      d1Pkg?.author_name || upstreamData?.author || author,
+      d1Pkg?.name || upstreamData?.name || name,
+      d1Pkg?.min_minetest_version || '5.0.0',
+      noCache
+    ).catch(() => []);
+  }
+
   if (!isLite && !hasRealTaggedD1Releases && (!Array.isArray(releasesPayload) || releasesPayload.length === 0)) {
-    const discoveredGitReleases = await fetchGitRepoReleasesAndTags(
-      d1Pkg?.repo_url,
-      d1Pkg?.author_name || author,
-      d1Pkg?.name || name,
-      d1Pkg?.min_minetest_version || '5.0.0'
-    );
     if (discoveredGitReleases.length > 0) {
       d1Releases = sortAndCapReleases(discoveredGitReleases, MAX_PACKAGE_RELEASES);
       if (context.env.DB && d1Pkg) {
@@ -799,7 +1020,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const smartRefs = await fetchGitSmartHttpRefs(
         d1Pkg.repo_url,
         d1Pkg.author_name || author,
-        d1Pkg.name || name
+        d1Pkg.name || name,
+        noCache
       );
       if (context.env.DB && d1Pkg && smartRefs?.headSha) {
         await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
@@ -827,7 +1049,65 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
-  let bundledReleases = buildNormalizedReleases(author, name, d1Releases, releasesPayload);
+  let bundledReleases = buildNormalizedReleases(
+    author,
+    name,
+    d1Releases,
+    releasesPayload,
+    discoveredGitReleases
+  );
+  if (
+    context.env.DB &&
+    d1Pkg?.id &&
+    discoveredGitReleases.length > 0 &&
+    bundledReleases.length > d1Releases.length
+  ) {
+    try {
+      const existingTagKeys = new Set(
+        d1Releases.map((r: any) => String(r.tag_name || r.version || '').toLowerCase())
+      );
+      const newRels = bundledReleases.filter(
+        (r: any) =>
+          r.commit_sha !== 'HEAD' &&
+          r.id !== 'git-branch-fallback' &&
+          !existingTagKeys.has(String(r.tag_name || r.version || '').toLowerCase())
+      );
+      const insertStmts = newRels.map((rel: any) =>
+        context.env.DB.prepare(`
+          INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          d1Pkg.id,
+          rel.version,
+          rel.tag_name,
+          rel.commit_sha,
+          rel.download_url || rel.url,
+          rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
+          sanitizeReleaseNotesText(rel.changelog, rel.tag_name) || null,
+          rel.released_at || null
+        )
+      );
+      if (insertStmts.length > 0) {
+        if (typeof context.env.DB.batch === 'function') {
+          await context.env.DB.batch(insertStmts);
+        } else {
+          for (const stmt of insertStmts) {
+            await stmt.run();
+          }
+        }
+      }
+      if (newRels.length > 0) {
+        await syncDebouncedGitVersionStamp(
+          context.env.DB,
+          d1Pkg,
+          bundledReleases[0]?.commit_sha || bundledReleases[0]?.tag_name,
+          true
+        );
+      }
+    } catch {
+      // Non-fatal D1 sync error
+    }
+  }
   const bundledReviews = buildNormalizedReviews(d1Reviews, upstreamReviewsPayload, pkgId);
 
   // Merge forClientData into upstreamData if single-package endpoint is missing or partial
@@ -1098,8 +1378,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         maintainers: parseJsonArray(d1Pkg?.maintainers),
         created_at: d1Pkg?.created_at || undefined,
         updated_at: d1Pkg?.updated_at || undefined,
-        latest_commit_sha: d1Pkg?.latest_commit_sha || bundledReleases[0]?.commit_sha || undefined,
-        provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : 'github'),
+        latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
+        provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : resolvedRepo.includes('bitbucket.org') ? 'bitbucket' : 'github'),
         default_branch: d1Pkg?.default_branch || 'main',
         min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
         max_minetest_version: d1Pkg?.max_minetest_version || gitScan?.maxVersion || undefined,
@@ -1148,10 +1428,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     extractEngineVersionString(d1Pkg?.max_minetest_version) ||
     undefined;
 
-  // Probe Git repository only when license is missing (ContentDB already provides repo_url, dependencies & metadata)
+  // Probe Git repository when license is missing or when video_url is missing on a repository-backed package
   let probedCdbMeta: CdbJsonMetadata | null = null;
   let gitProbeScan: GitRepoScanResult | null = null;
-  const needsGitProbe = !resolvedLicense;
+  const hasResolvedVideo = Boolean(upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url);
+  const needsGitProbe = !resolvedLicense || (!hasResolvedVideo && Boolean(repoUrl));
   if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
@@ -1378,13 +1659,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     : undefined;
 
   const createdAt = upstreamData.created_at || forClientData?.created_at || d1Pkg?.created_at || undefined;
-  const updatedAt =
+  const candidateUpdatedAt =
     upstreamData.updated_at ||
     forClientData?.updated_at ||
-    (bundledReleases[0]?.release_date || bundledReleases[0]?.released_at) ||
     upstreamData.approved_at ||
     d1Pkg?.updated_at ||
     undefined;
+  const latestRelDate = bundledReleases[0]?.release_date || bundledReleases[0]?.released_at;
+  const updatedAt =
+    latestRelDate &&
+    (!candidateUpdatedAt || new Date(latestRelDate).getTime() > new Date(candidateUpdatedAt).getTime())
+      ? latestRelDate
+      : (candidateUpdatedAt || latestRelDate || undefined);
 
   const combinedTagsList = Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
   const resolvedHardDeps = finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps;
@@ -1499,7 +1785,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       contentWarnings.length > 0 ? JSON.stringify(contentWarnings) : null,
       aiDisclosures.length > 0 ? JSON.stringify(aiDisclosures) : null,
       maintainersList.length > 0 ? JSON.stringify(maintainersList) : null,
-      JSON.stringify(screenshots),
+      !isLite && screenshots.length > 0 ? JSON.stringify(screenshots) : null,
       gameSupport.length > 0 ? JSON.stringify(gameSupport) : null,
       reviewThreadCounts ? JSON.stringify(reviewThreadCounts) : null
     ).run().catch(() => {});
@@ -1562,7 +1848,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     game_support: gameSupport.length > 0 ? gameSupport : undefined,
     created_at: createdAt,
     updated_at: updatedAt,
-    latest_commit_sha: d1Pkg?.latest_commit_sha || bundledReleases[0]?.commit_sha || undefined,
+    latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
     screenshots,
     tags: Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean),
     contentdb_downloads: contentdbDownloads,
@@ -1687,7 +1973,9 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     '/__api_boot_catalog_bundle_v3',
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
     `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
-    `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`
+    `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
+    `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
+    `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
   ]);
 
     return Response.json({
@@ -1699,5 +1987,36 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       { error: sanitizePublicErrorMessage(err, 'Could not update package tags.') },
       { status: 500 }
     );
+  }
+}
+
+// POST /api/packages/:author/:name?view=1 — Lightweight non-blocking web view beacon
+export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  try {
+    const { author, name } = context.params;
+    if (!author || !name) {
+      return Response.json({ recorded: false }, { status: 400 });
+    }
+    const pkgId = `${author}/${name}`;
+    let recorded = false;
+    if (context.env.DB) {
+      recorded = await recordWebPackageView(
+        context.env.DB,
+        context.request,
+        pkgId,
+        context.env.SESSION_SECRET
+      );
+    }
+    return Response.json(
+      { recorded },
+      {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'private, no-store'
+        }
+      }
+    );
+  } catch {
+    return Response.json({ recorded: false }, { status: 200 });
   }
 }

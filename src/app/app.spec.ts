@@ -2949,12 +2949,69 @@ supported_games = minetest_game, voxelibre
   });
 
   it('should sort releases newest-first by semantic version, cap at 10 with 5-per-page pagination, and lazily load Similar Packages when scrolled near the viewport', async () => {
-    const { sortAndCapReleases, compareSemanticVersionsDesc } = await import('../../functions/api/lib/upstream');
+    const {
+      sortAndCapReleases,
+      compareSemanticVersionsDesc,
+      parseGitRepoTarget,
+      buildGitTagArchiveUrl,
+      mergeUpstreamAndGitReleases
+    } = await import('../../functions/api/lib/upstream');
     const pkgService = TestBed.inject(PackageService);
 
     // 1. Verify semantic version descending comparison and backend + frontend release sorting & 10-cap
     expect(compareSemanticVersionsDesc('2.0.4', '2.0.0')).toBeLessThan(0);
     expect(compareSemanticVersionsDesc('2.0.0', 'v1.0.0')).toBeLessThan(0);
+
+    // Verify Bitbucket & multi-forge Git target parsing and tag archive URLs
+    const bitbucketTarget = parseGitRepoTarget('https://bitbucket.org/SaKeL/everness', 'SaKeL', 'everness');
+    expect(bitbucketTarget).toBeTruthy();
+    expect(bitbucketTarget!.provider).toBe('bitbucket');
+    expect(bitbucketTarget!.host).toBe('bitbucket.org');
+    expect(bitbucketTarget!.owner).toBe('SaKeL');
+    expect(bitbucketTarget!.repo).toBe('everness');
+    expect(
+      buildGitTagArchiveUrl(
+        bitbucketTarget!.provider,
+        bitbucketTarget!.host,
+        bitbucketTarget!.owner,
+        bitbucketTarget!.repo,
+        'v2.5.0'
+      )
+    ).toBe('https://bitbucket.org/SaKeL/everness/get/v2.5.0.zip');
+
+    // Verify hybrid merge of ContentDB releases + newly pushed Git tags across all providers
+    const cdbBase = [
+      { id: 101, version: '2.4.0', title: '2.4.0', tag_name: 'v2.4.0', commit_sha: 'aaaa1111', released_at: '2026-10-01T10:00:00Z', downloads: 420 }
+    ];
+    const liveGitTags = [
+      {
+        id: 'git-tag-v2.5.0',
+        version: 'v2.5.0',
+        title: 'v2.5.0',
+        tag_name: 'v2.5.0',
+        commit_sha: 'bbbb2222',
+        released_at: '2026-11-01T12:00:00Z',
+        url: 'https://bitbucket.org/SaKeL/everness/get/v2.5.0.zip',
+        download_url: 'https://bitbucket.org/SaKeL/everness/get/v2.5.0.zip',
+        min_minetest_version: '5.0.0'
+      },
+      {
+        id: 'git-tag-v2.4.0',
+        version: 'v2.4.0',
+        title: 'v2.4.0',
+        tag_name: 'v2.4.0',
+        commit_sha: 'aaaa11119999',
+        released_at: '2026-10-01T10:00:00Z',
+        url: 'https://bitbucket.org/SaKeL/everness/get/v2.4.0.zip',
+        download_url: 'https://bitbucket.org/SaKeL/everness/get/v2.4.0.zip',
+        min_minetest_version: '5.0.0'
+      }
+    ];
+    const mergedHybrid = mergeUpstreamAndGitReleases(cdbBase, liveGitTags, 'SaKeL', 'everness');
+    expect(mergedHybrid.length).toBe(2);
+    expect(mergedHybrid[0].tag_name).toBe('v2.5.0');
+    expect(mergedHybrid[0].commit_sha).toBe('bbbb2222');
+    expect(mergedHybrid[1].downloads).toBe(420);
 
     // Simulate 14 Git tags returned with identical/missing timestamps (as in screenshot: 2.0.0 .. 2.0.4, v1.0.0, etc.)
     const rawUnorderedReleases = [
@@ -4868,38 +4925,44 @@ supported_games = minetest_game, voxelibre
       }
 
       // 4. Verify Service Worker `LH_BOOT_SYNC_UPDATED` broadcast updates Home Page tiles & Top 10 Today/Week
-      (pwaService as any).notifyCatalogSyncListeners({
-        source: 'sw-broadcast',
-        ts: Date.now(),
-        payload: {
-          packages: [
-            {
-              id: 'Wuzzy/mineclone2',
-              author: 'Wuzzy',
-              name: 'mineclone2',
-              title: 'VoxeLibre (Synced via SW)',
-              type: 'game',
-              short_desc: 'Updated in background via Periodic Sync',
-              downloads: 950000,
-              score: 4.9,
-              source: 'official'
-            }
-          ],
-          top10Today: [
-            {
-              id: 'Wuzzy/mineclone2',
-              author: 'Wuzzy',
-              name: 'mineclone2',
-              title: 'VoxeLibre (Synced via SW)',
-              type: 'game',
-              short_desc: 'Updated in background via Periodic Sync',
-              downloads: 950000,
-              score: 4.9,
-              source: 'official'
-            }
-          ]
-        }
-      });
+      const origSendDuringBroadcast = pwaService.sendNativeNotification.bind(pwaService);
+      pwaService.sendNativeNotification = async () => true;
+      try {
+        (pwaService as any).notifyCatalogSyncListeners({
+          source: 'sw-broadcast',
+          ts: Date.now(),
+          payload: {
+            packages: [
+              {
+                id: 'Wuzzy/mineclone2',
+                author: 'Wuzzy',
+                name: 'mineclone2',
+                title: 'VoxeLibre (Synced via SW)',
+                type: 'game',
+                short_desc: 'Updated in background via Periodic Sync',
+                downloads: 950000,
+                score: 4.9,
+                source: 'official'
+              }
+            ],
+            top10Today: [
+              {
+                id: 'Wuzzy/mineclone2',
+                author: 'Wuzzy',
+                name: 'mineclone2',
+                title: 'VoxeLibre (Synced via SW)',
+                type: 'game',
+                short_desc: 'Updated in background via Periodic Sync',
+                downloads: 950000,
+                score: 4.9,
+                source: 'official'
+              }
+            ]
+          }
+        });
+      } finally {
+        pwaService.sendNativeNotification = origSendDuringBroadcast;
+      }
 
       expect(pkgService.packages().some(p => p.title === 'VoxeLibre (Synced via SW)')).toBe(true);
       expect(pkgService.top10TodayPackages()[0]?.title).toBe('VoxeLibre (Synced via SW)');
@@ -5246,6 +5309,147 @@ supported_games = minetest_game, voxelibre
     } finally {
       pwaService.sendNativeNotification = origSendReviewNotif;
       localStorage.removeItem('lh_seen_reviews_v1');
+    }
+  });
+
+  it('should resolve .cdb.json video_url (including Bitbucket /src/master/ branch hints and hover ?lite=1 hydration) and deliver PWA notifications immediately when minimized or in background', async () => {
+    const {
+      parseCdbJsonMetadata,
+      extractGitBranchHint,
+      scanGitRepoMetadataCached
+    } = await import('../../functions/api/lib/upstream');
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    // 1. Verify UTF-8 BOM tolerance and video_url extraction in parseCdbJsonMetadata
+    const bomCdbRaw =
+      '\uFEFF{"type":"MOD","title":"Everness","name":"everness","short_description":"Adds many new biomes, items and blocks.","video_url":"https://www.youtube.com/watch?v=9bZkp7q19f0"}';
+    const parsedCdb = parseCdbJsonMetadata(bomCdbRaw);
+    expect(parsedCdb?.title).toBe('Everness');
+    expect(parsedCdb?.video_url).toBe('https://www.youtube.com/watch?v=9bZkp7q19f0');
+
+    // 2. Verify branch-aware Bitbucket /src/master/ extraction and .cdb.json scanning
+    const branchHint = extractGitBranchHint('https://bitbucket.org/minetest_gamers/everness/src/master/');
+    expect(branchHint).toBe('master');
+
+    const origFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      requestedUrls.push(url);
+      if (url === 'https://bitbucket.org/minetest_gamers/everness/raw/master/.cdb.json') {
+        return new Response(bomCdbRaw, { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/api/packages/SaKeL/everness/?lite=1')) {
+        return new Response(
+          JSON.stringify({
+            author: 'SaKeL',
+            name: 'everness',
+            title: 'Everness',
+            type: 'mod',
+            short_desc: 'Adds many new biomes, items and blocks.',
+            repo_url: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+            video_url: 'https://www.youtube.com/embed/9bZkp7q19f0',
+            video_thumbnail_url: 'https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not found', { status: 404 });
+    });
+
+    try {
+      const scanned = await scanGitRepoMetadataCached(
+        'SaKeL',
+        'everness',
+        'mod',
+        'https://bitbucket.org/minetest_gamers/everness/src/master/'
+      );
+      expect(scanned?.cdbMeta?.video_url).toBe('https://www.youtube.com/watch?v=9bZkp7q19f0');
+      expect(requestedUrls).toContain('https://bitbucket.org/minetest_gamers/everness/raw/master/.cdb.json');
+
+      // 3. Verify tile hover (!deepFetch) calls ?lite=1 when video_url is missing and hydrates video_url + video_thumbnail_url
+      const baseEverness = (pkgService as any).normalizePackage({
+        id: 'SaKeL/everness',
+        author: 'SaKeL',
+        name: 'everness',
+        title: 'Everness',
+        type: 'mod',
+        short_desc: 'Adds many new biomes, items and blocks.',
+        repo_url: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+        screenshots: ['https://content.luanti.org/uploads/everness1.png']
+      });
+      (pkgService as any)._packages.set([baseEverness]);
+      await pkgService.loadPackageDetails(baseEverness, false);
+
+      const hydratedEverness = pkgService.packages().find(p => p.id === 'SaKeL/everness');
+      expect(hydratedEverness?.video_url).toContain('9bZkp7q19f0');
+      expect(hydratedEverness?.video_thumbnail_url).toBe('https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. Verify PWA notifications fire immediately when window is minimized/hidden (document.visibilityState === 'hidden')
+    const origVisDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    const origNotification = (window as any).Notification;
+    const origSwDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+    const swNotifCalls: Array<{ title: string; options?: NotificationOptions }> = [];
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden'
+    });
+    (window as any).Notification = { permission: 'granted' };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        getRegistration: async () => ({
+          active: { state: 'activated', postMessage: vi.fn() },
+          showNotification: async (title: string, options?: NotificationOptions) => {
+            swNotifCalls.push({ title, options });
+          }
+        })
+      }
+    });
+
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyPackageUpdates.set(true);
+      pwaService.notificationPermission.set('granted');
+
+      const sentHidden = await pwaService.sendNativeNotification({
+        title: 'Package Updated · [MOD] Everness',
+        body: 'by SaKeL — Mineral Waters Update',
+        icon: 'https://content.luanti.org/uploads/everness1.png',
+        tag: 'lh-test-hidden-everness-update',
+        category: 'package_update',
+        variant: 'package_update',
+        data: { packageId: 'SaKeL/everness' }
+      });
+      expect(sentHidden).toBe(true);
+      expect(swNotifCalls.length).toBe(1);
+      expect(swNotifCalls[0].title).toBe('Package Updated · [MOD] Everness');
+
+      // Verify click routing deduplication (500ms guard prevents double-navigation when both SW and client handle click)
+      const clickedPayloads: any[] = [];
+      pwaService.registerNotificationClickHandler((data: any) => {
+        clickedPayloads.push(data);
+      });
+      (pwaService as any).handleNotificationAction({ packageId: 'SaKeL/everness' });
+      (pwaService as any).handleNotificationAction({ packageId: 'SaKeL/everness' });
+      expect(clickedPayloads.length).toBe(1);
+      expect(clickedPayloads[0].packageId).toBe('SaKeL/everness');
+    } finally {
+      if (origVisDescriptor) {
+        Object.defineProperty(document, 'visibilityState', origVisDescriptor);
+      } else {
+        delete (document as any).visibilityState;
+      }
+      (window as any).Notification = origNotification;
+      if (origSwDescriptor) {
+        Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
+      }
     }
   });
 });

@@ -7,8 +7,10 @@ import {
   ensureExtendedPackageColumns,
   buildGitBranchArchiveUrl,
   sortAndCapReleases,
+  mergeUpstreamAndGitReleases,
   sanitizeReleaseNotesText,
   scanGitRepoMetadataCached,
+  invalidateEdgeCacheKeys,
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 
@@ -21,6 +23,8 @@ export async function onRequestGet(context: { request: Request; params: { author
   const packageId = `${author}/${name}`;
   const reqUrl = context.request?.url ? new URL(context.request.url) : null;
   const isNotesQuery = reqUrl?.searchParams.get('notes') === '1';
+  const forceRefresh =
+    reqUrl?.searchParams.get('refresh') === '1' || reqUrl?.searchParams.get('nocache') === '1';
 
   let d1Pkg: any = null;
   let d1Releases: any[] = [];
@@ -97,18 +101,44 @@ export async function onRequestGet(context: { request: Request; params: { author
     });
   }
 
-  // 2. Query official ContentDB `/api/packages/<author>/<name>/releases/` first when available
-  // (`PackageRelease.as_dict()` provides size, downloads, release_notes, sha256, commit, min/max_minetest_version)
+  // 2. Resolve repository URL & query official ContentDB + live Git repository tags/releases in parallel
   const isPureGitOnly = Boolean(d1Pkg && d1Pkg.provider && d1Pkg.provider !== 'contentdb');
-  const data = isPureGitOnly
-    ? null
-    : await fetchUpstreamJsonCached<any[]>(
-        `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/`,
-        300
-      );
+  const queryRepoParam = (reqUrl?.searchParams.get('repo') || '').trim();
+  let resolvedRepoUrl: string = (d1Pkg?.repo_url ? String(d1Pkg.repo_url).trim() : '') || queryRepoParam;
 
-  if (Array.isArray(data) && data.length > 0) {
-    const normalized = data.map((r: any) => {
+  if (!resolvedRepoUrl && !isPureGitOnly) {
+    const cdbDetail = await fetchUpstreamJsonCached<any>(
+      `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
+      600
+    ).catch(() => null);
+    if (cdbDetail?.repo) {
+      resolvedRepoUrl = String(cdbDetail.repo).trim();
+    }
+  }
+
+  const [data, discoveredGitReleases] = await Promise.all([
+    isPureGitOnly
+      ? Promise.resolve(null)
+      : fetchUpstreamJsonCached<any[]>(
+          `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/releases/`,
+          forceRefresh ? 0 : 120
+        ),
+    resolvedRepoUrl || isPureGitOnly
+      ? fetchGitRepoReleasesAndTags(
+          resolvedRepoUrl || null,
+          author,
+          name,
+          d1Pkg?.min_minetest_version || '5.0.0',
+          forceRefresh
+        )
+      : Promise.resolve([])
+  ]);
+
+  const hasOfficialContentDbReleases = Array.isArray(data) && data.length > 0;
+  let baseReleases: any[] = [];
+
+  if (hasOfficialContentDbReleases) {
+    baseReleases = data!.map((r: any) => {
       const rawUrl = r.url || '';
       const fullDownloadUrl = rawUrl.startsWith('http')
         ? rawUrl
@@ -146,24 +176,11 @@ export async function onRequestGet(context: { request: Request; params: { author
         released_at: r.release_date || ''
       };
     });
-
-    return new Response(JSON.stringify(sortAndCapReleases(normalized, MAX_PACKAGE_RELEASES)), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=120, s-maxage=600'
-      }
-    });
-  }
-
-  // 3. Check cached D1 tagged releases for pure Git packages (or when ContentDB is offline)
-  const hasTaggedD1Releases = d1Releases.some(
-    (r: any) => r && r.commit_sha !== 'HEAD' && r.version !== 'latest'
-  );
-  if (hasTaggedD1Releases) {
-    return new Response(JSON.stringify(d1Releases.map((r: any) => {
+  } else if (d1Releases.length > 0) {
+    baseReleases = d1Releases.map((r: any) => {
       const tag = String(r.tag_name || r.version || '').trim();
-      const packagedUrl = tag
+      const isBranchFallback = r.commit_sha === 'HEAD' || r.version === 'latest';
+      const packagedUrl = !isBranchFallback && tag
         ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?tag=${encodeURIComponent(tag)}`
         : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
       return {
@@ -182,46 +199,60 @@ export async function onRequestGet(context: { request: Request; params: { author
         release_date: r.released_at,
         released_at: r.released_at
       };
-    })), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'no-cache'
-      }
     });
   }
 
-  // 4. Discover Releases & Tags from GitHub, Codeberg, or GitLab API when a Git repository is known
-  if (d1Pkg?.repo_url) {
-    const discoveredGitReleases = await fetchGitRepoReleasesAndTags(
-      d1Pkg.repo_url,
-      author,
-      name,
-      d1Pkg?.min_minetest_version || '5.0.0'
-    );
+  // Merge official ContentDB/D1 releases with live Git repository tags across all supported Git services
+  const mergedReleases = mergeUpstreamAndGitReleases(
+    baseReleases,
+    discoveredGitReleases,
+    author,
+    name,
+    {
+      usePackagedDownloadUrls: true,
+      isOfficialContentDbBase: hasOfficialContentDbReleases
+    }
+  );
 
-    if (discoveredGitReleases.length > 0) {
-      if (context.env.DB && d1Pkg?.id) {
+  const hasRealMergedReleases = mergedReleases.some(
+    (r: any) => r && r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+  );
+
+  if (hasRealMergedReleases) {
+    if (context.env.DB && d1Pkg?.id && (discoveredGitReleases.length > 0 || forceRefresh)) {
+      const topMerged = mergedReleases[0];
+      const topD1 = d1Releases[0];
+      const topMergedTag = String(topMerged?.tag_name || topMerged?.version || '').trim();
+      const topD1Tag = String(topD1?.tag_name || topD1?.version || '').trim();
+      const topMergedSha = String(topMerged?.commit_sha || '').trim();
+      const topD1Sha = String(topD1?.commit_sha || '').trim();
+      const hasNewerRelease =
+        d1Releases.length === 0 ||
+        topMergedTag !== topD1Tag ||
+        (Boolean(topMergedSha) && topMergedSha !== topD1Sha);
+
+      if (hasNewerRelease || forceRefresh) {
         try {
           await context.env.DB.prepare(
             `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
           ).bind(d1Pkg.id).run();
-          for (const rel of discoveredGitReleases.slice(0, MAX_PACKAGE_RELEASES)) {
+          for (const rel of mergedReleases.slice(0, MAX_PACKAGE_RELEASES)) {
             await context.env.DB.prepare(`
-              INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+              INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, max_minetest_version, changelog, released_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
             `).bind(
               d1Pkg.id,
-              rel.version,
-              rel.tag_name,
+              rel.version || rel.title || 'latest',
+              rel.tag_name || rel.version || 'latest',
               rel.commit_sha || '',
-              rel.download_url,
-              rel.min_minetest_version || '5.0.0',
-              rel.changelog || null,
-              rel.released_at || ''
+              rel.upstream_url || rel.download_url || rel.url || '',
+              rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
+              rel.max_minetest_version || null,
+              rel.changelog || rel.release_notes || null,
+              rel.released_at || rel.release_date || ''
             ).run();
           }
-          const newestRelTime = Date.parse(String(discoveredGitReleases[0]?.released_at || '')) || 0;
+          const newestRelTime = Date.parse(String(topMerged?.released_at || topMerged?.release_date || '')) || 0;
           const prevPkgTime = Date.parse(String(d1Pkg.updated_at || '')) || 0;
           if (newestRelTime > prevPkgTime) {
             await context.env.DB.prepare(
@@ -231,44 +262,40 @@ export async function onRequestGet(context: { request: Request; params: { author
           await syncDebouncedGitVersionStamp(
             context.env.DB,
             d1Pkg,
-            discoveredGitReleases[0]?.commit_sha || discoveredGitReleases[0]?.tag_name,
+            topMerged?.commit_sha || topMerged?.tag_name,
             true
           );
+
+          const lowerA = encodeURIComponent(author.toLowerCase());
+          const lowerN = encodeURIComponent(name.toLowerCase());
+          await invalidateEdgeCacheKeys([
+            `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
+            `https://edge-cache.luantihub.local/pkg-detail-v7/full-readme/${lowerA}/${lowerN}`,
+            `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
+          ]).catch(() => {});
         } catch {
           // Non-blocking D1 sync
         }
       }
-
-      const packagedGitReleases = discoveredGitReleases.map(rel => {
-        const tag = String(rel.tag_name || rel.version || '').trim();
-        const packagedUrl = tag
-          ? `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download?tag=${encodeURIComponent(tag)}`
-          : `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
-        return {
-          ...rel,
-          url: packagedUrl,
-          download_url: packagedUrl,
-          upstream_url: rel.download_url
-        };
-      });
-
-      return new Response(JSON.stringify(packagedGitReleases), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=600'
-        }
-      });
     }
+
+    return new Response(JSON.stringify(mergedReleases), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=120'
+      }
+    });
   }
 
-  // 4. Fallback: Discover Git releases/tags by author/name when D1 had no explicit repo_url
-  if (!d1Pkg?.repo_url) {
+  // 3. Fallback: Discover Git releases/tags by author/name when D1 had no explicit repo_url
+  if (!resolvedRepoUrl && !isPureGitOnly) {
     const fallbackGitReleases = await fetchGitRepoReleasesAndTags(
       null,
       author,
       name,
-      d1Pkg?.min_minetest_version || '5.0.0'
+      d1Pkg?.min_minetest_version || '5.0.0',
+      forceRefresh
     );
     if (fallbackGitReleases.length > 0) {
       const packagedFallbackReleases = fallbackGitReleases.map(rel => {
@@ -287,14 +314,14 @@ export async function onRequestGet(context: { request: Request; params: { author
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=600'
+          'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=120'
         }
       });
     }
   }
 
-  // 5. Final Fallback: Default branch archive from D1 or repository URL when no tags or releases exist
-  if (d1Releases.length > 0) {
+  // 4. Final Fallback: Default branch archive from D1 or repository URL when no tags or releases exist
+  if (d1Releases.length > 0 && !forceRefresh) {
     return new Response(JSON.stringify(d1Releases.map((r: any) => {
       const tag = String(r.tag_name || r.version || '').trim();
       const packagedUrl = `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
@@ -319,17 +346,17 @@ export async function onRequestGet(context: { request: Request; params: { author
     });
   }
 
-  if (d1Pkg?.repo_url) {
-    const smartRefs = await fetchGitSmartHttpRefs(d1Pkg.repo_url, author, name);
+  if (resolvedRepoUrl) {
+    const smartRefs = await fetchGitSmartHttpRefs(resolvedRepoUrl, author, name, forceRefresh);
     const branch =
-      d1Pkg.provider === 'contentdb'
+      d1Pkg?.provider === 'contentdb'
         ? (smartRefs?.defaultBranch || 'HEAD')
-        : (d1Pkg.default_branch || smartRefs?.defaultBranch || 'HEAD');
+        : (d1Pkg?.default_branch || smartRefs?.defaultBranch || 'HEAD');
     const resolvedHeadSha = smartRefs?.headSha || 'HEAD';
     if (context.env.DB && d1Pkg?.id && smartRefs?.headSha) {
       await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
     }
-    const branchUrl = buildGitBranchArchiveUrl(d1Pkg.repo_url, author, name, branch);
+    const branchUrl = buildGitBranchArchiveUrl(resolvedRepoUrl, author, name, branch);
     const packagedUrl = `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
     return Response.json([
       {
@@ -341,7 +368,7 @@ export async function onRequestGet(context: { request: Request; params: { author
         url: packagedUrl,
         download_url: packagedUrl,
         upstream_url: branchUrl,
-        min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
+        min_minetest_version: d1Pkg?.min_minetest_version || '5.0.0',
         released_at: ''
       }
     ], { headers: { 'Access-Control-Allow-Origin': '*' } });

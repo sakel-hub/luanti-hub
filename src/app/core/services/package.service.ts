@@ -208,76 +208,120 @@ export class PackageService {
     const nowMs = Date.now();
 
     const scoreItem = (pkg: LuantiPackage): number => {
-      let score = (pkg.score || 4.5) * 20;
-      score += Math.min(35, Math.log10((pkg.downloads || 1) + 1) * 7);
-      if (pkg.featured) score += 35;
-      if (pkg.banner && pkg.banner !== 'logo.svg') score += 15;
-      if (pkg.source === 'git') score += 20;
+      let score = (pkg.score || 4.5) * 18;
+      score += Math.min(28, Math.log10((pkg.downloads || 1) + 1) * 5.8);
+      if (pkg.featured) score += 30;
+      const hasRealBanner = Boolean(pkg.banner && pkg.banner !== 'logo.svg' && pkg.banner !== pkg.thumbnail);
+      if (hasRealBanner) {
+        score += 22;
+      } else if (pkg.banner && pkg.banner !== 'logo.svg') {
+        score += 12;
+      }
+      if (pkg.source === 'git') score += 16;
+
+      // Real-time 7-day download & view velocity + unified Web + In-Game conversion rate
+      const weekDl = Number(pkg.weekly_downloads || 0);
+      const dayDl = Number(pkg.daily_downloads || 0);
+      if (dayDl > 0 || weekDl > 0) {
+        score += Math.min(28, Math.log10(dayDl * 3 + weekDl + 1) * 9.5);
+      }
+      const weekViews = Number(pkg.weekly_views || 0);
+      if (weekViews > 0) {
+        score += Math.min(12, Math.log10(weekViews + 1) * 4.5);
+      }
+      if (pkg.conversion_rate !== undefined && pkg.conversion_rate > 0) {
+        score += Math.min(18, pkg.conversion_rate * 28);
+      }
+      if (pkg.favorites_count && pkg.favorites_count > 0) {
+        score += Math.min(10, Math.log10(pkg.favorites_count + 1) * 5);
+      }
 
       const key = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
       const tRank = todayRanks.get(key);
       if (tRank !== undefined) {
-        score += Math.max(20, 48 - tRank * 3);
+        score += Math.max(22, 50 - tRank * 3);
       } else {
         const wRank = weekRanks.get(key);
         if (wRank !== undefined) {
-          score += Math.max(12, 30 - wRank * 2);
+          score += Math.max(14, 32 - wRank * 2);
         }
       }
 
       if (pkg.updated_at) {
         const updatedMs = Date.parse(String(pkg.updated_at)) || 0;
-        if (updatedMs > 0 && nowMs - updatedMs <= 7 * 86400000) {
-          score += 15;
+        if (updatedMs > 0) {
+          const ageDays = (nowMs - updatedMs) / 86400000;
+          if (ageDays <= 7) score += 18;
+          else if (ageDays <= 30) score += 10;
         }
       }
+
+      // Personalized Match % affinity boost
+      const matchPct = this.getMatchScore(pkg);
+      score += Math.max(0, (matchPct - 75) * 0.85);
 
       return score;
     };
 
-    const games = list
-      .filter(p => p.type === 'game')
-      .sort((a, b) => scoreItem(b) - scoreItem(a));
+    const heroScores = new Map<LuantiPackage, number>();
+    for (const pkg of list) {
+      heroScores.set(pkg, scoreItem(pkg));
+    }
+    const sortByHeroScore = (items: LuantiPackage[]): LuantiPackage[] =>
+      [...items].sort((a, b) => (heroScores.get(b) || 0) - (heroScores.get(a) || 0));
 
-    const automation = list
-      .filter(p => p.type === 'mod' && (
+    const games = sortByHeroScore(list.filter(p => p.type === 'game'));
+
+    const automation = sortByHeroScore(
+      list.filter(p => p.type === 'mod' && (
         p.tags?.some(t => ['automation', 'circuits', 'technology', 'mesecons', 'pipe'].includes(t.toLowerCase())) ||
         p.name?.toLowerCase().includes('mesecon') ||
         p.name?.toLowerCase().includes('pipe')
       ))
-      .sort((a, b) => scoreItem(b) - scoreItem(a));
+    );
+    const automationSet = new Set<LuantiPackage>(automation);
 
-    const gitMods = list
-      .filter(p => p.source === 'git' || p.sources?.includes('git'))
-      .sort((a, b) => scoreItem(b) - scoreItem(a));
+    const gitMods = sortByHeroScore(
+      list.filter(p => p.source === 'git' || p.sources?.includes('git'))
+    );
 
-    const textures = list
-      .filter(p => p.type === 'txp')
-      .sort((a, b) => scoreItem(b) - scoreItem(a));
+    const textures = sortByHeroScore(list.filter(p => p.type === 'txp'));
 
-    const topMods = list
-      .filter(p => p.type === 'mod' && !automation.includes(p))
-      .sort((a, b) => scoreItem(b) - scoreItem(a));
+    const topMods = sortByHeroScore(
+      list.filter(p => p.type === 'mod' && !automationSet.has(p))
+    );
 
     const showcase: LuantiPackage[] = [];
-    const pushUnique = (pkg?: LuantiPackage) => {
-      if (pkg && !showcase.some(item => item.id === pkg.id)) {
+    const seenAuthors = new Set<string>();
+    const pickFirstDiverse = (candidates: LuantiPackage[], allowDuplicateAuthor = false): void => {
+      for (const pkg of candidates) {
+        if (!pkg || showcase.some(item => item.id === pkg.id)) continue;
+        const authorKey = String(pkg.author || '').toLowerCase();
+        if (!allowDuplicateAuthor && authorKey && seenAuthors.has(authorKey)) continue;
         showcase.push(pkg);
+        if (authorKey) seenAuthors.add(authorKey);
+        return;
       }
     };
 
-    pushUnique(games[0]);
-    pushUnique(automation[0]);
-    pushUnique(gitMods[0]);
-    pushUnique(games[1]);
-    pushUnique(textures[0]);
-    pushUnique(topMods[0]);
+    pickFirstDiverse(games);
+    pickFirstDiverse(automation);
+    pickFirstDiverse(gitMods);
+    pickFirstDiverse(games.slice(1));
+    pickFirstDiverse(textures);
+    pickFirstDiverse(topMods);
 
-    if (showcase.length < 5) {
-      const remaining = [...list].sort((a, b) => scoreItem(b) - scoreItem(a));
+    if (showcase.length < 6) {
+      const remaining = sortByHeroScore(list);
       for (const p of remaining) {
-        pushUnique(p);
+        pickFirstDiverse([p], false);
         if (showcase.length >= 6) break;
+      }
+      if (showcase.length < 6) {
+        for (const p of remaining) {
+          pickFirstDiverse([p], true);
+          if (showcase.length >= 6) break;
+        }
       }
     }
 
@@ -437,6 +481,97 @@ export class PackageService {
   private readonly _serverTop10Today = signal<LuantiPackage[]>([]);
   private readonly _serverTop10Week = signal<LuantiPackage[]>([]);
 
+  private computeSwimlaneRelevance(pkg: LuantiPackage, nowMs = Date.now()): number {
+    const dayDl = Number(pkg.daily_downloads || 0);
+    const weekDl = Number(pkg.weekly_downloads || 0);
+    const weekViews = Number(pkg.weekly_views || 0);
+    const conv = Number(pkg.conversion_rate ?? 0.22);
+    const favs = Number(pkg.favorites_count || 0);
+    const allTimeDl = Number(pkg.downloads || 0);
+    const cdbScore = Number(pkg.contentdb_score || 0);
+    const stars = Number(pkg.score || 0);
+
+    // 1. Real-time 7-day download & view velocity
+    let score = Math.log10(dayDl * 3 + weekDl * 1.5 + 1) * 32;
+    if (weekViews > 0) {
+      score += Math.log10(weekViews + 1) * 8;
+    }
+
+    // 2. Unified Web + In-Game conversion rate & community favorites
+    score += conv * 36;
+    if (favs > 0) {
+      score += Math.log10(favs + 1) * 14;
+    }
+
+    // 3. All-time popularity & star rating baseline (smooth log scale so legacy packages don't crowd out rising projects)
+    score += Math.log10(allTimeDl + 1) * 14;
+    score += Math.log10(cdbScore + 1) * 10;
+    if (stars >= 1 && stars <= 5) {
+      score += stars * 7;
+    }
+    if (pkg.featured) {
+      score += 20;
+    }
+
+    // 4. Release & commit freshness bonus
+    if (pkg.updated_at) {
+      const updatedMs = Date.parse(String(pkg.updated_at)) || 0;
+      if (updatedMs > 0) {
+        const ageDays = (nowMs - updatedMs) / 86400000;
+        if (ageDays <= 7) score += 24;
+        else if (ageDays <= 30) score += 14;
+        else if (ageDays <= 90) score += 6;
+      }
+    }
+
+    // 5. Personalized Match % affinity
+    const matchPct = this.getMatchScore(pkg);
+    score += Math.max(0, (matchPct - 72) * 1.15);
+
+    return score;
+  }
+
+  private sortByRelevanceDesc(
+    items: LuantiPackage[],
+    limit = CAROUSEL_CAP,
+    bonusFn?: (pkg: LuantiPackage) => number
+  ): LuantiPackage[] {
+    if (items.length === 0) return [];
+    const nowMs = Date.now();
+    return items
+      .map(pkg => ({
+        pkg,
+        score: this.computeSwimlaneRelevance(pkg, nowMs) + (bonusFn ? bonusFn(pkg) : 0)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(entry => entry.pkg);
+  }
+
+  private applyTop10DiversityCap(sortedList: LuantiPackage[], maxPerAuthor = 2): LuantiPackage[] {
+    const selected: LuantiPackage[] = [];
+    const overflow: LuantiPackage[] = [];
+    const authorCounts = new Map<string, number>();
+
+    for (const pkg of sortedList) {
+      if (selected.length >= 10) break;
+      const authorKey = String(pkg.author || '').toLowerCase();
+      const count = authorCounts.get(authorKey) || 0;
+      if (authorKey && count >= maxPerAuthor) {
+        overflow.push(pkg);
+        continue;
+      }
+      selected.push(pkg);
+      if (authorKey) authorCounts.set(authorKey, count + 1);
+    }
+
+    for (const pkg of overflow) {
+      if (selected.length >= 10) break;
+      selected.push(pkg);
+    }
+    return selected;
+  }
+
   readonly top10TodayPackages = computed<LuantiPackage[]>(() => {
     const serverList = this._serverTop10Today();
     const list = this._packages();
@@ -445,7 +580,7 @@ export class PackageService {
       for (const p of list) {
         byLowerId.set(p.id.toLowerCase(), p);
       }
-      return serverList.slice(0, 10).map(item => {
+      const hydrated = serverList.map(item => {
         const live = byLowerId.get(item.id.toLowerCase());
         if (!live) return item;
         return {
@@ -454,17 +589,27 @@ export class PackageService {
           downloads: Math.max(live.downloads || 0, item.downloads || 0)
         };
       });
+      return this.applyTop10DiversityCap(hydrated, 2);
     }
     if (list.length === 0) return [];
-    return [...list]
-      .sort((a, b) => {
-        const cdbA = Number(a.contentdb_score || 0);
-        const cdbB = Number(b.contentdb_score || 0);
-        const scoreA = cdbA + ((a.score || 0) * 180) + (a.source === 'git' ? 250 : 0);
-        const scoreB = cdbB + ((b.score || 0) * 180) + (b.source === 'git' ? 250 : 0);
-        return scoreB - scoreA;
-      })
-      .slice(0, 10);
+    const sorted = [...list].sort((a, b) => {
+      const scoreA =
+        (Number(a.daily_downloads || 0) * 180) +
+        (Number(a.weekly_downloads || 0) * 35) +
+        (Number(a.conversion_rate || 0) * 400) +
+        Number(a.contentdb_score || 0) +
+        ((a.score || 0) * 180) +
+        (a.source === 'git' ? 220 : 0);
+      const scoreB =
+        (Number(b.daily_downloads || 0) * 180) +
+        (Number(b.weekly_downloads || 0) * 35) +
+        (Number(b.conversion_rate || 0) * 400) +
+        Number(b.contentdb_score || 0) +
+        ((b.score || 0) * 180) +
+        (b.source === 'git' ? 220 : 0);
+      return scoreB - scoreA;
+    });
+    return this.applyTop10DiversityCap(sorted, 2);
   });
 
   readonly top10WeekPackages = computed<LuantiPackage[]>(() => {
@@ -475,7 +620,7 @@ export class PackageService {
       for (const p of list) {
         byLowerId.set(p.id.toLowerCase(), p);
       }
-      return serverList.slice(0, 10).map(item => {
+      const hydrated = serverList.map(item => {
         const live = byLowerId.get(item.id.toLowerCase());
         if (!live) return item;
         return {
@@ -484,43 +629,56 @@ export class PackageService {
           downloads: Math.max(live.downloads || 0, item.downloads || 0)
         };
       });
+      return this.applyTop10DiversityCap(hydrated, 2);
     }
     if (list.length === 0) return [];
-    return [...list]
-      .sort((a, b) => {
-        const scoreA = (a.downloads || 0) + Number(a.contentdb_score || 0) * 2 + ((a.score || 0) * 500) + (a.featured ? 2500 : 0);
-        const scoreB = (b.downloads || 0) + Number(b.contentdb_score || 0) * 2 + ((b.score || 0) * 500) + (b.featured ? 2500 : 0);
-        return scoreB - scoreA;
-      })
-      .slice(0, 10);
+    const sorted = [...list].sort((a, b) => {
+      const scoreA =
+        (Number(a.weekly_downloads || 0) * 120) +
+        (Number(a.conversion_rate || 0) * 600) +
+        (a.downloads || 0) +
+        Number(a.contentdb_score || 0) * 2 +
+        ((a.score || 0) * 500) +
+        (a.featured ? 2500 : 0);
+      const scoreB =
+        (Number(b.weekly_downloads || 0) * 120) +
+        (Number(b.conversion_rate || 0) * 600) +
+        (b.downloads || 0) +
+        Number(b.contentdb_score || 0) * 2 +
+        ((b.score || 0) * 500) +
+        (b.featured ? 2500 : 0);
+      return scoreB - scoreA;
+    });
+    return this.applyTop10DiversityCap(sorted, 2);
   });
 
   readonly trendingPackages = computed(() => {
-    return [...this._packages()]
-      .filter(p => p.type === 'mod')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
-      .slice(0, CAROUSEL_CAP);
+    return this.sortByRelevanceDesc(
+      this._packages().filter(p => p.type === 'mod')
+    );
   });
 
   readonly standaloneGames = computed(() => {
-    return this._packages()
-      .filter(p => p.type === 'game')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
-      .slice(0, CAROUSEL_CAP);
+    return this.sortByRelevanceDesc(
+      this._packages().filter(p => p.type === 'game')
+    );
   });
 
   // Strictly packages submitted from decentralized Git repositories (source === 'git' or dual-indexed in sources)
   readonly decentralizedGitPackages = computed(() => {
-    return this._packages()
-      .filter(p => p.source === 'git' || p.sources?.includes('git'))
-      .slice(0, CAROUSEL_CAP);
+    return this.sortByRelevanceDesc(
+      this._packages().filter(p => p.source === 'git' || p.sources?.includes('git')),
+      CAROUSEL_CAP,
+      pkg => (pkg.latest_commit_sha ? 8 : 0) + (pkg.source === 'git' && !pkg.sources?.includes('official') ? 6 : 0)
+    );
   });
 
   readonly automationMods = computed(() => {
-    return this._packages()
-      .filter(p =>
+    const coreAutomationTags = new Set(['automation', 'circuits', 'technology', 'mesecons', 'transport', 'machinery']);
+    return this.sortByRelevanceDesc(
+      this._packages().filter(p =>
         p.type === 'mod' && (
-          p.tags?.some(t => ['automation', 'circuits', 'technology', 'mesecons', 'transport', 'machinery'].includes(t.toLowerCase())) ||
+          p.tags?.some(t => coreAutomationTags.has(t.toLowerCase())) ||
           p.name?.toLowerCase().includes('mesecon') ||
           p.name?.toLowerCase().includes('pipe') ||
           p.name?.toLowerCase().includes('tech') ||
@@ -528,15 +686,16 @@ export class PackageService {
           p.title?.toLowerCase().includes('automation') ||
           p.title?.toLowerCase().includes('tech')
         )
-      )
-      .slice(0, CAROUSEL_CAP);
+      ),
+      CAROUSEL_CAP,
+      pkg => (pkg.tags || []).filter(t => coreAutomationTags.has(t.toLowerCase())).length * 10
+    );
   });
 
   readonly texturePacks = computed(() => {
-    return this._packages()
-      .filter(p => p.type === 'txp')
-      .sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0))
-      .slice(0, CAROUSEL_CAP);
+    return this.sortByRelevanceDesc(
+      this._packages().filter(p => p.type === 'txp')
+    );
   });
 
   constructor() {
@@ -617,6 +776,9 @@ export class PackageService {
     if (!lic && cdbDl <= 0) return;
 
     const key = pkg.id.toLowerCase();
+    const resolvedScreenshots = Array.isArray(fields.screenshots) && fields.screenshots.length > 0
+      ? fields.screenshots
+      : (Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? pkg.screenshots : undefined);
     this.pendingD1Writeback.set(key, {
       id: pkg.id,
       author: pkg.author,
@@ -624,6 +786,8 @@ export class PackageService {
       title: pkg.title,
       type: pkg.type,
       short_desc: fields.short_desc || pkg.short_desc,
+      long_desc: fields.desc || pkg.desc || undefined,
+      screenshots: resolvedScreenshots,
       license: lic,
       media_license: fields.media_license || pkg.media_license || lic,
       min_minetest_version: fields.min_minetest_version || pkg.min_minetest_version || '5.0.0',
@@ -956,6 +1120,11 @@ export class PackageService {
       contentdb_downloads: contentdbDownloads,
       luantihub_downloads: luantihubDownloads,
       downloads,
+      daily_downloads: item.daily_downloads !== undefined ? Number(item.daily_downloads) || 0 : undefined,
+      weekly_downloads: item.weekly_downloads !== undefined ? Number(item.weekly_downloads) || 0 : undefined,
+      weekly_views: item.weekly_views !== undefined ? Number(item.weekly_views) || 0 : undefined,
+      conversion_rate: item.conversion_rate !== undefined ? Number(item.conversion_rate) || 0 : undefined,
+      favorites_count: item.favorites_count !== undefined ? Number(item.favorites_count) || 0 : undefined,
       license: resolvedLic,
       media_license: resolvedMediaLic,
       repo_url: repoUrl,
@@ -1091,6 +1260,11 @@ export class PackageService {
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: mergedDownloads,
+      daily_downloads: Math.max(primary.daily_downloads || 0, secondary.daily_downloads || 0) || undefined,
+      weekly_downloads: Math.max(primary.weekly_downloads || 0, secondary.weekly_downloads || 0) || undefined,
+      weekly_views: Math.max(primary.weekly_views || 0, secondary.weekly_views || 0) || undefined,
+      conversion_rate: primary.conversion_rate ?? secondary.conversion_rate,
+      favorites_count: Math.max(primary.favorites_count || 0, secondary.favorites_count || 0) || undefined,
       score: primary.score || secondary.score || 0,
       contentdb_score: Math.max(primary.contentdb_score || 0, secondary.contentdb_score || 0),
       license: primary.license || secondary.license || '',
@@ -2016,19 +2190,16 @@ export class PackageService {
   private initBackgroundCatalogRefresh(): void {
     if (typeof window === 'undefined') return;
 
-    // 1. Periodic 10-minute silent refresh when tab is visible and online
+    // 1. Periodic 5-minute silent refresh when online (runs even when minimized or in background)
     if (this.backgroundRefreshTimer) {
       clearInterval(this.backgroundRefreshTimer);
     }
     this.backgroundRefreshTimer = setInterval(() => {
-      if (
-        typeof document !== 'undefined' &&
-        document.visibilityState === 'visible' &&
-        this.pwaService.isOnline()
-      ) {
+      if (this.pwaService.isOnline()) {
         this.refreshCatalogInBackground().catch(() => {});
+        this.pwaService.triggerSwBackgroundCatalogCheck();
       }
-    }, 10 * 60 * 1000);
+    }, 5 * 60 * 1000);
 
     // 2. Unified Service Worker Broadcast (`periodicsync` / `sync`) & Wakeup Listener via PwaService
     this.pwaService.registerCatalogSyncHandler((event) => {
@@ -2675,15 +2846,19 @@ export class PackageService {
     return todayIdx >= 0 ? 'today' : 'week';
   }
 
+  private readonly viewedInSessionIds = new Set<string>();
+
   /**
    * Reactive O(1) user taste profile built from:
    * 1. Saved Favorites (`user_favorites` in D1 + localStorage)
    * 2. Per-Package Download History & Counts (`user_downloads` in D1 + localStorage)
    * 3. User's Own Authored / Claimed Packages (`packages` in D1)
+   * 4. Recently Viewed Packages (`user_views` in D1 + `lh_recently_viewed_v1` in localStorage)
    */
   private readonly userTasteProfile = computed(() => {
     const favIds = this.settingsService.favorites().map(id => id.toLowerCase());
     const dlMap = this.settingsService.downloadedPackages();
+    const recentViews = this.settingsService.recentlyViewedPackages();
     const userPkgs = this.authService.currentUser()?.packages || [];
     const catalog = this._packages();
 
@@ -2704,11 +2879,19 @@ export class PackageService {
         pkgWeights.set(key, (pkgWeights.get(key) || 0) + 2.5);
       }
     }
+    // Recently viewed packages contribute recency-weighted signal (newest views have higher weight)
+    for (let i = 0; i < recentViews.length; i++) {
+      const viewedKey = String(recentViews[i] || '').toLowerCase();
+      if (!viewedKey) continue;
+      const recencyFactor = Math.max(0.45, 1.35 - i * 0.03);
+      pkgWeights.set(viewedKey, (pkgWeights.get(viewedKey) || 0) + recencyFactor);
+    }
 
     const authorWeights = new Map<string, number>();
     const tagWeights = new Map<string, number>();
     const typeWeights: Record<string, number> = { mod: 0, game: 0, txp: 0, modpack: 0 };
     const ecosystemNames = new Set<string>();
+    const preferredGames = new Set<string>();
     let totalTypeWeight = 0;
 
     const matchedKeys = new Set<string>();
@@ -2729,8 +2912,23 @@ export class PackageService {
         totalTypeWeight += weight;
 
         ecosystemNames.add(nameLower);
+        if (item.type === 'game') {
+          preferredGames.add(nameLower);
+        }
         for (const dep of item.dependencies || []) {
-          if (dep) ecosystemNames.add(dep.toLowerCase());
+          if (dep) {
+            const depLower = dep.toLowerCase();
+            ecosystemNames.add(depLower);
+            if (depLower.startsWith('mcl_')) preferredGames.add('mineclonia');
+            else if (depLower === 'default') preferredGames.add('minetest_game');
+            else if (depLower.startsWith('nc_')) preferredGames.add('nodecore');
+            else if (depLower.startsWith('rp_')) preferredGames.add('repixture');
+          }
+        }
+        for (const gs of item.game_support || []) {
+          if (gs?.supports === false) continue;
+          if (gs?.game?.name) preferredGames.add(gs.game.name.toLowerCase());
+          if (gs?.game?.title) preferredGames.add(gs.game.title.toLowerCase());
         }
 
         for (const t of item.tags || []) {
@@ -2771,14 +2969,17 @@ export class PackageService {
       maxTagWeight,
       typeWeights,
       totalTypeWeight,
-      ecosystemNames
+      ecosystemNames,
+      preferredGames
     };
   });
 
   /**
    * Computes a personalized Match % (64%–99%) combining:
-   * - LuantiHub D1 star reviews (`pkg.score`), LuantiHub downloads (`pkg.downloads`), and ContentDB composite `contentdb_score`
-   * - Personalized user taste profile from Favorites, Per-Package Download Counts, and Ecosystem Dependencies
+   * - LuantiHub D1 star reviews (`pkg.score`), LuantiHub downloads (`pkg.downloads`), ContentDB composite `contentdb_score`,
+   *   7-day momentum (`pkg.weekly_downloads`), and unified Web + In-Game conversion rate (`pkg.conversion_rate`)
+   * - Personalized user taste profile from Favorites, Per-Package Download Counts, Recently Viewed Packages,
+   *   Game Ecosystem Compatibility (`pkg.game_support`), and Engine Version Compatibility
    */
   getMatchScore(pkg: LuantiPackage): number {
     if (!pkg) return 85;
@@ -2786,13 +2987,13 @@ export class PackageService {
     const profile = this.userTasteProfile();
     const cdbScore = Number(pkg.contentdb_score || 0);
 
-    // 1. Base quality & popularity signal (64%–89% before personalization)
+    // 1. Base quality, conversion & popularity signal (64%–89% before personalization)
     let score = 64;
 
     if (cdbScore > 5) {
-      score += Math.min(22, Math.log10(cdbScore + 1) * 6.2);
+      score += Math.min(20, Math.log10(cdbScore + 1) * 5.8);
     } else if (pkg.score >= 1 && pkg.score <= 5) {
-      score += pkg.score * 4.5;
+      score += pkg.score * 4.2;
     } else {
       const idStr = `${pkg.author}/${pkg.name}`;
       let hash = 0;
@@ -2807,27 +3008,41 @@ export class PackageService {
     }
 
     if (pkg.downloads > 0) {
-      score += Math.min(3.5, Math.log10(pkg.downloads + 1) * 0.8);
+      score += Math.min(3.0, Math.log10(pkg.downloads + 1) * 0.7);
     }
 
-    // 2. Personalization boost from D1 + local Favorites, Download Counts, Authors, Tags, and Dependencies
+    // Conversion rate & 7-day momentum signal (up to +3.5%)
+    if (pkg.conversion_rate !== undefined && pkg.conversion_rate > 0) {
+      score += Math.min(2.2, pkg.conversion_rate * 3.2);
+    }
+    if (pkg.weekly_downloads && pkg.weekly_downloads > 0) {
+      score += Math.min(1.5, Math.log10(pkg.weekly_downloads + 1) * 0.6);
+    }
+
+    // Engine compatibility signal (+1% when explicitly targeting modern Luanti 5.x+)
+    const prefEngine = this.settingsService.preferredEngine();
+    if (prefEngine && pkg.min_minetest_version && String(pkg.min_minetest_version).startsWith('5.')) {
+      score += 1.0;
+    }
+
+    // 2. Personalization boost from D1 + local Favorites, Download Counts, Recent Views, Authors, Tags, Games & Dependencies
     if (profile.hasHistory) {
       const pkgIdLower = pkg.id.toLowerCase();
       const pkgNameLower = pkg.name.toLowerCase();
 
-      // Direct Favorite / Repeated Download boost (up to +7%)
+      // Direct Favorite / Repeated Download / Recent View boost (up to +7%)
       const directWeight = profile.pkgWeights.get(pkgIdLower) || profile.pkgWeights.get(pkgNameLower) || 0;
       if (directWeight > 0) {
-        score += Math.min(7, 3 + directWeight * 0.9);
+        score += Math.min(7, 2.5 + directWeight * 0.9);
       }
 
-      // Author Affinity boost (up to +6% based on how many packages by this author you favorited/downloaded)
+      // Author Affinity boost (up to +6% based on how many packages by this author you favorited/downloaded/viewed)
       const authorWeight = profile.authorWeights.get(pkg.author.toLowerCase()) || 0;
       if (authorWeight > 0) {
-        score += Math.min(6, 2.5 + Math.log2(authorWeight + 1) * 1.4);
+        score += Math.min(6, 2.2 + Math.log2(authorWeight + 1) * 1.4);
       }
 
-      // Tag Affinity boost (up to +12% weighted by tag frequency across your favorites & download counts)
+      // Tag Affinity boost (up to +12% weighted by tag frequency across your favorites, downloads & recent views)
       let matchedTagScore = 0;
       for (const t of pkg.tags || []) {
         const w = profile.tagWeights.get(t.toLowerCase()) || 0;
@@ -2839,12 +3054,30 @@ export class PackageService {
         score += Math.min(12, matchedTagScore);
       }
 
-      // Dependency / Ecosystem Graph boost (+4% if this package extends or is required by a package you downloaded/favorited)
-      const inEcosystem =
+      // Dependency & Game Ecosystem Compatibility boost (+3.5%–5% if this package extends or supports a game/mod in your ecosystem)
+      const inDepEcosystem =
         (pkg.dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase())) ||
         (pkg.optional_dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase()));
-      if (inEcosystem) {
-        score += 4;
+      const inGameEcosystem =
+        profile.preferredGames.size > 0 && (
+          profile.preferredGames.has(pkgNameLower) ||
+          (pkg.game_support || []).some(gs =>
+            gs?.supports !== false && (
+              (gs?.game?.name && profile.preferredGames.has(gs.game.name.toLowerCase())) ||
+              (gs?.game?.title && profile.preferredGames.has(gs.game.title.toLowerCase()))
+            )
+          ) ||
+          (pkg.dependencies || []).some(d => {
+            const dl = d.toLowerCase();
+            return (
+              (dl.startsWith('mcl_') && (profile.preferredGames.has('mineclonia') || profile.preferredGames.has('voxelibre'))) ||
+              (dl === 'default' && profile.preferredGames.has('minetest_game')) ||
+              (dl.startsWith('nc_') && profile.preferredGames.has('nodecore'))
+            );
+          })
+        );
+      if (inDepEcosystem || inGameEcosystem) {
+        score += inDepEcosystem && inGameEcosystem ? 5 : 3.5;
       }
 
       // Package Type Preference boost (up to +3.5% proportional to your mod/game/txp ratio)
@@ -2855,6 +3088,41 @@ export class PackageService {
     }
 
     return Math.min(99, Math.max(64, Math.round(score)));
+  }
+
+  /**
+   * Records a package detail / video view locally (for immediate `% Match` personalization)
+   * and fires a non-blocking web view beacon to `/api/packages/:author/:name?view=1`
+   * so D1 `views_web` and `user_views` analytics stay accurate even when full details are cached.
+   */
+  trackPackageView(
+    pkg: LuantiPackage,
+    options?: { skipBeacon?: boolean; deferSignalMs?: number }
+  ): void {
+    if (!pkg || !pkg.author || !pkg.name || pkg.author === 'Luanti.org') return;
+    const pkgId = `${pkg.author}/${pkg.name}`;
+    const deferMs = Number(options?.deferSignalMs || 0);
+    if (deferMs > 0 && typeof setTimeout === 'function') {
+      setTimeout(() => this.settingsService.recordPackageView(pkgId), deferMs);
+    } else {
+      this.settingsService.recordPackageView(pkgId);
+    }
+
+    const lowerKey = pkgId.toLowerCase();
+    if (this.viewedInSessionIds.has(lowerKey) || !this.edgeApiAvailable) return;
+    this.viewedInSessionIds.add(lowerKey);
+    if (options?.skipBeacon) return;
+
+    const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}?view=1`;
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+        navigator.sendBeacon(url);
+        return;
+      }
+    } catch {
+      // Fall back to fetch keepalive below
+    }
+    fetch(url, { method: 'POST', credentials: 'include', keepalive: true }).catch(() => null);
   }
 
   trackDownload(pkg: LuantiPackage): void {
@@ -3539,10 +3807,14 @@ export class PackageService {
   }
 
   /**
-   * Fetches `.cdb.json` directly from static raw CDNs (`raw.githubusercontent.com`, `codeberg.org`, `gitlab.com`, `git.minetest.land`)
-   * without touching rate-limited GitHub REST APIs (`api.github.com`).
+   * Fetches `.cdb.json` from a repository URL. When `checkListingFirst` is true (e.g. when probing for `video_url`
+   * on an already-licensed package), checks the cached 200 OK root directory listing first so repositories without
+   * `.cdb.json` never trigger 404 console errors in browser DevTools, and uses CORS-enabled `api.bitbucket.org` URLs.
    */
-  private fetchRawCdbJsonFromRepoUrl(repoUrl?: string): Promise<ReturnType<PackageService['parseCdbJsonText']>> {
+  private fetchRawCdbJsonFromRepoUrl(
+    repoUrl?: string,
+    checkListingFirst = false
+  ): Promise<ReturnType<PackageService['parseCdbJsonText']>> {
     const normalized = this.normalizeGitRepoUrl(repoUrl);
     if (!normalized) return Promise.resolve(null);
     const cacheKey = normalized.toLowerCase();
@@ -3557,22 +3829,71 @@ export class PackageService {
         const owner = parts[0];
         const repo = parts[1].replace(/\.git$/i, '');
         const host = u.hostname.toLowerCase();
-        const rawCdbUrl = host.includes('codeberg.org')
-          ? `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/.cdb.json`
-          : host.includes('git.minetest.land')
-            ? `https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw/.cdb.json`
-            : host.includes('gitlab.com')
-              ? `https://gitlab.com/${owner}/${repo}/-/raw/HEAD/.cdb.json`
-              : host.includes('github.com')
-                ? `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.cdb.json`
-                : host.includes('bitbucket.org')
-                  ? `https://bitbucket.org/${owner}/${repo}/raw/HEAD/.cdb.json`
-                  : null;
-        if (!rawCdbUrl) return null;
-        const res = await fetch(rawCdbUrl);
-        if (!res.ok) return null;
-        const text = await res.text();
-        return this.parseCdbJsonText(text);
+        const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+        const fullName = isGitlabHost ? parts.join('/').replace(/\.git$/i, '') : `${owner}/${repo}`;
+        const forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom' =
+          host.includes('codeberg.org')
+            ? 'codeberg'
+            : host.includes('git.minetest.land')
+              ? 'mesehub'
+              : isGitlabHost
+                ? 'gitlab'
+                : host.includes('github.com')
+                  ? 'github'
+                  : host.includes('bitbucket.org')
+                    ? 'bitbucket'
+                    : 'custom';
+
+        const listingUrls: string[] = [];
+        if (checkListingFirst && forge !== 'custom') {
+          const listing = await this.getRepoRootListing(forge, fullName);
+          if (listing.length > 0) {
+            const cdbEntry = listing.find(f => f.name.toLowerCase() === '.cdb.json');
+            if (!cdbEntry) {
+              return null;
+            }
+            if (cdbEntry.download_url) {
+              listingUrls.push(cdbEntry.download_url);
+            }
+          }
+        }
+
+        const candidateUrls = [
+          ...listingUrls,
+          ...(host.includes('codeberg.org')
+            ? [`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/.cdb.json`]
+            : host.includes('git.minetest.land')
+              ? [`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw/.cdb.json`]
+              : isGitlabHost
+                ? [`https://${u.hostname}/${fullName}/-/raw/HEAD/.cdb.json`]
+                : host.includes('github.com')
+                  ? [`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.cdb.json`]
+                  : host.includes('bitbucket.org')
+                    ? [
+                        `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/master/.cdb.json`,
+                        `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/main/.cdb.json`,
+                        `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/HEAD/.cdb.json`,
+                        `https://bitbucket.org/${owner}/${repo}/raw/master/.cdb.json`,
+                        `https://bitbucket.org/${owner}/${repo}/raw/main/.cdb.json`,
+                        `https://bitbucket.org/${owner}/${repo}/raw/HEAD/.cdb.json`
+                      ]
+                    : [])
+        ];
+        const seenUrls = new Set<string>();
+        for (const rawCdbUrl of candidateUrls) {
+          if (!rawCdbUrl || seenUrls.has(rawCdbUrl)) continue;
+          seenUrls.add(rawCdbUrl);
+          try {
+            const res = await fetch(rawCdbUrl);
+            if (!res.ok) continue;
+            const text = await res.text();
+            const parsed = this.parseCdbJsonText(text);
+            if (parsed) return parsed;
+          } catch {
+            // Try next branch candidate
+          }
+        }
+        return null;
       } catch {
         return null;
       }
@@ -3919,7 +4240,7 @@ export class PackageService {
           Boolean(pkg.provider && pkg.provider !== 'contentdb');
 
         let edgeResolved = false;
-        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly)) {
+        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly || !pkg.video_url)) {
           try {
             const edgePromise = fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).then(async res => {
               if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
@@ -3939,7 +4260,7 @@ export class PackageService {
                 data = fastResult.res;
                 edgeResolved = Boolean(data && Object.keys(data).length > 0);
               } else {
-                // Edge is still working on a cold cache miss; let it finish in background to sync D1 reviews/downloads
+                // Edge is still working on a cold cache miss; let it finish in background to sync D1 reviews/downloads/video
                 edgePromise.then(bgData => {
                   if (bgData && typeof bgData === 'object' && Object.keys(bgData).length > 0) {
                     if (Array.isArray(bgData.reviews_list)) {
@@ -3949,7 +4270,12 @@ export class PackageService {
                     const lhDl = Number(bgData.luantihub_downloads || 0);
                     const cdbDl = Number(bgData.contentdb_downloads ?? bgData.downloads ?? 0);
                     const bgStatus = bgData.git_repo_status;
-                    if (lhDl > 0 || cdbDl > 0 || bgStatus === 'verified') {
+                    const bgVideo = this.extractEmbeddedVideo(
+                      bgData.video_url,
+                      bgData.video_thumbnail_url,
+                      this.extractLongDescription(bgData.long_description) || bgData.desc
+                    );
+                    if (lhDl > 0 || cdbDl > 0 || bgStatus === 'verified' || bgVideo.video_url) {
                       this._activePackage.update(curr => {
                         if (curr && curr.id.toLowerCase() === cacheKey) {
                           return {
@@ -3957,11 +4283,26 @@ export class PackageService {
                             git_repo_status: bgStatus === 'verified' ? 'verified' : curr.git_repo_status,
                             contentdb_downloads: Math.max(curr.contentdb_downloads || 0, cdbDl),
                             luantihub_downloads: Math.max(curr.luantihub_downloads || 0, lhDl),
-                            downloads: Math.max(curr.downloads || 0, cdbDl + lhDl)
+                            downloads: Math.max(curr.downloads || 0, cdbDl + lhDl),
+                            video_url: curr.video_url || bgVideo.video_url,
+                            video_thumbnail_url: curr.video_thumbnail_url || bgVideo.video_thumbnail_url
                           };
                         }
                         return curr;
                       });
+                      if (bgVideo.video_url) {
+                        this._packages.update(list =>
+                          list.map(item =>
+                            item.id.toLowerCase() === cacheKey
+                              ? {
+                                  ...item,
+                                  video_url: item.video_url || bgVideo.video_url,
+                                  video_thumbnail_url: item.video_thumbnail_url || bgVideo.video_thumbnail_url
+                                }
+                              : item
+                          )
+                        );
+                      }
                     }
                   }
                 });
@@ -3984,12 +4325,20 @@ export class PackageService {
         }
 
         // Query ContentDB directly from the browser when light-hydrating tiles (saving Worker quota) or when Edge API lacked full detail
+        const hasScreenshots = Array.isArray(data?.screenshots) && data.screenshots.length > 0;
+        const hasDistinctLongDesc = Boolean(
+          data?.long_description &&
+          String(data.long_description).trim() &&
+          String(data.long_description).trim() !== String(data.short_desc || pkg.short_desc || '').trim()
+        );
+        const hasFullDetailInEdge = hasScreenshots || hasDistinctLongDesc;
+
         const needsUpstreamDetail =
           !edgeResolved ||
           !data ||
           Object.keys(data).length === 0 ||
           !data.license ||
-          (deepFetch && !Array.isArray(data.screenshots)) ||
+          (deepFetch && !hasFullDetailInEdge) ||
           !(Number(data.downloads ?? data.downloads_count ?? 0) > 0);
 
         if (!isPureGitOnly && needsUpstreamDetail) {
@@ -4223,11 +4572,10 @@ export class PackageService {
           : data.min_minetest_version;
         let minVersion = (rawMinVerVal && String(rawMinVerVal).toLowerCase() !== 'none' ? String(rawMinVerVal) : '') || pkg.min_minetest_version || '5.0.0';
 
-        // Only probe static raw `.cdb.json` when a pure Git package still lacks a license
-        // (ContentDB's `/api/packages/:author/:name/` already parses `.cdb.json` and `mod.conf`, so probing `.cdb.json`
-        // for every package without a `video_url` caused red 404 errors in Chrome DevTools for 95%+ of repositories).
-        if (!resolvedLicense && isPureGitOnly && repoUrl) {
-          const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl);
+        // Probe `.cdb.json` when a pure Git package lacks a license OR when `video_url` is still missing and `repoUrl` is known
+        // (uses cached 200 OK directory listing first when `resolvedLicense` is already present so repos without `.cdb.json` never log 404s).
+        if ((!resolvedLicense || (!data.video_url && !pkg.video_url)) && repoUrl) {
+          const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl, Boolean(resolvedLicense));
           if (cdbRaw) {
             gitRepoStatus = 'verified';
             if (!resolvedLicense && (cdbRaw.license || cdbRaw.media_license)) {
@@ -4608,22 +4956,327 @@ export class PackageService {
     return this.releasesCache.get(pkg.id.toLowerCase());
   }
 
-  async fetchPackageReleases(pkg: LuantiPackage): Promise<PackageRelease[]> {
-    const cacheKey = pkg.id.toLowerCase();
-    const cached = this.releasesCache.get(cacheKey);
-    if (cached) {
-      return cached;
-    }
-    const inFlight = this.releasesPromiseCache.get(cacheKey);
-    if (inFlight) {
-      return inFlight;
+  private readonly liveGitTagsCheckedKeys = new Set<string>();
+
+  private normalizeClientReleaseTagKey(raw?: string | null): string {
+    if (!raw || typeof raw !== 'string') return '';
+    return raw
+      .trim()
+      .toLowerCase()
+      .replace(/^(?:release|version|ver|rel)[\s_-]+/i, '')
+      .replace(/^v(?=\d)/i, '');
+  }
+
+  private async fetchDirectGitForgeReleases(
+    pkg: LuantiPackage,
+    forceRefresh = false
+  ): Promise<PackageRelease[]> {
+    const activePkg = this._activePackage();
+    const effectivePkg =
+      activePkg && activePkg.id?.toLowerCase() === pkg.id?.toLowerCase() ? activePkg : pkg;
+    const repoUrl = this.normalizeGitRepoUrl(effectivePkg.repo_url || pkg.repo_url);
+    if (!repoUrl) return [];
+
+    let host = '';
+    let owner = '';
+    let repo = '';
+    try {
+      const u = new URL(repoUrl);
+      host = u.hostname.toLowerCase();
+      const parts = u.pathname
+        .replace(/^\/+|\/+$/g, '')
+        .replace(/\.git$/i, '')
+        .split('/')
+        .filter(Boolean);
+      if (parts.length < 2) return [];
+      const isGitlabHost =
+        host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+      owner = isGitlabHost ? parts.slice(0, -1).join('/') : parts[0];
+      repo = parts[parts.length - 1];
+    } catch {
+      return [];
     }
 
+    let provider: 'bitbucket' | 'github' | 'gitlab' | 'codeberg' = 'codeberg';
+    let tagsUrl = '';
+    if (host.includes('bitbucket.org')) {
+      provider = 'bitbucket';
+      const bbOwner = owner.toLowerCase().split('/').map(encodeURIComponent).join('/');
+      tagsUrl = `https://api.bitbucket.org/2.0/repositories/${bbOwner}/${encodeURIComponent(repo.toLowerCase())}/refs/tags?sort=-target.date&pagelen=20`;
+    } else if (host.includes('github.com')) {
+      provider = 'github';
+      tagsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags?per_page=15`;
+    } else if (host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org') {
+      provider = 'gitlab';
+      tagsUrl = `https://${host}/api/v4/projects/${encodeURIComponent(`${owner}/${repo}`)}/repository/tags?per_page=15`;
+    } else {
+      provider = 'codeberg';
+      const encOwner = owner.split('/').map(encodeURIComponent).join('/');
+      tagsUrl = `https://${host}/api/v1/repos/${encOwner}/${encodeURIComponent(repo)}/tags?limit=15`;
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3500);
+    try {
+      const res = await fetch(tagsUrl, {
+        headers: {
+          Accept: provider === 'github' ? 'application/vnd.github+json' : 'application/json'
+        },
+        cache: forceRefresh ? 'no-store' : 'default',
+        signal: ctrl.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) return [];
+      const data: any = await res.json();
+      const rawTags: any[] = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.values)
+          ? data.values
+          : [];
+      if (rawTags.length === 0) return [];
+
+      const buildDirectZipUrl = (tagName: string): string => {
+        if (this.edgeApiAvailable) {
+          return `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?tag=${encodeURIComponent(tagName)}`;
+        }
+        const encTag = encodeURIComponent(tagName);
+        if (provider === 'bitbucket') {
+          return `https://bitbucket.org/${owner}/${repo}/get/${encTag}.zip`;
+        }
+        if (provider === 'github') {
+          return `https://github.com/${owner}/${repo}/archive/refs/tags/${encTag}.zip`;
+        }
+        if (provider === 'gitlab') {
+          return `https://${host}/${owner}/${repo}/-/archive/${encTag}/${encodeURIComponent(repo)}-${encTag}.zip`;
+        }
+        return `https://${host}/${owner}/${repo}/archive/${encTag}.zip`;
+      };
+
+      const mapped: PackageRelease[] = [];
+      for (const t of rawTags) {
+        const tagName = String(t?.name || '').trim();
+        if (!tagName) continue;
+        const sha = String(
+          t?.target?.hash || t?.commit?.sha || t?.commit?.id || t?.id || ''
+        ).trim();
+        const relDate = String(
+          t?.target?.date ||
+            t?.Date ||
+            t?.commit?.committed_date ||
+            t?.commit?.created_at ||
+            t?.commit?.created ||
+            t?.commit?.author?.date ||
+            ''
+        ).trim();
+        const rawNotes = this.sanitizeReleaseNotesText(
+          t?.message || t?.target?.message || t?.commit?.message,
+          tagName
+        );
+        mapped.push({
+          id: `git-tag-${tagName}`,
+          version: tagName,
+          tag_name: tagName,
+          commit_sha: /^[0-9a-f]{7,40}$/i.test(sha) ? sha : '',
+          download_url: buildDirectZipUrl(tagName),
+          file_size: effectivePkg.file_size || pkg.file_size,
+          release_notes: rawNotes,
+          changelog: rawNotes,
+          min_minetest_version: effectivePkg.min_minetest_version || pkg.min_minetest_version || '5.0.0',
+          max_minetest_version: effectivePkg.max_minetest_version || pkg.max_minetest_version,
+          released_at: relDate
+        });
+      }
+      return this.sortAndCapReleases(mapped, 10);
+    } catch {
+      clearTimeout(timer);
+      return [];
+    }
+  }
+
+  private mergeClientReleasesWithGitTags(
+    baseReleases: PackageRelease[],
+    gitReleases: PackageRelease[]
+  ): PackageRelease[] {
+    const realBase = (Array.isArray(baseReleases) ? baseReleases : []).filter(
+      r => r && r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+    );
+    const validGit = (Array.isArray(gitReleases) ? gitReleases : []).filter(
+      r => r && r.commit_sha !== 'HEAD' && r.version !== 'latest'
+    );
+    if (realBase.length === 0) {
+      return validGit.length > 0 ? this.sortAndCapReleases(validGit, 10) : this.sortAndCapReleases(baseReleases || [], 10);
+    }
+    if (validGit.length === 0) {
+      return this.sortAndCapReleases(realBase, 10);
+    }
+
+    const sortedBase = this.sortAndCapReleases(realBase, 10);
+    const newestBase = sortedBase[0];
+    const newestBaseVer = String(newestBase?.tag_name || newestBase?.version || '');
+    const newestBaseTime = Date.parse(String(newestBase?.released_at || '')) || 0;
+    const baseUsesBareSemver = Boolean(
+      newestBase?.version && /^\d+\.\d+/.test(newestBase.version.trim())
+    );
+
+    const matchedGitIndices = new Set<number>();
+    const enrichedBase = sortedBase.map(b => {
+      const bKeys = new Set(
+        [b.tag_name, b.version]
+          .map(v => this.normalizeClientReleaseTagKey(v))
+          .filter(Boolean)
+      );
+      const bSha = String(b.commit_sha || '').trim().toLowerCase();
+      const bHasHexSha = /^[0-9a-f]{7,40}$/.test(bSha);
+
+      let matchedIdx = -1;
+      for (let i = 0; i < validGit.length; i++) {
+        const g = validGit[i];
+        const gSha = String(g.commit_sha || '').trim().toLowerCase();
+        const gHasHexSha = /^[0-9a-f]{7,40}$/.test(gSha);
+        if (bHasHexSha && gHasHexSha && (bSha.startsWith(gSha.slice(0, 7)) || gSha.startsWith(bSha.slice(0, 7)))) {
+          matchedIdx = i;
+          break;
+        }
+        const gKey = this.normalizeClientReleaseTagKey(g.tag_name || g.version);
+        if (gKey && bKeys.has(gKey)) {
+          matchedIdx = i;
+          break;
+        }
+      }
+
+      if (matchedIdx >= 0) {
+        matchedGitIndices.add(matchedIdx);
+        const g = validGit[matchedIdx];
+        return {
+          ...b,
+          commit_sha: b.commit_sha || g.commit_sha || '',
+          released_at: b.released_at || g.released_at || '',
+          release_notes: b.release_notes || g.release_notes,
+          changelog: b.changelog || g.changelog
+        };
+      }
+      return b;
+    });
+
+    const newGitReleases: PackageRelease[] = [];
+    for (let i = 0; i < validGit.length; i++) {
+      if (matchedGitIndices.has(i)) continue;
+      const g = validGit[i];
+      const gVer = String(g.tag_name || g.version || '');
+      const semverCmp = this.compareClientSemverDesc(gVer, newestBaseVer);
+      const gTime = Date.parse(String(g.released_at || '')) || 0;
+
+      const isNewerSemver = semverCmp < 0;
+      const isNewerTimestamp = semverCmp === 0 && gTime > 0 && newestBaseTime > 0 && gTime > newestBaseTime;
+      if (isNewerSemver || isNewerTimestamp) {
+        const displayVersion =
+          baseUsesBareSemver && /^v(?=\d)/i.test(g.version)
+            ? g.version.replace(/^v/i, '')
+            : g.version;
+        newGitReleases.push({
+          ...g,
+          version: displayVersion,
+          released_at: g.released_at || newestBase?.released_at || new Date().toISOString()
+        });
+      }
+    }
+
+    return this.sortAndCapReleases([...newGitReleases, ...enrichedBase], 10);
+  }
+
+  private compareClientSemverDesc(aRaw?: string | null, bRaw?: string | null): number {
+    const parse = (raw?: string | null): number[] | null => {
+      if (!raw || typeof raw !== 'string') return null;
+      const m = raw.trim().match(/^(?:v|ver|version|rel|release)?[\s_-]*(\d+)\.(\d+)(?:\.(\d+))?(?:[.-](\d+))?/i);
+      if (!m) return null;
+      return [
+        parseInt(m[1], 10) || 0,
+        parseInt(m[2], 10) || 0,
+        m[3] !== undefined ? parseInt(m[3], 10) || 0 : 0,
+        m[4] !== undefined ? parseInt(m[4], 10) || 0 : 0
+      ];
+    };
+    const tupleA = parse(aRaw);
+    const tupleB = parse(bRaw);
+    if (!tupleA || !tupleB) return 0;
+    for (let i = 0; i < 4; i++) {
+      if (tupleA[i] !== tupleB[i]) {
+        return tupleB[i] - tupleA[i];
+      }
+    }
+    return 0;
+  }
+
+  async fetchPackageReleases(pkg: LuantiPackage, forceRefresh = false): Promise<PackageRelease[]> {
+    const cacheKey = pkg.id.toLowerCase();
+    const activePkg = this._activePackage();
+    const effectiveRepoUrl =
+      (activePkg && activePkg.id?.toLowerCase() === cacheKey ? activePkg.repo_url : undefined) ||
+      pkg.repo_url;
+
+    if (!forceRefresh) {
+      const cached = this.releasesCache.get(cacheKey);
+      if (cached && (this.liveGitTagsCheckedKeys.has(cacheKey) || !effectiveRepoUrl)) {
+        return cached;
+      }
+      const inFlight = this.releasesPromiseCache.get(cacheKey);
+      if (inFlight) {
+        return inFlight;
+      }
+    } else {
+      this.releasesCache.delete(cacheKey);
+      this.releasesPromiseCache.delete(cacheKey);
+      this.liveGitTagsCheckedKeys.delete(cacheKey);
+    }
+
+    const syncLatestReleaseToPackageState = (sortedRels: PackageRelease[]) => {
+      const latestRel = sortedRels[0];
+      if (!latestRel) return;
+      const nextSha = latestRel.commit_sha || pkg.latest_commit_sha;
+      const nextUpdatedAt =
+        latestRel.released_at &&
+        (!pkg.updated_at || new Date(latestRel.released_at).getTime() > new Date(pkg.updated_at).getTime())
+          ? latestRel.released_at
+          : pkg.updated_at;
+      if (nextSha !== pkg.latest_commit_sha || nextUpdatedAt !== pkg.updated_at) {
+        this._packages.update(list =>
+          list.map(item =>
+            item.id.toLowerCase() === cacheKey
+              ? { ...item, latest_commit_sha: nextSha, updated_at: nextUpdatedAt }
+              : item
+          )
+        );
+        const active = this._activePackage();
+        if (active && active.id.toLowerCase() === cacheKey) {
+          this._activePackage.set({
+            ...active,
+            latest_commit_sha: nextSha,
+            updated_at: nextUpdatedAt
+          });
+        }
+      }
+    };
+
     const promise = (async (): Promise<PackageRelease[]> => {
+      this.liveGitTagsCheckedKeys.add(cacheKey);
+      const directGitPromise = effectiveRepoUrl
+        ? this.fetchDirectGitForgeReleases(pkg, forceRefresh)
+        : Promise.resolve<PackageRelease[]>([]);
+
       let edgeFallbackBranchReleases: PackageRelease[] = [];
       if (this.edgeApiAvailable) {
         try {
-          const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases`);
+          const params = new URLSearchParams();
+          if (forceRefresh) params.set('refresh', '1');
+          if (effectiveRepoUrl) params.set('repo', effectiveRepoUrl);
+          const querySuffix = params.toString() ? `?${params.toString()}` : '';
+          const [res, directGitRels] = await Promise.all([
+            fetch(
+              `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases${querySuffix}`,
+              forceRefresh ? { cache: 'no-store' } : undefined
+            ),
+            directGitPromise
+          ]);
           if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
             const data = await res.json();
             if (Array.isArray(data) && data.length > 0) {
@@ -4669,9 +5322,10 @@ export class PackageService {
                   released_at: rel.release_date || rel.released_at || ''
                 };
               });
-              const sortedEdgeRels = this.sortAndCapReleases(mapped, 10);
-              this.releasesCache.set(cacheKey, sortedEdgeRels);
-              return sortedEdgeRels;
+              const mergedEdgeRels = this.mergeClientReleasesWithGitTags(mapped, directGitRels);
+              this.releasesCache.set(cacheKey, mergedEdgeRels);
+              syncLatestReleaseToPackageState(mergedEdgeRels);
+              return mergedEdgeRels;
             }
           }
         } catch {
@@ -4679,13 +5333,16 @@ export class PackageService {
         }
       }
 
-      // Local-dev fallback: Check official ContentDB `/packages/:author/:name/releases/` when Edge Functions are offline
+      // Local-dev fallback: Check official ContentDB `/packages/:author/:name/releases/` + live Git tags when Edge Functions are offline
       const isOfficialPkg = pkg.source === 'official' || pkg.sources?.includes('official') || !pkg.provider || pkg.provider === 'contentdb';
       if (isOfficialPkg) {
         try {
-          const cdbRels = await this.fetchUpstreamWithMirrorFallback(
-            `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases/`
-          );
+          const [cdbRels, directGitRels] = await Promise.all([
+            this.fetchUpstreamWithMirrorFallback(
+              `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/releases/`
+            ),
+            directGitPromise
+          ]);
           if (Array.isArray(cdbRels) && cdbRels.length > 0) {
             const mappedCdbRels: PackageRelease[] = cdbRels.map((rel: any) => {
               const rawBytes = Number(rel.size || rel.file_size || 0);
@@ -4718,13 +5375,26 @@ export class PackageService {
                 released_at: rel.release_date || ''
               };
             });
-            const sortedCdbRels = this.sortAndCapReleases(mappedCdbRels, 10);
-            this.releasesCache.set(cacheKey, sortedCdbRels);
-            return sortedCdbRels;
+            const mergedCdbRels = this.mergeClientReleasesWithGitTags(mappedCdbRels, directGitRels);
+            this.releasesCache.set(cacheKey, mergedCdbRels);
+            syncLatestReleaseToPackageState(mergedCdbRels);
+            return mergedCdbRels;
+          }
+          if (directGitRels.length > 0) {
+            this.releasesCache.set(cacheKey, directGitRels);
+            syncLatestReleaseToPackageState(directGitRels);
+            return directGitRels;
           }
         } catch {
           // Ignore fallback error
         }
+      }
+
+      const directGitRels = await directGitPromise;
+      if (directGitRels.length > 0) {
+        this.releasesCache.set(cacheKey, directGitRels);
+        syncLatestReleaseToPackageState(directGitRels);
+        return directGitRels;
       }
 
       if (edgeFallbackBranchReleases.length > 0) {
@@ -5117,7 +5787,8 @@ export class PackageService {
       : { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` };
 
     this.startInEditTagsMode.set(editTags);
-    if (!this.deepHydratedIds.has(targetId)) {
+    const isAlreadyDeepHydrated = this.deepHydratedIds.has(targetId);
+    if (!isAlreadyDeepHydrated) {
       this._isLoadingDetails.set(true);
     }
     this._activePackage.set(hydratedPkg);
@@ -5125,6 +5796,10 @@ export class PackageService {
     if (updateUrl && hydratedPkg.author && hydratedPkg.name) {
       this.navigatePreservingScroll(['/package', hydratedPkg.author, hydratedPkg.name]);
     }
+    this.trackPackageView(hydratedPkg, {
+      skipBeacon: !isAlreadyDeepHydrated && this.edgeApiAvailable,
+      deferSignalMs: 320
+    });
     this.loadPackageDetails(hydratedPkg, true);
   }
 
@@ -5649,6 +6324,7 @@ export class PackageService {
   openVideoTheater(pkg: LuantiPackage, startSeconds = 0): void {
     if (!pkg || !pkg.video_url) return;
     const cleanSec = Number.isFinite(startSeconds) && startSeconds > 0 ? Math.floor(startSeconds) : 0;
+    this.trackPackageView(pkg);
     this._activeVideoTheater.set({ pkg, startSeconds: cleanSec });
   }
 

@@ -228,7 +228,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
 
           <!-- Key Metrics: Match %, Real Engine Compatibility & License -->
           <div class="flex items-center gap-2 text-xs overflow-hidden whitespace-nowrap">
-            <span class="text-emerald-400 font-bold text-[11px] flex-shrink-0">
+            <span
+              class="text-emerald-400 font-bold text-[11px] flex-shrink-0 cursor-help"
+              [appTooltip]="'card.matchTooltip' | translate">
               {{ packageService.getMatchScore(package) }}% {{ 'card.match' | translate }}
             </span>
             @if (package.min_minetest_version) {
@@ -456,6 +458,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       if (!this.isPointerHovering) return;
 
       let rawUrl = this.package?.video_url;
+      let rawThumbUrl = this.package?.video_thumbnail_url;
       if (!rawUrl && this.package) {
         if (preloadDetailsPromise) {
           await preloadDetailsPromise;
@@ -467,10 +470,11 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
           p => p.id.toLowerCase() === this.package.id.toLowerCase()
         );
         rawUrl = hydrated?.video_url || this.package?.video_url;
+        rawThumbUrl = hydrated?.video_thumbnail_url || this.package?.video_thumbnail_url;
       }
       if (!rawUrl || !this.isPointerHovering) return;
 
-      this.packageService.warmUpVideoPreview(rawUrl, this.package?.video_thumbnail_url, true);
+      this.packageService.warmUpVideoPreview(rawUrl, rawThumbUrl, true);
       this.currentHoverSeconds = 0;
       this.isHoverMuted.set(true);
       this.isEmbedVideoReady.set(false);

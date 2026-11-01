@@ -67,15 +67,15 @@ export const en: TranslationDictionary = {
     scrollLeft: 'Scroll left',
     scrollRight: 'Scroll right',
     viewAll: 'View All',
-    infoHero: 'Daily spotlight featuring standout games, popular mods, automation packs, and texture packs—selected based on community ratings, download popularity, and recent updates.',
+    infoHero: 'Daily spotlight rotating standout games, popular mods, automation packs, and texture packs—prioritized by recent player downloads, how often visitors install after viewing, community ratings, recent updates, and your personal taste.',
     infoTags: 'Browse packages by popular themes and gameplay categories, ordered by how many packages belong to each topic.',
-    infoTrending: 'Popular mods from ContentDB and community Git repositories, ranked by player downloads and recent release activity.',
-    infoTop10Today: 'The fastest-rising packages over the last 24 hours, combining today’s downloads, recent updates, and player ratings.',
-    infoGames: 'Complete standalone voxel games ready to play in Luanti, ranked by player downloads and community ratings.',
-    infoGit: 'Community packages published directly from creators’ GitHub, Codeberg, and GitLab repositories.',
-    infoAutomation: 'Engineering, machinery, logistics, and redstone-style circuit mods built for technical and automation gameplay.',
-    infoTop10Week: 'The most popular packages over the past 7 days, ranked by weekly downloads and community ratings.',
-    infoTextures: 'Visual overhaul and texture packs to customize the look and feel of your worlds, ranked by downloads and player ratings.'
+    infoTrending: 'Mods gaining momentum across ContentDB and community Git repositories, prioritized by recent player downloads, install popularity, community ratings, recent updates, and your personal taste.',
+    infoTop10Today: 'The 10 most active packages over the last 24 hours—combining today’s new installs and updates, how often players download after viewing, and community ratings (up to 2 packages per creator for variety).',
+    infoGames: 'Complete standalone voxel games ready to play in Luanti, prioritized by recent player activity, community ratings, recent updates, and overall popularity.',
+    infoGit: 'Community packages published directly from creators’ GitHub, Codeberg, and GitLab repositories, prioritized by recent updates, player downloads, community ratings, and your personal taste.',
+    infoAutomation: 'Engineering, machinery, logistics, and circuit mods built for technical gameplay, prioritized by category relevance, recent player downloads, community ratings, and recent updates.',
+    infoTop10Week: 'The 10 most popular packages over the past 7 days—ranked by weekly player downloads, visitor-to-download popularity, community favorites, and ratings (up to 2 packages per creator for variety).',
+    infoTextures: 'Visual overhaul and texture packs to customize the look and feel of your worlds, prioritized by recent player downloads, community ratings, and visual updates.'
   },
   catalog: {
     resultsFor: 'Results for "{query}"',
@@ -106,6 +106,7 @@ export const en: TranslationDictionary = {
     license: 'License',
     matchScore: '{score}% Match',
     match: 'Match',
+    matchTooltip: 'Personalized for you based on your favorites, downloaded and recently viewed packages, preferred games and tags, plus community ratings and download popularity.',
     quickInstall: 'Download .zip Package',
     downloadZip: 'Download .zip',
     moreInfo: 'More Info & Details',
@@ -475,7 +476,7 @@ export const en: TranslationDictionary = {
     safeHarborDetail: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalSafeHarbor: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalPrivacy: 'LuantiHub uses zero third-party ad trackers. Only essential session cookies and public open-source package metadata are stored in Cloudflare D1.',
-    copyright: 'Open-Source Community Project (LGPL-2.1+).'
+    copyright: 'Open-Source Community Project (Code: LGPL-2.1+ · Assets: CC-BY-SA-4.0).'
   },
   author: {
     viewProfile: 'View Author Profile',

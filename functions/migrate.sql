@@ -77,7 +77,36 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE package_daily_downloads ADD COLUMN reason_web INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE package_daily_downloads ADD COLUMN views_luanti INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE package_daily_downloads ADD COLUMN views_web INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE packages ADD COLUMN latest_commit_sha TEXT;
 
+-- 8. Per-User Package View History & Counts (Idempotent)
+CREATE TABLE IF NOT EXISTS user_views (
+    user_id TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    view_count INTEGER NOT NULL DEFAULT 1,
+    last_viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, package_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewed_at DESC);
 
-
+-- 9. Hero Banner Promotions & Scheduled Community Highlights (Idempotent)
+CREATE TABLE IF NOT EXISTS promotions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    short_desc TEXT NOT NULL,
+    banner_url TEXT NOT NULL,
+    badge_text TEXT,
+    cta_label TEXT NOT NULL,
+    cta_url TEXT NOT NULL,
+    secondary_cta_label TEXT,
+    secondary_cta_url TEXT,
+    starts_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    priority INTEGER DEFAULT 100,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
 

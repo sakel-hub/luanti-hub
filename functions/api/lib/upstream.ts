@@ -609,6 +609,17 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
       )
     `).run().catch(() => {});
 
+    // Ensure user_views table exists for cross-device view & conversion personalization
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS user_views (
+        user_id TEXT NOT NULL,
+        package_id TEXT NOT NULL,
+        view_count INTEGER NOT NULL DEFAULT 1,
+        last_viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, package_id)
+      )
+    `).run().catch(() => {});
+
     if (existing.size > 0) {
       extendedColumnsEnsured = true;
     }
@@ -725,7 +736,7 @@ export function parseGitRepoTarget(
   repoUrl?: string | null,
   fallbackOwner?: string,
   fallbackRepo?: string
-): { provider: 'github' | 'codeberg' | 'gitlab'; host: string; owner: string; repo: string } | null {
+): { provider: 'github' | 'codeberg' | 'gitlab' | 'bitbucket'; host: string; owner: string; repo: string } | null {
   if (repoUrl && typeof repoUrl === 'string' && repoUrl.trim()) {
     try {
       const u = new URL(repoUrl.trim());
@@ -734,23 +745,27 @@ export function parseGitRepoTarget(
       if (host.includes('notabug.org')) {
         host = 'codeberg.org';
       }
-      // Strip deep web UI suffixes (`/-/tree/...`, `/tree/...`, `/src/branch/...`, `/releases`, `/commits`)
+      // Strip deep web UI suffixes (`/-/tree/...`, `/tree/...`, `/src/branch/...`, `/releases`, `/commits`, `/downloads`)
       const cleanedPath = u.pathname
         .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
-        .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+        .replace(/\/(?:tree|blob|src|commits|releases|tags|archive|downloads)(?:\/.*)?$/i, '')
         .replace(/^\/+|\/+$/g, '');
       const parts = cleanedPath.split('/').filter(Boolean);
       if (parts.length >= 2) {
         const isGitlabHost =
           host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+        const isBitbucketHost =
+          host === 'bitbucket.org' || host.endsWith('.bitbucket.org');
         const owner = isGitlabHost && parts.length > 2 ? parts.slice(0, -1).join('/') : parts[0];
         const repo = (isGitlabHost && parts.length > 2 ? parts[parts.length - 1] : parts[1]).replace(/\.git$/i, '');
         if (owner && repo) {
-          let provider: 'github' | 'codeberg' | 'gitlab' = 'codeberg';
+          let provider: 'github' | 'codeberg' | 'gitlab' | 'bitbucket' = 'codeberg';
           if (host === 'github.com' || host.endsWith('.github.com')) {
             provider = 'github';
           } else if (isGitlabHost) {
             provider = 'gitlab';
+          } else if (isBitbucketHost) {
+            provider = 'bitbucket';
           } else {
             // Codeberg, Mesehub (git.minetest.land), Gitea, Forgejo, and self-hosted Gitea/Forgejo instances
             provider = 'codeberg';
@@ -1201,7 +1216,7 @@ export function normalizeLuantiPackageZip(
 }
 
 export function buildGitTagArchiveUrl(
-  provider: 'github' | 'codeberg' | 'gitlab' | 'mesehub' | string,
+  provider: 'github' | 'codeberg' | 'gitlab' | 'bitbucket' | 'mesehub' | string,
   host: string,
   owner: string,
   repo: string,
@@ -1209,6 +1224,9 @@ export function buildGitTagArchiveUrl(
 ): string {
   const encTag = encodeURIComponent(tagName);
   const lowerHost = (host || '').toLowerCase();
+  if (provider === 'bitbucket' || lowerHost.includes('bitbucket.org')) {
+    return `https://bitbucket.org/${owner}/${repo}/get/${encTag}.zip`;
+  }
   if (
     provider === 'codeberg' ||
     provider === 'mesehub' ||
@@ -1534,13 +1552,15 @@ export function parseGitSmartHttpRefs(rawText: string): GitSmartHttpRefs {
 
 /**
  * Queries the universal Git Smart HTTP endpoint (`GET <repo>.git/info/refs?service=git-upload-pack`)
- * supported by all Git servers (GitHub, Codeberg, Mesehub, GitLab, Gitea, Forgejo, cgit) with a 15-minute Edge Cache.
+ * supported by all Git servers (GitHub, Codeberg, Mesehub, GitLab, Bitbucket, Gitea, Forgejo, cgit)
+ * with a 2-minute Edge Cache (or bypassed via `forceRefresh`).
  * Costs 1 lightweight (~2 KB) request and 0 REST API rate-limit quota.
  */
 export async function fetchGitSmartHttpRefs(
   repoUrl?: string | null,
   fallbackOwner?: string,
-  fallbackRepo?: string
+  fallbackRepo?: string,
+  forceRefresh = false
 ): Promise<GitSmartHttpRefs | null> {
   const target = parseGitRepoTarget(repoUrl, fallbackOwner, fallbackRepo);
   if (!target) return null;
@@ -1548,9 +1568,11 @@ export async function fetchGitSmartHttpRefs(
   const { host, owner, repo } = target;
   const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
   const cacheKey = `/__git_smart_refs_v1/${host}/${encOwnerPath}/${encodeURIComponent(repo.toLowerCase())}`;
-  const cached = await readEdgeCacheJson<GitSmartHttpRefs>(cacheKey);
-  if (cached && (cached.headSha || cached.tags.length > 0)) {
-    return cached;
+  if (!forceRefresh) {
+    const cached = await readEdgeCacheJson<GitSmartHttpRefs>(cacheKey);
+    if (cached && (cached.headSha || cached.tags.length > 0)) {
+      return cached;
+    }
   }
 
   const smartUrl = `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`;
@@ -1569,7 +1591,7 @@ export async function fetchGitSmartHttpRefs(
     const text = await res.text();
     const parsed = parseGitSmartHttpRefs(text);
     if (parsed.headSha || parsed.tags.length > 0) {
-      await writeEdgeCacheJson(cacheKey, parsed, 900);
+      await writeEdgeCacheJson(cacheKey, parsed, 120);
       return parsed;
     }
   } catch {
@@ -1652,15 +1674,16 @@ export async function syncDebouncedGitVersionStamp(
 }
 
 /**
- * Discovers both formal Releases and Git Tags across all Git services using the universal
- * Git Smart HTTP wire protocol (`info/refs?service=git-upload-pack`) as the primary source of truth
- * for tags and commit SHAs, enriched with formal Release notes/dates when available.
+ * Discovers both formal Releases and Git Tags across all Git services (GitHub, Codeberg, Mesehub,
+ * Gitea/Forgejo, GitLab, and Bitbucket) using the universal Git Smart HTTP wire protocol
+ * (`info/refs?service=git-upload-pack`) combined with Forge Release & Tag REST APIs.
  */
 export async function fetchGitRepoReleasesAndTags(
   repoUrl?: string | null,
   fallbackOwner?: string,
   fallbackRepo?: string,
-  minMinetestVersion = '5.0.0'
+  minMinetestVersion = '5.0.0',
+  forceRefresh = false
 ): Promise<DiscoveredGitRelease[]> {
   let effectiveRepoUrl = repoUrl;
   if (!effectiveRepoUrl && fallbackOwner && fallbackRepo) {
@@ -1679,10 +1702,12 @@ export async function fetchGitRepoReleasesAndTags(
 
   const { provider, host, owner, repo } = target;
   const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
-  const relCacheKey = `/__git_releases_tags_v2/${host}/${encOwnerPath}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(minMinetestVersion)}`;
-  const cachedReleases = await readEdgeCacheJson<DiscoveredGitRelease[]>(relCacheKey);
-  if (Array.isArray(cachedReleases) && cachedReleases.length > 0) {
-    return cachedReleases;
+  const relCacheKey = `/__git_releases_tags_v3/${host}/${encOwnerPath}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(minMinetestVersion)}`;
+  if (!forceRefresh) {
+    const cachedReleases = await readEdgeCacheJson<DiscoveredGitRelease[]>(relCacheKey);
+    if (Array.isArray(cachedReleases) && cachedReleases.length > 0) {
+      return cachedReleases;
+    }
   }
 
   const headers: Record<string, string> = {
@@ -1697,8 +1722,10 @@ export async function fetchGitRepoReleasesAndTags(
       const res = await fetchWithAnubisSupport(url, { headers, signal: controller.signal });
       clearTimeout(timer);
       if (!res.ok) return null;
-      const data = await res.json();
-      return Array.isArray(data) ? data : null;
+      const data: any = await res.json();
+      if (Array.isArray(data)) return data;
+      if (Array.isArray(data?.values)) return data.values;
+      return null;
     } catch {
       clearTimeout(timer);
       return null;
@@ -1717,21 +1744,61 @@ export async function fetchGitRepoReleasesAndTags(
     const projectPath = encodeURIComponent(`${owner}/${repo}`);
     releasesUrl = `https://${host}/api/v4/projects/${projectPath}/releases?per_page=15`;
     tagsUrl = `https://${host}/api/v4/projects/${projectPath}/repository/tags?per_page=15`;
+  } else if (provider === 'bitbucket') {
+    const bbOwnerPath = owner.toLowerCase().split('/').map(encodeURIComponent).join('/');
+    tagsUrl = `https://api.bitbucket.org/2.0/repositories/${bbOwnerPath}/${encodeURIComponent(repo.toLowerCase())}/refs/tags?sort=-target.date&pagelen=20`;
   }
 
-  // Query universal Git Smart HTTP refs (0 REST API quota) + formal Releases metadata in parallel;
-  // only fall back to the REST `/tags` endpoint if Smart HTTP refs advertisement was not supported.
-  const [smartRefs, rawReleases] = await Promise.all([
-    fetchGitSmartHttpRefs(effectiveRepoUrl, fallbackOwner, fallbackRepo),
-    releasesUrl ? fetchJsonWithTimeout(releasesUrl) : Promise.resolve(null)
+  // Query universal Git Smart HTTP refs + formal Releases + Forge Tags metadata in parallel
+  // so plain Git tags across Bitbucket, GitLab, Codeberg/Mesehub/Gitea, and GitHub retain timestamps & messages.
+  const [smartRefs, rawReleases, apiTags] = await Promise.all([
+    fetchGitSmartHttpRefs(effectiveRepoUrl, fallbackOwner, fallbackRepo, forceRefresh),
+    releasesUrl ? fetchJsonWithTimeout(releasesUrl) : Promise.resolve(null),
+    tagsUrl && provider !== 'github' ? fetchJsonWithTimeout(tagsUrl) : Promise.resolve(null)
   ]);
 
-  const rawTags =
-    smartRefs && smartRefs.tags.length > 0
-      ? smartRefs.tags.map(t => ({ name: t.tagName, commit: { sha: t.commitSha } }))
-      : tagsUrl
-        ? await fetchJsonWithTimeout(tagsUrl)
-        : null;
+  let fallbackApiTags = apiTags;
+  if (!fallbackApiTags && (!smartRefs || smartRefs.tags.length === 0) && tagsUrl) {
+    fallbackApiTags = await fetchJsonWithTimeout(tagsUrl);
+  }
+
+  const apiTagByName = new Map<string, any>();
+  if (Array.isArray(fallbackApiTags)) {
+    for (const t of fallbackApiTags) {
+      const tagName = String(t?.name || '').trim();
+      if (tagName && !apiTagByName.has(tagName)) {
+        apiTagByName.set(tagName, t);
+      }
+    }
+  }
+
+  const combinedTagsList: any[] = [];
+  const addedTagNames = new Set<string>();
+  if (Array.isArray(fallbackApiTags)) {
+    for (const t of fallbackApiTags) {
+      const tagName = String(t?.name || '').trim();
+      if (tagName && !addedTagNames.has(tagName)) {
+        addedTagNames.add(tagName);
+        combinedTagsList.push(t);
+      }
+    }
+  }
+  if (smartRefs && smartRefs.tags.length > 0) {
+    for (const st of smartRefs.tags) {
+      const tagName = String(st.tagName || '').trim();
+      if (!tagName) continue;
+      if (addedTagNames.has(tagName)) {
+        const existing = apiTagByName.get(tagName);
+        if (existing && st.commitSha) {
+          existing._peeledSha = st.commitSha;
+        }
+      } else {
+        addedTagNames.add(tagName);
+        combinedTagsList.push({ name: tagName, commit: { sha: st.commitSha } });
+      }
+    }
+  }
+  const rawTags = combinedTagsList.length > 0 ? combinedTagsList : null;
 
   const extractReleaseZipAsset = (relObj: any): { url?: string; size?: number } => {
     if (!relObj) return {};
@@ -1765,8 +1832,15 @@ export async function fetchGitRepoReleasesAndTags(
   if (Array.isArray(rawTags)) {
     for (const t of rawTags) {
       const tagName = String(t?.name || '').trim();
-      const sha = String(t?.commit?.sha || t?.commit?.id || t?.id || '').trim();
-      if (tagName && sha) {
+      const sha = String(
+        t?._peeledSha ||
+          t?.target?.hash ||
+          t?.commit?.sha ||
+          t?.commit?.id ||
+          t?.id ||
+          ''
+      ).trim();
+      if (tagName && /^[0-9a-f]{7,40}$/i.test(sha)) {
         tagShaMap.set(tagName, sha);
       }
     }
@@ -1787,7 +1861,7 @@ export async function fetchGitRepoReleasesAndTags(
   const results: DiscoveredGitRelease[] = [];
   const seenTags = new Set<string>();
 
-  // 1. Add tags in repository tag order, enriched with formal Release metadata if present
+  // 1. Add tags in repository tag order, enriched with formal Release & Forge Tag metadata if present
   if (Array.isArray(rawTags)) {
     for (const t of rawTags) {
       const tagName = String(t?.name || '').trim();
@@ -1796,7 +1870,14 @@ export async function fetchGitRepoReleasesAndTags(
 
       const rel = releaseByTag.get(tagName);
       const rawCommit = String(
-        t?.commit?.sha || t?.commit?.id || rel?.commit?.id || t?.id || rel?.target_commitish || ''
+        t?._peeledSha ||
+          t?.target?.hash ||
+          t?.commit?.sha ||
+          t?.commit?.id ||
+          rel?.commit?.id ||
+          t?.id ||
+          rel?.target_commitish ||
+          ''
       ).trim();
       const isHexSha = /^[0-9a-f]{7,40}$/i.test(rawCommit);
       const zipAsset = extractReleaseZipAsset(rel);
@@ -1806,6 +1887,8 @@ export async function fetchGitRepoReleasesAndTags(
         rel?.published_at ||
           rel?.released_at ||
           rel?.created_at ||
+          t?.target?.date ||
+          t?.Date ||
           t?.commit?.committed_date ||
           t?.commit?.created_at ||
           t?.commit?.created ||
@@ -1813,6 +1896,12 @@ export async function fetchGitRepoReleasesAndTags(
           ''
       );
       const title = String(rel?.name || tagName).trim() || tagName;
+      const rawNotes =
+        rel?.body ||
+        rel?.description ||
+        t?.message ||
+        t?.target?.message ||
+        t?.commit?.message;
 
       results.push({
         id: rel?.id || results.length + 1,
@@ -1824,7 +1913,7 @@ export async function fetchGitRepoReleasesAndTags(
         download_url: archiveUrl,
         size: assetSize > 0 ? assetSize : undefined,
         min_minetest_version: minMinetestVersion,
-        changelog: sanitizeReleaseNotesText(rel?.body || rel?.description || t?.message, title),
+        changelog: sanitizeReleaseNotesText(rawNotes, title),
         release_date: relDate,
         released_at: relDate
       });
@@ -1865,7 +1954,7 @@ export async function fetchGitRepoReleasesAndTags(
   }
 
   // 3. Graceful Atom/RSS feed fallback if REST APIs were rate-limited or disabled on the forge
-  if (results.length === 0) {
+  if (results.length === 0 && provider !== 'bitbucket') {
     const feedUrls =
       provider === 'github'
         ? [
@@ -1924,10 +2013,215 @@ export async function fetchGitRepoReleasesAndTags(
   }
 
   const sortedResults = sortAndCapReleases(results, MAX_PACKAGE_RELEASES);
+
+  // For GitHub repos where the newest tag is a plain Git tag without a formal GitHub Release object,
+  // enrich the top tag with its commit date and commit message so timestamps and sorting are accurate.
+  if (
+    provider === 'github' &&
+    sortedResults.length > 0 &&
+    !sortedResults[0].released_at &&
+    /^[0-9a-f]{7,40}$/i.test(sortedResults[0].commit_sha)
+  ) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    try {
+      const commitRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sortedResults[0].commit_sha)}`,
+        { headers, signal: ctrl.signal }
+      );
+      clearTimeout(timer);
+      if (commitRes.ok) {
+        const commitData: any = await commitRes.json();
+        const commitDate = String(
+          commitData?.commit?.committer?.date || commitData?.commit?.author?.date || ''
+        ).trim();
+        if (commitDate) {
+          sortedResults[0].released_at = commitDate;
+          sortedResults[0].release_date = commitDate;
+        }
+        if (!sortedResults[0].changelog && commitData?.commit?.message) {
+          sortedResults[0].changelog = sanitizeReleaseNotesText(
+            commitData.commit.message,
+            sortedResults[0].title
+          );
+        }
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
   if (sortedResults.length > 0) {
-    await writeEdgeCacheJson(relCacheKey, sortedResults, 900);
+    await writeEdgeCacheJson(relCacheKey, sortedResults, 120);
   }
   return sortedResults;
+}
+
+export function normalizeReleaseTagKey(raw?: string | null): string {
+  if (!raw || typeof raw !== 'string') return '';
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:release|version|ver|rel)[\s_-]+/i, '')
+    .replace(/^v(?=\d)/i, '');
+}
+
+/**
+ * Merges ContentDB/D1 releases with live Git releases & tags discovered via `fetchGitRepoReleasesAndTags`.
+ * - Deduplicates by normalized tag/version/title key and by commit SHA prefix (`7..40` hex chars).
+ * - Preserves official ContentDB release IDs, download counts, and sizes when a tag exists in both.
+ * - Prepends any newly pushed Git tags from GitHub, Codeberg, Mesehub, GitLab, or Bitbucket that
+ *   have not yet been imported into ContentDB or D1.
+ */
+export function mergeUpstreamAndGitReleases(
+  baseReleases: any[],
+  gitReleases: DiscoveredGitRelease[],
+  author: string,
+  name: string,
+  options?: { usePackagedDownloadUrls?: boolean; isOfficialContentDbBase?: boolean }
+): any[] {
+  const usePackaged = options?.usePackagedDownloadUrls ?? false;
+  const isOfficialBase = options?.isOfficialContentDbBase ?? false;
+  const encAuthor = encodeURIComponent(author);
+  const encName = encodeURIComponent(name);
+
+  const realBase = (Array.isArray(baseReleases) ? baseReleases : []).filter(
+    r => r && r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
+  );
+  const validGit = (Array.isArray(gitReleases) ? gitReleases : []).filter(
+    r => r && r.commit_sha !== 'HEAD' && r.version !== 'latest'
+  );
+
+  const formatGitRel = (rel: DiscoveredGitRelease): any => {
+    const tag = String(rel.tag_name || rel.version || rel.title || '').trim();
+    const packagedUrl = tag
+      ? `/api/packages/${encAuthor}/${encName}/download?tag=${encodeURIComponent(tag)}`
+      : `/api/packages/${encAuthor}/${encName}/download`;
+    const cleanNotes = sanitizeReleaseNotesText(rel.changelog, tag);
+    const rawBytes = Number(rel.size || 0);
+    return {
+      ...rel,
+      id: rel.id || `git-${tag}`,
+      version: rel.version || tag,
+      title: rel.title || rel.version || tag,
+      tag_name: tag,
+      commit_sha: rel.commit_sha || '',
+      url: usePackaged ? packagedUrl : (rel.download_url || rel.url || packagedUrl),
+      download_url: usePackaged ? packagedUrl : (rel.download_url || rel.url || packagedUrl),
+      upstream_url: rel.download_url || rel.url,
+      size: rawBytes > 0 ? rawBytes : undefined,
+      file_size: rawBytes > 0 ? formatByteSize(rawBytes) : undefined,
+      changelog: cleanNotes,
+      release_notes: cleanNotes,
+      release_date: rel.released_at || rel.release_date || undefined,
+      released_at: rel.released_at || rel.release_date || ''
+    };
+  };
+
+  if (realBase.length === 0) {
+    if (validGit.length > 0) {
+      return sortAndCapReleases(validGit.map(formatGitRel), MAX_PACKAGE_RELEASES);
+    }
+    return sortAndCapReleases(baseReleases || [], MAX_PACKAGE_RELEASES);
+  }
+
+  if (validGit.length === 0) {
+    return sortAndCapReleases(realBase, MAX_PACKAGE_RELEASES);
+  }
+
+  const sortedBase = sortAndCapReleases(realBase, MAX_PACKAGE_RELEASES);
+  const newestBase = sortedBase[0];
+  const newestBaseVer = String(newestBase?.tag_name || newestBase?.version || newestBase?.title || '');
+  const newestBaseTime = Date.parse(String(newestBase?.released_at || newestBase?.release_date || '')) || 0;
+  const baseUsesBareSemver = Boolean(
+    newestBase?.version && /^\d+\.\d+/.test(String(newestBase.version).trim())
+  );
+
+  const formatGitRelAligned = (rel: DiscoveredGitRelease): any => {
+    const formatted = formatGitRel(rel);
+    if (baseUsesBareSemver) {
+      if (typeof formatted.version === 'string' && /^v(?=\d)/i.test(formatted.version)) {
+        formatted.version = formatted.version.replace(/^v/i, '');
+      }
+      if (typeof formatted.title === 'string' && /^v(?=\d)/i.test(formatted.title)) {
+        formatted.title = formatted.title.replace(/^v/i, '');
+      }
+    }
+    return formatted;
+  };
+
+  const matchedGitIndices = new Set<number>();
+  const enrichedBase = sortedBase.map(b => {
+    const bKeys = new Set(
+      [b.tag_name, b.version, b.title]
+        .map(v => normalizeReleaseTagKey(String(v || '')))
+        .filter(Boolean)
+    );
+    const bSha = String(b.commit_sha || '').trim().toLowerCase();
+    const bHasHexSha = /^[0-9a-f]{7,40}$/.test(bSha);
+
+    let matchedIdx = -1;
+    for (let i = 0; i < validGit.length; i++) {
+      const g = validGit[i];
+      const gSha = String(g.commit_sha || '').trim().toLowerCase();
+      const gHasHexSha = /^[0-9a-f]{7,40}$/.test(gSha);
+      if (bHasHexSha && gHasHexSha && (bSha.startsWith(gSha) || gSha.startsWith(bSha))) {
+        matchedIdx = i;
+        break;
+      }
+      const gKeys = [g.tag_name, g.version, g.title]
+        .map(v => normalizeReleaseTagKey(String(v || '')))
+        .filter(Boolean);
+      if (gKeys.some(k => bKeys.has(k))) {
+        matchedIdx = i;
+        break;
+      }
+    }
+
+    if (matchedIdx >= 0) {
+      matchedGitIndices.add(matchedIdx);
+      const g = validGit[matchedIdx];
+      const cleanNotes =
+        b.release_notes ||
+        b.changelog ||
+        sanitizeReleaseNotesText(g.changelog, String(b.title || b.version || g.tag_name || ''));
+      return {
+        ...b,
+        tag_name: b.tag_name || g.tag_name || b.version,
+        commit_sha: b.commit_sha || g.commit_sha || '',
+        release_notes: cleanNotes,
+        changelog: cleanNotes,
+        release_date: b.release_date || b.released_at || g.released_at || g.release_date || undefined,
+        released_at: b.released_at || b.release_date || g.released_at || g.release_date || ''
+      };
+    }
+    return b;
+  });
+
+  const unmatchedGitToInclude: any[] = [];
+  for (let i = 0; i < validGit.length; i++) {
+    if (matchedGitIndices.has(i)) continue;
+    const g = validGit[i];
+    if (!isOfficialBase) {
+      unmatchedGitToInclude.push(formatGitRelAligned(g));
+      continue;
+    }
+
+    // When merging with official ContentDB releases, include any unmatched Git tag that is newer
+    // than ContentDB's latest release (by timestamp, semantic version, or top-of-repo tag position).
+    const gVer = String(g.tag_name || g.version || g.title || '');
+    const gTime = Date.parse(String(g.released_at || g.release_date || '')) || 0;
+    const semverVsNewest = compareSemanticVersionsDesc(gVer, newestBaseVer);
+    const isNewerBySemver = semverVsNewest < 0;
+    const isNewerByTime = gTime > 0 && newestBaseTime > 0 && gTime > newestBaseTime + 1000;
+    const isTopUnmatchedTagWithoutTime = i === 0 && gTime === 0 && semverVsNewest <= 0;
+
+    if (isNewerBySemver || isNewerByTime || isTopUnmatchedTagWithoutTime) {
+      unmatchedGitToInclude.push(formatGitRelAligned(g));
+    }
+  }
+
+  return sortAndCapReleases([...unmatchedGitToInclude, ...enrichedBase], MAX_PACKAGE_RELEASES);
 }
 
 /**
@@ -2169,6 +2463,18 @@ export async function fetchAccurateGitZipSize(
             bytes = Math.round(rawBytes);
           }
         }
+      } else if (provider === 'bitbucket') {
+        const res = await fetch(
+          `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`,
+          { headers, signal: ctrl.signal }
+        );
+        if (res.ok) {
+          const data: any = await res.json();
+          const rawBytes = Number(data?.size || 0);
+          if (Number.isFinite(rawBytes) && rawBytes > 0) {
+            bytes = Math.round(rawBytes);
+          }
+        }
       }
     }
     clearTimeout(timer);
@@ -2336,7 +2642,7 @@ export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
   if (!raw) return null;
   let obj: any = raw;
   if (typeof raw === 'string') {
-    const trimmed = raw.trim();
+    const trimmed = raw.replace(/^\uFEFF/, '').trim();
     if (!trimmed.startsWith('{') || trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
       return null;
     }
@@ -2464,6 +2770,25 @@ export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
   return trimmed;
 }
 
+export function extractGitBranchHint(rawUrl?: string): string | undefined {
+  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
+  try {
+    const u = new URL(rawUrl.trim());
+    const m =
+      u.pathname.match(/\/-\/(?:tree|blob)\/([^/?#]+)/i) ||
+      u.pathname.match(/\/(?:tree|blob|src)\/([^/?#]+)/i);
+    if (m && m[1]) {
+      const branch = decodeURIComponent(m[1]).trim();
+      if (branch && !branch.includes('..')) {
+        return branch;
+      }
+    }
+  } catch {
+    // Ignore invalid URL
+  }
+  return undefined;
+}
+
 /**
  * Agnostic server-side Git repository scanner modeled after `luanti-org/contentdb`
  * (`app/tasks/luanticheck/tree.py` & `app/tasks/importtasks.py`).
@@ -2479,8 +2804,9 @@ export async function scanGitRepoMetadataCached(
   existingRepoUrl?: string,
   ttlSeconds = 21600
 ): Promise<GitRepoScanResult> {
+  const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v3/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -2528,13 +2854,22 @@ export async function scanGitRepoMetadataCached(
     pushCandidate(`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw`, `https://git.minetest.land/${owner}/${repo}`);
     pushCandidate(`https://git.minetest.land/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://git.minetest.land/${lowerOwner}/${repo}`);
   } else if (host.includes('gitlab.com')) {
+    if (branchHint) {
+      pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/${branchHint}`, `https://gitlab.com/${owner}/${repo}`);
+    }
     pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
   } else if (host.includes('github.com')) {
+    if (branchHint) {
+      pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/${branchHint}`, `https://github.com/${owner}/${repo}`);
+    }
     pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
   } else if (host.includes('bitbucket.org')) {
-    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/HEAD`, `https://bitbucket.org/${owner}/${repo}`);
+    if (branchHint) {
+      pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/${branchHint}`, `https://bitbucket.org/${owner}/${repo}`);
+    }
     pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/master`, `https://bitbucket.org/${owner}/${repo}`);
     pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/main`, `https://bitbucket.org/${owner}/${repo}`);
+    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/HEAD`, `https://bitbucket.org/${owner}/${repo}`);
   }
 
   // Only include multi-forge fallbacks when no explicit repository URL was provided
@@ -3272,26 +3607,31 @@ export interface DiscoveredReleaseNotesPayload {
 
 function normalizeForgeCommitItem(
   c: any,
-  provider: 'github' | 'codeberg' | 'gitlab',
+  provider: 'github' | 'codeberg' | 'gitlab' | 'bitbucket',
   host: string,
   owner: string,
   repo: string
 ): DiscoveredReleaseCommitItem | null {
   if (!c || typeof c !== 'object') return null;
-  const sha = String(c.sha || c.id || '').trim();
+  const sha = String(c.sha || c.id || c.hash || '').trim();
   if (!sha) return null;
-  const rawMessage = String(c.commit?.message || c.message || c.title || '').trim();
+  const rawMessage = String(c.commit?.message || c.message || c.summary?.raw || c.title || '').trim();
   const firstLine = rawMessage.split(/\r?\n/)[0]?.trim() || sha.slice(0, 7);
+  const rawBitbucketAuthor = String(c.author?.user?.display_name || c.author?.raw || '')
+    .replace(/\s*<[^>]+>\s*/g, '')
+    .trim();
   const authorName = String(
     c.commit?.author?.name ||
     c.author?.login ||
     c.author?.username ||
+    rawBitbucketAuthor ||
     c.author_name ||
     owner
   ).trim();
   const committedAt = String(
     c.commit?.author?.date ||
     c.commit?.committer?.date ||
+    c.date ||
     c.created_at ||
     c.committed_date ||
     ''
@@ -3299,9 +3639,12 @@ function normalizeForgeCommitItem(
   const webUrl = String(
     c.html_url ||
     c.web_url ||
+    c.links?.html?.href ||
     (provider === 'gitlab'
       ? `https://${host}/${owner}/${repo}/-/commit/${sha}`
-      : `https://${host}/${owner}/${repo}/commit/${sha}`)
+      : provider === 'bitbucket'
+        ? `https://bitbucket.org/${owner}/${repo}/commits/${sha}`
+        : `https://${host}/${owner}/${repo}/commit/${sha}`)
   ).trim();
 
   return {
@@ -3438,6 +3781,18 @@ export async function fetchGitReleaseNotesBetweenRefs(
           .filter((c): c is DiscoveredReleaseCommitItem => Boolean(c))
           .slice(0, 25);
       }
+    } else if (provider === 'bitbucket') {
+      compareUrl = `https://bitbucket.org/${owner}/${repo}/branches/compare/${encHead}%0D${encBase}`;
+      const cmp = await fetchJsonQuick(
+        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/commits/${encHead}?exclude=${encBase}&pagelen=25`
+      );
+      if (Array.isArray(cmp?.values) && cmp.values.length > 0) {
+        source = 'compare';
+        commits = cmp.values
+          .map((c: any) => normalizeForgeCommitItem(c, provider, host, owner, repo))
+          .filter((c: DiscoveredReleaseCommitItem | null): c is DiscoveredReleaseCommitItem => Boolean(c))
+          .slice(0, 25);
+      }
     }
   }
 
@@ -3470,6 +3825,11 @@ export async function fetchGitReleaseNotesBetweenRefs(
         rawList = await fetchJsonQuick(
           `https://${host}/api/v4/projects/${projectPath}/repository/commits?per_page=15${encRef ? `&ref_name=${encRef}` : ''}${!encRef ? untilQuery : ''}`
         );
+      } else if (provider === 'bitbucket') {
+        const bbData = await fetchJsonQuick(
+          `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/commits${encRef ? '/' + encRef : ''}?pagelen=15`
+        );
+        rawList = Array.isArray(bbData?.values) ? bbData.values : null;
       }
 
       if (Array.isArray(rawList) && rawList.length > 0) {
@@ -3485,7 +3845,7 @@ export async function fetchGitReleaseNotesBetweenRefs(
 
   // Level 3b: Atom / RSS feed fallback across GitHub, Codeberg, Mesehub, Gitea/Forgejo, and GitLab
   // when REST API quotas are rate-limited on shared Worker egress IPs or disabled on custom instances
-  if (commits.length === 0) {
+  if (commits.length === 0 && provider !== 'bitbucket') {
     const feedRefs = Array.from(
       new Set([headRef !== 'HEAD' ? headRef : '', options.defaultBranch || 'main', 'master'].filter(Boolean))
     );

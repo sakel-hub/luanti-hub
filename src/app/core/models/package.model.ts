@@ -52,6 +52,11 @@ export interface LuantiPackage {
   downloads: number; // Total aggregated downloads (contentdb_downloads + luantihub_downloads)
   contentdb_downloads?: number; // Upstream ContentDB downloads count
   luantihub_downloads?: number; // Native Luanti Hub downloads count
+  daily_downloads?: number; // 24-hour download velocity (in-game + web)
+  weekly_downloads?: number; // 7-day download velocity (in-game + web)
+  weekly_views?: number; // 7-day package views (in-game + web)
+  conversion_rate?: number; // Smoothed view-to-download conversion rate (0.0 - 1.0)
+  favorites_count?: number; // Community favorites count in D1
   license: string;
   media_license?: string;
   repo_url?: string;

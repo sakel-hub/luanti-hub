@@ -15,6 +15,7 @@ export class SettingsService {
   readonly preferredEngine = signal<string>('5.9.0');
   readonly favorites = signal<string[]>([]);
   readonly downloadedPackages = signal<Record<string, number>>({});
+  readonly recentlyViewedPackages = signal<string[]>([]);
   readonly notificationsEnabled = signal<boolean>(false);
   readonly notifyModeration = signal<boolean>(true);
   readonly notifyAdminQueue = signal<boolean>(true);
@@ -37,6 +38,7 @@ export class SettingsService {
         localStorage.setItem('lh_preferred_engine', this.preferredEngine());
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
         localStorage.setItem('lh_downloaded_packages', JSON.stringify(this.downloadedPackages()));
+        localStorage.setItem('lh_recently_viewed_v1', JSON.stringify(this.recentlyViewedPackages()));
         localStorage.setItem(
           'lh_notification_prefs',
           JSON.stringify({
@@ -135,9 +137,33 @@ export class SettingsService {
           this.downloadedPackages.set(cleanDl);
         }
       }
+
+      const savedViews = localStorage.getItem('lh_recently_viewed_v1');
+      if (savedViews) {
+        const parsedViews = JSON.parse(savedViews);
+        if (Array.isArray(parsedViews)) {
+          const validViews = Array.from(
+            new Set(
+              parsedViews
+                .filter((id: any) => typeof id === 'string' && id.includes('/') && id.trim().length > 2)
+                .map((id: string) => id.trim().toLowerCase())
+            )
+          ).slice(0, 30);
+          this.recentlyViewedPackages.set(validViews);
+        }
+      }
     } catch {
       // Defaults kept
     }
+  }
+
+  recordPackageView(packageId: string): void {
+    if (!packageId || !packageId.includes('/')) return;
+    const key = packageId.trim().toLowerCase();
+    this.recentlyViewedPackages.update(curr => {
+      const next = [key, ...curr.filter(id => id !== key)].slice(0, 30);
+      return next;
+    });
   }
 
   recordLocalDownload(packageId: string): void {

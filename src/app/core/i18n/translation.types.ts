@@ -121,6 +121,7 @@ export interface TranslationDictionary {
     license: string;
     matchScore: string;
     match: string;
+    matchTooltip: string;
     quickInstall: string;
     downloadZip: string;
     moreInfo: string;

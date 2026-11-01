@@ -16,18 +16,32 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let top10List: any[] = [];
   const blockedIds = new Set<string>();
   const d1Ratings = new Map<string, number>();
+  const d1Favorites = new Map<string, number>();
+  const authorCounts = new Map<string, number>();
+  const canTakeAuthor = (author?: string, maxPerAuthor = 2): boolean => {
+    const k = String(author || '').trim().toLowerCase();
+    if (!k) return true;
+    return (authorCounts.get(k) || 0) < maxPerAuthor;
+  };
+  const markAuthor = (author?: string): void => {
+    const k = String(author || '').trim().toLowerCase();
+    if (k) authorCounts.set(k, (authorCounts.get(k) || 0) + 1);
+  };
 
-  // 1. Query Cloudflare D1 for real download velocity, star ratings & Kill Switch blacklist
+  // 1. Query Cloudflare D1 for intent-weighted download velocity, views, conversion rate, favorites, star ratings & Kill Switch blacklist
   if (env.DB) {
     try {
       await ensureExtendedPackageColumns(env.DB);
-      const [blockedRes, ratingsRes] = await Promise.all([
+      const [blockedRes, ratingsRes, favsRes] = await Promise.all([
         env.DB.prepare(
           `SELECT LOWER(id) as id FROM packages WHERE status IN ('flagged', 'delisted')`
         ).all(),
         env.DB.prepare(
           `SELECT LOWER(package_id) as pkg_id, AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews GROUP BY LOWER(package_id)`
-        ).all()
+        ).all(),
+        env.DB.prepare(
+          `SELECT LOWER(package_id) as pkg_id, COUNT(*) as fav_cnt FROM user_favorites GROUP BY LOWER(package_id)`
+        ).all().catch(() => ({ results: [] }))
       ]);
 
       for (const r of (blockedRes.results || [])) {
@@ -38,11 +52,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           d1Ratings.set(String(r.pkg_id).toLowerCase(), Number(Number(r.avg_rating).toFixed(1)));
         }
       }
+      for (const r of (favsRes.results || [])) {
+        if (r?.pkg_id && Number(r.fav_cnt) > 0) {
+          d1Favorites.set(String(r.pkg_id).toLowerCase(), Number(r.fav_cnt));
+        }
+      }
 
       const query = `
         SELECT
           d.package_id,
           SUM(d.downloads_count) AS period_downloads,
+          SUM(COALESCE(d.reason_new, 0)) AS r_new,
+          SUM(COALESCE(d.reason_web, 0)) AS r_web,
+          SUM(COALESCE(d.reason_update, 0)) AS r_upd,
+          SUM(COALESCE(d.reason_dependency, 0)) AS r_dep,
+          SUM(COALESCE(d.views_luanti, 0) + COALESCE(d.views_web, 0)) AS period_views,
           p.title,
           p.author_name AS author,
           p.name,
@@ -57,17 +81,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.downloads_count,
           p.contentdb_downloads,
           p.luantihub_downloads,
-          p.file_size
+          p.file_size,
+          p.updated_at
         FROM package_daily_downloads d
         LEFT JOIN packages p ON LOWER(p.id) = LOWER(d.package_id)
         WHERE ${dateCondition} AND (p.status IS NULL OR p.status = 'active')
         GROUP BY LOWER(d.package_id)
-        ORDER BY period_downloads DESC
-        LIMIT 10;
+        LIMIT 40;
       `;
 
       const res = await env.DB.prepare(query).all();
       if (res.results && res.results.length > 0) {
+        const candidates: Array<{ item: any; compositeScore: number; periodDownloads: number }> = [];
         for (const r of res.results) {
           const pkgKey = String(r.package_id || '').toLowerCase();
           if (!pkgKey || blockedIds.has(pkgKey)) continue;
@@ -76,31 +101,75 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const name = r.name || parts[1];
           if (!author || !name) continue;
 
+          const periodDl = Number(r.period_downloads || 0);
+          const periodViews = Number(r.period_views || 0);
+          if (periodDl <= 0 && periodViews <= 0) continue;
+
+          const reasonSum =
+            (Number(r.r_new) || 0) +
+            (Number(r.r_web) || 0) +
+            (Number(r.r_upd) || 0) +
+            (Number(r.r_dep) || 0);
+          const intentDl =
+            reasonSum > 0
+              ? (Number(r.r_new) || 0) * 1.0 +
+                (Number(r.r_web) || 0) * 1.0 +
+                (Number(r.r_upd) || 0) * 0.6 +
+                (Number(r.r_dep) || 0) * 0.2
+              : periodDl;
+          const conversionRate = Number(
+            Math.min(1.0, (intentDl + 1.5) / (Math.max(intentDl, periodViews) + 10)).toFixed(3)
+          );
+          const favCnt = d1Favorites.get(pkgKey) || 0;
+          const resolvedScore = d1Ratings.get(pkgKey) ?? computeGenuineStarRating(null, r.score);
+          const starMultiplier = resolvedScore >= 1 ? 0.85 + (resolvedScore / 5) * 0.35 : 1.0;
+
+          const compositeScore =
+            (intentDl * (1 + conversionRate * 0.5) + periodViews * 0.18 + Math.min(6, favCnt * 0.6)) *
+            starMultiplier;
+
           const cdbDl = Number(r.contentdb_downloads || 0);
-          const lhDl = Math.max(Number(r.luantihub_downloads || 0), Number(r.period_downloads || 0));
+          const lhDl = Math.max(Number(r.luantihub_downloads || 0), periodDl);
           const totalDl = Math.max(
             Number(r.downloads_count || 0),
             cdbDl + lhDl,
-            Number(r.period_downloads) || 1
+            periodDl || 1
           );
 
-          top10List.push({
-            id: `${author}/${name}`,
-            author,
-            name,
-            title: r.title || name,
-            type: r.type || 'mod',
-            short_desc: r.short_desc || '',
-            thumbnail: r.thumbnail_url || '',
-            banner: r.banner_url || r.thumbnail_url || '',
-            score: d1Ratings.get(pkgKey) ?? computeGenuineStarRating(null, r.score),
-            contentdb_downloads: cdbDl,
-            luantihub_downloads: lhDl,
-            downloads: totalDl,
-            file_size: r.file_size || undefined,
-            license: r.license || '',
-            source: r.provider && r.provider !== 'contentdb' ? 'git' : 'official'
+          candidates.push({
+            periodDownloads: periodDl,
+            compositeScore,
+            item: {
+              id: `${author}/${name}`,
+              author,
+              name,
+              title: r.title || name,
+              type: r.type || 'mod',
+              short_desc: r.short_desc || '',
+              thumbnail: r.thumbnail_url || '',
+              banner: r.banner_url || r.thumbnail_url || '',
+              score: resolvedScore,
+              contentdb_downloads: cdbDl,
+              luantihub_downloads: lhDl,
+              downloads: totalDl,
+              weekly_downloads: timeframe === 'week' ? periodDl : undefined,
+              daily_downloads: timeframe === 'today' ? periodDl : undefined,
+              weekly_views: periodViews > 0 ? periodViews : undefined,
+              conversion_rate: conversionRate,
+              favorites_count: favCnt > 0 ? favCnt : undefined,
+              file_size: r.file_size || undefined,
+              license: r.license || '',
+              source: r.provider && r.provider !== 'contentdb' ? 'git' : 'official'
+            }
           });
+        }
+
+        candidates.sort((a, b) => b.compositeScore - a.compositeScore || b.periodDownloads - a.periodDownloads);
+        for (const c of candidates) {
+          if (top10List.length >= 10) break;
+          if (!canTakeAuthor(c.item.author, 2)) continue;
+          markAuthor(c.item.author);
+          top10List.push(c.item);
         }
       }
     } catch (err) {
@@ -169,6 +238,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const lowerId = pkgId.toLowerCase();
           if (blockedIds.has(lowerId)) continue;
           if (top10List.some(p => p.id.toLowerCase() === lowerId)) continue;
+          if (!canTakeAuthor(item.author, 2)) continue;
+          markAuthor(item.author);
 
           const thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
           let banner = item.banner || item.banner_url;

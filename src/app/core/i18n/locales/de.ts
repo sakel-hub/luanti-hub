@@ -67,15 +67,15 @@ export const de: TranslationDictionary = {
     scrollLeft: 'Nach links scrollen',
     scrollRight: 'Nach rechts scrollen',
     viewAll: 'Alle anzeigen',
-    infoHero: 'Tägliche Auswahl herausragender Spiele, beliebter Mods, Technik-Pakete und Texturen – basierend auf Community-Bewertungen, Downloads und aktuellen Updates.',
+    infoHero: 'Tägliches Rampenlicht mit herausragenden Spielen, beliebten Mods, Technik-Paketen und Texturen – priorisiert nach aktuellen Spieler-Downloads, Installationsrate nach dem Ansehen, Community-Bewertungen, Updates und Ihrem persönlichen Geschmack.',
     infoTags: 'Durchsuchen Sie Pakete nach beliebten Themen und Spielkategorien, sortiert nach der Anzahl der verfügbaren Pakete.',
-    infoTrending: 'Beliebte Mods aus ContentDB und Community-Git-Repositories, sortiert nach Spieler-Downloads und aktuellen Updates.',
-    infoTop10Today: 'Die am stärksten wachsenden Pakete der letzten 24 Stunden, basierend auf heutigen Downloads, neuen Versionen und Spielerbewertungen.',
-    infoGames: 'Vollständige eigenständige Voxel-Spiele für Luanti, sortiert nach Downloads und Community-Bewertung.',
-    infoGit: 'Community-Pakete, die direkt aus den GitHub-, Codeberg- und GitLab-Repositories der Entwickler veröffentlicht wurden.',
-    infoAutomation: 'Technik-, Maschinen-, Logistik- und Schaltungs-Mods für Automatisierung und komplexe Bauprojekte.',
-    infoTop10Week: 'Die beliebtesten Pakete der letzten 7 Tage, sortiert nach wöchentlichen Downloads und Spielerbewertungen.',
-    infoTextures: 'Textur-Pakete und visuelle Überarbeitungen für Ihre Welten, sortiert nach Downloads und Bewertungen.'
+    infoTrending: 'Aufstrebende Mods aus ContentDB und Community-Git-Repositories, priorisiert nach aktuellen Downloads, Installationsbeliebtheit, Community-Bewertungen, Updates und Ihrem Geschmack.',
+    infoTop10Today: 'Die 10 aktivsten Pakete der letzten 24 Stunden – basierend auf heutigen Neuinstallationen und Updates, wie oft Besucher nach dem Ansehen herunterladen, sowie Spielerbewertungen (max. 2 Pakete pro Entwickler für mehr Vielfalt).',
+    infoGames: 'Vollständige eigenständige Voxel-Spiele für Luanti, priorisiert nach aktueller Spieleraktivität, Community-Bewertungen, jüngsten Updates und allgemeiner Beliebtheit.',
+    infoGit: 'Community-Pakete direkt aus den GitHub-, Codeberg- und GitLab-Repositories der Entwickler, priorisiert nach aktuellen Updates, Spieler-Downloads, Bewertungen und Ihrem persönlichen Geschmack.',
+    infoAutomation: 'Technik-, Maschinen-, Logistik- und Schaltungs-Mods für Automatisierung, priorisiert nach Themenrelevanz, aktuellen Spieler-Downloads, Community-Bewertungen und Updates.',
+    infoTop10Week: 'Die 10 beliebtesten Pakete der letzten 7 Tage – sortiert nach wöchentlichen Downloads, Installationsbeliebtheit, Community-Favoriten und Bewertungen (max. 2 Pakete pro Entwickler für mehr Vielfalt).',
+    infoTextures: 'Textur-Pakete und visuelle Überarbeitungen für Ihre Welten, priorisiert nach aktuellen Spieler-Downloads, Community-Bewertungen und Updates.'
   },
   catalog: {
     resultsFor: 'Ergebnisse für „{query}“',
@@ -106,6 +106,7 @@ export const de: TranslationDictionary = {
     license: 'Lizenz',
     matchScore: '{score}% Übereinstimmung',
     match: 'Treffer',
+    matchTooltip: 'Für Sie personalisiert anhand Ihrer Favoriten, heruntergeladenen und zuletzt angesehenen Pakete, bevorzugten Spiele und Tags sowie Community-Bewertungen und Beliebtheit.',
     quickInstall: '.zip Paket Herunterladen',
     downloadZip: '.zip Herunterladen',
     moreInfo: 'Mehr Infos & Details',
@@ -475,7 +476,7 @@ export const de: TranslationDictionary = {
     safeHarborDetail: 'Betrieben gemäß 17 U.S.C. § 512 (DMCA Safe Harbor) und dem EU Digital Services Act (DSA). Gemeldete Pakete können über unseren Cloudflare D1 Kill Switch umgehend entfernt werden.',
     legalSafeHarbor: 'Betrieben gemäß 17 U.S.C. § 512 (DMCA Safe Harbor) und dem EU Digital Services Act (DSA). Gemeldete Pakete können über unseren Cloudflare D1 Kill Switch umgehend entfernt werden.',
     legalPrivacy: 'LuantiHub verwendet keinerlei Werbe-Tracker von Drittanbietern. Es werden ausschließlich notwendige Sitzungsdaten und öffentliche Open-Source-Paketmetadaten in Cloudflare D1 gespeichert.',
-    copyright: 'Open-Source-Community-Projekt (LGPL-2.1+).'
+    copyright: 'Open-Source-Community-Projekt (Code: LGPL-2.1+ · Medien: CC-BY-SA-4.0).'
   },
   author: {
     viewProfile: 'Autorenprofil ansehen',

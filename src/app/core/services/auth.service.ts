@@ -185,6 +185,7 @@ export class AuthService {
   });
   readonly openReportsCount = computed(() => this._currentUser()?.open_reports_count || 0);
   readonly linkedIdentities = computed(() => this._currentUser()?.identities || []);
+  private backgroundAuthDigestTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.pwaService.registerNotificationClickHandler((data: any) => {
@@ -236,6 +237,34 @@ export class AuthService {
     });
     this.handleUrlAuthParams();
     this.initAuth();
+    this.initBackgroundAuthDigestRefresh();
+  }
+
+  private initBackgroundAuthDigestRefresh(): void {
+    if (typeof window === 'undefined') return;
+
+    const isUnitTestEnv =
+      typeof (globalThis as any).__karma__ !== 'undefined' ||
+      typeof (globalThis as any).jasmine !== 'undefined' ||
+      typeof (globalThis as any).vi !== 'undefined' ||
+      typeof (globalThis as any).__vitest_worker__ !== 'undefined';
+
+    if (!isUnitTestEnv) {
+      this.pwaService.registerCatalogSyncHandler(() => {
+        if (this.isLoggedIn() && this.pwaService.isOnline()) {
+          this.initAuth(true).catch(() => {});
+        }
+      });
+
+      if (this.backgroundAuthDigestTimer) {
+        clearInterval(this.backgroundAuthDigestTimer);
+      }
+      this.backgroundAuthDigestTimer = setInterval(() => {
+        if (this.isLoggedIn() && this.pwaService.isOnline()) {
+          this.initAuth(true).catch(() => {});
+        }
+      }, 5 * 60 * 1000);
+    }
   }
 
   setSelectedProvider(provider: GitProvider): void {

@@ -48,7 +48,10 @@
     <img src="https://img.shields.io/badge/i18n-6_Languages-8b5cf6.svg?style=flat-square" alt="i18n 6 Languages">
   </a>
   <a href="LICENSE.txt">
-    <img src="https://img.shields.io/badge/License-LGPL_2.1+-blue.svg?style=flat-square" alt="License LGPL 2.1+">
+    <img src="https://img.shields.io/badge/Code_License-LGPL_2.1+-blue.svg?style=flat-square" alt="Code License LGPL 2.1+">
+  </a>
+  <a href="https://creativecommons.org/licenses/by-sa/4.0/">
+    <img src="https://img.shields.io/badge/Assets_License-CC--BY--SA_4.0-ef9421.svg?style=flat-square&logo=creativecommons&logoColor=white" alt="Assets License CC-BY-SA 4.0">
   </a>
 </p>
 
@@ -62,7 +65,7 @@
 
 **LuantiHub** is a package discovery platform, decentralized content repository, and resilient proxy mirror for the [Luanti](https://www.luanti.org) voxel game engine (formerly Minetest). 
 
-Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a **direct drop-in replacement for the in-game Luanti Content tab** while empowering mod creators to index, audit, and distribute packages directly from **Codeberg**, **GitLab**, or **GitHub**.
+Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a **direct drop-in replacement for the in-game Luanti Content tab** while empowering mod creators to index, audit, and distribute packages directly from **Codeberg**, **Mesehub**, **GitLab**, **GitHub**, or **Bitbucket**.
 
 ---
 
@@ -74,29 +77,36 @@ Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a *
 - **Backward & Forward Compatible:** Works seamlessly with Luanti 5.0+ and legacy Minetest 5.x releases.
 
 ### 🌐 Decentralized Git Ingestion & Static Code Audit
-- **Multi-Forge Freedom:** Ingest and index mods directly from **Codeberg**, **GitLab**, or **GitHub** without relying on a single centralized repository.
-- **Automated Manifest Parsing:** Automatically detects, reads, and validates `mod.conf`, `game.conf`, and `texture_pack.conf` manifests, extracting titles, authors, descriptions, and dependency trees.
+- **Multi-Forge Freedom:** Ingest and index mods directly from **Codeberg**, **Mesehub (`git.minetest.land`)**, **GitLab**, **GitHub**, or **Bitbucket** without relying on a single centralized repository.
+- **Automated Manifest & `.cdb.json` Parsing:** Automatically detects, reads, and validates `mod.conf`, `game.conf`, `modpack.conf`, `texture_pack.conf`, and `.cdb.json` manifests, extracting titles, authors, long descriptions, tags, screenshots, video URLs, and dependency trees.
 - **Static Code Analysis (Luacheck):** Performs automated static linting and safety checks on submitted Lua code to flag fatal syntax errors and undefined global variables before publication.
-- **SPDX Open-Source License Verification:** Enforces open-source compliance by validating declared licenses against standard SPDX identifiers (e.g. `MIT`, `LGPL-2.1-or-later`, `GPL-3.0-or-later`, `CC-BY-SA-4.0`).
+- **SPDX Open-Source License Verification:** Enforces open-source compliance by validating declared code and media licenses against standard SPDX identifiers (e.g. `MIT`, `LGPL-2.1-or-later`, `GPL-3.0-or-later`, `CC-BY-SA-4.0`).
 - **Cryptographic Repo Ownership Proof:** Issues short-lived HMAC-SHA256 audit proof tokens to ensure only authorized repository owners can index or update packages.
 
 ### 🪞 Resilient Multi-Tier High-Availability Mirror & Failover
 - **Triple-Tier Fallback Architecture:** Automatically queries and fails over between the official ContentDB API (`content.luanti.org`), the community mirror (`contentdb.milcho.org`), and Cloudflare D1 distributed SQLite.
-- **Zero-Downtime Package Delivery:** If upstream registries experience rate limits, cloud outages, or connectivity drops, LuantiHub serves cached package listings and downloads without interruption.
-- **Background Sync & Tag Harmonization:** Continuously reconciles upstream package metadata, maintainer lists, and topic tags into local D1 storage.
+- **Zero-Downtime Package Delivery:** If upstream registries experience rate limits, cloud outages, or connectivity drops, LuantiHub serves cached package listings, hydrated D1 metadata, and downloads without interruption.
+- **Background Sync & Tag Harmonization:** Continuously reconciles upstream package metadata, maintainer lists, `.cdb.json` attributes, and topic tags into local D1 storage.
 
-### 🖼️ Screenshots, Media Gallery & Live Markdown Documentation
+### 🖼️ Screenshots, Hover Video Previews, Cinema Theater & Live Markdown
 - **Full-HD Screenshot Gallery:** Resolves uncompressed full-HD screenshots (`shot-0.png`, `shot-1.png`, etc.) with resilient multi-tier fallback chains and an interactive keyboard-navigable image carousel.
-- **Live GFM README Viewer:** Renders repository `README.md` files in real-time inside the package detail modal with responsive formatting, code syntax styling, and sanitized HTML.
-- **Visual Type Badges:** Color-coded badges for **Mods**, **Games**, and **Texture Packs** with download counters, author handles, and release history.
+- **Hover Video Previews & Cinema Theater:** Automatically resolves YouTube, Vimeo, PeerTube, and direct MP4/WebM trailers from ContentDB, `.cdb.json`, and Markdown descriptions. Hovering over a package tile previews the video after a short delay with a one-click expand button into a 16:9 Cinema Theater modal.
+- **Live GFM README & Commit Release Notes Viewer:** Renders repository `README.md` files and commit-by-commit release notes (`baseRef...headRef`) in real-time inside the package detail modal with responsive formatting, code syntax styling, and sanitized HTML.
+- **Visual Type Badges:** Color-coded badges for **Mods**, **Games**, and **Texture Packs** with dual ContentDB + LuantiHub download counters, author handles, and semantic release history.
+
+### 🎯 Personalized `% Match`, Intent-Weighted Top 10 & Author Analytics
+- **Personalized `% Match` Scoring:** Dynamically computes a 64%–99% match score for every package using your saved Favorites, per-package download history, recently viewed packages, game ecosystem compatibility (`game_support` & dependencies), and target Luanti engine version.
+- **Intent-Weighted Top 10 & Swimlane Ranking:** Prioritizes Hero Showcase slides, Top 10 Today / This Week charts, and category carousels using real 24-hour and 7-day download velocity, unified Web + in-game view-to-download conversion rate, community favorites, and author diversity caps, explained via human-friendly localized tooltips.
+- **Granular Author & Package Analytics Dashboard:** Interactive time-series analytics (`/analytics/:author` and `/analytics/:author/:name`) tracking daily downloads by install reason (`new`, `update`, `dependency`, `web`), client platform (`Luanti Client` vs. `Web`), store views (`views_luanti` + `views_web`), conversion rates, and CSV export.
+- **Hero Promotions & Luanti Blog Integration:** Supports scheduled community promotions and automatically surfaces the latest official article from `blog.luanti.org` in the Hero Showcase.
 
 ### ⭐ Genuine Community Ratings, Reviews & Discussions
-- **Independent 1–5 Star Rating System:** Users can submit verified ratings and written reviews stored permanently in Cloudflare D1.
+- **Independent 1–5 Star Rating System:** Users can submit verified ratings and written reviews stored permanently in Cloudflare D1 alongside official ContentDB review threads.
 - **Unrated Transparency:** Packages without community ratings cleanly suppress star indicators, avoiding misleading "0-star" penalties for brand new mods.
 - **Aggregated Discussion Threads:** Links directly to upstream Luanti forum discussion threads and issue trackers alongside native community feedback.
 
 ### 🔐 Multi-Provider Authentication & Role-Based Moderation
-- **Universal OAuth 2.0 & PAT Support:** One-click OAuth authentication with Codeberg, GitLab, GitHub, and ContentDB, plus Personal Access Token (PAT) verification for developer automation.
+- **Universal OAuth 2.0 & PAT Support:** One-click OAuth authentication with Codeberg, Mesehub, GitLab, GitHub, and ContentDB, plus Personal Access Token (PAT) verification for developer automation.
 - **Cryptographic HTTP-Only Session Security:** Issues stateless HMAC-SHA256 signed `lh_session` cookies with 30-day lifespans and strict `SameSite=Lax` protection against cross-site scripting (XSS) and token theft.
 - **Role-Based Moderation:** Built-in moderation queue for administrators and verified moderators with emergency package delisting and takedown capabilities.
 
@@ -109,8 +119,9 @@ Built with Angular 22 Signals and Cloudflare Edge Workers, LuantiHub acts as a *
 - **6 Supported Languages:** Fully translated in **English (`en`)**, **Slovak (`sk`)**, **German (`de`)**, **French (`fr`)**, **Spanish (`es`)**, and **Russian (`ru`)**.
 - **Instant In-App Switching:** Change languages on the fly via the header selector, with automatic detection from browser preferences or deep-link parameter (`?lang=de`).
 
-### ⚡ Modern PWA, Deep Linking & Web Share Target (MDN Best Practices)
+### ⚡ Modern PWA, Background Notifications, Deep Linking & Web Share Target
 - **Installable PWA with Rich Install UI:** Full Web App Manifest compliant with modern W3C standards, featuring high-resolution icons, adaptive maskable icons, and 16:9 desktop / mobile screenshots that trigger Chromium's native Rich Install UI dialog.
+- **Native OS Notifications & Background Sync:** Service Worker integration (`custom-sw.js`) supporting W3C Periodic Background Sync (`periodicSync`), One-Off Background Sync (`sync`), and Web Push so users receive OS notifications (with package thumbnails and monochrome badge) for updated Favorites/Downloads, new Git packages, community reviews, and official Luanti Blog posts even when the app window is minimized or in the background.
 - **Web Share Target API (OS Share Sheet Integration):** When LuantiHub is installed as a PWA, it registers with Android and Windows as an OS-level Share Target for URLs and text. When browsing any mod repository on GitHub, Codeberg, or GitLab on your phone or PC, tap the native **Share** button &rarr; choose **LuantiHub**, and the app opens instantly with the repository URL prefilled in the submission dialog!
 - **1-Click Pre-Filled Submission Deep Links:** Anyone can construct direct URLs that immediately open LuantiHub, launch the "Submit Git Package" modal, and prefill the Git repository URL:
   ```text
@@ -401,6 +412,7 @@ If you find LuantiHub useful, consider supporting its continued open-source deve
 
 ## 📄 License & Legal
 
-* **LuantiHub Source Code:** Licensed under the [GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later)](LICENSE.txt).
-* **Game Packages & Mods:** All indexed packages, games, and texture packs remain the property of their respective creators under their declared open-source licenses (SPDX).
+* **LuantiHub Source Code:** Licensed under the [GNU Lesser General Public License, version 2.1 or later (`LGPL-2.1-or-later`)](LICENSE.txt).
+* **LuantiHub Visual Assets, Icons & Media:** All original LuantiHub visual assets, logos, isometric SVG icons, notification badges, and promotional graphics (`public/logo.svg`, `public/icons/*`, `public/banners/*`) are licensed under the [Creative Commons Attribution-ShareAlike 4.0 International License (`CC-BY-SA-4.0`)](https://creativecommons.org/licenses/by-sa/4.0/) (see [Part II of `LICENSE.txt`](LICENSE.txt)).
+* **Game Packages & Mods:** All indexed packages, games, and texture packs remain the property of their respective creators under their declared open-source code and media licenses (SPDX).
 * **Luanti Trademark:** Luanti is an open-source voxel game engine created by Perttu Ahola and contributors. LuantiHub is an independent community project and is not officially affiliated with or endorsed by the Luanti core development team.

@@ -42,20 +42,30 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const tagsArr = Array.isArray(item.tags)
         ? item.tags.map((t: any) => String(typeof t === 'string' ? t : t?.name || '').trim()).filter(Boolean)
         : [];
+      const screenshotsArr = Array.isArray(item.screenshots)
+        ? item.screenshots.map((s: any) => String(typeof s === 'string' ? s : s?.url || '').trim()).filter(Boolean)
+        : [];
+      const longDescText = typeof item.long_desc === 'string' && item.long_desc.trim()
+        ? item.long_desc.trim()
+        : null;
       const pkgType = ['mod', 'game', 'txp', 'modpack'].includes(item.type) ? item.type : 'mod';
 
       statements.push(
         env.DB.prepare(`
           INSERT INTO packages (
-            id, author_name, name, title, type, short_desc, repo_url, provider,
+            id, author_name, name, title, type, short_desc, long_desc, repo_url, provider,
             thumbnail_url, banner_url, license, media_license, min_minetest_version,
-            tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url, file_size
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+            tags, screenshots, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url, file_size
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
+            short_desc = COALESCE(excluded.short_desc, packages.short_desc),
+            long_desc = COALESCE(excluded.long_desc, packages.long_desc),
+            repo_url = CASE WHEN excluded.repo_url != '' THEN excluded.repo_url ELSE packages.repo_url END,
             license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
             media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
             min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
             tags = COALESCE(excluded.tags, packages.tags),
+            screenshots = COALESCE(excluded.screenshots, packages.screenshots),
             contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
             downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
             video_url = COALESCE(excluded.video_url, packages.video_url),
@@ -68,6 +78,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           String(item.title || item.name).trim(),
           pkgType,
           item.short_desc ? String(item.short_desc).slice(0, 500) : null,
+          longDescText,
           item.repo_url ? String(item.repo_url).trim() : '',
           item.thumbnail && item.thumbnail !== 'logo.svg' ? String(item.thumbnail) : null,
           item.banner && item.banner !== 'logo.svg' ? String(item.banner) : null,
@@ -75,6 +86,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           mediaLic,
           item.min_minetest_version ? String(item.min_minetest_version).trim() : '5.0.0',
           tagsArr.length > 0 ? JSON.stringify(tagsArr) : null,
+          screenshotsArr.length > 0 ? JSON.stringify(screenshotsArr) : null,
           totalDl,
           cdbDl,
           item.video_url ? String(item.video_url) : null,
@@ -115,6 +127,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           `SELECT * FROM packages WHERE LOWER(id) IN (${placeholders}) AND status = 'active'`
         ).bind(...lowerParams).all();
 
+        const d1VideoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
           if (!row?.id) continue;
           const lowerKey = String(row.id).toLowerCase();
@@ -143,6 +156,54 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           if (row.license && (cdbDl > 0 || row.provider !== 'contentdb') && hasRealTags) {
             missingIds.delete(lowerKey);
+            if (!row.video_url && row.repo_url && d1VideoScanRows.length < 4) {
+              d1VideoScanRows.push(row);
+            }
+          }
+        }
+
+        if (d1VideoScanRows.length > 0) {
+          const videoUpdateStmts: any[] = [];
+          await Promise.all(
+            d1VideoScanRows.map(async (row) => {
+              const lowerKey = String(row.id).toLowerCase();
+              const author = String(row.author_name || String(row.id).split('/')[0] || '');
+              const name = String(row.name || String(row.id).split('/')[1] || '');
+              if (!author || !name) return;
+              const gitScan = await scanGitRepoMetadataCached(
+                author,
+                name,
+                row.type || 'mod',
+                row.repo_url,
+                21600
+              ).catch(() => null);
+              const resolvedVid = extractEmbeddedVideo(
+                gitScan?.cdbMeta?.video_url,
+                row.video_thumbnail_url,
+                row.long_desc || gitScan?.cdbMeta?.long_description || gitScan?.longDesc
+              );
+              if (resolvedVid.video_url && hydratedMap[lowerKey]) {
+                hydratedMap[lowerKey].video_url = resolvedVid.video_url;
+                hydratedMap[lowerKey].video_thumbnail_url = resolvedVid.video_thumbnail_url;
+                videoUpdateStmts.push(
+                  env.DB.prepare(`
+                    UPDATE packages
+                    SET video_url = COALESCE(video_url, ?),
+                        video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                    WHERE id = ?
+                  `).bind(resolvedVid.video_url, resolvedVid.video_thumbnail_url || null, row.id)
+                );
+              }
+            })
+          );
+          if (videoUpdateStmts.length > 0) {
+            if (typeof env.DB.batch === 'function') {
+              await env.DB.batch(videoUpdateStmts).catch(() => {});
+            } else {
+              for (const stmt of videoUpdateStmts) {
+                stmt.run().catch(() => {});
+              }
+            }
           }
         }
       } catch {

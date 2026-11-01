@@ -67,15 +67,15 @@ export const sk: TranslationDictionary = {
     scrollLeft: 'Posunúť doľava',
     scrollRight: 'Posunúť doprava',
     viewAll: 'Zobraziť všetko',
-    infoHero: 'Denný výber najzaujímavejších samostatných hier, populárnych módov, automatizácie a balíčkov textúr na základe hodnotení komunity, sťahovanosti a nedávnych aktualizácií.',
+    infoHero: 'Denný výber najzaujímavejších hier, populárnych módov, automatizácie a balíčkov textúr – zoradený podľa nedávnych stiahnutí, záujmu návštevníkov o inštaláciu, hodnotení komunity, aktualizácií a vašich preferencií.',
     infoTags: 'Prehľadávajte balíčky podľa obľúbených tém a herných kategórií zoradených podľa počtu dostupných balíčkov.',
-    infoTrending: 'Obľúbené módy z ContentDB a komunitných Git repozitárov zoradené podľa počtu stiahnutí a nedávnych aktualizácií.',
-    infoTop10Today: 'Najrýchlejšie rastúce balíčky za posledných 24 hodín podľa dnešných stiahnutí, nových vydaní a hodnotení hráčov.',
-    infoGames: 'Kompletné samostatné voxelové hry pripravené na hranie v Luanti, zoradené podľa počtu stiahnutí a hodnotení komunity.',
-    infoGit: 'Komunitné balíčky publikované priamo z GitHub, Codeberg a GitLab repozitárov samotných tvorcov.',
-    infoAutomation: 'Technické, strojové, logistické a obvodové módy zamerané na automatizáciu a pokročilé stavanie.',
-    infoTop10Week: 'Najpopulárnejšie balíčky za posledných 7 dní zoradené podľa týždenných stiahnutí a hodnotení hráčov.',
-    infoTextures: 'Balíčky textúr a vizuálnych vylepšení na úpravu vzhľadu vašich svetov, zoradené podľa sťahovanosti a hodnotení.'
+    infoTrending: 'Módy naberaúce na popularite z ContentDB a komunitných Git repozitárov, zoradené podľa nedávnych stiahnutí, obľúbenosti inštalácií, hodnotení komunity, aktualizácií a vašich preferencií.',
+    infoTop10Today: '10 najaktívnejších balíčkov za posledných 24 hodín – kombinuje dnešné nové inštalácie a aktualizácie, mieru stiahnutí po zobrazení a hodnotenia hráčov (najviac 2 balíčky od jedného autora pre väčšiu pestrosť).',
+    infoGames: 'Kompletné samostatné voxelové hry pripravené na hranie v Luanti, zoradené podľa nedávnej aktivity hráčov, hodnotení komunity, aktualizácií a celkovej obľúbenosti.',
+    infoGit: 'Komunitné balíčky publikované priamo z GitHub, Codeberg a GitLab repozitárov tvorcov, zoradené podľa nedávnych aktualizácií, stiahnutí hráčmi, hodnotení a vašich preferencií.',
+    infoAutomation: 'Technické, strojové, logistické a obvodové módy pre automatizáciu, zoradené podľa zhody so zameraním kategórie, nedávnych stiahnutí, hodnotení komunity a aktualizácií.',
+    infoTop10Week: '10 najpopulárnejších balíčkov za posledných 7 dní – zoradených podľa týždenných stiahnutí, záujmu návštevníkov o stiahnutie, obľúbených položiek a hodnotení (najviac 2 balíčky od jedného autora).',
+    infoTextures: 'Balíčky textúr a vizuálnych vylepšení na úpravu vzhľadu vašich svetov, zoradené podľa nedávnych stiahnutí hráčmi, hodnotení komunity a aktualizácií.'
   },
   catalog: {
     resultsFor: 'Výsledky pre "{query}"',
@@ -106,6 +106,7 @@ export const sk: TranslationDictionary = {
     license: 'Licencia',
     matchScore: '{score}% Zhoda',
     match: 'Zhoda',
+    matchTooltip: 'Prispôsobené pre vás podľa vašich obľúbených položiek, stiahnutých a nedávno zobrazených balíčkov, preferovaných hier a značiek, ako aj hodnotení komunity a obľúbenosti.',
     quickInstall: 'Stiahnuť .zip Balíček',
     downloadZip: 'Stiahnuť .zip',
     moreInfo: 'Viac Informácií & Detaily',
@@ -475,7 +476,7 @@ export const sk: TranslationDictionary = {
     safeHarborDetail: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalSafeHarbor: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalPrivacy: 'LuantiHub nepoužíva žiadne reklamné sledovacie skripty tretích strán. V Cloudflare D1 sú uložené iba nevyhnutné prihlasovacie údaje a verejné open-source metadáta balíčkov.',
-    copyright: 'Open-Source komunitný projekt (LGPL-2.1+).'
+    copyright: 'Open-Source komunitný projekt (Kód: LGPL-2.1+ · Grafika: CC-BY-SA-4.0).'
   },
   author: {
     viewProfile: 'Zobraziť profil autora',

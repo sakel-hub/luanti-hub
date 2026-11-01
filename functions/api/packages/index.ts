@@ -9,7 +9,9 @@ import {
   normalizeRepoKey,
   readEdgeCacheJson,
   writeEdgeCacheJson,
-  ensureExtendedPackageColumns
+  ensureExtendedPackageColumns,
+  scanGitRepoMetadataCached,
+  extractEmbeddedVideo
 } from '../lib/upstream';
 
 interface Env {
@@ -64,9 +66,20 @@ function computeCatalogStarRating(item: any, d1StarAvg?: number): number {
   return 0;
 }
 
+interface PackageVelocityMetrics {
+  todayDl: number;
+  weekDl: number;
+  todayIntentDl: number;
+  weekIntentDl: number;
+  todayViews: number;
+  weekViews: number;
+  conversionRate: number;
+}
+
 function buildTop10FromCatalog(
   mergedCatalog: any[],
-  velocityMap: Map<string, number>,
+  telemetryMap: Map<string, PackageVelocityMetrics>,
+  favoritesMap: Map<string, number>,
   timeframe: 'today' | 'week'
 ): any[] {
   const catalogByLowerId = new Map<string, any>();
@@ -76,36 +89,124 @@ function buildTop10FromCatalog(
     }
   }
 
-  const top10: any[] = [];
-  const sortedVelocity = Array.from(velocityMap.entries())
-    .filter(([, count]) => count > 0)
-    .sort((a, b) => b[1] - a[1]);
+  const authorCounts = new Map<string, number>();
+  const canTakeAuthor = (author?: string, maxPerAuthor = 2): boolean => {
+    const key = String(author || '').trim().toLowerCase();
+    if (!key) return true;
+    return (authorCounts.get(key) || 0) < maxPerAuthor;
+  };
+  const markAuthor = (author?: string): void => {
+    const key = String(author || '').trim().toLowerCase();
+    if (key) {
+      authorCounts.set(key, (authorCounts.get(key) || 0) + 1);
+    }
+  };
 
-  for (const [lowerId, periodDownloads] of sortedVelocity) {
-    if (top10.length >= 10) break;
+  const top10: any[] = [];
+  const deferredSameAuthor: any[] = [];
+  const nowMs = Date.now();
+
+  const scoredTelemetry: Array<{ lowerId: string; item: any; periodDl: number; compositeScore: number }> = [];
+  for (const [lowerId, m] of telemetryMap.entries()) {
     const match = catalogByLowerId.get(lowerId);
     if (!match) continue;
-    top10.push({
-      ...match,
-      downloads: Math.max(Number(match.downloads || 0), periodDownloads)
-    });
+    const periodDl = timeframe === 'today' ? m.todayDl : m.weekDl;
+    const periodIntentDl = timeframe === 'today' ? m.todayIntentDl : m.weekIntentDl;
+    const periodViews = timeframe === 'today' ? m.todayViews : m.weekViews;
+    if (periodDl <= 0 && periodViews <= 0) continue;
+
+    const favs = favoritesMap.get(lowerId) || Number(match.favorites_count || 0);
+    const starMultiplier = match.score >= 1 ? 0.85 + (Number(match.score) / 5) * 0.35 : 1.0;
+    let freshnessBonus = 0;
+    if (match.updated_at) {
+      const updatedMs = Date.parse(String(match.updated_at)) || 0;
+      if (updatedMs > 0 && nowMs - updatedMs <= 14 * 86400000) {
+        freshnessBonus = timeframe === 'today' ? 1.5 : 1.0;
+      }
+    }
+
+    const compositeScore =
+      (periodIntentDl * (1 + m.conversionRate * 0.5) +
+        periodViews * 0.18 +
+        Math.min(6, favs * 0.6) +
+        freshnessBonus) *
+      starMultiplier;
+
+    if (compositeScore > 0) {
+      scoredTelemetry.push({ lowerId, item: match, periodDl, compositeScore });
+    }
+  }
+
+  scoredTelemetry.sort((a, b) => b.compositeScore - a.compositeScore || b.periodDl - a.periodDl);
+
+  for (const entry of scoredTelemetry) {
+    if (top10.length >= 10) break;
+    const enrichedItem = {
+      ...entry.item,
+      downloads: Math.max(Number(entry.item.downloads || 0), entry.periodDl)
+    };
+    if (!canTakeAuthor(enrichedItem.author, 2)) {
+      deferredSameAuthor.push(enrichedItem);
+      continue;
+    }
+    markAuthor(enrichedItem.author);
+    top10.push(enrichedItem);
   }
 
   if (top10.length < 10) {
     const remaining = [...mergedCatalog].sort((a, b) => {
+      const favA = favoritesMap.get(String(a.id || '').toLowerCase()) || 0;
+      const favB = favoritesMap.get(String(b.id || '').toLowerCase()) || 0;
+      const convA = Number(a.conversion_rate || 0);
+      const convB = Number(b.conversion_rate || 0);
       if (timeframe === 'today') {
-        const scoreA = (Number(a.contentdb_score ?? a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50;
-        const scoreB = (Number(b.contentdb_score ?? b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50;
+        const updA = Date.parse(String(a.updated_at || '')) || 0;
+        const updB = Date.parse(String(b.updated_at || '')) || 0;
+        const recencyA = updA > 0 && nowMs - updA <= 30 * 86400000 ? 180 : 0;
+        const recencyB = updB > 0 && nowMs - updB <= 30 * 86400000 ? 180 : 0;
+        const scoreA =
+          (Number(a.contentdb_score ?? a.score) || 0) * 10 +
+          Math.log10((Number(a.downloads) || 1) + 1) * 50 +
+          convA * 120 +
+          favA * 25 +
+          recencyA;
+        const scoreB =
+          (Number(b.contentdb_score ?? b.score) || 0) * 10 +
+          Math.log10((Number(b.downloads) || 1) + 1) * 50 +
+          convB * 120 +
+          favB * 25 +
+          recencyB;
         return scoreB - scoreA;
       }
-      return (Number(b.downloads) || 0) - (Number(a.downloads) || 0);
+      const scoreA =
+        (Number(a.downloads) || 0) * (1 + convA * 0.25) +
+        (Number(a.contentdb_score) || 0) * 3 +
+        favA * 150;
+      const scoreB =
+        (Number(b.downloads) || 0) * (1 + convB * 0.25) +
+        (Number(b.contentdb_score) || 0) * 3 +
+        favB * 150;
+      return scoreB - scoreA;
     });
 
     for (const item of remaining) {
       if (top10.length >= 10) break;
       const lowerId = String(item.id || `${item.author}/${item.name}`).toLowerCase();
       if (top10.some(p => String(p.id).toLowerCase() === lowerId)) continue;
+      if (!canTakeAuthor(item.author, 2)) {
+        deferredSameAuthor.push(item);
+        continue;
+      }
+      markAuthor(item.author);
       top10.push(item);
+    }
+  }
+
+  for (const fallback of deferredSameAuthor) {
+    if (top10.length >= 10) break;
+    const lowerId = String(fallback.id || `${fallback.author}/${fallback.name}`).toLowerCase();
+    if (!top10.some(p => String(p.id).toLowerCase() === lowerId)) {
+      top10.push(fallback);
     }
   }
 
@@ -258,10 +359,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let blockedPromise = Promise.resolve<Set<string>>(new Set());
   let reviewRatingsPromise = Promise.resolve<Map<string, number>>(new Map());
   let lhDownloadsMapPromise = Promise.resolve<Map<string, number>>(new Map());
-  let velocityPromise = Promise.resolve<{ today: Map<string, number>; week: Map<string, number> }>({
-    today: new Map(),
-    week: new Map()
-  });
+  let favoritesMapPromise = Promise.resolve<Map<string, number>>(new Map());
+  let velocityPromise = Promise.resolve<Map<string, PackageVelocityMetrics>>(new Map());
   let promotionsPromise = Promise.resolve<any[]>([]);
   let recentReviewsPromise = Promise.resolve<any[]>([]);
 
@@ -330,28 +429,90 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       })
       .catch(() => new Map<string, number>());
 
+    // Community Favorites count per package from `user_favorites`
+    favoritesMapPromise = env.DB.prepare(
+      `SELECT LOWER(package_id) as pkg_id, COUNT(*) as fav_cnt FROM user_favorites GROUP BY LOWER(package_id)`
+    ).all()
+      .then((res: any) => {
+        const map = new Map<string, number>();
+        for (const r of (res.results || [])) {
+          if (r?.pkg_id && Number(r.fav_cnt) > 0) {
+            map.set(String(r.pkg_id).toLowerCase(), Number(r.fav_cnt));
+          }
+        }
+        return map;
+      })
+      .catch(() => new Map<string, number>());
+
     if (isBootBundle) {
       velocityPromise = env.DB.prepare(`
         SELECT
           LOWER(package_id) as pkg_id,
           SUM(CASE WHEN download_date = DATE('now') THEN downloads_count ELSE 0 END) as today_dl,
-          SUM(downloads_count) as week_dl
+          SUM(downloads_count) as week_dl,
+          SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_new, 0) ELSE 0 END) as today_new,
+          SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_web, 0) ELSE 0 END) as today_web,
+          SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_update, 0) ELSE 0 END) as today_upd,
+          SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_dependency, 0) ELSE 0 END) as today_dep,
+          SUM(COALESCE(reason_new, 0)) as week_new,
+          SUM(COALESCE(reason_web, 0)) as week_web,
+          SUM(COALESCE(reason_update, 0)) as week_upd,
+          SUM(COALESCE(reason_dependency, 0)) as week_dep,
+          SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(views_luanti, 0) + COALESCE(views_web, 0) ELSE 0 END) as today_views,
+          SUM(COALESCE(views_luanti, 0) + COALESCE(views_web, 0)) as week_views
         FROM package_daily_downloads
         WHERE download_date >= DATE('now', '-7 days')
         GROUP BY LOWER(package_id)
       `).all()
         .then((res: any) => {
-          const today = new Map<string, number>();
-          const week = new Map<string, number>();
+          const map = new Map<string, PackageVelocityMetrics>();
           for (const row of (res.results || [])) {
             if (!row?.pkg_id) continue;
             const k = String(row.pkg_id).toLowerCase();
-            if (Number(row.today_dl) > 0) today.set(k, Number(row.today_dl));
-            if (Number(row.week_dl) > 0) week.set(k, Number(row.week_dl));
+            const todayDl = Number(row.today_dl) || 0;
+            const weekDl = Number(row.week_dl) || 0;
+            const todayReasonSum =
+              (Number(row.today_new) || 0) +
+              (Number(row.today_web) || 0) +
+              (Number(row.today_upd) || 0) +
+              (Number(row.today_dep) || 0);
+            const weekReasonSum =
+              (Number(row.week_new) || 0) +
+              (Number(row.week_web) || 0) +
+              (Number(row.week_upd) || 0) +
+              (Number(row.week_dep) || 0);
+            const todayIntentDl =
+              todayReasonSum > 0
+                ? (Number(row.today_new) || 0) * 1.0 +
+                  (Number(row.today_web) || 0) * 1.0 +
+                  (Number(row.today_upd) || 0) * 0.6 +
+                  (Number(row.today_dep) || 0) * 0.2
+                : todayDl;
+            const weekIntentDl =
+              weekReasonSum > 0
+                ? (Number(row.week_new) || 0) * 1.0 +
+                  (Number(row.week_web) || 0) * 1.0 +
+                  (Number(row.week_upd) || 0) * 0.6 +
+                  (Number(row.week_dep) || 0) * 0.2
+                : weekDl;
+            const todayViews = Number(row.today_views) || 0;
+            const weekViews = Number(row.week_views) || 0;
+            const conversionRate = Number(
+              Math.min(1.0, (weekIntentDl + 1.5) / (Math.max(weekIntentDl, weekViews) + 10)).toFixed(3)
+            );
+            map.set(k, {
+              todayDl,
+              weekDl,
+              todayIntentDl,
+              weekIntentDl,
+              todayViews,
+              weekViews,
+              conversionRate
+            });
           }
-          return { today, week };
+          return map;
         })
-        .catch(() => ({ today: new Map(), week: new Map() }));
+        .catch(() => new Map<string, PackageVelocityMetrics>());
 
       promotionsPromise = env.DB.prepare(
         `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 10`
@@ -404,6 +565,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     blockedIds,
     d1Ratings,
     lhDownloadsMap,
+    favoritesMap,
     rawTags,
     velocity,
     activePromotions,
@@ -416,6 +578,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     blockedPromise,
     reviewRatingsPromise,
     lhDownloadsMapPromise,
+    favoritesMapPromise,
     tagsPromise,
     velocityPromise,
     promotionsPromise,
@@ -615,6 +778,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       tags: combinedTags.length > 0 ? combinedTags : [p.type || 'mod'],
       dependencies: parsedDeps.length > 0 ? parsedDeps : matchedUpstream?.dependencies,
       optional_dependencies: parsedOptDeps.length > 0 ? parsedOptDeps : matchedUpstream?.optional_dependencies,
+      daily_downloads: velocity.get(canonicalKey)?.todayDl ?? velocity.get(d1Key)?.todayDl,
+      weekly_downloads: velocity.get(canonicalKey)?.weekDl ?? velocity.get(d1Key)?.weekDl,
+      weekly_views: velocity.get(canonicalKey)?.weekViews ?? velocity.get(d1Key)?.weekViews,
+      conversion_rate: velocity.get(canonicalKey)?.conversionRate ?? velocity.get(d1Key)?.conversionRate,
+      favorites_count: favoritesMap.get(canonicalKey) ?? favoritesMap.get(d1Key),
       url: `/api/packages/${canonicalAuthor}/${canonicalName}/`,
       source: isGitSource ? 'git' : 'official',
       sources
@@ -631,6 +799,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const d1StarAvg = d1Ratings.get(key);
     const cdbDl = Number(item.downloads || 0);
     const lhDl = lhDownloadsMap.get(key) || 0;
+    const vel = velocity.get(key);
+    const favCnt = favoritesMap.get(key);
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
@@ -639,6 +809,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: cdbDl + lhDl,
+      daily_downloads: vel?.todayDl,
+      weekly_downloads: vel?.weekDl,
+      weekly_views: vel?.weekViews,
+      conversion_rate: vel?.conversionRate,
+      favorites_count: favCnt,
       min_minetest_version: item.min_minetest_version || '5.0.0',
       provider: 'contentdb',
       source: 'official',
@@ -647,8 +822,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   // Promote Top 10 trending packages as featured for in-game Luanti Content tab (renders gold star badge in dlg_contentdb.lua:355)
-  const top10Week = buildTop10FromCatalog(merged, velocity.week, 'week');
-  const top10Today = buildTop10FromCatalog(merged, velocity.today, 'today');
+  const top10Week = buildTop10FromCatalog(merged, velocity, favoritesMap, 'week');
+  const top10Today = buildTop10FromCatalog(merged, velocity, favoritesMap, 'today');
   const featuredIds = new Set<string>(
     [...top10Today.slice(0, 5), ...top10Week.slice(0, 10)].map(p => String(p.id || '').toLowerCase())
   );
@@ -698,6 +873,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const batchToHydrate = carouselPool.slice(0, 32);
     if (batchToHydrate.length > 0) {
+      let bootRepoScanBudget = 4;
+      const bootHydrateStmts: any[] = [];
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
           const detail = await fetchUpstreamJsonCached<any>(
@@ -724,64 +901,97 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               pkg.contentdb_downloads + Number(pkg.luantihub_downloads || 0)
             );
           }
-          if (detail.video_url && !pkg.video_url) {
-            pkg.video_url = detail.video_url;
+          const candidateRepo = pkg.repo_url || detail.repo || detail.repo_url || '';
+          if (candidateRepo && !pkg.repo_url) {
+            pkg.repo_url = candidateRepo;
           }
-          if (detail.video_thumbnail_url && !pkg.video_thumbnail_url) {
-            pkg.video_thumbnail_url = detail.video_thumbnail_url;
-          }
-          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0)) {
-            env.DB.prepare(`
-              INSERT INTO packages (
-                id, author_name, name, title, type, short_desc, repo_url, provider,
-                thumbnail_url, banner_url, license, media_license, tags, status,
-                downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET
-                license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-                media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-                tags = COALESCE(excluded.tags, packages.tags),
-                contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-                downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
-                video_url = COALESCE(excluded.video_url, packages.video_url),
-                video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url)
-            `).bind(
-              pkg.id,
+          let rawVideoUrl = detail.video_url || pkg.video_url;
+          if (!rawVideoUrl && candidateRepo && bootRepoScanBudget > 0) {
+            bootRepoScanBudget--;
+            const gitScan = await scanGitRepoMetadataCached(
               pkg.author,
               pkg.name,
-              pkg.title || pkg.name,
-              ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod',
-              pkg.short_desc || pkg.short_description || null,
-              pkg.repo_url || detail.repo || '',
-              pkg.thumbnail || null,
-              pkg.banner || null,
-              resolvedLic,
-              resolvedMediaLic,
-              pkg.tags?.length > 0 ? JSON.stringify(pkg.tags) : null,
-              Number(pkg.downloads || 0),
-              Number(pkg.contentdb_downloads || 0),
-              Number(pkg.luantihub_downloads || 0),
-              pkg.video_url || null,
-              pkg.video_thumbnail_url || null
-            ).run().catch(() => {});
-
-            // Also keep any existing D1 Git row with the same technical name & type in sync if its author_name differed from ContentDB
-            env.DB.prepare(`
-              UPDATE packages
-              SET contentdb_downloads = MAX(contentdb_downloads, ?),
-                  downloads_count = MAX(downloads_count, ? + COALESCE(luantihub_downloads, 0)),
-                  license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END
-              WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?)
-            `).bind(
-              Number(pkg.contentdb_downloads || 0),
-              Number(pkg.contentdb_downloads || 0),
-              resolvedLic,
-              pkg.name,
-              ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod'
-            ).run().catch(() => {});
+              pkg.type || 'mod',
+              candidateRepo,
+              21600
+            ).catch(() => null);
+            if (gitScan?.cdbMeta?.video_url) {
+              rawVideoUrl = gitScan.cdbMeta.video_url;
+            }
+          }
+          const resolvedVideo = extractEmbeddedVideo(
+            rawVideoUrl,
+            detail.video_thumbnail_url || pkg.video_thumbnail_url,
+            typeof detail.long_description === 'string' ? detail.long_description : undefined
+          );
+          if (resolvedVideo.video_url && !pkg.video_url) {
+            pkg.video_url = resolvedVideo.video_url;
+          }
+          if (resolvedVideo.video_thumbnail_url && !pkg.video_thumbnail_url) {
+            pkg.video_thumbnail_url = resolvedVideo.video_thumbnail_url;
+          }
+          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0)) {
+            bootHydrateStmts.push(
+              env.DB.prepare(`
+                INSERT INTO packages (
+                  id, author_name, name, title, type, short_desc, repo_url, provider,
+                  thumbnail_url, banner_url, license, media_license, tags, status,
+                  downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
+                  media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
+                  tags = COALESCE(excluded.tags, packages.tags),
+                  contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
+                  downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+                  video_url = COALESCE(excluded.video_url, packages.video_url),
+                  video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url)
+              `).bind(
+                pkg.id,
+                pkg.author,
+                pkg.name,
+                pkg.title || pkg.name,
+                ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod',
+                pkg.short_desc || pkg.short_description || null,
+                pkg.repo_url || detail.repo || '',
+                pkg.thumbnail || null,
+                pkg.banner || null,
+                resolvedLic,
+                resolvedMediaLic,
+                pkg.tags?.length > 0 ? JSON.stringify(pkg.tags) : null,
+                Number(pkg.downloads || 0),
+                Number(pkg.contentdb_downloads || 0),
+                Number(pkg.luantihub_downloads || 0),
+                pkg.video_url || null,
+                pkg.video_thumbnail_url || null
+              ),
+              // Also keep any existing D1 Git row with the same technical name & type in sync if its author_name differed from ContentDB
+              env.DB.prepare(`
+                UPDATE packages
+                SET contentdb_downloads = MAX(contentdb_downloads, ?),
+                    downloads_count = MAX(downloads_count, ? + COALESCE(luantihub_downloads, 0)),
+                    license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END
+                WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?)
+              `).bind(
+                Number(pkg.contentdb_downloads || 0),
+                Number(pkg.contentdb_downloads || 0),
+                resolvedLic,
+                pkg.name,
+                ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod'
+              )
+            );
           }
         })
       );
+      if (env.DB && bootHydrateStmts.length > 0) {
+        if (typeof env.DB.batch === 'function') {
+          await env.DB.batch(bootHydrateStmts).catch(() => {});
+        } else {
+          for (const stmt of bootHydrateStmts) {
+            stmt.run().catch(() => {});
+          }
+        }
+      }
     }
 
     responsePayload = {

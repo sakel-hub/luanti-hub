@@ -54,7 +54,8 @@ import {
   LucideChevronRight,
   LucideTag,
   LucideTrash2,
-  LucideTrendingUp
+  LucideTrendingUp,
+  LucideRefreshCw
 } from '@lucide/angular';
 
 @Component({
@@ -95,7 +96,8 @@ import {
     LucideChevronRight,
     LucideTag,
     LucideTrash2,
-    LucideTrendingUp
+    LucideTrendingUp,
+    LucideRefreshCw
   ],
   template: `
     @if (package) {
@@ -368,7 +370,9 @@ import {
 
                 <!-- Metrics Bar -->
                 <div class="flex items-center gap-3 text-xs sm:text-sm flex-wrap">
-                  <span class="text-emerald-400 font-bold">
+                  <span
+                    class="text-emerald-400 font-bold cursor-help"
+                    [appTooltip]="'card.matchTooltip' | translate">
                     {{ packageService.getMatchScore(package) }}% {{ 'card.match' | translate }}
                   </span>
                   @if (devStateBadge(); as devBadge) {
@@ -1627,6 +1631,25 @@ import {
               <!-- Releases Content (Sorted Newest-First, Capped at 10, Paginated 5 per Page) -->
               @if (activeTab() === 'releases') {
                 <div class="pt-4 space-y-2.5 luanti-tab-enter">
+                  @if (hasValidGitRepo) {
+                    <div class="flex items-center justify-between gap-2 pb-1">
+                      <span class="text-[11px] text-slate-400 flex items-center gap-1.5">
+                        <svg lucideGitBranch class="w-3.5 h-3.5 text-sky-400"></svg>
+                        <span>Synced with live Git tags &amp; releases</span>
+                      </span>
+                      <button
+                        type="button"
+                        (click)="onSyncGitReleases()"
+                        [disabled]="isSyncingReleases() || isLoadingReleases()"
+                        class="px-2.5 py-1 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white disabled:opacity-50 font-semibold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                        <svg
+                          lucideRefreshCw
+                          [class]="isSyncingReleases() ? 'w-3 h-3 text-sky-400 animate-spin' : 'w-3 h-3 text-sky-400'">
+                        </svg>
+                        <span>{{ isSyncingReleases() ? 'Syncing Git tags...' : 'Sync Git Tags' }}</span>
+                      </button>
+                    </div>
+                  }
                   @if (isLoadingReleases() && cappedReleases().length === 0) {
                     <div class="space-y-2.5" aria-busy="true" aria-label="Loading releases">
                       @for (placeholder of [1, 2, 3]; track placeholder) {
@@ -2266,10 +2289,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly editableTags = signal<string[]>([]);
   readonly isSavingTags = signal(false);
 
-  // Expandable Release Notes state
+  // Expandable Release Notes & Live Git Tag Sync state
   readonly expandedReleaseKeys = signal<Set<string>>(new Set());
   readonly loadingReleaseNotesKey = signal<string | null>(null);
   readonly releaseNotesByKey = signal<Map<string, ReleaseNotesPayload>>(new Map());
+  readonly isSyncingReleases = signal(false);
 
   readonly canModerate = computed(() => {
     const pkg = this.packageService.activePackage() || this.package;
@@ -2684,9 +2708,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (initialCachedReviews !== undefined) {
       this.reviews.set(initialCachedReviews);
       this.isLoadingReviews.set(false);
-    } else {
+    } else if (isSwitchingPackage || this.reviews().length === 0) {
       this.reviews.set([]);
       this.isLoadingReviews.set(true);
+    } else {
+      this.isLoadingReviews.set(false);
     }
 
     const initialCachedReleases = this.packageService.getCachedReleases(this.package);
@@ -2742,7 +2768,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       .fetchReviews(this.package, false)
       .then(res => {
         if (this.loadedPackageKey !== key) return;
-        this.reviews.set(res);
+        if (res.length > 0 || this.reviews().length === 0 || isSwitchingPackage) {
+          this.reviews.set(res);
+        }
         this.isLoadingReviews.set(false);
         if (savedState && savedState.scrollTop > 0) {
           this.restoreSavedScrollPosition(savedState.scrollTop);
@@ -2821,9 +2849,6 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextIdx = (this.mediaCarouselIndex() - 1 + slides.length) % slides.length;
     this.mediaCarouselIndex.set(nextIdx);
     this.scrollActiveThumbnailIntoView(nextIdx);
-    if (slides[nextIdx]?.type === 'image') {
-      this.activeBannerUrl.set(slides[nextIdx].url);
-    }
   }
 
   nextMediaSlide(event?: Event): void {
@@ -2834,9 +2859,6 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextIdx = (this.mediaCarouselIndex() + 1) % slides.length;
     this.mediaCarouselIndex.set(nextIdx);
     this.scrollActiveThumbnailIntoView(nextIdx);
-    if (slides[nextIdx]?.type === 'image') {
-      this.activeBannerUrl.set(slides[nextIdx].url);
-    }
   }
 
   goToMediaSlide(idx: number, event?: Event): void {
@@ -2848,9 +2870,6 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
     this.mediaCarouselIndex.set(idx);
     this.scrollActiveThumbnailIntoView(idx);
-    if (slides[idx]?.type === 'image') {
-      this.activeBannerUrl.set(slides[idx].url);
-    }
   }
 
   openLightbox(imageUrl: string, event?: Event): void {
@@ -3020,6 +3039,34 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       author: resolvedAuthor,
       name: pkg.name
     });
+  }
+
+  async onSyncGitReleases(): Promise<void> {
+    if (this.isSyncingReleases()) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+
+    const targetKey = this.loadedPackageKey;
+    const prevLatestVersion = this.cappedReleases()[0]?.version || this.cappedReleases()[0]?.tag_name || '';
+    this.isSyncingReleases.set(true);
+    try {
+      const freshReleases = await this.packageService.fetchPackageReleases(pkg, true);
+      if (this.loadedPackageKey === targetKey) {
+        this.releases.set(freshReleases);
+        this.releasesPage.set(1);
+        this.releaseNotesByKey.set(new Map());
+        const nextLatestVersion = freshReleases[0]?.version || freshReleases[0]?.tag_name || '';
+        if (nextLatestVersion && nextLatestVersion !== prevLatestVersion) {
+          this.pwaService.showToast(`Synced new Git release: ${nextLatestVersion}`);
+        } else {
+          this.pwaService.showToast('Synced latest Git tags & releases');
+        }
+      }
+    } finally {
+      if (this.loadedPackageKey === targetKey) {
+        this.isSyncingReleases.set(false);
+      }
+    }
   }
 
   getReleaseNotesKey(rel: PackageRelease, pageIdx: number): string {

@@ -41,7 +41,7 @@ interface RepoEntry {
 }
 
 async function fetchRepoRootEntries(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
   host: string,
   owner: string,
   repo: string,
@@ -92,6 +92,20 @@ async function fetchRepoRootEntries(
         type: it.type === 'tree' || it.type === 'commit' ? 'dir' : 'file'
       }));
     }
+    if (provider === 'bitbucket') {
+      const res = await fetch(
+        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/src/${encodeURIComponent(branch)}/?pagelen=100`,
+        { headers }
+      );
+      if (!res.ok) return null;
+      const data: any = await res.json();
+      const items = Array.isArray(data?.values) ? data.values : null;
+      if (!items) return null;
+      return items.map((it: any) => ({
+        name: String(it.path || '').split('/').pop() || '',
+        type: it.type === 'commit_directory' ? 'dir' : 'file'
+      }));
+    }
   } catch {
     return null;
   }
@@ -99,7 +113,7 @@ async function fetchRepoRootEntries(
 }
 
 async function fetchRepoSizeEstimate(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
   host: string,
   owner: string,
   repo: string
@@ -139,6 +153,15 @@ async function fetchRepoSizeEstimate(
           return { downloadSize: Math.round(bytes), fileSize: formatByteSize(bytes) || `${Math.round(bytes / 1024)} KB` };
         }
       }
+    } else if (provider === 'bitbucket') {
+      const res = await fetch(`https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`, { headers });
+      if (res.ok) {
+        const data: any = await res.json();
+        const bytes = Number(data?.size);
+        if (Number.isFinite(bytes) && bytes > 0) {
+          return { downloadSize: Math.round(bytes), fileSize: formatByteSize(bytes) || `${Math.round(bytes / 1024)} KB` };
+        }
+      }
     }
   } catch {
     // Non-blocking estimate
@@ -147,7 +170,7 @@ async function fetchRepoSizeEstimate(
 }
 
 async function verifyOrgOrRepoMembership(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github',
+  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
   host: string,
   owner: string,
   repo: string,
@@ -206,6 +229,24 @@ async function verifyOrgOrRepoMembership(
       if (membersRes.ok) {
         const list = await membersRes.json();
         if (Array.isArray(list) && list.some((m: any) => String(m?.username || '').toLowerCase() === lowerHandle)) {
+          return true;
+        }
+      }
+    } else if (provider === 'bitbucket') {
+      const repoRes = await fetch(
+        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`,
+        { headers }
+      );
+      if (repoRes.ok) {
+        const repoData: any = await repoRes.json();
+        const ownerCandidates = [
+          repoData?.owner?.username,
+          repoData?.owner?.nickname,
+          repoData?.workspace?.slug
+        ]
+          .filter(Boolean)
+          .map((s: any) => String(s).toLowerCase());
+        if (ownerCandidates.includes(lowerHandle)) {
           return true;
         }
       }
@@ -525,13 +566,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const repo = parts[1].replace(/\.git$/i, '');
 
     // 1. Detect Provider & Candidate Branches / Config Files
-    let provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' = 'github';
+    let provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket' = 'github';
     if (host.includes('git.minetest.land')) {
       provider = 'mesehub';
     } else if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
       provider = 'codeberg';
     } else if (host.includes('gitlab')) {
       provider = 'gitlab';
+    } else if (host.includes('bitbucket.org')) {
+      provider = 'bitbucket';
     }
 
     const buildRawUrl = (branchName: string, filePath: string): string => {
@@ -539,6 +582,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         return `https://${host}/${owner}/${repo}/raw/branch/${branchName}/${filePath}`;
       } else if (provider === 'gitlab') {
         return `https://${host}/${owner}/${repo}/-/raw/${branchName}/${filePath}`;
+      } else if (provider === 'bitbucket') {
+        return `https://bitbucket.org/${owner}/${repo}/raw/${branchName}/${filePath}`;
       }
       return `https://raw.githubusercontent.com/${owner}/${repo}/${branchName}/${filePath}`;
     };

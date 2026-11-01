@@ -1,3 +1,12 @@
+=============================================================================
+LUANTIHUB LICENSING OVERVIEW
+=============================================================================
+- Source Code: GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)
+- Visual Assets, Icons, Badges, Graphics & Media: Creative Commons Attribution-ShareAlike 4.0 International (CC-BY-SA-4.0)
+  (See Part II at the bottom of this file for CC-BY-SA-4.0 terms.)
+=============================================================================
+
+PART I — SOURCE CODE LICENSE:
 GNU LESSER GENERAL PUBLIC LICENSE
 
 Version 2.1, February 1999
@@ -174,3 +183,34 @@ by James Random Hacker.
 signature of Ty Coon, 1 April 1990
 Ty Coon, President of Vice
 That's all there is to it!
+
+=============================================================================
+PART II — VISUAL ASSETS, ICONS, GRAPHICS & DOCUMENTATION MEDIA LICENSE:
+CREATIVE COMMONS ATTRIBUTION-SHAREALIKE 4.0 INTERNATIONAL (CC-BY-SA-4.0)
+=============================================================================
+
+All original LuantiHub visual assets, logos, isometric SVG icons, notification
+badges, promotional graphics, and documentation screenshots/media located in
+this repository (including `public/logo.svg`, `public/icons/*`, and `public/banners/*`,
+excluding third-party package screenshots owned by their respective mod/game
+authors) are licensed under the Creative Commons Attribution-ShareAlike 4.0
+International License (SPDX: `CC-BY-SA-4.0`).
+
+You are free to:
+- Share: copy and redistribute the material in any medium or format for any
+  purpose, even commercially.
+- Adapt: remix, transform, and build upon the material for any purpose, even
+  commercially.
+
+Under the following terms:
+- Attribution: You must give appropriate credit to LuantiHub, provide a link to
+  the license, and indicate if changes were made.
+- ShareAlike: If you remix, transform, or build upon the material, you must
+  distribute your contributions under the same license as the original
+  (CC-BY-SA-4.0).
+- No additional restrictions: You may not apply legal terms or technological
+  measures that legally restrict others from doing anything the license permits.
+
+Full legal code: https://creativecommons.org/licenses/by-sa/4.0/legalcode
+Human-readable deed: https://creativecommons.org/licenses/by-sa/4.0/
+

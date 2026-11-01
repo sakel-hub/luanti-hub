@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS packages (
     screenshots TEXT,                    -- JSON array of screenshot URLs
     game_support TEXT,                   -- JSON array of supported games
     review_thread_counts TEXT,           -- JSON object { positive, neutral, negative }
+    latest_commit_sha TEXT,              -- Latest Git commit SHA for update notification tracking
     score REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -143,7 +144,36 @@ CREATE TABLE IF NOT EXISTS user_downloads (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 9. Moderation & Abuse Reports Queue (Supports Instant Kill Switch, Author Communication & Auto-Healing)
+-- 9. Per-User Package View History & Counts (For Personalized Match Scoring & Cross-Device Taste Sync)
+CREATE TABLE IF NOT EXISTS user_views (
+    user_id TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    view_count INTEGER NOT NULL DEFAULT 1,
+    last_viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, package_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 10. Hero Banner Promotions & Scheduled Community Highlights
+CREATE TABLE IF NOT EXISTS promotions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    short_desc TEXT NOT NULL,
+    banner_url TEXT NOT NULL,
+    badge_text TEXT,
+    cta_label TEXT NOT NULL,
+    cta_url TEXT NOT NULL,
+    secondary_cta_label TEXT,
+    secondary_cta_url TEXT,
+    starts_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    priority INTEGER DEFAULT 100,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 11. Moderation & Abuse Reports Queue (Supports Instant Kill Switch, Author Communication & Auto-Healing)
 CREATE TABLE IF NOT EXISTS moderation_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id TEXT NOT NULL,
@@ -168,5 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_reviews_pkg ON reviews(package_id);
 CREATE INDEX IF NOT EXISTS idx_pkg_downloads_date_count ON package_daily_downloads (download_date, downloads_count DESC);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);

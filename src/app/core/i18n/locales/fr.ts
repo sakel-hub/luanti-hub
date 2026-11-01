@@ -67,15 +67,15 @@ export const fr: TranslationDictionary = {
     scrollLeft: 'Défiler à gauche',
     scrollRight: 'Défiler à droite',
     viewAll: 'Voir tout',
-    infoHero: 'Sélection quotidienne mettant en avant des jeux complets, mods populaires, packs d’automatisation et textures — choisis selon les avis de la communauté, la popularité et les mises à jour récentes.',
+    infoHero: 'Sélection quotidienne mettant en avant des jeux complets, mods populaires, packs d’automatisation et textures — classés selon les téléchargements récents, la fréquence d’installation après consultation, les avis de la communauté, les mises à jour et vos préférences.',
     infoTags: 'Parcourez les paquets par thèmes et catégories de jeu, classés selon le nombre de paquets disponibles.',
-    infoTrending: 'Mods populaires issus de ContentDB et des dépôts Git communautaires, classés par téléchargements et mises à jour récentes.',
-    infoTop10Today: 'Les paquets les plus populaires des dernières 24 heures, combinant les téléchargements du jour, les nouveautés et les notes des joueurs.',
-    infoGames: 'Jeux voxel complets et autonomes prêts à jouer dans Luanti, classés par téléchargements et évaluations de la communauté.',
-    infoGit: 'Paquets communautaires publiés directement depuis les dépôts GitHub, Codeberg et GitLab des créateurs.',
-    infoAutomation: 'Mods d’ingénierie, de machines, de logistique et de circuits conçus pour l’automatisation et la construction technique.',
-    infoTop10Week: 'Les paquets les plus populaires des 7 derniers jours, classés selon les téléchargements hebdomadaires et les avis de la communauté.',
-    infoTextures: 'Packs de textures et refontes visuelles pour personnaliser l’apparence de vos mondes, classés par téléchargements et évaluations.'
+    infoTrending: 'Mods en pleine ascension sur ContentDB et les dépôts Git communautaires, classés selon les téléchargements récents, la popularité d’installation, les avis des joueurs, les mises à jour et vos goûts.',
+    infoTop10Today: 'Les 10 paquets les plus actifs des dernières 24 heures — combinant les nouvelles installations et mises à jour du jour, le taux de téléchargement après visite et les notes des joueurs (jusqu’à 2 paquets par créateur pour plus de variété).',
+    infoGames: 'Jeux voxel complets et autonomes prêts à jouer dans Luanti, classés selon l’activité récente des joueurs, les évaluations de la communauté, les mises à jour et la popularité globale.',
+    infoGit: 'Paquets communautaires publiés directement depuis les dépôts GitHub, Codeberg et GitLab des créateurs, classés selon les mises à jour récentes, les téléchargements, les avis et vos préférences.',
+    infoAutomation: 'Mods d’ingénierie, de machines, de logistique et de circuits pour l’automatisation, classés selon la pertinence thématique, les téléchargements récents, les avis de la communauté et les mises à jour.',
+    infoTop10Week: 'Les 10 paquets les plus populaires des 7 derniers jours — classés selon les téléchargements hebdomadaires, la popularité auprès des visiteurs, les favoris de la communauté et les notes (jusqu’à 2 paquets par créateur).',
+    infoTextures: 'Packs de textures et refontes visuelles pour personnaliser vos mondes, classés selon les téléchargements récents, les évaluations de la communauté et les mises à jour.'
   },
   catalog: {
     resultsFor: 'Résultats pour « {query} »',
@@ -106,6 +106,7 @@ export const fr: TranslationDictionary = {
     license: 'Licence',
     matchScore: '{score}% Recommandé',
     match: 'Compatibilité',
+    matchTooltip: 'Personnalisé pour vous selon vos favoris, vos paquets téléchargés et récemment consultés, vos jeux et tags préférés, ainsi que les avis et la popularité auprès de la communauté.',
     quickInstall: 'Télécharger le Paquet .zip',
     downloadZip: 'Télécharger .zip',
     moreInfo: 'Plus d\'Infos & Détails',
@@ -475,7 +476,7 @@ export const fr: TranslationDictionary = {
     safeHarborDetail: 'Opéré conformément au 17 U.S.C. § 512 (DMCA Safe Harbor) et au Digital Services Act (DSA) de l\'UE. Les paquets signalés peuvent être immédiatement retirés via notre Kill Switch Cloudflare D1.',
     legalSafeHarbor: 'Opéré conformément au 17 U.S.C. § 512 (DMCA Safe Harbor) et au Digital Services Act (DSA) de l\'UE. Les paquets signalés peuvent être immédiatement retirés via notre Kill Switch Cloudflare D1.',
     legalPrivacy: 'LuantiHub n\'utilise aucun traceur publicitaire tiers. Seules les sessions essentielles et les métadonnées publiques open-source sont enregistrées dans Cloudflare D1.',
-    copyright: 'Projet communautaire open-source (LGPL-2.1+).'
+    copyright: 'Projet communautaire open-source (Code : LGPL-2.1+ · Médias : CC-BY-SA-4.0).'
   },
   author: {
     viewProfile: 'Voir le profil de l\'auteur',
