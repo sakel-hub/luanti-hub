@@ -31,7 +31,8 @@ import {
   solveAnubisPowChallengeSync,
   parseGitRepoTarget,
   parseGitSmartHttpRefs,
-  syncDebouncedGitVersionStamp
+  syncDebouncedGitVersionStamp,
+  parseLuantiBlogFeed
 } from '../../functions/api/lib/upstream';
 import {
   createSessionToken,
@@ -4911,6 +4912,137 @@ supported_games = minetest_game, voxelibre
         configurable: true,
         value: origPermissions
       });
+    }
+  });
+
+  it('should parse blog.luanti.org RSS/JSON feeds, pin the latest Luanti Blog article in the Hero Slider right after active Admin Promotions, and notify once when a new article is published', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    // 1. Verify RSS 2.0 XML parser (`parseLuantiBlogFeed`) for https://blog.luanti.org/feed.rss
+    const sampleRssXml = `<?xml version="1.0" encoding="UTF-8"?>
+      <rss version="2.0">
+        <channel>
+          <title>Luanti Blog</title>
+          <link>https://blog.luanti.org/</link>
+          <item>
+            <title>Luanti 5.17.0 &amp;ndash; Released!</title>
+            <description>&lt;h2&gt;Highlights&lt;/h2&gt;&lt;p&gt;Luanti 5.17.0 brings early gamepad support, Android user data export, and faster rendering.&lt;/p&gt;</description>
+            <pubDate>Fri, 21 Aug 2026 12:00:00 +0000</pubDate>
+            <link>https://blog.luanti.org/2026/08/21/5.17.0-released/</link>
+            <guid isPermaLink="true">https://blog.luanti.org/2026/08/21/5.17.0-released/</guid>
+            <enclosure type="image/webp" url="https://blog.luanti.org/static/blog/5.17.0/cover.webp" />
+          </item>
+        </channel>
+      </rss>`;
+
+    const parsedRss = parseLuantiBlogFeed(sampleRssXml);
+    expect(parsedRss).toBeTruthy();
+    expect(parsedRss?.title).toBe('Luanti 5.17.0 – Released!');
+    expect(parsedRss?.url).toBe('https://blog.luanti.org/2026/08/21/5.17.0-released/');
+    expect(parsedRss?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+    expect(parsedRss?.summary).toContain('Luanti 5.17.0 brings early gamepad support');
+    expect(parsedRss?.summary).not.toContain('<p>');
+
+    // 2. Verify JSON Feed parser (`parseLuantiBlogFeed`) for https://blog.luanti.org/feed.json
+    const sampleJsonFeed = JSON.stringify({
+      version: 'https://jsonfeed.org/version/1.1',
+      title: 'Luanti Blog',
+      items: [
+        {
+          id: 'https://blog.luanti.org/2026/10/11/froscon-2026/',
+          url: 'https://blog.luanti.org/2026/10/11/froscon-2026/',
+          title: 'Luanti at FrOSCon 2026',
+          content_html: '<img src="/static/blog/froscon2026/stand.jpg" /><p>Recap of our open-source booth in Sankt Augustin.</p>',
+          date_published: '2026-10-11T10:00:00Z'
+        }
+      ]
+    });
+
+    const parsedJson = parseLuantiBlogFeed(sampleJsonFeed);
+    expect(parsedJson?.title).toBe('Luanti at FrOSCon 2026');
+    expect(parsedJson?.image_url).toBe('https://blog.luanti.org/static/blog/froscon2026/stand.jpg');
+    expect(parsedJson?.summary).toContain('Recap of our open-source booth');
+
+    // 3. Verify Hero Showcase slide ordering:
+    // - Slide #1 by default when no Admin Promotion is active
+    // - Slide #2 right after an active Admin Promotion when one is active
+    const sixGames = Array.from({ length: 6 }, (_, i) =>
+      (pkgService as any).normalizePackage({
+        id: `author/blog_test_game_${i + 1}`,
+        author: 'author',
+        name: `blog_test_game_${i + 1}`,
+        title: `Showcase Game ${i + 1}`,
+        type: 'game',
+        short_desc: `Organic showcase game #${i + 1}`,
+        banner: `https://content.luanti.org/uploads/game_${i + 1}.png`,
+        downloads: 1000 * (i + 1)
+      })
+    );
+    (pkgService as any)._packages.set(sixGames);
+    pkgService.setPromotions([]);
+    pkgService.setLatestBlogPost(parsedRss!);
+
+    const slidesNoPromo = pkgService.heroShowcasePackages();
+    expect(slidesNoPromo.length).toBe(7); // 1 blog slide + 6 organic slides
+    expect(slidesNoPromo[0].id).toContain('promo:blog:');
+    expect(slidesNoPromo[0].title).toBe('Luanti 5.17.0 – Released!');
+    expect(slidesNoPromo[0]._promo?.badge_text).toContain('LUANTI BLOG');
+    expect(slidesNoPromo[0]._promo?.cta_label).toBe('Read Article');
+    expect(slidesNoPromo[0]._promo?.cta_url).toBe('https://blog.luanti.org/2026/08/21/5.17.0-released/');
+
+    // Add an active Admin Promotion -> Admin Promo is Slide #1 (index 0), Blog Post is Slide #2 (index 1)
+    const nowMs = Date.now();
+    pkgService.setPromotions([
+      {
+        id: 'promo-jam',
+        title: 'Game Jam 2026',
+        short_desc: 'Join the jam!',
+        banner_url: '/promo.png',
+        badge_text: 'EVENT',
+        cta_label: 'Join Now',
+        cta_url: '/submit',
+        starts_at: new Date(nowMs - 3600_000).toISOString(),
+        expires_at: new Date(nowMs + 86400_000).toISOString(),
+        priority: 100
+      }
+    ]);
+
+    const slidesWithPromo = pkgService.heroShowcasePackages();
+    expect(slidesWithPromo.length).toBe(8); // 1 admin promo + 1 blog slide + 6 organic slides
+    expect(slidesWithPromo[0].id).toBe('promo:promo-jam');
+    expect(slidesWithPromo[1].id).toContain('promo:blog:');
+    expect(slidesWithPromo[1].title).toBe('Luanti 5.17.0 – Released!');
+
+    // 4. Verify PwaService.checkAndNotifyBlogPost() notifies once and deduplicates via lh_seen_blog_posts_v1
+    localStorage.removeItem('lh_seen_blog_posts_v1');
+    const blogNotifs: any[] = [];
+    const origSendNotif = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      blogNotifs.push(payload);
+      return true;
+    };
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyPromotions.set(true);
+
+      const notifiedFirst = pwaService.checkAndNotifyBlogPost(parsedRss!);
+      expect(notifiedFirst).toBe(true);
+      expect(blogNotifs.length).toBe(1);
+      expect(blogNotifs[0].title).toBe('Luanti Blog · Luanti 5.17.0 – Released!');
+      expect(blogNotifs[0].image).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+      expect(blogNotifs[0].data?.ctaUrl).toBe('https://blog.luanti.org/2026/08/21/5.17.0-released/');
+
+      // Second call for the same article is deduplicated
+      const notifiedSecond = pwaService.checkAndNotifyBlogPost(parsedRss!);
+      expect(notifiedSecond).toBe(false);
+      expect(blogNotifs.length).toBe(1);
+    } finally {
+      pwaService.sendNativeNotification = origSendNotif;
+      localStorage.removeItem('lh_seen_blog_posts_v1');
+      pkgService.setLatestBlogPost(null);
+      pkgService.setPromotions([]);
     }
   });
 });

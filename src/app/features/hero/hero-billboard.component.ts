@@ -110,10 +110,13 @@ import {
                   <div
                     [class]="idx === currentIndex() ? 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-auto opacity-100 translate-y-0 transition-all duration-700 delay-100 ease-out' : 'max-w-2xl lg:max-w-3xl space-y-4 pointer-events-none opacity-0 translate-y-4 transition-all duration-500 ease-out'">
 
-                    <!-- Category & Source Badges (or Promotional Badge Pill) -->
+                    <!-- Category & Source Badges (or Promotional / Luanti Blog Badge Pill) -->
                     @if (slidePkg._promo; as promo) {
                       <div class="flex items-center gap-2 flex-wrap">
-                        <span class="px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-400/40 shadow-[0_0_16px_rgba(245,158,11,0.25)] backdrop-blur-md">
+                        <span
+                          [class]="promo.id.startsWith('blog:')
+                            ? 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-sky-500/20 text-sky-300 border border-sky-400/40 shadow-[0_0_16px_rgba(56,189,248,0.25)] backdrop-blur-md'
+                            : 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-400/40 shadow-[0_0_16px_rgba(245,158,11,0.25)] backdrop-blur-md'">
                           {{ promo.badge_text || ('hero.promoted' | translate) }}
                         </span>
                       </div>

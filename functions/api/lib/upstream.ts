@@ -3577,3 +3577,50 @@ export async function fetchGitReleaseNotesBetweenRefs(
   return payload;
 }
 
+import { parseLuantiBlogFeed, LuantiBlogPost } from '../../../src/app/core/models/package.model';
+export { parseLuantiBlogFeed };
+export type DiscoveredLuantiBlogPost = LuantiBlogPost;
+
+/**
+ * Fetches the latest blog post from `https://blog.luanti.org/feed.rss` (with fallback to `feed.json`),
+ * cached in isolate memory + Cloudflare Edge Cache for 30 minutes (1800s).
+ */
+export async function fetchLatestLuantiBlogPost(): Promise<DiscoveredLuantiBlogPost | null> {
+  const cacheKey = 'https://cache.luantihub.internal/__luanti_blog_latest_v1';
+  const cached = await readEdgeCacheJson<DiscoveredLuantiBlogPost>(cacheKey);
+  if (cached && cached.title && cached.url) {
+    return cached;
+  }
+
+  const endpoints = [
+    'https://blog.luanti.org/feed.rss',
+    'https://blog.luanti.org/feed.json'
+  ];
+
+  for (const feedUrl of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    try {
+      const res = await fetch(feedUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
+          Accept: 'application/rss+xml, application/xml, application/feed+json, application/json, text/xml;q=0.9, */*;q=0.8'
+        }
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const text = await res.text();
+      const post = parseLuantiBlogFeed(text);
+      if (post) {
+        await writeEdgeCacheJson(cacheKey, post, 1800);
+        return post;
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  return null;
+}
+

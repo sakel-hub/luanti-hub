@@ -25,6 +25,16 @@ export interface HeroPromotion {
   created_at?: string;
 }
 
+export interface LuantiBlogPost {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  image_url: string;
+  published_at: string;
+  author?: string;
+}
+
 export interface LuantiPackage {
   id: string; // "author/name"
   author: string;
@@ -319,5 +329,187 @@ export interface DownloadAnalyticsData {
   views_web: number[];
   package_breakdown?: AuthorPackageBreakdownItem[];
   summary: AnalyticsSummary;
+}
+
+function decodeHtmlAndXmlEntities(input: string): string {
+  if (!input) return '';
+  const named: Record<string, string> = {
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    quot: '"',
+    apos: "'",
+    nbsp: ' ',
+    ndash: '–',
+    mdash: '—',
+    hellip: '…',
+    lsquo: '‘',
+    rsquo: '’',
+    ldquo: '“',
+    rdquo: '”'
+  };
+  let out = input;
+  for (let pass = 0; pass < 2; pass++) {
+    const next = out.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|([a-zA-Z0-9]+));/g, (full, dec, hex, name) => {
+      if (dec) {
+        const code = Number.parseInt(dec, 10);
+        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : full;
+      }
+      if (hex) {
+        const code = Number.parseInt(hex, 16);
+        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : full;
+      }
+      if (name && name in named) {
+        return named[name];
+      }
+      return full;
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+function resolveBlogAssetUrl(rawUrl?: string | null): string | null {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return null;
+  if (/^(javascript|data|vbscript):/i.test(trimmed)) return null;
+  try {
+    const resolved = new URL(trimmed, 'https://blog.luanti.org');
+    if (resolved.protocol === 'https:' || resolved.protocol === 'http:') {
+      return resolved.toString();
+    }
+  } catch {
+    // ignore malformed URL
+  }
+  return null;
+}
+
+function extractCleanBlogSummary(rawHtmlOrText: string, maxLength = 220): string {
+  if (!rawHtmlOrText) return '';
+  const unescapedHtml = decodeHtmlAndXmlEntities(rawHtmlOrText);
+  const withoutBlocks = unescapedHtml
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<(script|style|figure|figcaption|pre|code|svg|table)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<h[1-6][^>]*>[\s\S]*?<\/h[1-6]>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  const cleanText = decodeHtmlAndXmlEntities(withoutBlocks)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleanText.length <= maxLength) {
+    return cleanText;
+  }
+  const sliced = cleanText.slice(0, maxLength);
+  const lastSpace = sliced.lastIndexOf(' ');
+  return `${(lastSpace > maxLength * 0.6 ? sliced.slice(0, lastSpace) : sliced).replace(/[.,;:!?-]+$/, '')}…`;
+}
+
+function extractFirstImageFromHtml(rawHtml: string): string | null {
+  if (!rawHtml) return null;
+  const unescaped = decodeHtmlAndXmlEntities(rawHtml);
+  const imgMatch = unescaped.match(/<img\b[^>]*?\bsrc=["']([^"']+)["'][^>]*>/i);
+  return imgMatch?.[1] ? resolveBlogAssetUrl(imgMatch[1]) : null;
+}
+
+/**
+ * Parses either the official Luanti Blog RSS 2.0 feed (`https://blog.luanti.org/feed.rss`)
+ * or JSON Feed (`https://blog.luanti.org/feed.json`) and returns the latest article metadata.
+ */
+export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) return null;
+
+  // 1. JSON Feed (`feed.json`) format
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const items = Array.isArray(parsed?.items) ? parsed.items : [];
+      const first = items[0];
+      if (!first) return null;
+      const url = resolveBlogAssetUrl(first.url || first.external_url || first.id);
+      const title = decodeHtmlAndXmlEntities(String(first.title || '').trim());
+      if (!url || !title) return null;
+
+      const rawHtml = String(first.content_html || first.summary || first.content_text || '');
+      const summary =
+        extractCleanBlogSummary(first.summary || first.content_text || rawHtml) ||
+        'Read the latest official announcement and development update on the Luanti Blog.';
+      const imageUrl =
+        resolveBlogAssetUrl(first.image || first.banner_image) ||
+        extractFirstImageFromHtml(rawHtml) ||
+        '/promo.png';
+      const pubTime = Date.parse(String(first.date_published || first.date_modified || ''));
+      const publishedAt = Number.isFinite(pubTime) && pubTime > 0
+        ? new Date(pubTime).toISOString()
+        : new Date().toISOString();
+      const authorName =
+        typeof first.author?.name === 'string'
+          ? first.author.name.trim()
+          : Array.isArray(first.authors) && typeof first.authors[0]?.name === 'string'
+            ? first.authors[0].name.trim()
+            : undefined;
+
+      return {
+        id: String(first.id || url).trim(),
+        title,
+        summary,
+        url,
+        image_url: imageUrl,
+        published_at: publishedAt,
+        ...(authorName ? { author: authorName } : {})
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // 2. RSS 2.0 XML (`feed.rss`) format
+  const itemMatch = trimmed.match(/<item\b[^>]*>([\s\S]*?)<\/item>/i);
+  if (!itemMatch?.[1]) return null;
+  const itemXml = itemMatch[1];
+
+  const extractTag = (tag: string): string => {
+    const m = itemXml.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+    if (!m?.[1]) return '';
+    return m[1].replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i, '$1').trim();
+  };
+
+  const rawTitle = extractTag('title');
+  const rawLink = extractTag('link') || extractTag('guid');
+  const rawGuid = extractTag('guid') || rawLink;
+  const rawDesc = extractTag('description') || extractTag('content:encoded');
+  const rawPubDate = extractTag('pubDate') || extractTag('dc:date');
+  const rawAuthor = extractTag('dc:creator') || extractTag('author');
+
+  const title = decodeHtmlAndXmlEntities(rawTitle).trim();
+  const url = resolveBlogAssetUrl(decodeHtmlAndXmlEntities(rawLink));
+  if (!title || !url) return null;
+
+  const enclosureMatch =
+    itemXml.match(/<enclosure\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i) ||
+    itemXml.match(/<media:content\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i);
+  const enclosureUrl = enclosureMatch?.[1] ? resolveBlogAssetUrl(decodeHtmlAndXmlEntities(enclosureMatch[1])) : null;
+  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/promo.png';
+
+  const summary =
+    extractCleanBlogSummary(rawDesc) ||
+    'Read the latest official announcement and development update on the Luanti Blog.';
+
+  const pubTime = Date.parse(rawPubDate);
+  const publishedAt = Number.isFinite(pubTime) && pubTime > 0
+    ? new Date(pubTime).toISOString()
+    : new Date().toISOString();
+
+  const cleanAuthor = decodeHtmlAndXmlEntities(rawAuthor).trim();
+
+  return {
+    id: decodeHtmlAndXmlEntities(rawGuid || url).trim(),
+    title,
+    summary,
+    url,
+    image_url: imageUrl,
+    published_at: publishedAt,
+    ...(cleanAuthor ? { author: cleanAuthor } : {})
+  };
 }
 

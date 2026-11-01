@@ -2,7 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
-import { HeroPromotion } from '../models/package.model';
+import { HeroPromotion, LuantiBlogPost } from '../models/package.model';
 
 export type NotificationVariant =
   | 'resolved'
@@ -35,6 +35,7 @@ const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
 const SEEN_PROMOTIONS_KEY = 'lh_seen_promotions_v1';
+const SEEN_BLOG_POSTS_KEY = 'lh_seen_blog_posts_v1';
 const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
 const PACKAGE_UPDATE_COOLDOWN_MS = 12 * 3600 * 1000;
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
@@ -894,6 +895,62 @@ export class PwaService {
     }
 
     return newlyActive.length;
+  }
+
+  /**
+   * Notifies users once when a new article is published on `https://blog.luanti.org/`
+   * (`lh_seen_blog_posts_v1`) when `notifyPromotions()` is enabled.
+   */
+  checkAndNotifyBlogPost(
+    post: LuantiBlogPost | null | undefined,
+    options?: { forceNotify?: boolean }
+  ): boolean {
+    if (!post || !post.title || !post.url) return false;
+    if (typeof localStorage === 'undefined') return false;
+    if (!this.settingsService.notifyPromotions()) return false;
+
+    const postId = String(post.id || post.url).trim();
+    if (!postId) return false;
+
+    let seenIds: string[] = [];
+    try {
+      const rawSeen = localStorage.getItem(SEEN_BLOG_POSTS_KEY);
+      if (rawSeen) {
+        const parsed = JSON.parse(rawSeen);
+        if (Array.isArray(parsed)) {
+          seenIds = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      }
+    } catch {
+      seenIds = [];
+    }
+
+    const seenSet = new Set(seenIds);
+    if (seenSet.has(postId) && !options?.forceNotify) {
+      return false;
+    }
+
+    seenSet.add(postId);
+    try {
+      localStorage.setItem(SEEN_BLOG_POSTS_KEY, JSON.stringify(Array.from(seenSet).slice(-100)));
+    } catch {
+      // ignore storage errors
+    }
+
+    this.sendNativeNotification({
+      title: `Luanti Blog · ${post.title}`,
+      body: post.summary || 'New official article published on blog.luanti.org.',
+      icon: post.image_url || '/promo.png',
+      image: post.image_url || '/promo.png',
+      tag: `lh-blog-${postId}`,
+      category: 'promotion',
+      variant: 'promotion',
+      data: {
+        ctaUrl: post.url
+      }
+    });
+
+    return true;
   }
 
   /**

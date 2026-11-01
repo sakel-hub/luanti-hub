@@ -4,6 +4,7 @@ import {
   fetchGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
   fetchAccurateGitZipSize,
+  fetchLatestLuantiBlogPost,
   parseJsonArray,
   normalizeRepoKey,
   readEdgeCacheJson,
@@ -114,6 +115,7 @@ function buildTop10FromCatalog(
 const ALLOWED_IMAGE_PROXY_HOSTS = new Set([
   'content.luanti.org',
   'contentdb.milcho.org',
+  'blog.luanti.org',
   'raw.githubusercontent.com',
   'avatars.githubusercontent.com',
   'codeberg.org',
@@ -190,7 +192,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v4';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -246,6 +248,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const tagsPromise = isBootBundle
     ? fetchUpstreamJsonCached<any[]>('/tags/', 3600).catch(() => null)
     : Promise.resolve<any[] | null>(null);
+
+  const blogPostPromise = isBootBundle
+    ? fetchLatestLuantiBlogPost().catch(() => null)
+    : Promise.resolve(null);
 
   // 2. Fetch Decentralized Packages, Review Star Averages, AND Kill-Switch Blacklist from Cloudflare D1
   let d1Promise = Promise.resolve<any[]>([]);
@@ -366,7 +372,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  const [upstreamList, scoresList, d1List, blockedIds, d1Ratings, lhDownloadsMap, rawTags, velocity, activePromotions] = await Promise.all([
+  const [
+    upstreamList,
+    scoresList,
+    d1List,
+    blockedIds,
+    d1Ratings,
+    lhDownloadsMap,
+    rawTags,
+    velocity,
+    activePromotions,
+    latestBlogPost
+  ] = await Promise.all([
     upstreamPromise,
     scoresPromise,
     d1Promise,
@@ -375,7 +392,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     lhDownloadsMapPromise,
     tagsPromise,
     velocityPromise,
-    promotionsPromise
+    promotionsPromise,
+    blogPostPromise
   ]);
 
   // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
@@ -744,7 +762,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       tags,
       top10Week,
       top10Today,
-      promotions: activePromotions
+      promotions: activePromotions,
+      latestBlogPost: latestBlogPost || null
     };
 
     if (!noCache && !q && types.length === 0 && !author) {

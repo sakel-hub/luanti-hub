@@ -15,7 +15,9 @@ import {
   DownloadAnalyticsData,
   AuthorPackageBreakdownItem,
   ReleaseNotesPayload,
-  HeroPromotion
+  HeroPromotion,
+  LuantiBlogPost,
+  parseLuantiBlogFeed
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
@@ -86,6 +88,7 @@ export class PackageService {
   private readonly _activeVideoTheater = signal<{ pkg: LuantiPackage; startSeconds: number } | null>(null);
   private readonly _promotions = signal<HeroPromotion[]>([]);
   private readonly _adminPromotions = signal<HeroPromotion[]>([]);
+  private readonly _latestBlogPost = signal<LuantiBlogPost | null>(null);
   private readonly _promoClockTick = signal<number>(Date.now());
 
   private searchDebounceTimer: any = null;
@@ -96,6 +99,7 @@ export class PackageService {
   private lastCatalogSyncAt = 0;
   private isBackgroundRefreshing = false;
   private bulkScoresInFlight: Promise<void> | null = null;
+  private blogFeedInFlight: Promise<void> | null = null;
   private initialUrlSynced = false;
   private wasOnAnalyticsRoute = false;
   private pendingRoutePackage: { author: string; name: string } | null = null;
@@ -148,6 +152,7 @@ export class PackageService {
   readonly activeVideoTheater = this._activeVideoTheater.asReadonly();
   readonly promotions = this._promotions.asReadonly();
   readonly adminPromotions = this._adminPromotions.asReadonly();
+  readonly latestBlogPost = this._latestBlogPost.asReadonly();
 
   readonly activePromotions = computed<HeroPromotion[]>(() => {
     const nowMs = this._promoClockTick();
@@ -176,11 +181,16 @@ export class PackageService {
     );
   });
 
-  // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh, with Active Promotions pinned at Slide #1)
+  // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh, with Active Promotions & Latest Luanti Blog Article pinned first)
   readonly heroShowcasePackages = computed<LuantiPackage[]>(() => {
     const promoSlides = this.activePromotions().map(promo => this.toPromotionSlidePackage(promo));
+    const blogPost = this._latestBlogPost();
+    const blogSlides = blogPost && blogPost.title && blogPost.url
+      ? [this.toBlogSlidePackage(blogPost)]
+      : [];
+    const pinnedSlides = [...promoSlides, ...blogSlides];
     const list = this._packages();
-    if (list.length === 0) return promoSlides;
+    if (list.length === 0) return pinnedSlides;
 
     const todayRanks = new Map<string, number>();
     for (const [idx, p] of this._serverTop10Today().entries()) {
@@ -276,8 +286,43 @@ export class PackageService {
       organicSlides = [...showcase.slice(shift), ...showcase.slice(0, shift)];
     }
 
-    return [...promoSlides, ...organicSlides];
+    return [...pinnedSlides, ...organicSlides];
   });
+
+  private toBlogSlidePackage(post: LuantiBlogPost): LuantiPackage {
+    let formattedDate = '';
+    if (post.published_at) {
+      const parsedMs = Date.parse(String(post.published_at));
+      if (Number.isFinite(parsedMs) && parsedMs > 0) {
+        try {
+          formattedDate = new Date(parsedMs).toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
+          });
+        } catch {
+          formattedDate = '';
+        }
+      }
+    }
+    const badgeText = formattedDate ? `LUANTI BLOG · ${formattedDate.toUpperCase()}` : 'LUANTI BLOG';
+    const syntheticPromo: HeroPromotion = {
+      id: `blog:${post.id || post.url}`,
+      title: post.title,
+      short_desc: post.summary || 'Read the latest official announcement and development update on the Luanti Blog.',
+      banner_url: post.image_url || '/promo.png',
+      cta_label: 'Read Article',
+      cta_url: post.url,
+      secondary_cta_label: 'All Blog Posts',
+      secondary_cta_url: 'https://blog.luanti.org/',
+      badge_text: badgeText,
+      starts_at: post.published_at || new Date(0).toISOString(),
+      expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+      created_by: post.author || 'Luanti Blog'
+    };
+    return this.toPromotionSlidePackage(syntheticPromo);
+  }
 
   private toPromotionSlidePackage(promo: HeroPromotion): LuantiPackage {
     return {
@@ -306,6 +351,10 @@ export class PackageService {
   setPromotions(promotions: HeroPromotion[]): void {
     this._promotions.set(Array.isArray(promotions) ? promotions : []);
     this.refreshPromoClock();
+  }
+
+  setLatestBlogPost(post: LuantiBlogPost | null): void {
+    this._latestBlogPost.set(post && post.title && post.url ? post : null);
   }
 
   // High-performance O(1) per-package filtered & sorted list
@@ -1516,6 +1565,7 @@ export class PackageService {
       top10Week?: any[];
       top10Today?: any[];
       promotions?: HeroPromotion[];
+      latestBlogPost?: LuantiBlogPost | null;
     }
   ): void {
     this.lastCatalogSyncAt = Date.now();
@@ -1523,6 +1573,19 @@ export class PackageService {
       this._promotions.set(payload.promotions);
       this.refreshPromoClock();
       this.pwaService.checkAndNotifyPromotions(payload.promotions);
+    }
+    if (payload.latestBlogPost !== undefined) {
+      const validBlog =
+        payload.latestBlogPost && payload.latestBlogPost.title && payload.latestBlogPost.url
+          ? payload.latestBlogPost
+          : null;
+      this._latestBlogPost.set(validBlog);
+      if (validBlog) {
+        this.pwaService.checkAndNotifyBlogPost(validBlog);
+      }
+    }
+    if (!this._latestBlogPost()) {
+      this.ensureLatestBlogPostLoaded();
     }
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
@@ -1604,6 +1667,71 @@ export class PackageService {
 
     // Proactively hydrate visible Hero, Top 10, filtered grid, and swimlane packages so downloads, licenses & tags appear immediately
     this.queueInitialVisibleHydration();
+  }
+
+  /**
+   * Client-side fallback for fetching the latest Luanti Blog article from `https://blog.luanti.org/feed.rss`
+   * (or `/blog-api/feed.rss` in local dev) when `/api/packages/?boot=1` is served from an older cache
+   * or proxied to an endpoint that did not include `latestBlogPost`.
+   */
+  private ensureLatestBlogPostLoaded(forceInTest = false): void {
+    if (this._latestBlogPost() || this.blogFeedInFlight) return;
+    const isUnitTestEnv =
+      typeof (globalThis as any).describe === 'function' &&
+      typeof (globalThis as any).it === 'function';
+    if (
+      (!forceInTest && isUnitTestEnv) ||
+      typeof window === 'undefined' ||
+      typeof fetch !== 'function'
+    ) {
+      return;
+    }
+
+    this.blogFeedInFlight = (async () => {
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
+      const feedUrls = [
+        ...(isLocalhost ? ['/blog-api/feed.rss', '/blog-api/feed.json'] : []),
+        'https://blog.luanti.org/feed.rss',
+        'https://blog.luanti.org/feed.json',
+        ...(isLocalhost
+          ? [
+              'https://api.allorigins.win/raw?url=https%3A%2F%2Fblog.luanti.org%2Ffeed.rss',
+              'https://api.codetabs.com/v1/proxy?quest=https://blog.luanti.org/feed.rss'
+            ]
+          : [])
+      ];
+      try {
+        for (const url of feedUrls) {
+          try {
+            const res = await fetch(url, {
+              headers: {
+                Accept: 'application/rss+xml, application/xml, application/feed+json, application/json, text/xml;q=0.9, */*;q=0.8'
+              }
+            });
+            if (!res || !res.ok) continue;
+            const text = await res.text();
+            if (!text || text.trimStart().startsWith('<!doctype html') || text.trimStart().startsWith('<!DOCTYPE html')) {
+              continue;
+            }
+            const post = parseLuantiBlogFeed(text);
+            if (post && post.title && post.url) {
+              if (!this._latestBlogPost()) {
+                this._latestBlogPost.set(post);
+                this.pwaService.checkAndNotifyBlogPost(post);
+                this.scheduleBootCachePersist();
+              }
+              return;
+            }
+          } catch {
+            // Try next feed URL
+          }
+        }
+      } finally {
+        this.blogFeedInFlight = null;
+      }
+    })();
   }
 
   /**
@@ -1742,6 +1870,7 @@ export class PackageService {
     top10Week?: any[];
     top10Today?: any[];
     promotions?: HeroPromotion[];
+    latestBlogPost?: LuantiBlogPost | null;
   } | null {
     if (Array.isArray(data)) {
       return { packages: data };
@@ -1763,7 +1892,8 @@ export class PackageService {
         tags: this._availableTags(),
         top10Week: this.top10WeekPackages(),
         top10Today: this.top10TodayPackages(),
-        promotions: this._promotions()
+        promotions: this._promotions(),
+        latestBlogPost: this._latestBlogPost()
       };
       let existingTs = Date.now();
       try {
