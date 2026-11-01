@@ -291,6 +291,7 @@ export class PwaService {
   private syncBroadcastChannel: BroadcastChannel | null = null;
   private latestDetectedUpdateVersion: string | null = null;
   private bootManifestSignature: string | null = null;
+  private readonly localAssetDataUrlCache = new Map<string, string>();
 
   constructor() {
     this.initSwUpdate();
@@ -300,6 +301,7 @@ export class PwaService {
     this.initNetworkStatusWatcher();
     this.initBroadcastChannelSyncWatcher();
     this.initBackgroundAndPeriodicSync();
+    this.initLocalNotificationIconsCache();
   }
 
   private initNetworkStatusWatcher(): void {
@@ -937,11 +939,13 @@ export class PwaService {
       // ignore storage errors
     }
 
+    const validImageUrl =
+      post.image_url && post.image_url !== '/promo.png' ? post.image_url : undefined;
+
     this.sendNativeNotification({
       title: `Luanti Blog · ${post.title}`,
       body: post.summary || 'New official article published on blog.luanti.org.',
-      icon: post.image_url || '/promo.png',
-      image: post.image_url || '/promo.png',
+      ...(validImageUrl ? { icon: validImageUrl, image: validImageUrl } : {}),
       tag: `lh-blog-${postId}`,
       category: 'promotion',
       variant: 'promotion',
@@ -1375,6 +1379,38 @@ export class PwaService {
     return updatedPackages.length;
   }
 
+  /**
+   * Pre-warms the in-memory `data:image/png` cache for all semantic notification icons (`/icons/notif-*.png`)
+   * and the app badge (`/icons/icon-72x72.png`) shortly after startup so that even when an `app_update`
+   * occurs (and the server's `ngsw.json` hash table rotates) or the device goes offline, native
+   * notifications always have decoded PNG Data URLs ready in memory.
+   */
+  private initLocalNotificationIconsCache(): void {
+    const isUnitTestEnv =
+      typeof (globalThis as any).describe === 'function' &&
+      typeof (globalThis as any).it === 'function';
+    if (isUnitTestEnv || typeof window === 'undefined' || typeof fetch !== 'function') {
+      return;
+    }
+
+    setTimeout(() => {
+      const origin = window.location?.origin || '';
+      const iconPaths = [
+        '/icons/icon-72x72.png',
+        '/icons/notif-app-update.png',
+        '/icons/notif-new-package.png',
+        '/icons/notif-package-update.png',
+        '/icons/notif-moderation.png',
+        '/icons/notif-resolved.png',
+        '/icons/notif-dismissed.png',
+        '/icons/notif-admin-alert.png'
+      ];
+      for (const path of iconPaths) {
+        this.resolveLocalAssetAsDataUrl(path, origin).catch(() => {});
+      }
+    }, 1500);
+  }
+
   private blobToDataUrl(blob: Blob): Promise<string | null> {
     if (typeof FileReader === 'undefined') {
       return Promise.resolve(null);
@@ -1394,7 +1430,11 @@ export class PwaService {
     });
   }
 
-  private async fetchImageAsDataUrl(url: string, timeoutMs = 1500): Promise<string | null> {
+  private async fetchImageAsDataUrl(
+    url: string,
+    timeoutMs = 2500,
+    cacheMode: RequestCache = 'default'
+  ): Promise<string | null> {
     if (typeof fetch !== 'function') return null;
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -1402,7 +1442,7 @@ export class PwaService {
       const res = await fetch(url, {
         mode: 'cors',
         credentials: 'omit',
-        cache: 'reload',
+        cache: cacheMode,
         signal: controller?.signal
       });
       if (!res || !res.ok) return null;
@@ -1422,6 +1462,71 @@ export class PwaService {
   }
 
   /**
+   * Resolves a local static asset (such as `/icons/notif-*.png`, `/icons/icon-72x72.png`, or `/banners/...`)
+   * into an in-memory cached `data:image/png` Data URL using `ngsw-bypass=true`.
+   */
+  private async resolveLocalAssetAsDataUrl(
+    assetPath: string,
+    origin: string
+  ): Promise<string | null> {
+    const cleanPath = (assetPath.startsWith('/') ? assetPath : `/${assetPath}`).split('?')[0];
+    if (!cleanPath || cleanPath === '/promo.png') return null;
+
+    const cached = this.localAssetDataUrlCache.get(cleanPath);
+    if (cached) return cached;
+
+    const baseUrl = origin ? `${origin}${cleanPath}` : cleanPath;
+    const dataUrl =
+      (await this.fetchImageAsDataUrl(`${baseUrl}?ngsw-bypass=true`, 2000, 'default')) ||
+      (await this.fetchImageAsDataUrl(baseUrl, 2000, 'default'));
+    if (!dataUrl) return null;
+
+    const pngDataUrl = await this.ensurePngDataUrl(dataUrl);
+    this.localAssetDataUrlCache.set(cleanPath, pngDataUrl);
+    return pngDataUrl;
+  }
+
+  private isCanvas2dSupported(): boolean {
+    if (typeof document === 'undefined') return false;
+    if (typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '')) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Ensures a `data:image/...` URL is encoded as `data:image/png` so native OS notification bridges
+   * (such as macOS `UNNotificationAttachment`, which only accepts PNG/JPEG/GIF and rejects WebP)
+   * never drop the image attachment.
+   */
+  private async ensurePngDataUrl(dataUrl: string): Promise<string> {
+    if (!dataUrl || dataUrl.startsWith('data:image/png') || !this.isCanvas2dSupported()) {
+      return dataUrl;
+    }
+    try {
+      const img = await this.loadImageElement(dataUrl, 1500);
+      if (!img) return dataUrl;
+      const rawW = img.naturalWidth || 512;
+      const rawH = img.naturalHeight || 512;
+      const maxDim = 1280;
+      const scale = Math.min(1, maxDim / Math.max(rawW, rawH));
+      const width = Math.max(1, Math.round(rawW * scale));
+      const height = Math.max(1, Math.round(rawH * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
+      if (!ctx) return dataUrl;
+      ctx.drawImage(img, 0, 0, width, height);
+      const out = canvas.toDataURL('image/png');
+      return out && out.startsWith('data:image/png') ? out : dataUrl;
+    } catch {
+      return dataUrl;
+    }
+  }
+
+  /**
    * Resolves an external notification icon/thumbnail into a CORS-safe `data:image/...` URL
    * so Chromium's `NotificationImageLoader` on macOS, Android, Windows, and Linux never
    * drops the notification attachment due to missing `Access-Control-Allow-Origin` headers
@@ -1437,22 +1542,39 @@ export class PwaService {
         return null;
       }
       const host = parsed.hostname.toLowerCase();
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
+
+      // On localhost dev server, blog.luanti.org is proxied directly via /blog-api
+      if (isLocalhost && host === 'blog.luanti.org' && origin) {
+        const localBlogProxyUrl = `${origin}/blog-api${parsed.pathname}${parsed.search}`;
+        const localDataUrl = await this.fetchImageAsDataUrl(localBlogProxyUrl, 2500, 'default');
+        if (localDataUrl) return localDataUrl;
+      }
+
       const supportsDirectCors =
-        host === 'raw.githubusercontent.com' || host === 'avatars.githubusercontent.com';
+        host === 'raw.githubusercontent.com' ||
+        host === 'avatars.githubusercontent.com' ||
+        host === 'blog.luanti.org';
 
       if (supportsDirectCors) {
-        const directDataUrl = await this.fetchImageAsDataUrl(parsed.toString());
+        const directDataUrl =
+          (await this.fetchImageAsDataUrl(parsed.toString(), 2500, 'default')) ||
+          (await this.fetchImageAsDataUrl(parsed.toString(), 2500, 'reload'));
         if (directDataUrl) return directDataUrl;
       }
 
       if (origin) {
-        const proxyUrl = `${origin}/api/packages?proxy_image=${encodeURIComponent(parsed.toString())}`;
-        const proxiedDataUrl = await this.fetchImageAsDataUrl(proxyUrl);
+        const proxyUrl = `${origin}/api/packages?proxy_image=${encodeURIComponent(parsed.toString())}&ngsw-bypass=true`;
+        const proxiedDataUrl = await this.fetchImageAsDataUrl(proxyUrl, 2500, 'default');
         if (proxiedDataUrl) return proxiedDataUrl;
       }
 
       if (!supportsDirectCors) {
-        const fallbackDirectDataUrl = await this.fetchImageAsDataUrl(parsed.toString());
+        const fallbackDirectDataUrl =
+          (await this.fetchImageAsDataUrl(parsed.toString(), 2500, 'default')) ||
+          (await this.fetchImageAsDataUrl(parsed.toString(), 2500, 'reload'));
         if (fallbackDirectDataUrl) return fallbackDirectDataUrl;
       }
 
@@ -1498,7 +1620,7 @@ export class PwaService {
     }
   }
 
-  private loadImageElement(src: string, timeoutMs = 450): Promise<HTMLImageElement | null> {
+  private loadImageElement(src: string, timeoutMs = 1500): Promise<HTMLImageElement | null> {
     if (typeof Image === 'undefined') {
       return Promise.resolve(null);
     }
@@ -1547,7 +1669,7 @@ export class PwaService {
     thumbnailDataUrl: string,
     origin: string
   ): Promise<string> {
-    if (typeof document === 'undefined') return thumbnailDataUrl;
+    if (!this.isCanvas2dSupported()) return thumbnailDataUrl;
     try {
       const canvas = document.createElement('canvas');
       canvas.width = 192;
@@ -1555,9 +1677,14 @@ export class PwaService {
       const ctx = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
       if (!ctx) return thumbnailDataUrl;
 
+      const badgeSrc =
+        this.localAssetDataUrlCache.get('/icons/icon-72x72.png') ||
+        (await this.resolveLocalAssetAsDataUrl('/icons/icon-72x72.png', origin)) ||
+        `${origin}/icons/icon-72x72.png`;
+
       const [thumbImg, badgeImg] = await Promise.all([
-        this.loadImageElement(thumbnailDataUrl, 450),
-        this.loadImageElement(`${origin}/icons/icon-72x72.png`, 450)
+        this.loadImageElement(thumbnailDataUrl, 1500),
+        this.loadImageElement(badgeSrc, 1500)
       ]);
       if (!thumbImg) return thumbnailDataUrl;
 
@@ -1647,12 +1774,17 @@ export class PwaService {
 
     const origin = window.location?.origin || '';
     const variantIconPath = this.getNotificationVariantIconPath(payload);
-    const defaultAppIcon = `${origin}${variantIconPath}`;
-    const defaultAppBadge = `${origin}/icons/icon-72x72.png`;
+    const [variantIconDataUrl, badgeIconDataUrl] = await Promise.all([
+      this.resolveLocalAssetAsDataUrl(variantIconPath, origin),
+      this.resolveLocalAssetAsDataUrl('/icons/icon-72x72.png', origin)
+    ]);
+
+    const defaultAppIcon = variantIconDataUrl || `${origin}${variantIconPath}`;
+    const defaultAppBadge = badgeIconDataUrl || `${origin}/icons/icon-72x72.png`;
     const rawCandidate = (payload.icon || payload.image || '').trim();
 
     let resolvedIcon = defaultAppIcon;
-    let resolvedImage: string | undefined;
+    let resolvedImage: string | undefined = variantIconDataUrl || undefined;
 
     if (
       rawCandidate &&
@@ -1661,17 +1793,29 @@ export class PwaService {
       !rawCandidate.toLowerCase().endsWith('.svg')
     ) {
       if (rawCandidate.startsWith('data:image/')) {
-        resolvedIcon = await this.compositeThumbnailWithPwaBadge(rawCandidate, origin);
-        resolvedImage = rawCandidate;
-      } else if (rawCandidate.startsWith('/')) {
-        resolvedIcon = `${origin}${rawCandidate}`;
-      } else if (origin && rawCandidate.startsWith(origin)) {
-        resolvedIcon = rawCandidate;
+        const pngDataUrl = await this.ensurePngDataUrl(rawCandidate);
+        resolvedIcon = await this.compositeThumbnailWithPwaBadge(pngDataUrl, origin);
+        resolvedImage = pngDataUrl;
+      } else if (rawCandidate.startsWith('/') || (origin && rawCandidate.startsWith(origin))) {
+        const localPath = rawCandidate.startsWith('/')
+          ? rawCandidate
+          : rawCandidate.slice(origin.length);
+        const localDataUrl = await this.resolveLocalAssetAsDataUrl(localPath, origin);
+        if (localDataUrl) {
+          if (localPath.startsWith('/icons/')) {
+            resolvedIcon = localDataUrl;
+            resolvedImage = localDataUrl;
+          } else {
+            resolvedIcon = await this.compositeThumbnailWithPwaBadge(localDataUrl, origin);
+            resolvedImage = localDataUrl;
+          }
+        }
       } else if (/^https?:\/\//i.test(rawCandidate)) {
         const dataUrl = await this.resolveCorsSafeNotificationImage(rawCandidate, origin);
         if (dataUrl) {
-          resolvedIcon = await this.compositeThumbnailWithPwaBadge(dataUrl, origin);
-          resolvedImage = dataUrl;
+          const pngDataUrl = await this.ensurePngDataUrl(dataUrl);
+          resolvedIcon = await this.compositeThumbnailWithPwaBadge(pngDataUrl, origin);
+          resolvedImage = pngDataUrl;
         }
       }
     }

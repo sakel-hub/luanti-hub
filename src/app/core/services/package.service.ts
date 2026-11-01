@@ -311,7 +311,7 @@ export class PackageService {
       id: `blog:${post.id || post.url}`,
       title: post.title,
       short_desc: post.summary || 'Read the latest official announcement and development update on the Luanti Blog.',
-      banner_url: post.image_url || '/promo.png',
+      banner_url: post.image_url && post.image_url !== '/promo.png' ? post.image_url : '/banners/luanti-5-18-0.png',
       cta_label: 'Read Article',
       cta_url: post.url,
       secondary_cta_label: 'All Blog Posts',

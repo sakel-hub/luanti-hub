@@ -5044,5 +5044,114 @@ supported_games = minetest_game, voxelibre
       pkgService.setLatestBlogPost(null);
       pkgService.setPromotions([]);
     }
+
+    // 5. Verify sendNativeNotification resolves icons as data:image/png Data URLs across app_update, blog post, and broken/missing paths
+    const swNotifCalls: Array<{ title: string; options?: NotificationOptions & { image?: string } }> = [];
+    const origNotification = (window as any).Notification;
+    const origSwDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+    const origFetch = globalThis.fetch;
+
+    class MockNotif {
+      static permission: NotificationPermission = 'granted';
+      onclick: (() => void) | null = null;
+      constructor(public title: string, public options?: NotificationOptions) {
+        swNotifCalls.push({ title, options });
+      }
+      close(): void {}
+    }
+    (window as any).Notification = MockNotif;
+
+    const onePixelPngBytes = new Uint8Array([
+      137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+      0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0,
+      0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63,
+      0, 5, 254, 2, 254, 167, 53, 129, 132, 0, 0, 0, 0, 73, 69,
+      78, 68, 174, 66, 96, 130
+    ]);
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/promo.png')) {
+        return new Response('Not Found', { status: 404 });
+      }
+      if (
+        url.includes('/icons/notif-') ||
+        url.includes('/icons/icon-72x72.png') ||
+        url.includes('blog.luanti.org/static/') ||
+        url.includes('/banners/luanti-5-18-0.png')
+      ) {
+        return new Response(onePixelPngBytes, {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
+      }
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        getRegistration: async () => ({
+          active: { state: 'activated' },
+          showNotification: async (title: string, options?: NotificationOptions) => {
+            swNotifCalls.push({ title, options });
+          }
+        })
+      }
+    });
+
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyAppUpdates.set(true);
+      settingsService.notifyPromotions.set(true);
+      (pwaService as any).localAssetDataUrlCache.clear();
+
+      // A: App Update notification resolves /icons/notif-app-update.png into a data:image/png Data URL for both icon and image
+      const appUpdateSent = await pwaService.sendNativeNotification({
+        title: 'LuantiHub Update Available',
+        body: 'Click to reload.',
+        tag: 'lh-test-app-update-icon-dataurl',
+        category: 'app_update',
+        variant: 'app_update'
+      });
+      expect(appUpdateSent).toBe(true);
+      expect(swNotifCalls[0].options?.icon?.startsWith('data:image/png')).toBe(true);
+      expect(swNotifCalls[0].options?.image?.startsWith('data:image/png')).toBe(true);
+      expect(swNotifCalls[0].options?.badge?.startsWith('data:image/png')).toBe(true);
+
+      // B: Blog post notification with external blog.luanti.org image resolves to data:image/png
+      const blogSent = await pwaService.sendNativeNotification({
+        title: 'Luanti Blog · Security Incident Update',
+        body: 'Official blog post',
+        icon: 'https://blog.luanti.org/static/blog/2026_cdb_incident/cover.webp',
+        image: 'https://blog.luanti.org/static/blog/2026_cdb_incident/cover.webp',
+        tag: 'lh-test-blog-icon-dataurl',
+        category: 'promotion',
+        variant: 'promotion'
+      });
+      expect(blogSent).toBe(true);
+      expect(swNotifCalls[1].options?.icon?.startsWith('data:image/png')).toBe(true);
+      expect(swNotifCalls[1].options?.image?.startsWith('data:image/png')).toBe(true);
+
+      // C: Promotion with broken /promo.png path falls back to /icons/notif-new-package.png Data URL instead of 404 URL
+      const fallbackPromoSent = await pwaService.sendNativeNotification({
+        title: 'PROMOTED · Event',
+        body: 'Event details',
+        icon: '/promo.png',
+        image: '/promo.png',
+        tag: 'lh-test-promo-broken-fallback',
+        category: 'promotion',
+        variant: 'promotion'
+      });
+      expect(fallbackPromoSent).toBe(true);
+      expect(swNotifCalls[2].options?.icon?.startsWith('data:image/png')).toBe(true);
+      expect(swNotifCalls[2].options?.icon).not.toContain('/promo.png');
+    } finally {
+      globalThis.fetch = origFetch;
+      (window as any).Notification = origNotification;
+      if (origSwDescriptor) {
+        Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
+      }
+    }
   });
 });

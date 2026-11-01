@@ -437,7 +437,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
       const imageUrl =
         resolveBlogAssetUrl(first.image || first.banner_image) ||
         extractFirstImageFromHtml(rawHtml) ||
-        '/promo.png';
+        '/banners/luanti-5-18-0.png';
       const pubTime = Date.parse(String(first.date_published || first.date_modified || ''));
       const publishedAt = Number.isFinite(pubTime) && pubTime > 0
         ? new Date(pubTime).toISOString()
@@ -489,7 +489,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
     itemXml.match(/<enclosure\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i) ||
     itemXml.match(/<media:content\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i);
   const enclosureUrl = enclosureMatch?.[1] ? resolveBlogAssetUrl(decodeHtmlAndXmlEntities(enclosureMatch[1])) : null;
-  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/promo.png';
+  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/banners/luanti-5-18-0.png';
 
   const summary =
     extractCleanBlogSummary(rawDesc) ||
