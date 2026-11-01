@@ -3,7 +3,9 @@ import {
   parseJsonArray,
   ensureExtendedPackageColumns,
   scanGitRepoMetadataCached,
-  extractEmbeddedVideo
+  extractEmbeddedVideo,
+  isGitRepositoryAssetUrl,
+  mergeScreenshotsPreferringGit
 } from '../lib/upstream';
 
 interface Env {
@@ -42,9 +44,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const tagsArr = Array.isArray(item.tags)
         ? item.tags.map((t: any) => String(typeof t === 'string' ? t : t?.name || '').trim()).filter(Boolean)
         : [];
-      const screenshotsArr = Array.isArray(item.screenshots)
-        ? item.screenshots.map((s: any) => String(typeof s === 'string' ? s : s?.url || '').trim()).filter(Boolean)
-        : [];
+      const screenshotsArr = mergeScreenshotsPreferringGit(
+        [item.banner, item.thumbnail],
+        item.screenshots
+      );
       const longDescText = typeof item.long_desc === 'string' && item.long_desc.trim()
         ? item.long_desc.trim()
         : null;
@@ -61,6 +64,36 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             short_desc = COALESCE(excluded.short_desc, packages.short_desc),
             long_desc = COALESCE(excluded.long_desc, packages.long_desc),
             repo_url = CASE WHEN excluded.repo_url != '' THEN excluded.repo_url ELSE packages.repo_url END,
+            thumbnail_url = CASE
+              WHEN excluded.thumbnail_url IS NOT NULL
+                AND excluded.thumbnail_url != ''
+                AND excluded.thumbnail_url != 'logo.svg'
+                AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
+                AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+              THEN excluded.thumbnail_url
+              WHEN packages.thumbnail_url IS NOT NULL
+                AND packages.thumbnail_url != ''
+                AND packages.thumbnail_url != 'logo.svg'
+                AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
+                AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+              THEN packages.thumbnail_url
+              ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
+            END,
+            banner_url = CASE
+              WHEN excluded.banner_url IS NOT NULL
+                AND excluded.banner_url != ''
+                AND excluded.banner_url != 'logo.svg'
+                AND excluded.banner_url NOT LIKE '%content.luanti.org%'
+                AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
+              THEN excluded.banner_url
+              WHEN packages.banner_url IS NOT NULL
+                AND packages.banner_url != ''
+                AND packages.banner_url != 'logo.svg'
+                AND packages.banner_url NOT LIKE '%content.luanti.org%'
+                AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
+              THEN packages.banner_url
+              ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
+            END,
             license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
             media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
             min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
@@ -247,74 +280,110 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE) when ContentDB is offline,
           // package is Git-only, or license / video_url is missing. Cached for 6h at Cloudflare Edge.
-          if ((!detail || !lic || (!videoUrl && repoUrl)) && repoScanBudget > 0) {
-            repoScanBudget--;
-            const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
-            if (gitScan && gitScan.gitRepoStatus === 'verified') {
-              lic = lic || gitScan.license || gitScan.mediaLicense || '';
-              mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
-              repoUrl = repoUrl || gitScan.repoUrl || '';
-              minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
-              shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
-              title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
-              if (gitScan.detectedType) pkgType = gitScan.detectedType;
-              if (gitScan.cdbMeta?.tags?.length) {
-                detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
+              let gitScanShot: string | undefined;
+              if ((!detail || !lic || (!videoUrl && repoUrl)) && repoScanBudget > 0) {
+                repoScanBudget--;
+                const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
+                if (gitScan && gitScan.gitRepoStatus === 'verified') {
+                  lic = lic || gitScan.license || gitScan.mediaLicense || '';
+                  mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
+                  repoUrl = repoUrl || gitScan.repoUrl || '';
+                  minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
+                  shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
+                  title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
+                  if (gitScan.detectedType) pkgType = gitScan.detectedType;
+                  if (gitScan.screenshotUrl) gitScanShot = gitScan.screenshotUrl;
+                  if (gitScan.cdbMeta?.tags?.length) {
+                    detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
+                  }
+                  if (!videoUrl && gitScan.cdbMeta?.video_url) {
+                    const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
+                    videoUrl = extractedVid.video_url;
+                    videoThumbUrl = extractedVid.video_thumbnail_url || videoThumbUrl;
+                  }
+                }
               }
-              if (!videoUrl && gitScan.cdbMeta?.video_url) {
-                const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
-                videoUrl = extractedVid.video_url;
-                videoThumbUrl = extractedVid.video_thumbnail_url || videoThumbUrl;
-              }
-            }
-          }
 
-          if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
+              if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
-          const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
-          hydratedMap[lowerKey] = {
-            id: canonicalId,
-            license: lic,
-            media_license: mediaLic,
-            min_minetest_version: minVer,
-            contentdb_downloads: cdbDl,
-            luantihub_downloads: lhDl,
-            downloads: totalDl,
-            tags: detailTags.length > 0 ? detailTags : undefined,
-            download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
-            video_url: videoUrl,
-            video_thumbnail_url: videoThumbUrl,
-            repo_url: repoUrl || undefined
-          };
+              const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
+              const resolvedHydrateThumb = gitScanShot || detail?.thumbnail || null;
+              const resolvedHydrateBanner = gitScanShot || detail?.screenshots?.[0]?.url || detail?.screenshots?.[0] || null;
+              hydratedMap[lowerKey] = {
+                id: canonicalId,
+                license: lic,
+                media_license: mediaLic,
+                min_minetest_version: minVer,
+                contentdb_downloads: cdbDl,
+                luantihub_downloads: lhDl,
+                downloads: totalDl,
+                tags: detailTags.length > 0 ? detailTags : undefined,
+                download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
+                video_url: videoUrl,
+                video_thumbnail_url: videoThumbUrl,
+                repo_url: repoUrl || undefined,
+                thumbnail: gitScanShot || undefined,
+                banner: gitScanShot || undefined
+              };
 
-          if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0)) {
-            persistStatements.push(
-              env.DB.prepare(`
-                INSERT INTO packages (
-                  id, author_name, name, title, type, short_desc, repo_url, provider,
-                  thumbnail_url, banner_url, license, media_license, min_minetest_version,
-                  tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-                  media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-                  min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
-                  tags = COALESCE(excluded.tags, packages.tags),
-                  contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-                  downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
-                  video_url = COALESCE(excluded.video_url, packages.video_url),
-                  video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
-                  repo_url = CASE WHEN COALESCE(packages.repo_url, '') = '' THEN excluded.repo_url ELSE packages.repo_url END
-              `).bind(
-                canonicalId,
-                String(detail?.author || author).trim(),
-                String(detail?.name || name).trim(),
-                String(title).trim(),
-                pkgType,
-                shortDesc ? String(shortDesc).slice(0, 500) : null,
-                repoUrl,
-                detail?.thumbnail || null,
-                detail?.screenshots?.[0]?.url || detail?.screenshots?.[0] || null,
+              if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0)) {
+                persistStatements.push(
+                  env.DB.prepare(`
+                    INSERT INTO packages (
+                      id, author_name, name, title, type, short_desc, repo_url, provider,
+                      thumbnail_url, banner_url, license, media_license, min_minetest_version,
+                      tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      thumbnail_url = CASE
+                        WHEN excluded.thumbnail_url IS NOT NULL
+                          AND excluded.thumbnail_url != ''
+                          AND excluded.thumbnail_url != 'logo.svg'
+                          AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
+                          AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+                        THEN excluded.thumbnail_url
+                        WHEN packages.thumbnail_url IS NOT NULL
+                          AND packages.thumbnail_url != ''
+                          AND packages.thumbnail_url != 'logo.svg'
+                          AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
+                          AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+                        THEN packages.thumbnail_url
+                        ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
+                      END,
+                      banner_url = CASE
+                        WHEN excluded.banner_url IS NOT NULL
+                          AND excluded.banner_url != ''
+                          AND excluded.banner_url != 'logo.svg'
+                          AND excluded.banner_url NOT LIKE '%content.luanti.org%'
+                          AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
+                        THEN excluded.banner_url
+                        WHEN packages.banner_url IS NOT NULL
+                          AND packages.banner_url != ''
+                          AND packages.banner_url != 'logo.svg'
+                          AND packages.banner_url NOT LIKE '%content.luanti.org%'
+                          AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
+                        THEN packages.banner_url
+                        ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
+                      END,
+                      license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
+                      media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
+                      min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
+                      tags = COALESCE(excluded.tags, packages.tags),
+                      contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
+                      downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
+                      video_url = COALESCE(excluded.video_url, packages.video_url),
+                      video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
+                      repo_url = CASE WHEN COALESCE(packages.repo_url, '') = '' THEN excluded.repo_url ELSE packages.repo_url END
+                  `).bind(
+                    canonicalId,
+                    String(detail?.author || author).trim(),
+                    String(detail?.name || name).trim(),
+                    String(title).trim(),
+                    pkgType,
+                    shortDesc ? String(shortDesc).slice(0, 500) : null,
+                    repoUrl,
+                    resolvedHydrateThumb,
+                    resolvedHydrateBanner,
                 lic,
                 mediaLic,
                 minVer,

@@ -457,7 +457,15 @@ export async function syncAuthorContentDbPackages(
           title = excluded.title,
           short_desc = excluded.short_desc,
           repo_url = COALESCE(NULLIF(excluded.repo_url, ''), packages.repo_url),
-          thumbnail_url = COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url),
+          thumbnail_url = CASE
+            WHEN packages.thumbnail_url IS NOT NULL
+              AND packages.thumbnail_url != ''
+              AND packages.thumbnail_url != 'logo.svg'
+              AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
+              AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+            THEN packages.thumbnail_url
+            ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
+          END,
           contentdb_downloads = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads),
           downloads_count = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads) + COALESCE(packages.luantihub_downloads, 0),
           license = COALESCE(NULLIF(excluded.license, ''), packages.license),
@@ -2741,6 +2749,78 @@ export interface GitRepoScanResult {
   supportedGames: string[];
   unsupportedGames: string[];
   cdbMeta?: CdbJsonMetadata | null;
+  screenshotUrl?: string;
+  screenshots?: string[];
+}
+
+/**
+ * Checks whether an asset URL (screenshot/thumbnail/banner) originates from a Git repository
+ * or independent CDN rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
+ */
+export function isGitRepositoryAssetUrl(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === 'logo.svg' || !/^https?:\/\//i.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * ContentDB-agnostic screenshot merger:
+ * Always places Git repository screenshots (`screenshot.png` / `.cdb.json` screenshots) FIRST,
+ * followed by any additional ContentDB or gallery screenshots, deduplicated while preserving order.
+ */
+export function mergeScreenshotsPreferringGit(
+  preferredGitUrls: Array<string | null | undefined>,
+  ...screenshotLists: any[]
+): string[] {
+  const gitUrls: string[] = [];
+  const otherUrls: string[] = [];
+  const seen = new Set<string>();
+
+  const extractUrl = (entry: any): string => {
+    if (!entry) return '';
+    if (typeof entry === 'string') return entry.trim();
+    if (typeof entry === 'object' && typeof entry.url === 'string') return entry.url.trim();
+    return '';
+  };
+
+  const addCandidate = (raw: any, forceGitPriority = false) => {
+    const url = extractUrl(raw);
+    if (!url || url === 'logo.svg' || !/^https?:\/\//i.test(url)) return;
+    // Ignore ContentDB resized thumbnail URLs in full-resolution screenshot galleries
+    const lower = url.toLowerCase();
+    if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
+      return;
+    }
+    if (seen.has(lower)) return;
+    seen.add(lower);
+    if (forceGitPriority || isGitRepositoryAssetUrl(url)) {
+      gitUrls.push(url);
+    } else {
+      otherUrls.push(url);
+    }
+  };
+
+  if (Array.isArray(preferredGitUrls)) {
+    for (const u of preferredGitUrls) {
+      if (u && isGitRepositoryAssetUrl(u)) {
+        addCandidate(u, true);
+      }
+    }
+  }
+
+  for (const list of screenshotLists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      addCandidate(item, false);
+    }
+  }
+
+  return [...gitUrls, ...otherUrls];
 }
 
 export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
@@ -2806,7 +2886,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v3/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v4/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -2894,6 +2974,7 @@ export async function scanGitRepoMetadataCached(
   let maxVersion: string | undefined;
   let resolvedRepoUrl: string | undefined;
   let resolvedRawBaseUrl: string | undefined;
+  let screenshotUrl: string | undefined;
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
   let sawExplicit404 = false;
   let cdbMeta: CdbJsonMetadata | null = null;
@@ -2911,11 +2992,16 @@ export async function scanGitRepoMetadataCached(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1600);
       try {
-        const [res, cdbRes] = await Promise.all([
+        const [res, cdbRes, shotRes] = await Promise.all([
           fetchWithAnubisSupport(`${cand.base}/${confFile}`, { signal: controller.signal }),
-          fetchWithAnubisSupport(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null)
+          fetchWithAnubisSupport(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null),
+          fetchWithAnubisSupport(`${cand.base}/screenshot.png`, { method: 'HEAD', signal: controller.signal }).catch(() => null)
         ]);
         clearTimeout(timer);
+
+        const hasCandidateScreenshot =
+          Boolean(shotRes && shotRes.ok) &&
+          !(shotRes?.headers?.get('content-type') || '').toLowerCase().includes('text/html');
 
         if (cdbRes && cdbRes.ok) {
           const cdbText = await cdbRes.text().catch(() => '');
@@ -2924,6 +3010,9 @@ export async function scanGitRepoMetadataCached(
             cdbMeta = parsedCdb;
             resolvedRepoUrl = cand.repoUrl;
             resolvedRawBaseUrl = cand.base;
+            if (hasCandidateScreenshot) {
+              screenshotUrl = `${cand.base}/screenshot.png`;
+            }
             gitRepoStatus = 'verified';
             if (parsedCdb.type) detectedType = parsedCdb.type;
             if (parsedCdb.title) title = parsedCdb.title;
@@ -2980,6 +3069,9 @@ export async function scanGitRepoMetadataCached(
                 if (fbText && !fbText.trim().startsWith('<!DOCTYPE') && !fbText.trim().startsWith('<html')) {
                   resolvedRepoUrl = cand.repoUrl;
                   resolvedRawBaseUrl = cand.base;
+                  if (hasCandidateScreenshot) {
+                    screenshotUrl = `${cand.base}/screenshot.png`;
+                  }
                   gitRepoStatus = 'verified';
                   return true;
                 }
@@ -2999,6 +3091,9 @@ export async function scanGitRepoMetadataCached(
           if (confText && !confText.trim().startsWith('<!DOCTYPE') && !confText.trim().startsWith('<html')) {
             resolvedRepoUrl = cand.repoUrl;
             resolvedRawBaseUrl = cand.base;
+            if (hasCandidateScreenshot) {
+              screenshotUrl = `${cand.base}/screenshot.png`;
+            }
             gitRepoStatus = 'verified';
             const confMap = parseLuantiConf(confText);
 
@@ -3134,6 +3229,26 @@ export async function scanGitRepoMetadataCached(
     gitRepoStatus = 'broken_404';
   }
 
+  const cdbScreenshotsRaw = (cdbMeta as CdbJsonMetadata | null)?.screenshots;
+  const resolvedCdbScreenshots = Array.isArray(cdbScreenshotsRaw)
+    ? cdbScreenshotsRaw
+        .map((s: string) => {
+          const clean = String(s || '').trim();
+          if (!clean) return '';
+          if (/^https?:\/\//i.test(clean)) return clean;
+          if (resolvedRawBaseUrl) {
+            return `${resolvedRawBaseUrl.replace(/\/+$/, '')}/${clean.replace(/^\/+/, '')}`;
+          }
+          return '';
+        })
+        .filter(Boolean)
+    : [];
+
+  const mergedGitScreenshots = mergeScreenshotsPreferringGit(
+    [screenshotUrl],
+    resolvedCdbScreenshots
+  );
+
   const scanResult: GitRepoScanResult = {
     repoUrl: resolvedRepoUrl || normalizedInputUrl,
     rawBaseUrl: resolvedRawBaseUrl,
@@ -3150,7 +3265,9 @@ export async function scanGitRepoMetadataCached(
     maxVersion,
     supportedGames,
     unsupportedGames,
-    cdbMeta
+    cdbMeta,
+    screenshotUrl: screenshotUrl || mergedGitScreenshots[0],
+    screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined
   };
 
   if (ttlSeconds > 0 && scanResult.gitRepoStatus !== 'unverified') {

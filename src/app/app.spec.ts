@@ -2037,7 +2037,13 @@ description = Mob animation and spawning framework.
       cardComp.package = videoPkg;
       cardFixture.detectChanges();
 
-      expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).not.toBeNull();
+      const vignetteEl = cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]') as HTMLElement | null;
+      expect(vignetteEl).not.toBeNull();
+      expect(vignetteEl?.className).toContain('card-thumbnail-vignette');
+      expect(vignetteEl?.className).not.toContain('from-5%');
+      const maskClipEl = cardFixture.nativeElement.querySelector('.card-thumbnail-mask') as HTMLElement | null;
+      expect(maskClipEl).not.toBeNull();
+      expect(maskClipEl?.className).toContain('bottom-px');
 
       cardComp.onCardMouseEnter();
       await new Promise(resolve => setTimeout(resolve, 210));
@@ -5450,6 +5456,173 @@ supported_games = minetest_game, voxelibre
       if (origSwDescriptor) {
         Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
       }
+    }
+  });
+
+  it('should prefer and store Git repository screenshot.png in D1 and merge ContentDB gallery screenshots in Package Details', async () => {
+    const {
+      isGitRepositoryAssetUrl,
+      mergeScreenshotsPreferringGit,
+      scanGitRepoMetadataCached
+    } = await import('../../functions/api/lib/upstream');
+    const { onRequestGet: onPkgDetailGet } = await import('../../functions/api/packages/[author]/[name]/index');
+    const pkgService = TestBed.inject(PackageService);
+
+    const gitShot = 'https://bitbucket.org/minetest_gamers/everness/raw/master/screenshot.png';
+    const cdbThumb = 'https://content.luanti.org/thumbnails/1/everness.png';
+    const cdbShot1 = 'https://content.luanti.org/uploads/everness_shot_1.png';
+    const cdbShot2 = 'https://content.luanti.org/uploads/everness_shot_2.png';
+
+    // 1. Verify isGitRepositoryAssetUrl and mergeScreenshotsPreferringGit
+    expect(isGitRepositoryAssetUrl(gitShot)).toBe(true);
+    expect(isGitRepositoryAssetUrl(cdbThumb)).toBe(false);
+    expect(isGitRepositoryAssetUrl(cdbShot1)).toBe(false);
+
+    const mergedList = mergeScreenshotsPreferringGit(
+      [gitShot, cdbThumb],
+      [cdbShot1, { url: cdbShot2 }, gitShot]
+    );
+    expect(mergedList).toEqual([gitShot, cdbShot1, cdbShot2]);
+
+    // 2. Verify scanGitRepoMetadataCached discovers screenshot.png in Git repository
+    const origFetch = globalThis.fetch;
+    const savedRows: any[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === 'https://bitbucket.org/minetest_gamers/everness/raw/master/mod.conf') {
+        return new Response('name = everness\ntitle = Everness\ndescription = Biomes and blocks\nlicense = LGPL-2.1-only\n', {
+          status: 200
+        });
+      }
+      if (url === gitShot) {
+        return new Response('', { status: 200, headers: { 'Content-Type': 'image/png' } });
+      }
+      if (url.includes('/api/packages/SaKeL/everness/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'SaKeL',
+            name: 'everness',
+            title: 'Everness',
+            type: 'mod',
+            short_description: 'Biomes and blocks',
+            long_description: 'Full Everness long description from ContentDB.',
+            license: 'LGPL-2.1-only',
+            media_license: 'CC-BY-SA-4.0',
+            repo: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+            thumbnail: cdbThumb,
+            screenshots: [{ url: cdbShot1 }, { url: cdbShot2 }],
+            downloads: 42000
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not found', { status: 404 });
+    });
+
+    try {
+      const scanRes = await scanGitRepoMetadataCached(
+        'SaKeL',
+        'everness',
+        'mod',
+        'https://bitbucket.org/minetest_gamers/everness/src/master/',
+        0
+      );
+      expect(scanRes.gitRepoStatus).toBe('verified');
+      expect(scanRes.screenshotUrl).toBe(gitShot);
+      expect(scanRes.screenshots).toEqual([gitShot]);
+
+      // 3. Verify /api/packages/[author]/[name] prefers Git screenshot.png, merges ContentDB screenshots, and stores in D1
+      const mockDb = {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            first: async () => {
+              if (sql.includes('FROM packages')) {
+                return {
+                  id: 'SaKeL/everness',
+                  author_name: 'SaKeL',
+                  name: 'everness',
+                  title: 'Everness',
+                  type: 'mod',
+                  provider: 'bitbucket',
+                  repo_url: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+                  thumbnail_url: gitShot,
+                  banner_url: gitShot,
+                  screenshots: null,
+                  license: 'LGPL-2.1-only',
+                  media_license: 'CC-BY-SA-4.0',
+                  tags: JSON.stringify(['mod', 'git', 'contentdb']),
+                  status: 'active'
+                };
+              }
+              return null;
+            },
+            all: async () => ({ results: [] }),
+            run: async () => {
+              if (sql.includes('INSERT INTO packages') || sql.includes('UPDATE packages')) {
+                savedRows.push({ sql, args });
+              }
+              return { success: true };
+            }
+          })
+        })
+      };
+
+      const res = await onPkgDetailGet({
+        params: { author: 'SaKeL', name: 'everness' },
+        request: new Request('https://luantihub.org/api/packages/SaKeL/everness/?nocache=1'),
+        env: { DB: mockDb }
+      });
+      expect(res.status).toBe(200);
+      const detailBody = await res.json();
+      expect(detailBody.thumbnail).toBe(gitShot);
+      expect(detailBody.banner).toBe(gitShot);
+      expect(detailBody.screenshots).toEqual([gitShot, cdbShot1, cdbShot2]);
+      expect(savedRows.length).toBeGreaterThan(0);
+
+      // 4. Verify PackageService.mergeDualSourcePackage and PackageDetailModalComponent preserve Git screenshot.png + merged gallery
+      const cdbEntry = (pkgService as any).normalizePackage({
+        id: 'SaKeL/everness',
+        author: 'SaKeL',
+        name: 'everness',
+        title: 'Everness',
+        type: 'mod',
+        source: 'official',
+        sources: ['official'],
+        thumbnail: cdbThumb,
+        screenshots: [cdbShot1, cdbShot2]
+      });
+      const gitEntry = (pkgService as any).normalizePackage({
+        id: 'SaKeL/everness',
+        author: 'SaKeL',
+        name: 'everness',
+        title: 'Everness',
+        type: 'mod',
+        source: 'git',
+        sources: ['git'],
+        thumbnail: gitShot,
+        banner: gitShot,
+        screenshots: [gitShot]
+      });
+
+      const dualMerged = pkgService.mergeDualSourcePackage(cdbEntry, gitEntry);
+      expect(dualMerged.thumbnail).toBe(gitShot);
+      expect(dualMerged.banner).toBe(gitShot);
+      expect(dualMerged.screenshots).toEqual([gitShot, cdbShot1, cdbShot2]);
+
+      const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+      modalFixture.componentInstance.package = dualMerged;
+      (pkgService as any)._activePackage.set(dualMerged);
+      modalFixture.detectChanges();
+
+      expect(modalFixture.componentInstance.bannerImage).toBe(gitShot);
+      expect(modalFixture.componentInstance.activeScreenshots()).toEqual([gitShot, cdbShot1, cdbShot2]);
+      expect(modalFixture.componentInstance.mediaSlides().map(s => s.url)).toEqual([
+        gitShot,
+        cdbShot1,
+        cdbShot2
+      ]);
+    } finally {
+      globalThis.fetch = origFetch;
     }
   });
 });

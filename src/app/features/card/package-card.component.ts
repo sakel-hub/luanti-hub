@@ -67,9 +67,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       class="group relative flex flex-col h-full min-h-[352px] w-full max-w-sm rounded-2xl glass-card cursor-pointer transition-all duration-300 ease-out hover:scale-105 sm:hover:scale-[1.06] hover:-translate-y-1.5 hover:z-30 focus:outline-none focus:ring-2 focus:ring-sky-500 overflow-hidden">
 
       <!-- Thumbnail with True 16:9 Widescreen Aspect Ratio + Desktop Hover Video Preview -->
-      <div class="relative w-full aspect-video flex-shrink-0 bg-slate-950">
-        <!-- Isolated inner clip ends 1px above the bottom edge so the scaled <img> can never bleed past the vignette -->
-        <div class="absolute inset-x-0 top-0 bottom-px overflow-hidden">
+      <div class="relative w-full aspect-video flex-shrink-0">
+        <!-- Isolated inner clip ends 1px above the bottom edge with a multi-stop alpha feather mask so the scaled <img> blends seamlessly into glass-card without a solid dark bar or zoom seam -->
+        <div class="absolute inset-x-0 top-0 bottom-px overflow-hidden card-thumbnail-mask">
           <img
             [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
             [fallbackThumbnail]="package.thumbnail"
@@ -156,11 +156,11 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
           </div>
         }
 
-        <!-- Unclipped z-10 vignette overlaps the inner image clip boundary with a solid 5% base band (removed while hover video plays and restored on mouse leave) -->
+        <!-- Soft feathered z-10 vignette blends the bottom of the thumbnail into glass-card without a solid dark bar (removed while hover video plays and restored on mouse leave) -->
         @if (!(isHoverVideoActive() && package.video_url)) {
           <div
             data-testid="card-thumbnail-vignette"
-            class="absolute -inset-x-px -bottom-0.5 top-0 z-10 bg-gradient-to-t from-slate-950 from-5% via-slate-950/20 to-transparent pointer-events-none">
+            class="absolute inset-x-0 bottom-0 top-0 z-10 card-thumbnail-vignette pointer-events-none">
           </div>
         }
 

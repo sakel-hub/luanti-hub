@@ -798,7 +798,7 @@ export class PackageService {
       video_url: fields.video_url || pkg.video_url,
       video_thumbnail_url: fields.video_thumbnail_url || pkg.video_thumbnail_url,
       repo_url: fields.repo_url || pkg.repo_url,
-      thumbnail: pkg.thumbnail,
+      thumbnail: fields.thumbnail || pkg.thumbnail,
       banner: fields.banner || pkg.banner
     });
 
@@ -988,8 +988,14 @@ export class PackageService {
     const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? cachedMeta?.contentdb_score ?? 0);
     const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
 
-    const thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
-    let banner = item.banner || item.banner_url || item.screenshots?.[0]?.url || item.screenshots?.[0];
+    const gitShotCandidate = [
+      item.banner,
+      item.banner_url,
+      item.thumbnail,
+      item.thumbnail_url
+    ].find(u => this.isGitScreenshotUrl(u));
+    const thumbnail = gitShotCandidate || item.thumbnail || item.thumbnail_url || 'logo.svg';
+    let banner = gitShotCandidate || item.banner || item.banner_url || item.screenshots?.[0]?.url || item.screenshots?.[0];
     if (!banner && thumbnail && thumbnail.includes('thumbnail.png')) {
       banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
     }
@@ -1061,8 +1067,11 @@ export class PackageService {
     if (hasGit) sources.push('git');
     if (sources.length === 0) sources.push(source);
 
-    const screenshots = Array.isArray(item.screenshots)
-      ? item.screenshots.map((s: any) => (typeof s === 'string' ? s : s?.url || '')).filter(Boolean)
+    const mergedItemScreenshots = Array.isArray(item.screenshots)
+      ? this.mergePackageScreenshots([gitShotCandidate], item.screenshots)
+      : undefined;
+    const screenshots = mergedItemScreenshots && mergedItemScreenshots.length > 0
+      ? mergedItemScreenshots
       : undefined;
 
     const forumUrl = this.normalizeForumUrl(item.forum_url || item.forums);
@@ -1201,6 +1210,75 @@ export class PackageService {
   }
 
   /**
+   * Checks whether a screenshot/thumbnail/banner URL is hosted in a Git repository or independent CDN
+   * rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
+   */
+  public isGitScreenshotUrl(url?: string | null): boolean {
+    if (!url || typeof url !== 'string') return false;
+    const trimmed = url.trim();
+    if (!trimmed || trimmed === 'logo.svg' || !/^https?:\/\//i.test(trimmed)) return false;
+    const lower = trimmed.toLowerCase();
+    if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * ContentDB-agnostic screenshot merger:
+   * Places Git repository screenshots (`screenshot.png` / `.cdb.json`) first, followed by
+   * any additional ContentDB gallery screenshots, deduplicated while preserving order.
+   */
+  public mergePackageScreenshots(
+    preferredGitUrls: Array<string | null | undefined>,
+    ...screenshotLists: any[]
+  ): string[] {
+    const gitUrls: string[] = [];
+    const otherUrls: string[] = [];
+    const seen = new Set<string>();
+
+    const extractUrl = (entry: any): string => {
+      if (!entry) return '';
+      if (typeof entry === 'string') return entry.trim();
+      if (typeof entry === 'object' && typeof entry.url === 'string') return entry.url.trim();
+      return '';
+    };
+
+    const addCandidate = (raw: any, forceGitPriority = false) => {
+      const url = extractUrl(raw);
+      if (!url || url === 'logo.svg' || !/^https?:\/\//i.test(url)) return;
+      const lower = url.toLowerCase();
+      if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
+        return;
+      }
+      if (seen.has(lower)) return;
+      seen.add(lower);
+      if (forceGitPriority || this.isGitScreenshotUrl(url)) {
+        gitUrls.push(url);
+      } else {
+        otherUrls.push(url);
+      }
+    };
+
+    if (Array.isArray(preferredGitUrls)) {
+      for (const u of preferredGitUrls) {
+        if (u && this.isGitScreenshotUrl(u)) {
+          addCandidate(u, true);
+        }
+      }
+    }
+
+    for (const list of screenshotLists) {
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        addCandidate(item, false);
+      }
+    }
+
+    return [...gitUrls, ...otherUrls];
+  }
+
+  /**
    * Merges two package entries representing the same mod (e.g. ContentDB + Git Community)
    * into a single unified package tagged with both 'official' and 'git' in `sources`.
    */
@@ -1221,12 +1299,29 @@ export class PackageService {
     const mergedDeps = Array.from(new Set([...(primary.dependencies || []), ...(secondary.dependencies || [])]));
     const mergedOptDeps = Array.from(new Set([...(primary.optional_dependencies || []), ...(secondary.optional_dependencies || [])]));
 
-    const resolvedThumb = (primary.thumbnail && primary.thumbnail !== 'logo.svg')
-      ? primary.thumbnail
-      : (secondary.thumbnail || 'logo.svg');
-    const resolvedBanner = (primary.banner && primary.banner !== 'logo.svg')
-      ? primary.banner
-      : (secondary.banner || resolvedThumb);
+    const preferredGitShot = [
+      primary.banner,
+      secondary.banner,
+      primary.thumbnail,
+      secondary.thumbnail
+    ].find(u => this.isGitScreenshotUrl(u));
+
+    const mergedScreenshots = this.mergePackageScreenshots(
+      [preferredGitShot],
+      primary.screenshots,
+      secondary.screenshots
+    );
+
+    const resolvedThumb = preferredGitShot
+      ? preferredGitShot
+      : ((primary.thumbnail && primary.thumbnail !== 'logo.svg')
+          ? primary.thumbnail
+          : (secondary.thumbnail || 'logo.svg'));
+    const resolvedBanner = preferredGitShot
+      ? preferredGitShot
+      : ((primary.banner && primary.banner !== 'logo.svg')
+          ? primary.banner
+          : (mergedScreenshots[0] || secondary.banner || resolvedThumb));
 
     const cdbDl = Math.max(primary.contentdb_downloads || 0, secondary.contentdb_downloads || 0);
     const lhDl = Math.max(primary.luantihub_downloads || 0, secondary.luantihub_downloads || 0);
@@ -1257,6 +1352,7 @@ export class PackageService {
       readme: primary.readme || secondary.readme,
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
+      screenshots: mergedScreenshots.length > 0 ? mergedScreenshots : (primary.screenshots || secondary.screenshots),
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: mergedDownloads,
@@ -4044,6 +4140,7 @@ export class PackageService {
     deps: string[];
     optDeps: string[];
     minVersion?: string;
+    screenshotUrl?: string;
     cdbMeta?: ReturnType<PackageService['parseCdbJsonText']>;
   }> {
     const normalizedInputUrl = this.normalizeGitRepoUrl(existingRepoUrl);
@@ -4056,6 +4153,7 @@ export class PackageService {
     let mediaLicense: string | undefined;
     let minVersion: string | undefined;
     let resolvedRepoUrl: string | undefined;
+    let screenshotUrl: string | undefined;
     let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
     let cdbMeta: ReturnType<PackageService['parseCdbJsonText']> = null;
     let sawExplicitRepo404 = false;
@@ -4072,6 +4170,7 @@ export class PackageService {
       const confEntry = listing.find(f => confFiles.includes(f.name.toLowerCase()));
       const initLuaEntry = listing.find(f => f.name.toLowerCase() === 'init.lua');
       const dependsTxtEntry = listing.find(f => f.name.toLowerCase() === 'depends.txt');
+      const screenshotEntry = listing.find(f => f.name.toLowerCase() === 'screenshot.png');
 
       if (listing.length > 0) {
         resolvedRepoUrl = repo.repoUrl;
@@ -4094,6 +4193,9 @@ export class PackageService {
 
       resolvedRepoUrl = repo.repoUrl;
       gitRepoStatus = 'verified';
+      if (screenshotEntry) {
+        screenshotUrl = screenshotEntry.download_url || `${repo.rawBase}/${encodeURIComponent(screenshotEntry.name)}`;
+      }
 
       if (cdbEntry) {
         const cdbUrl = cdbEntry.download_url || `${repo.rawBase}/${encodeURIComponent(cdbEntry.name)}`;
@@ -4208,6 +4310,7 @@ export class PackageService {
       deps,
       optDeps,
       minVersion,
+      screenshotUrl,
       cdbMeta
     };
   }
@@ -4428,11 +4531,11 @@ export class PackageService {
                   license: data?.license || combinedUpstream.license,
                   media_license: data?.media_license || combinedUpstream.media_license,
                   long_description: upstreamLongDesc || data?.long_description,
-                  screenshots: (Array.isArray(data?.screenshots) && data.screenshots.length > 1)
-                    ? data.screenshots
-                    : (Array.isArray(combinedUpstream.screenshots) && combinedUpstream.screenshots.length > 0
-                        ? combinedUpstream.screenshots
-                        : data?.screenshots)
+                  screenshots: this.mergePackageScreenshots(
+                    [data?.banner, data?.thumbnail, pkg.banner, pkg.thumbnail],
+                    data?.screenshots,
+                    combinedUpstream.screenshots
+                  )
                 };
               }
 
@@ -4605,8 +4708,12 @@ export class PackageService {
         }
 
         // Probe Git repository metadata only when the package still lacks a license and Edge did not already bundle metadata
+        let probedGitScreenshot: string | undefined;
         if (!resolvedLicense && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
+          if (gitMeta.screenshotUrl) {
+            probedGitScreenshot = gitMeta.screenshotUrl;
+          }
           if (gitMeta.gitRepoStatus === 'verified') {
             gitRepoStatus = 'verified';
             if (gitMeta.repoUrl) {
@@ -4680,9 +4787,26 @@ export class PackageService {
           ? data.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
           : [];
 
-        const screenshots = Array.isArray(data.screenshots)
-          ? data.screenshots.map((s: any) => (typeof s === 'string' ? s : s?.url || '')).filter(Boolean)
-          : pkg.screenshots;
+        const preferredGitShot = [
+          probedGitScreenshot,
+          data.banner,
+          data.thumbnail,
+          pkg.banner,
+          pkg.thumbnail
+        ].find(u => this.isGitScreenshotUrl(u));
+        const mergedScreenshotsList = this.mergePackageScreenshots(
+          [preferredGitShot],
+          data.screenshots,
+          pkg.screenshots
+        );
+        const screenshots = mergedScreenshotsList.length > 0 ? mergedScreenshotsList : pkg.screenshots;
+        const resolvedDetailThumb = preferredGitShot || data.thumbnail || pkg.thumbnail;
+        const resolvedDetailBanner =
+          preferredGitShot ||
+          (screenshots && screenshots[0]) ||
+          data.banner ||
+          pkg.banner ||
+          resolvedDetailThumb;
 
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
@@ -4782,7 +4906,8 @@ export class PackageService {
           updated_at: data.updated_at || pkg.updated_at,
           min_minetest_version: minVersion,
           max_minetest_version: data.max_minetest_version || pkg.max_minetest_version,
-          banner: (screenshots && screenshots[0]) || data.banner || pkg.banner,
+          thumbnail: resolvedDetailThumb,
+          banner: resolvedDetailBanner,
           dependencies: deps.length > 0 ? deps : (pkg.dependencies || []),
           optional_dependencies: optDeps.length > 0 ? optDeps : (pkg.optional_dependencies || []),
           sources: mergedSources

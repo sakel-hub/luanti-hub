@@ -11,7 +11,9 @@ import {
   writeEdgeCacheJson,
   ensureExtendedPackageColumns,
   scanGitRepoMetadataCached,
-  extractEmbeddedVideo
+  extractEmbeddedVideo,
+  isGitRepositoryAssetUrl,
+  mergeScreenshotsPreferringGit
 } from '../lib/upstream';
 
 interface Env {
@@ -293,7 +295,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v5';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v6';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -708,15 +710,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const parsedDeps = parseJsonArray(p.dependencies);
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
 
-    const rawThumbCandidate = (p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
-      ? p.thumbnail_url
-      : (matchedUpstream?.thumbnail || p.banner_url || '');
+    const gitShotD1 = isGitRepositoryAssetUrl(p.banner_url)
+      ? String(p.banner_url)
+      : (isGitRepositoryAssetUrl(p.thumbnail_url) ? String(p.thumbnail_url) : undefined);
+    const rawThumbCandidate = gitShotD1
+      ? gitShotD1
+      : ((p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
+          ? p.thumbnail_url
+          : (matchedUpstream?.thumbnail || p.banner_url || ''));
     const resolvedThumb = rawThumbCandidate && String(rawThumbCandidate).startsWith('http')
       ? String(rawThumbCandidate)
       : null;
-    const resolvedBanner = (p.banner_url && p.banner_url !== 'logo.svg')
-      ? p.banner_url
-      : (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : (resolvedThumb || ''));
+    const mergedCatalogScreenshots = mergeScreenshotsPreferringGit(
+      [gitShotD1, p.banner_url, p.thumbnail_url],
+      parseJsonArray(p.screenshots),
+      matchedUpstream?.screenshots
+    );
+    const resolvedBanner = gitShotD1
+      ? gitShotD1
+      : ((p.banner_url && p.banner_url !== 'logo.svg')
+          ? p.banner_url
+          : (mergedCatalogScreenshots[0] || (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : (resolvedThumb || ''))));
 
     const cdbDownloads = Math.max(
       typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
@@ -760,6 +774,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         : (matchedUpstream?.created_at || undefined),
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
+      screenshots: mergedCatalogScreenshots.length > 0 ? mergedCatalogScreenshots : undefined,
       score: computeCatalogStarRating(matchedUpstream, d1StarAvg),
       contentdb_score: Number(matchedUpstream?.score || 0),
       contentdb_downloads: cdbDownloads,
@@ -918,6 +933,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             if (gitScan?.cdbMeta?.video_url) {
               rawVideoUrl = gitScan.cdbMeta.video_url;
             }
+            if (gitScan?.screenshotUrl) {
+              pkg.thumbnail = gitScan.screenshotUrl;
+              pkg.banner = gitScan.screenshotUrl;
+            }
           }
           const resolvedVideo = extractEmbeddedVideo(
             rawVideoUrl,
@@ -939,6 +958,36 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                   downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                  thumbnail_url = CASE
+                    WHEN excluded.thumbnail_url IS NOT NULL
+                      AND excluded.thumbnail_url != ''
+                      AND excluded.thumbnail_url != 'logo.svg'
+                      AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
+                      AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+                    THEN excluded.thumbnail_url
+                    WHEN packages.thumbnail_url IS NOT NULL
+                      AND packages.thumbnail_url != ''
+                      AND packages.thumbnail_url != 'logo.svg'
+                      AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
+                      AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
+                    THEN packages.thumbnail_url
+                    ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
+                  END,
+                  banner_url = CASE
+                    WHEN excluded.banner_url IS NOT NULL
+                      AND excluded.banner_url != ''
+                      AND excluded.banner_url != 'logo.svg'
+                      AND excluded.banner_url NOT LIKE '%content.luanti.org%'
+                      AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
+                    THEN excluded.banner_url
+                    WHEN packages.banner_url IS NOT NULL
+                      AND packages.banner_url != ''
+                      AND packages.banner_url != 'logo.svg'
+                      AND packages.banner_url NOT LIKE '%content.luanti.org%'
+                      AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
+                    THEN packages.banner_url
+                    ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
+                  END,
                   license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
                   media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
                   tags = COALESCE(excluded.tags, packages.tags),

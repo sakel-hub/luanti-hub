@@ -24,7 +24,9 @@ import {
   formatByteSize,
   fetchAccurateGitZipSize,
   sanitizePublicErrorMessage,
-  fetchWithAnubisSupport
+  fetchWithAnubisSupport,
+  isGitRepositoryAssetUrl,
+  mergeScreenshotsPreferringGit
 } from '../lib/upstream';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
@@ -1176,7 +1178,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           }
         }
 
-        if (matchedContentDbPkg?.author && matchedContentDbPkg?.name && !(Number(matchedContentDbPkg.downloads) > 0)) {
+        if (
+          matchedContentDbPkg?.author &&
+          matchedContentDbPkg?.name &&
+          (!(Number(matchedContentDbPkg.downloads) > 0) || !Array.isArray(matchedContentDbPkg.screenshots))
+        ) {
           const cdbDetail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(matchedContentDbPkg.author)}/${encodeURIComponent(matchedContentDbPkg.name)}/`,
             600
@@ -1239,12 +1245,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? discoveredReleases[0].download_url
       : branchArchiveUrl;
 
-    const resolvedThumbnail = hasScreenshot
-      ? screenshotUrl
+    const existingGitScreenshot = isGitRepositoryAssetUrl(existingD1Pkg?.banner_url)
+      ? String(existingD1Pkg.banner_url)
+      : (isGitRepositoryAssetUrl(existingD1Pkg?.thumbnail_url) ? String(existingD1Pkg.thumbnail_url) : undefined);
+    const primaryGitScreenshot = hasScreenshot ? screenshotUrl : existingGitScreenshot;
+    const mergedScreenshots = mergeScreenshotsPreferringGit(
+      [primaryGitScreenshot],
+      cdbMeta?.screenshots,
+      parseJsonArray(existingD1Pkg?.screenshots),
+      matchedContentDbPkg?.screenshots
+    );
+
+    const resolvedThumbnail = primaryGitScreenshot
+      ? primaryGitScreenshot
       : (matchedContentDbPkg?.thumbnail || existingD1Pkg?.thumbnail_url || screenshotUrl);
-    const resolvedBanner = hasScreenshot
-      ? screenshotUrl
-      : (matchedContentDbPkg?.thumbnail ? String(matchedContentDbPkg.thumbnail).replace('thumbnail.png', 'shot-0.png') : resolvedThumbnail);
+    const resolvedBanner = primaryGitScreenshot
+      ? primaryGitScreenshot
+      : (mergedScreenshots[0] || (matchedContentDbPkg?.thumbnail ? String(matchedContentDbPkg.thumbnail).replace('thumbnail.png', 'shot-0.png') : resolvedThumbnail));
     const resolvedCdbDownloads = Math.max(
       Number(matchedContentDbPkg?.downloads) || 0,
       Number(existingD1Pkg?.contentdb_downloads) || 0
@@ -1290,6 +1307,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       readme: readmeMarkdown || undefined,
       thumbnail: resolvedThumbnail,
       banner: resolvedBanner,
+      screenshots: mergedScreenshots.length > 0 ? mergedScreenshots : undefined,
       score: Number(existingD1Pkg?.score) || 0,
       contentdb_downloads: resolvedCdbDownloads,
       luantihub_downloads: resolvedLhDownloads,
@@ -1474,12 +1492,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const runPackageUpsert = () => context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
-          repo_url, provider, default_branch, thumbnail_url, banner_url,
+          repo_url, provider, default_branch, thumbnail_url, banner_url, screenshots,
           downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
           min_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
           video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
         ON CONFLICT(id) DO UPDATE SET
           author_id = excluded.author_id,
           title = excluded.title,
@@ -1490,6 +1508,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           default_branch = excluded.default_branch,
           thumbnail_url = excluded.thumbnail_url,
           banner_url = excluded.banner_url,
+          screenshots = COALESCE(excluded.screenshots, packages.screenshots),
           contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
           downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
           score = excluded.score,
@@ -1540,6 +1559,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         branch,
         resolvedThumbnail,
         resolvedBanner,
+        mergedScreenshots.length > 0 ? JSON.stringify(mergedScreenshots) : null,
         resolvedDownloads,
         resolvedCdbDownloads,
         actualReviewScore,

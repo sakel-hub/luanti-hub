@@ -2158,8 +2158,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   readonly activeScreenshots = computed<string[]>(() => {
     const pkg = this.packageService.activePackage() || this.package;
-    if (!pkg || !Array.isArray(pkg.screenshots)) return [];
-    return pkg.screenshots.filter(Boolean);
+    if (!pkg) return [];
+    const merged = this.packageService.mergePackageScreenshots(
+      [pkg.banner, pkg.thumbnail],
+      pkg.screenshots
+    );
+    return merged;
   });
 
   readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string }>>(() => {
@@ -2173,7 +2177,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         thumbnail: pkg.video_thumbnail_url || this.bannerImage
       });
     }
-    const shots = Array.isArray(pkg.screenshots) ? pkg.screenshots.filter(Boolean) : [];
+    const shots = this.activeScreenshots();
     for (const shot of shots) {
       slides.push({
         type: 'image',
@@ -2508,13 +2512,20 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   get bannerImage(): string {
-    if (this.package.banner && !this.package.banner.includes('thumbnail.png')) {
-      return this.package.banner;
+    const pkg = this.packageService.activePackage() || this.package;
+    const preferredGitShot = [pkg?.banner, pkg?.thumbnail, this.package?.banner, this.package?.thumbnail].find(
+      u => this.packageService.isGitScreenshotUrl(u)
+    );
+    if (preferredGitShot) {
+      return preferredGitShot;
     }
-    if (this.package.thumbnail && this.package.thumbnail.includes('thumbnail.png')) {
-      return this.package.thumbnail.replace('thumbnail.png', 'shot-0.png');
+    if (pkg?.banner && !pkg.banner.includes('thumbnail.png')) {
+      return pkg.banner;
     }
-    return this.package.banner || this.package.thumbnail || 'logo.svg';
+    if (pkg?.thumbnail && pkg.thumbnail.includes('thumbnail.png')) {
+      return pkg.thumbnail.replace('thumbnail.png', 'shot-0.png');
+    }
+    return pkg?.banner || pkg?.thumbnail || 'logo.svg';
   }
 
   private static readonly savedViewStateByPkg = new Map<string, {
