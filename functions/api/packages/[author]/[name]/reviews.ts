@@ -243,6 +243,8 @@ export async function onRequestPost(context: { request: Request; params: { autho
     await invalidateEdgeCacheKeys([
       '/__api_packages_v2',
       '/__api_packages_v2?boot=1',
+      '/__api_boot_catalog_bundle_v4',
+      '/__api_boot_catalog_bundle_v5',
       `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
     ]);
 
@@ -363,6 +365,8 @@ export async function onRequestPost(context: { request: Request; params: { autho
   await invalidateEdgeCacheKeys([
     '/__api_packages_v2',
     '/__api_packages_v2?boot=1',
+    '/__api_boot_catalog_bundle_v4',
+    '/__api_boot_catalog_bundle_v5',
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
   ]);
 

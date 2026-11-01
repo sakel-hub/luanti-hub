@@ -12,13 +12,21 @@ export type NotificationVariant =
   | 'app_update'
   | 'new_git_package'
   | 'package_update'
+  | 'new_review'
   | 'promotion';
 
 export interface NativeNotificationPayload {
   title: string;
   body: string;
   tag: string;
-  category: 'moderation' | 'admin_queue' | 'app_update' | 'new_git_package' | 'package_update' | 'promotion';
+  category:
+    | 'moderation'
+    | 'admin_queue'
+    | 'app_update'
+    | 'new_git_package'
+    | 'package_update'
+    | 'new_review'
+    | 'promotion';
   variant?: NotificationVariant;
   icon?: string;
   image?: string;
@@ -34,6 +42,7 @@ export interface NativeNotificationPayload {
 const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
+const SEEN_REVIEWS_KEY = 'lh_seen_reviews_v1';
 const SEEN_PROMOTIONS_KEY = 'lh_seen_promotions_v1';
 const SEEN_BLOG_POSTS_KEY = 'lh_seen_blog_posts_v1';
 const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
@@ -813,6 +822,7 @@ export class PwaService {
     if (category === 'app_update') return this.settingsService.notifyAppUpdates();
     if (category === 'new_git_package') return this.settingsService.notifyNewGitPackages();
     if (category === 'package_update') return this.settingsService.notifyPackageUpdates();
+    if (category === 'new_review') return this.settingsService.notifyNewReviews();
     if (category === 'promotion') return this.settingsService.notifyPromotions();
     return false;
   }
@@ -1380,6 +1390,212 @@ export class PwaService {
   }
 
   /**
+   * Records a review ID as seen in `lh_seen_reviews_v1` (e.g. immediately when a user submits
+   * their own review so they are never notified about it on subsequent catalog syncs).
+   */
+  markReviewSeen(reviewId: string | number): void {
+    if (reviewId === undefined || reviewId === null || typeof localStorage === 'undefined') return;
+    const cleanId = String(reviewId).trim().replace(/^lh_/i, '');
+    if (!cleanId) return;
+    try {
+      const raw = localStorage.getItem(SEEN_REVIEWS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const list = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+      if (!list.includes(cleanId)) {
+        list.push(cleanId);
+        localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(list.slice(-500)));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  /**
+   * Tracks known LuantiHub community review IDs in `localStorage` (`lh_seen_reviews_v1`).
+   * On the very first catalog load, seeds the baseline set silently without spamming notifications.
+   * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
+   * formatted as `New Review · ★★★★★ Title` for newly posted community reviews (within <= 48h).
+   */
+  checkAndNotifyNewReviews(
+    reviews: Array<{
+      id?: string | number;
+      package_id?: string;
+      packageId?: string;
+      package_title?: string;
+      packageTitle?: string;
+      package_type?: string;
+      packageType?: string;
+      package_thumbnail?: string;
+      packageThumbnail?: string;
+      rating?: number;
+      title?: string;
+      comment?: string;
+      created_at?: string;
+      createdAt?: string;
+      reviewer_username?: string;
+      username?: string;
+      reviewer_display_name?: string;
+      display_name?: string;
+      author?: {
+        username?: string;
+        display_name?: string;
+      };
+    }>,
+    options?: {
+      forceNotifyIds?: string[];
+      isBaselineSeedAllowed?: boolean;
+      excludeAuthorUsername?: string;
+    }
+  ): number {
+    if (!Array.isArray(reviews) || reviews.length === 0) return 0;
+    if (typeof localStorage === 'undefined') return 0;
+
+    const forceSet = new Set(
+      (options?.forceNotifyIds || [])
+        .map(id => String(id || '').trim().replace(/^lh_/i, ''))
+        .filter(Boolean)
+    );
+    const excludedUser = String(options?.excludeAuthorUsername || '').trim().toLowerCase();
+
+    const validReviews = reviews.filter(rev => {
+      if (!rev || rev.id === undefined || rev.id === null) return false;
+      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
+      const pkgId = String(rev.package_id || rev.packageId || '').trim();
+      return Boolean(cleanId && pkgId);
+    });
+
+    if (validReviews.length === 0) return 0;
+
+    let rawSeen: string | null = null;
+    try {
+      rawSeen = localStorage.getItem(SEEN_REVIEWS_KEY);
+    } catch {
+      return 0;
+    }
+
+    // First-time baseline seed: record all existing reviews silently without notification flood
+    if (rawSeen === null && forceSet.size === 0) {
+      if (options?.isBaselineSeedAllowed === false) {
+        return 0;
+      }
+      try {
+        const initialIds = Array.from(
+          new Set(validReviews.map(rev => String(rev.id).trim().replace(/^lh_/i, '')))
+        ).slice(-500);
+        localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(initialIds));
+      } catch {
+        // ignore storage errors
+      }
+      return 0;
+    }
+
+    let seenList: string[] = [];
+    if (rawSeen) {
+      try {
+        const parsed = JSON.parse(rawSeen);
+        if (Array.isArray(parsed)) {
+          seenList = parsed.filter((id): id is string => typeof id === 'string');
+        }
+      } catch {
+        seenList = [];
+      }
+    }
+
+    const seenSet = new Set<string>(seenList.map(id => id.replace(/^lh_/i, '')));
+    const newlyDiscovered: typeof validReviews = [];
+    let seenChanged = false;
+
+    for (const rev of validReviews) {
+      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
+      const isForced = forceSet.has(cleanId);
+      const reviewerUsername = String(
+        rev.reviewer_username || rev.username || rev.author?.username || ''
+      ).trim();
+
+      const isSelfReview =
+        Boolean(excludedUser) &&
+        Boolean(reviewerUsername) &&
+        reviewerUsername.toLowerCase() === excludedUser;
+
+      let isRecent = true;
+      const createdRaw = rev.created_at || rev.createdAt;
+      if (!isForced && createdRaw) {
+        const normalizedIso =
+          /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(createdRaw).trim())
+            ? `${String(createdRaw).trim().replace(' ', 'T')}Z`
+            : String(createdRaw).trim();
+        const timeMs = new Date(normalizedIso).getTime();
+        if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
+          isRecent = false;
+        }
+      }
+
+      if (!seenSet.has(cleanId)) {
+        seenSet.add(cleanId);
+        seenChanged = true;
+        if (!isSelfReview && isRecent) {
+          newlyDiscovered.push(rev);
+        }
+      } else if (isForced && !isSelfReview) {
+        newlyDiscovered.push(rev);
+      }
+    }
+
+    if (seenChanged) {
+      try {
+        localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(Array.from(seenSet).slice(-500)));
+      } catch {
+        // ignore storage errors
+      }
+    }
+
+    if (newlyDiscovered.length === 0 || !this.settingsService.notifyNewReviews()) return 0;
+
+    // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
+    for (const rev of newlyDiscovered.slice(0, 3)) {
+      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
+      const pkgId = String(rev.package_id || rev.packageId || '').trim();
+      const pkgTitle = String(
+        rev.package_title || rev.packageTitle || pkgId.split('/')[1] || pkgId
+      ).trim();
+      const rawRating = Number(rev.rating ?? 5);
+      const rating = Math.max(1, Math.min(5, Number.isFinite(rawRating) ? Math.round(rawRating) : 5));
+      const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
+      const reviewer =
+        String(
+          rev.reviewer_username ||
+            rev.username ||
+            rev.author?.username ||
+            rev.reviewer_display_name ||
+            rev.display_name ||
+            rev.author?.display_name ||
+            'community'
+        ).trim() || 'community';
+      const rawComment = String(rev.comment || rev.title || '').replace(/\s+/g, ' ').trim();
+      const excerpt =
+        rawComment.length > 90
+          ? `${rawComment.slice(0, 87)}...`
+          : rawComment || 'New community review posted on LuantiHub.';
+      const thumb = rev.package_thumbnail || rev.packageThumbnail || undefined;
+
+      this.sendNativeNotification({
+        title: `New Review · ${stars} ${pkgTitle}`,
+        body: `by @${reviewer} — "${excerpt}"`,
+        icon: thumb,
+        image: thumb,
+        tag: `lh-review-${cleanId}`,
+        category: 'new_review',
+        variant: 'new_review',
+        data: {
+          packageId: pkgId
+        }
+      });
+    }
+
+    return newlyDiscovered.length;
+  }
+
+  /**
    * Pre-warms the in-memory `data:image/png` cache for all semantic notification icons (`/icons/notif-*.png`)
    * and the app badge (`/icons/icon-72x72.png`) shortly after startup so that even when an `app_update`
    * occurs (and the server's `ngsw.json` hash table rotates) or the device goes offline, native
@@ -1611,6 +1827,7 @@ export class PwaService {
       case 'app_update':
         return '/icons/notif-app-update.png';
       case 'new_git_package':
+      case 'new_review':
       case 'promotion':
         return '/icons/notif-new-package.png';
       case 'package_update':

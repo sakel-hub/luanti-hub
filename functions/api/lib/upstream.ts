@@ -535,7 +535,10 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
     ['content_warnings', 'TEXT'],
     ['ai_disclosures', 'TEXT'],
     ['maintainers', 'TEXT'],
-    ['latest_commit_sha', 'TEXT']
+    ['latest_commit_sha', 'TEXT'],
+    ['screenshots', 'TEXT'],
+    ['game_support', 'TEXT'],
+    ['review_thread_counts', 'TEXT']
   ];
   try {
     const info = await db.prepare(`PRAGMA table_info(packages)`).all();
@@ -3623,4 +3626,125 @@ export async function fetchLatestLuantiBlogPost(): Promise<DiscoveredLuantiBlogP
 
   return null;
 }
+
+/**
+ * Fetches and parses a Git repository's README file across GitHub, Codeberg, and GitLab,
+ * returning sanitized markdown with rewritten relative image URLs, cached at the edge for 1 hour.
+ */
+export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | undefined> {
+  const normalized = normalizeGitRepoInputUrl(repoUrl);
+  if (!normalized) return undefined;
+  const candidates: Array<{ url: string; rawBase?: string; headers?: Record<string, string> }> = [];
+  const pushCandidate = (url: string, rawBase?: string, headers?: Record<string, string>) => {
+    if (!candidates.some(c => c.url === url)) {
+      candidates.push({ url, rawBase, headers });
+    }
+  };
+
+  try {
+    const u = new URL(normalized);
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return undefined;
+    const owner = parts[0];
+    const repo = parts[1];
+    const host = u.hostname.toLowerCase();
+
+    if (host.includes('github.com')) {
+      const ghBase = `https://raw.githubusercontent.com/${owner}/${repo}/HEAD`;
+      for (const file of ['README.md', 'readme.md', 'Readme.md', 'README.txt', 'readme.txt', 'README']) {
+        pushCandidate(`${ghBase}/${file}`, ghBase);
+      }
+      pushCandidate(`https://api.github.com/repos/${owner}/${repo}/readme`, ghBase, {
+        Accept: 'application/vnd.github.raw+json'
+      });
+    } else if (host.includes('codeberg.org')) {
+      const lowerOwner = owner.toLowerCase();
+      const cbApiBase = `https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`;
+      for (const file of ['README.md', 'readme.md', 'Readme.md', 'README.txt', 'readme.txt', 'README']) {
+        pushCandidate(`${cbApiBase}/${file}`, cbApiBase);
+      }
+      for (const branch of ['main', 'master']) {
+        const cbBranchBase = `https://codeberg.org/${lowerOwner}/${repo}/raw/branch/${branch}`;
+        pushCandidate(`${cbBranchBase}/README.md`, cbBranchBase);
+        pushCandidate(`${cbBranchBase}/readme.md`, cbBranchBase);
+      }
+    } else if (host.includes('gitlab.com')) {
+      const glBase = `https://gitlab.com/${owner}/${repo}/-/raw/HEAD`;
+      for (const file of ['README.md', 'readme.md', 'README.txt', 'readme.txt']) {
+        pushCandidate(`${glBase}/${file}`, glBase);
+      }
+    } else {
+      const giteaBase = `${u.origin}/api/v1/repos/${owner}/${repo}/raw`;
+      for (const file of ['README.md', 'readme.md', 'README.txt', 'readme.txt']) {
+        pushCandidate(`${giteaBase}/${file}`, giteaBase);
+      }
+    }
+  } catch {
+    return undefined;
+  }
+
+  if (candidates.length === 0) return undefined;
+
+  const cacheKeyUrl = `https://cache.luantihub.internal/readme?repo=${encodeURIComponent(normalized)}`;
+  const cacheReq = new Request(cacheKeyUrl, { method: 'GET' });
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+
+  if (edgeCache) {
+    try {
+      const cached = await edgeCache.match(cacheReq);
+      if (cached) {
+        const text = await cached.text();
+        return text || undefined;
+      }
+    } catch {
+      // Ignore cache read error
+    }
+  }
+
+  for (const cand of candidates) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1800);
+    try {
+      const res = await fetch(cand.url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)',
+          ...(cand.headers || {})
+        }
+      });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const rawText = (await res.text()).slice(0, 64000);
+        if (
+          rawText &&
+          rawText.trim().length > 10 &&
+          !rawText.trim().startsWith('<!DOCTYPE') &&
+          !rawText.trim().startsWith('<html')
+        ) {
+          const text = rewriteRelativeMarkdownUrls(rawText, cand.rawBase);
+          if (edgeCache) {
+            try {
+              await edgeCache.put(
+                cacheReq,
+                new Response(text, {
+                  headers: {
+                    'Content-Type': 'text/plain; charset=utf-8',
+                    'Cache-Control': 'public, max-age=3600, s-maxage=86400'
+                  }
+                })
+              );
+            } catch {
+              // Ignore
+            }
+          }
+          return text;
+        }
+      }
+    } catch {
+      clearTimeout(timeoutId);
+    }
+  }
+  return undefined;
+}
+
 

@@ -151,6 +151,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     let myReportsTotal = 0;
     let latestGitPackages: any[] = [];
     let recentlyUpdatedPackages: any[] = [];
+    let latestReviews: any[] = [];
 
     try {
       await Promise.all([
@@ -275,6 +276,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         ...p,
         release_id: Math.max(1, Math.floor(new Date(p.updated_at).getTime() / 1000) || 1)
       }));
+
+      const latestReviewsRes = await context.env.DB.prepare(`
+        SELECT
+          r.id,
+          r.package_id,
+          r.rating,
+          r.title,
+          r.comment,
+          r.created_at,
+          u.username AS reviewer_username,
+          u.display_name AS reviewer_display_name,
+          p.title AS package_title,
+          p.type AS package_type,
+          p.thumbnail_url AS package_thumbnail
+        FROM reviews r
+        LEFT JOIN users u ON r.user_id = u.id
+        LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
+        WHERE COALESCE(p.status, 'active') = 'active'
+          AND r.user_id != ?
+          AND r.created_at >= datetime('now', '-2 days')
+        ORDER BY r.created_at DESC
+        LIMIT 5
+      `).bind(resolvedUserId).all().catch(() => ({ results: [] }));
+      latestReviews = latestReviewsRes?.results || [];
     } catch (err) {
       console.error('[me.ts] Failed to load moderation digest:', err);
     }
@@ -307,7 +332,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           my_reports_total: myReportsTotal || userAlerts.length,
           admin_latest_open: adminLatestOpen,
           latest_git_packages: latestGitPackages,
-          recently_updated_packages: recentlyUpdatedPackages
+          recently_updated_packages: recentlyUpdatedPackages,
+          latest_reviews: latestReviews
         }
       },
       oauthProviders

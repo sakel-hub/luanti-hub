@@ -538,6 +538,16 @@ import {
                       </label>
 
                       <label class="flex items-center justify-between gap-3 cursor-pointer">
+                        <span>{{ 'profile.notifyNewReviewsLabel' | translate }}</span>
+                        <input
+                          type="checkbox"
+                          [ngModel]="settingsService.notifyNewReviews()"
+                          (ngModelChange)="settingsService.notifyNewReviews.set($event)"
+                          class="rounded border-slate-700 bg-slate-900 text-sky-500"
+                        />
+                      </label>
+
+                      <label class="flex items-center justify-between gap-3 cursor-pointer">
                         <span>{{ 'profile.notifyModerationLabel' | translate }}</span>
                         <input
                           type="checkbox"

@@ -1016,5 +1016,12 @@ export class AuthService {
         isBaselineSeedAllowed: false
       });
     }
+
+    if (Array.isArray(digest.latest_reviews) && digest.latest_reviews.length > 0) {
+      this.pwaService.checkAndNotifyNewReviews(digest.latest_reviews, {
+        isBaselineSeedAllowed: false,
+        excludeAuthorUsername: user.username
+      });
+    }
   }
 }

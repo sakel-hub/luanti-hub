@@ -343,6 +343,7 @@ export const en: TranslationDictionary = {
     notifyNewGitPackagesLabel: 'New Git Community Packages Published',
     notifyPackageUpdatesLabel: 'Recent Package Releases & Updates (Favorites & Catalog)',
     notifyPromotionsLabel: 'Featured Events, Game Jams & Community Promotions',
+    notifyNewReviewsLabel: 'New Community Reviews & Star Ratings',
     permissionGranted: 'Active',
     permissionBlocked: 'Blocked in Browser',
     permissionResetHint: 'Notifications are muted in LuantiHub. To fully revoke browser permission and be prompted again next time, click the site settings icon in your address bar and select "Reset permission".'

@@ -63,6 +63,9 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE packages ADD COLUMN ai_disclosures TEXT;
 -- ALTER TABLE packages ADD COLUMN maintainers TEXT;
 -- ALTER TABLE packages ADD COLUMN max_minetest_version TEXT;
+-- ALTER TABLE packages ADD COLUMN screenshots TEXT;
+-- ALTER TABLE packages ADD COLUMN game_support TEXT;
+-- ALTER TABLE packages ADD COLUMN review_thread_counts TEXT;
 
 -- 7. Granular daily download & view telemetry columns for Author Analytics Dashboard
 -- (Also auto-initialized at runtime by the Worker via ensureExtendedPackageColumns)

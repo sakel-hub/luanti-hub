@@ -134,12 +134,18 @@ function injectSectionSeoIntoHtml(
   const canonicalUrl = `https://luantihub.org${sectionPath}`;
   const safeTitle = escapeHtmlAttr(meta.title);
   const safeDesc = escapeHtmlAttr(meta.description);
+  const safeBreadcrumb = escapeHtmlAttr(meta.breadcrumbName);
   const breadcrumbJsonLd = JSON.stringify({
     '@context': 'https://schema.org',
     '@type': 'CollectionPage',
     name: meta.breadcrumbName,
     description: meta.description,
     url: canonicalUrl,
+    isPartOf: {
+      '@type': 'WebSite',
+      '@id': 'https://luantihub.org/#website',
+      name: 'Luanti Hub'
+    },
     breadcrumb: {
       '@type': 'BreadcrumbList',
       itemListElement: [
@@ -188,6 +194,10 @@ function injectSectionSeoIntoHtml(
     .replace(
       /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
       `<meta name="twitter:description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<h1>[\s\S]*?<\/h1>/i,
+      `<h1>Luanti ${safeBreadcrumb} — ${safeTitle}</h1><p>${safeDesc}</p>`
     )
     .replace(
       '</head>',

@@ -343,6 +343,7 @@ export const de: TranslationDictionary = {
     notifyNewGitPackagesLabel: 'Neue veröffentlichte Git-Community-Pakete',
     notifyPackageUpdatesLabel: 'Kürzlich aktualisierte Pakete & neue Releases',
     notifyPromotionsLabel: 'Events, Game Jams & Community-Aktionen',
+    notifyNewReviewsLabel: 'Neue Community-Bewertungen & Rezensionen',
     permissionGranted: 'Aktiv',
     permissionBlocked: 'Im Browser blockiert',
     permissionResetHint: 'Benachrichtigungen sind in LuantiHub stummgeschaltet. Um die Browser-Berechtigung vollständig zurückzusetzen, klicken Sie auf das Website-Einstellungssymbol in der Adressleiste und wählen Sie „Berechtigung zurücksetzen“.'

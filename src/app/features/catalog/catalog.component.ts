@@ -450,6 +450,99 @@ import {
 
       </div>
     }
+
+    <!-- Semantic Luanti Ecosystem Guide, Internal Pillar Links & FAQ Section (SEO & User Discovery) -->
+    <section
+      aria-labelledby="luanti-ecosystem-guide-heading"
+      class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 pt-6 pb-8">
+      <div class="p-6 sm:p-8 rounded-3xl glass-panel space-y-6 text-slate-300">
+        <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-6 border-b border-white/10 pb-6">
+          <div class="space-y-2.5 max-w-3xl">
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/30 text-sky-300 text-[11px] font-bold uppercase tracking-wider">
+              Open-Source Voxel Engine Ecosystem
+            </span>
+            <h1 id="luanti-ecosystem-guide-heading" class="text-lg sm:text-2xl font-black text-white tracking-tight">
+              Luanti — Open-Source Voxel Games, Mods &amp; Texture Packs on Luanti Hub
+            </h1>
+            <p class="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              <strong>Luanti</strong> (formerly known as <strong>Minetest</strong>) is a free, open-source C++ voxel game engine for Windows, Linux, macOS, Android, and iOS.
+              <strong>Luanti Hub (LuantiHub)</strong> is the high-availability package registry and discovery hub where players and server administrators can explore, preview, and install thousands of community
+              <a href="/games" (click)="onSeoNavClick($event, 'game')" class="text-sky-400 hover:text-sky-300 font-semibold underline decoration-sky-400/40">Luanti games</a>,
+              <a href="/mods" (click)="onSeoNavClick($event, 'mod')" class="text-sky-400 hover:text-sky-300 font-semibold underline decoration-sky-400/40">Luanti mods</a>, and
+              <a href="/texture-packs" (click)="onSeoNavClick($event, 'txp')" class="text-sky-400 hover:text-sky-300 font-semibold underline decoration-sky-400/40">Luanti texture packs</a>.
+            </p>
+          </div>
+
+          <!-- Crawlable Pillar Category Cards -->
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5 lg:w-[440px] flex-shrink-0 text-xs">
+            <a
+              href="/games"
+              (click)="onSeoNavClick($event, 'game')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">Luanti Games</span>
+              <span class="text-[11px] text-slate-400">Voxel sandboxes &amp; RPGs</span>
+            </a>
+            <a
+              href="/mods"
+              (click)="onSeoNavClick($event, 'mod')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">Luanti Mods</span>
+              <span class="text-[11px] text-slate-400">Worldgen, tech &amp; mobs</span>
+            </a>
+            <a
+              href="/texture-packs"
+              (click)="onSeoNavClick($event, 'txp')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">Texture Packs</span>
+              <span class="text-[11px] text-slate-400">HD &amp; pixel-art packs</span>
+            </a>
+            <a
+              href="/git"
+              (click)="onSeoNavClick($event, 'git')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">Git Packages</span>
+              <span class="text-[11px] text-slate-400">Direct Git repo releases</span>
+            </a>
+            <a
+              href="/setup"
+              (click)="onSeoNavClick($event, 'setup')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">In-Game Setup</span>
+              <span class="text-[11px] text-slate-400">1-click client config</span>
+            </a>
+            <a
+              href="/submit"
+              (click)="onSeoNavClick($event, 'submit')"
+              class="p-3 rounded-2xl glass-btn hover:border-sky-400/50 flex flex-col justify-between gap-1 no-underline transition cursor-pointer">
+              <span class="font-bold text-white">Submit Mod</span>
+              <span class="text-[11px] text-slate-400">Publish from Git</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Frequently Asked Questions About Luanti & Luanti Hub -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-5 text-xs">
+          <div class="space-y-1.5">
+            <h2 class="text-sm font-bold text-white">What is Luanti (formerly Minetest)?</h2>
+            <p class="text-slate-400 leading-relaxed">
+              Luanti is the official new name of the open-source Minetest voxel engine. Rather than locking players into a single game, Luanti provides a lightweight C++ engine and Lua API that powers standalone voxel games like VoxeLibre, Mineclonia, and NodeCore alongside thousands of community mods.
+            </p>
+          </div>
+          <div class="space-y-1.5">
+            <h2 class="text-sm font-bold text-white">How do I install Luanti mods and games?</h2>
+            <p class="text-slate-400 leading-relaxed">
+              Every package on Luanti Hub can be downloaded directly as a ready-to-drop <code>.zip</code> archive for your Luanti <code>mods/</code>, <code>games/</code>, or <code>textures/</code> directory, or installed with one click inside the Luanti client by setting <code>contentdb_url = https://luantihub.org</code> in <code>luanti.conf</code>.
+            </p>
+          </div>
+          <div class="space-y-1.5">
+            <h2 class="text-sm font-bold text-white">How does Luanti Hub work with ContentDB &amp; Git?</h2>
+            <p class="text-slate-400 leading-relaxed">
+              Luanti Hub unifies the official Luanti ContentDB catalog (backed by automatic mirror failover) with decentralized community Git repositories hosted on GitHub, Codeberg, Mesehub, and GitLab, complete with automated <code>mod.conf</code> and SPDX license verification.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
   `
 })
 export class CatalogComponent {
@@ -482,5 +575,22 @@ export class CatalogComponent {
 
   onSortChange(sort: SortOption): void {
     this.packageService.setSortBy(sort);
+  }
+
+  onSeoNavClick(event: MouseEvent, target: 'game' | 'mod' | 'txp' | 'git' | 'setup' | 'submit'): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      return;
+    }
+    event.preventDefault();
+    if (target === 'setup') {
+      this.packageService.openSetupModal();
+    } else if (target === 'submit') {
+      this.packageService.openSubmitModal();
+    } else {
+      this.packageService.selectPrimaryNavTab(target);
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
   }
 }

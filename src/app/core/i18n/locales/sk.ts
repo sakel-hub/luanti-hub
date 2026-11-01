@@ -343,6 +343,7 @@ export const sk: TranslationDictionary = {
     notifyNewGitPackagesLabel: 'Nové publikované komunitné Git balíčky',
     notifyPackageUpdatesLabel: 'Nedávne aktualizácie a nové vydania balíčkov',
     notifyPromotionsLabel: 'Odporúčané udalosti, Game Jamy a komunitné akcie',
+    notifyNewReviewsLabel: 'Nové komunitné recenzie a hodnotenia',
     permissionGranted: 'Aktívne',
     permissionBlocked: 'Zablokované v prehliadači',
     permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.'

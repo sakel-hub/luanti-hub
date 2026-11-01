@@ -74,7 +74,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
             [fallbackThumbnail]="package.thumbnail"
             appImgFallback
-            [alt]="package.title"
+            [alt]="seoImageAlt"
             loading="lazy"
             class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-300"
           />
@@ -243,10 +243,15 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             }
           </div>
 
-          <!-- Title (Fixed 1 line) & Short Description (Fixed 2-line height) -->
+          <!-- Title (Fixed 1 line with Crawlable Internal Package Link) & Short Description (Fixed 2-line height) -->
           <div>
             <h3 class="text-xs sm:text-sm font-bold text-white group-hover:text-sky-300 transition-colors line-clamp-1">
-              {{ package.title }}
+              <a
+                [href]="packageUrl"
+                (click)="onTitleLinkClick($event)"
+                class="text-inherit hover:text-sky-300 no-underline focus:outline-none">
+                {{ package.title }}
+              </a>
             </h3>
             <p class="text-[11px] text-slate-400 line-clamp-2 min-h-[2.25rem] leading-relaxed mt-0.5">
               {{ package.short_desc }}
@@ -544,6 +549,34 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
         // Ignore cross-origin postMessage restrictions
       }
     }
+  }
+
+  get packageUrl(): string {
+    const author = this.package?.author || '';
+    const name = this.package?.name || '';
+    return `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+  }
+
+  get seoImageAlt(): string {
+    if (!this.package) return 'Luanti Package';
+    const typeLabel =
+      this.package.type === 'game'
+        ? 'Game'
+        : this.package.type === 'txp'
+          ? 'Texture Pack'
+          : 'Mod';
+    return `${this.package.title} – Luanti ${typeLabel} by ${this.package.author}`;
+  }
+
+  onTitleLinkClick(event: MouseEvent): void {
+    // Allow Cmd+Click / Ctrl+Click / Middle-Click / Shift+Click to open in a new tab naturally
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.openDetails();
   }
 
   openDetails(event?: MouseEvent): void {

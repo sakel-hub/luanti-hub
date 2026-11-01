@@ -5153,5 +5153,99 @@ supported_games = minetest_game, voxelibre
         Object.defineProperty(navigator, 'serviceWorker', origSwDescriptor);
       }
     }
+
+    // 6. Verify PwaService.checkAndNotifyNewReviews() baseline seeding, star formatting, self-review exclusion, and deduplication
+    localStorage.removeItem('lh_seen_reviews_v1');
+    const reviewNotifs: any[] = [];
+    const origSendReviewNotif = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      reviewNotifs.push(payload);
+      return true;
+    };
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyNewReviews.set(true);
+
+      const recentIso = new Date().toISOString();
+      // First load with isBaselineSeedAllowed: true seeds existing reviews silently without firing notifications
+      const seededCount = pwaService.checkAndNotifyNewReviews(
+        [
+          {
+            id: 101,
+            package_id: 'wuzzy/mineclonia',
+            package_title: 'Mineclonia',
+            rating: 5,
+            comment: 'Baseline review',
+            created_at: recentIso,
+            reviewer_username: 'alice'
+          }
+        ],
+        { isBaselineSeedAllowed: true }
+      );
+      expect(seededCount).toBe(0);
+      expect(reviewNotifs.length).toBe(0);
+
+      // Marking own submitted review as seen prevents future notifications
+      pwaService.markReviewSeen('lh_102');
+
+      // Subsequent check with a brand-new review (103), own review (104), and already-seen (101, 102)
+      const notifiedCount = pwaService.checkAndNotifyNewReviews(
+        [
+          {
+            id: 101,
+            package_id: 'wuzzy/mineclonia',
+            package_title: 'Mineclonia',
+            rating: 5,
+            comment: 'Baseline review',
+            created_at: recentIso,
+            reviewer_username: 'alice'
+          },
+          {
+            id: 102,
+            package_id: 'wuzzy/mineclonia',
+            package_title: 'Mineclonia',
+            rating: 4,
+            comment: 'Already marked seen via markReviewSeen',
+            created_at: recentIso,
+            reviewer_username: 'bob'
+          },
+          {
+            id: 103,
+            package_id: 'rubenwardy/crafting',
+            package_title: 'Crafting Guide',
+            package_thumbnail: 'https://raw.githubusercontent.com/rubenwardy/crafting/main/screenshot.png',
+            rating: 4,
+            comment: 'Super intuitive crafting UI!',
+            created_at: recentIso,
+            reviewer_username: 'charlie'
+          },
+          {
+            id: 104,
+            package_id: 'rubenwardy/crafting',
+            package_title: 'Crafting Guide',
+            rating: 5,
+            comment: 'My own review',
+            created_at: recentIso,
+            reviewer_username: 'current_viewer'
+          }
+        ],
+        {
+          isBaselineSeedAllowed: true,
+          excludeAuthorUsername: 'current_viewer'
+        }
+      );
+
+      expect(notifiedCount).toBe(1);
+      expect(reviewNotifs.length).toBe(1);
+      expect(reviewNotifs[0].title).toBe('New Review · ★★★★☆ Crafting Guide');
+      expect(reviewNotifs[0].body).toBe('by @charlie — "Super intuitive crafting UI!"');
+      expect(reviewNotifs[0].category).toBe('new_review');
+      expect(reviewNotifs[0].variant).toBe('new_review');
+      expect(reviewNotifs[0].data?.packageId).toBe('rubenwardy/crafting');
+      expect(pwaService.getNotificationVariantIconPath(reviewNotifs[0])).toBe('/icons/notif-new-package.png');
+    } finally {
+      pwaService.sendNativeNotification = origSendReviewNotif;
+      localStorage.removeItem('lh_seen_reviews_v1');
+    }
   });
 });

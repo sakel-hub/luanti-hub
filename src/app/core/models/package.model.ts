@@ -210,6 +210,18 @@ export interface AuthUser {
     admin_latest_open?: ModerationReport[];
     latest_git_packages?: Array<Partial<LuantiPackage>>;
     recently_updated_packages?: Array<Partial<LuantiPackage>>;
+    latest_reviews?: Array<{
+      id: string | number;
+      package_id: string;
+      package_title?: string;
+      package_type?: string;
+      package_thumbnail?: string;
+      rating: number;
+      comment: string;
+      created_at: string;
+      reviewer_username?: string;
+      reviewer_display_name?: string;
+    }>;
   };
 }
 

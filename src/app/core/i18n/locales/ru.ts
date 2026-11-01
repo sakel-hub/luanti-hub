@@ -343,6 +343,7 @@ export const ru: TranslationDictionary = {
     notifyNewGitPackagesLabel: 'Новые опубликованные Git-пакеты сообщества',
     notifyPackageUpdatesLabel: 'Недавние обновления и новые релизы пакетов',
     notifyPromotionsLabel: 'События, Game Jams и промоакции сообщества',
+    notifyNewReviewsLabel: 'Новые отзывы и оценки сообщества',
     permissionGranted: 'Активно',
     permissionBlocked: 'Заблокировано в браузере',
     permissionResetHint: 'Уведомления отключены в LuantiHub. Чтобы полностью отозвать разрешение браузера, нажмите на значок настроек сайта в адресной строке и выберите «Сбросить разрешение».'

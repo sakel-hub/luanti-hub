@@ -358,6 +358,7 @@ export interface TranslationDictionary {
     notifyNewGitPackagesLabel: string;
     notifyPackageUpdatesLabel: string;
     notifyPromotionsLabel: string;
+    notifyNewReviewsLabel: string;
     permissionGranted: string;
     permissionBlocked: string;
     permissionResetHint: string;

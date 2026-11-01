@@ -28,17 +28,23 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     { loc: `${origin}/legal`, priority: '0.8', changefreq: 'monthly' }
   ];
 
-  const packageUrls = new Set<string>();
+  const packageLastModByUrl = new Map<string, string>();
+  const normalizeIsoDate = (raw: unknown): string => {
+    if (!raw || typeof raw !== 'string') return today;
+    const match = raw.match(/^\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : today;
+  };
 
   // 1. Add active packages from Cloudflare D1
   if (context.env.DB) {
     try {
       const d1Rows = await context.env.DB.prepare(
-        `SELECT author_name, name FROM packages WHERE status = 'active' LIMIT 250`
+        `SELECT author_name, name, updated_at, created_at FROM packages WHERE status = 'active' LIMIT 1000`
       ).all();
       for (const r of d1Rows.results || []) {
         if (r.author_name && r.name) {
-          packageUrls.add(`${origin}/package/${encodeURIComponent(r.author_name)}/${encodeURIComponent(r.name)}`);
+          const pkgUrl = `${origin}/package/${encodeURIComponent(r.author_name)}/${encodeURIComponent(r.name)}`;
+          packageLastModByUrl.set(pkgUrl, normalizeIsoDate(r.updated_at || r.created_at));
         }
       }
     } catch {
@@ -46,13 +52,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  // 2. Add top packages from upstream ContentDB
+  // 2. Add top 1,500 packages from upstream ContentDB (cached for 6 hours at Edge)
   try {
-    const upstreamList = await fetchUpstreamJsonCached<any[]>('/packages/?limit=150', 3600);
+    const upstreamList = await fetchUpstreamJsonCached<any[]>('/packages/?limit=1500', 21600);
     if (Array.isArray(upstreamList)) {
-      for (const p of upstreamList.slice(0, 150)) {
+      for (const p of upstreamList.slice(0, 1500)) {
         if (p.author && p.name) {
-          packageUrls.add(`${origin}/package/${encodeURIComponent(p.author)}/${encodeURIComponent(p.name)}`);
+          const pkgUrl = `${origin}/package/${encodeURIComponent(p.author)}/${encodeURIComponent(p.name)}`;
+          if (!packageLastModByUrl.has(pkgUrl)) {
+            packageLastModByUrl.set(pkgUrl, normalizeIsoDate(p.updated_at || p.created_at));
+          }
         }
       }
     }
@@ -83,12 +92,12 @@ ${hreflangLinks}
   </url>`);
   }
 
-  for (const pkgLoc of packageUrls) {
+  for (const [pkgLoc, lastmod] of packageLastModByUrl.entries()) {
     urlEntries.push(`  <url>
     <loc>${escapeXml(pkgLoc)}</loc>
-    <lastmod>${today}</lastmod>
+    <lastmod>${escapeXml(lastmod)}</lastmod>
     <changefreq>weekly</changefreq>
-    <priority>0.7</priority>
+    <priority>0.8</priority>
   </url>`);
   }
 
@@ -101,7 +110,7 @@ ${urlEntries.join('\n')}
   return new Response(xml, {
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, s-maxage=3600'
+      'Cache-Control': 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400'
     }
   });
 }

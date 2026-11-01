@@ -12,9 +12,9 @@ export class SeoService {
   private readonly doc = inject(DOCUMENT);
 
   private readonly defaultTitle =
-    'Luanti Hub (LuantiHub) – Mods & Packages for Luanti (Minetest)';
+    'Luanti — Mods, Games & Texture Packs | Luanti Hub (LuantiHub)';
   private readonly defaultDesc =
-    'Luanti Hub (LuantiHub) is the open package registry and mod repository for Luanti (Minetest). Discover, search, and download mods, games, and texture packs directly from Git repositories and ContentDB with instant failover.';
+    'Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub). Direct .zip downloads, Git repository packages, and 1-click in-game ContentDB setup.';
   private readonly baseUrl = 'https://luantihub.org';
 
   updateForPackage(pkg: LuantiPackage): void {
@@ -26,9 +26,21 @@ export class SeoService {
       `Download ${pkg.title} by ${pkg.author} (${typeLabel}) for Luanti / Minetest on Luanti Hub.`;
     const canonicalUrl = `${this.baseUrl}/package/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}`;
     const imageUrl = pkg.banner || pkg.thumbnail || `${this.baseUrl}/icons/icon-512x512.png`;
+    const keywords = [
+      'luanti',
+      `luanti ${pkg.type === 'txp' ? 'texture pack' : pkg.type}`,
+      pkg.title,
+      pkg.name,
+      pkg.author,
+      'luanti hub',
+      'luantihub',
+      'minetest',
+      ...(Array.isArray(pkg.tags) ? pkg.tags.slice(0, 8) : [])
+    ].join(', ');
 
     this.title.setTitle(pageTitle);
     this.meta.updateTag({ name: 'description', content: pageDesc });
+    this.meta.updateTag({ name: 'keywords', content: keywords });
     this.meta.updateTag({ property: 'og:title', content: pageTitle });
     this.meta.updateTag({ property: 'og:description', content: pageDesc });
     this.meta.updateTag({ property: 'og:url', content: canonicalUrl });
@@ -105,16 +117,30 @@ export class SeoService {
       this.doc.head.appendChild(scriptEl);
     }
 
-    const schema: Record<string, any> = {
-      '@context': 'https://schema.org',
+    const typeLabel =
+      pkg.type === 'game' ? 'Game' : pkg.type === 'txp' ? 'Texture Pack' : 'Mod';
+    const sectionPath =
+      pkg.type === 'game' ? '/games' : pkg.type === 'txp' ? '/texture-packs' : '/mods';
+    const sectionLabel =
+      pkg.type === 'game' ? 'Luanti Games' : pkg.type === 'txp' ? 'Luanti Texture Packs' : 'Luanti Mods';
+
+    const softwareAppSchema: Record<string, any> = {
       '@type': 'SoftwareApplication',
+      '@id': `${canonicalUrl}#software`,
       name: pkg.title,
+      alternateName: `${pkg.name} (Luanti ${typeLabel})`,
       applicationCategory: 'GameApplication',
-      operatingSystem: 'Windows, macOS, Linux, Android',
+      applicationSubCategory: `Luanti ${typeLabel}`,
+      operatingSystem: 'Windows, macOS, Linux, Android, iOS',
       description,
       url: canonicalUrl,
       image: imageUrl,
       license: pkg.license,
+      isPartOf: {
+        '@type': 'WebSite',
+        '@id': `${this.baseUrl}/#website`,
+        name: 'Luanti Hub'
+      },
       author: {
         '@type': 'Person',
         name: pkg.author
@@ -134,7 +160,7 @@ export class SeoService {
       const resolvedCount = realReviewCount > 0
         ? realReviewCount
         : Math.max(1, Math.round((pkg.downloads || 100) / 50));
-      schema['aggregateRating'] = {
+      softwareAppSchema['aggregateRating'] = {
         '@type': 'AggregateRating',
         ratingValue: String(pkg.score),
         bestRating: '5',
@@ -143,7 +169,34 @@ export class SeoService {
       };
     }
 
-    scriptEl.textContent = JSON.stringify(schema);
+    const breadcrumbSchema = {
+      '@type': 'BreadcrumbList',
+      itemListElement: [
+        {
+          '@type': 'ListItem',
+          position: 1,
+          name: 'Luanti Hub',
+          item: `${this.baseUrl}/`
+        },
+        {
+          '@type': 'ListItem',
+          position: 2,
+          name: sectionLabel,
+          item: `${this.baseUrl}${sectionPath}`
+        },
+        {
+          '@type': 'ListItem',
+          position: 3,
+          name: pkg.title,
+          item: canonicalUrl
+        }
+      ]
+    };
+
+    scriptEl.textContent = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@graph': [softwareAppSchema, breadcrumbSchema]
+    });
   }
 
   private setBreadcrumbJsonLd(routeTitle: string, routeDesc: string, canonicalUrl: string): void {

@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS packages (
     content_warnings TEXT,               -- JSON array of content warning identifiers
     ai_disclosures TEXT,                 -- JSON array of AI disclosure identifiers
     maintainers TEXT,                    -- JSON array of maintainer handles
+    screenshots TEXT,                    -- JSON array of screenshot URLs
+    game_support TEXT,                   -- JSON array of supported games
+    review_thread_counts TEXT,           -- JSON object { positive, neutral, negative }
     score REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

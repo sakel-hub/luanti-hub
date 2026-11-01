@@ -105,12 +105,15 @@ export class PackageService {
   private pendingRoutePackage: { author: string; name: string } | null = null;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
+  private readonly _deepHydratedVersion = signal<number>(0);
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
   private readonly pendingD1Writeback = new Map<string, any>();
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
   private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
   private readonly releaseNotesCache = new Map<string, ReleaseNotesPayload>();
+  private readonly readmeCache = new Map<string, string | null>();
+  private readonly readmePromiseCache = new Map<string, Promise<string | undefined>>();
   private readonly reportedBrokenGitIds = new Set<string>();
   private readonly hydrationQueue: LuantiPackage[] = [];
   private activeHydrationWorkers = 0;
@@ -1566,6 +1569,7 @@ export class PackageService {
       top10Today?: any[];
       promotions?: HeroPromotion[];
       latestBlogPost?: LuantiBlogPost | null;
+      recentReviews?: any[];
     }
   ): void {
     this.lastCatalogSyncAt = Date.now();
@@ -1600,6 +1604,28 @@ export class PackageService {
     this.reconcileFavoritesWithCatalog(normalized);
     this.pwaService.checkAndNotifyNewGitPackages(normalized, { isBaselineSeedAllowed: true });
     this.pwaService.checkAndNotifyUpdatedPackages(normalized, { isBaselineSeedAllowed: true });
+
+    if (Array.isArray(payload.recentReviews) && payload.recentReviews.length > 0) {
+      const pkgMap = new Map<string, LuantiPackage>();
+      for (const p of normalized) {
+        pkgMap.set(p.id.toLowerCase(), p);
+        pkgMap.set(`${p.author}/${p.name}`.toLowerCase(), p);
+      }
+      const enrichedReviews = payload.recentReviews.map((rev: any) => {
+        const pkgId = String(rev?.package_id || rev?.packageId || '').trim();
+        const match = pkgId ? pkgMap.get(pkgId.toLowerCase()) : undefined;
+        return {
+          ...rev,
+          package_title: rev?.package_title || match?.title || pkgId.split('/')[1] || pkgId,
+          package_type: rev?.package_type || match?.type || 'mod',
+          package_thumbnail: rev?.package_thumbnail || match?.thumbnail
+        };
+      });
+      this.pwaService.checkAndNotifyNewReviews(enrichedReviews, {
+        isBaselineSeedAllowed: true,
+        excludeAuthorUsername: this.authService.currentUser()?.username
+      });
+    }
 
     // If a package detail modal is currently open during a background refresh, merge live catalog metrics
     // (downloads, score, release_id, updated_at, download_size, file_size) without losing deep-hydrated fields
@@ -3864,10 +3890,55 @@ export class PackageService {
         let edgeResolved = false;
         if (this.edgeApiAvailable && (deepFetch || isPureGitOnly)) {
           try {
-            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`);
-            if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-              data = await res.json();
-              edgeResolved = Boolean(data && Object.keys(data).length > 0);
+            const edgePromise = fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).then(async res => {
+              if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+                return await res.json();
+              }
+              return null;
+            }).catch(() => null);
+
+            if (deepFetch && !isPureGitOnly) {
+              // Race the Edge call against a 280ms timer: if Edge/D1 is warm it resolves in <50ms;
+              // if cold, we immediately start upstream ContentDB hydration in parallel rather than blocking for seconds.
+              const fastResult = await Promise.race([
+                edgePromise.then(res => ({ done: true, res })),
+                new Promise<{ done: false; res: null }>(resolve => setTimeout(() => resolve({ done: false, res: null }), 280))
+              ]);
+              if (fastResult.done && fastResult.res) {
+                data = fastResult.res;
+                edgeResolved = Boolean(data && Object.keys(data).length > 0);
+              } else {
+                // Edge is still working on a cold cache miss; let it finish in background to sync D1 reviews/downloads
+                edgePromise.then(bgData => {
+                  if (bgData && typeof bgData === 'object' && Object.keys(bgData).length > 0) {
+                    if (Array.isArray(bgData.reviews_list)) {
+                      const normalizedBundled = this.normalizeContentDbReviews(bgData.reviews_list, pkg.id);
+                      this.reviewsCache.set(cacheKey, normalizedBundled);
+                    }
+                    const lhDl = Number(bgData.luantihub_downloads || 0);
+                    const cdbDl = Number(bgData.contentdb_downloads ?? bgData.downloads ?? 0);
+                    if (lhDl > 0 || cdbDl > 0) {
+                      this._activePackage.update(curr => {
+                        if (curr && curr.id.toLowerCase() === cacheKey) {
+                          return {
+                            ...curr,
+                            contentdb_downloads: Math.max(curr.contentdb_downloads || 0, cdbDl),
+                            luantihub_downloads: Math.max(curr.luantihub_downloads || 0, lhDl),
+                            downloads: Math.max(curr.downloads || 0, cdbDl + lhDl)
+                          };
+                        }
+                        return curr;
+                      });
+                    }
+                  }
+                });
+              }
+            } else {
+              const resJson = await edgePromise;
+              if (resJson) {
+                data = resJson;
+                edgeResolved = Boolean(data && Object.keys(data).length > 0);
+              }
             }
           } catch {
             // Fallback below
@@ -3885,6 +3956,7 @@ export class PackageService {
           !data ||
           Object.keys(data).length === 0 ||
           !data.license ||
+          (deepFetch && !Array.isArray(data.screenshots)) ||
           !(Number(data.downloads ?? data.downloads_count ?? 0) > 0);
 
         if (!isPureGitOnly && needsUpstreamDetail) {
@@ -4026,7 +4098,7 @@ export class PackageService {
         const hasBundledEdgeResponse = Boolean(this.edgeApiAvailable && data && (data.git_repo_status || Array.isArray(data.reviews_list)));
 
         // Populate in-memory reviews and releases caches directly from bundled response
-        if (Array.isArray(data.reviews_list) && data.reviews_list.length > 0) {
+        if (Array.isArray(data.reviews_list)) {
           const normalizedBundled = this.normalizeContentDbReviews(data.reviews_list, pkg.id);
           const hasCdbReviewsInBundled = normalizedBundled.some(r => r.source === 'contentdb' && r.author.username !== 'contentdb_user');
           const rawCdbCounts = data.review_thread_counts || (data.reviews && !Array.isArray(data.reviews) && typeof data.reviews === 'object' ? data.reviews : pkg.review_thread_counts);
@@ -4231,10 +4303,7 @@ export class PackageService {
           ? data.screenshots.map((s: any) => (typeof s === 'string' ? s : s?.url || '')).filter(Boolean)
           : pkg.screenshots;
 
-        let readmeText: string | undefined = data.readme || pkg.readme;
-        if (deepFetch && !readmeText && !hasBundledEdgeResponse && gitRepoStatus !== 'broken_404') {
-          readmeText = await this.fetchRawReadmeFromRepo(repoUrl, pkg);
-        }
+        let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
         const dataSources: PackageSource[] = Array.isArray(data.sources)
           ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
@@ -4408,11 +4477,14 @@ export class PackageService {
 
         if (deepFetch) {
           this.deepHydratedIds.add(cacheKey);
+          this._deepHydratedVersion.update(v => v + 1);
         }
       } catch (err) {
         console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
       } finally {
         if (deepFetch) {
+          this.deepHydratedIds.add(cacheKey);
+          this._deepHydratedVersion.update(v => v + 1);
           this._isLoadingDetails.set(false);
         }
       }
@@ -4422,6 +4494,80 @@ export class PackageService {
 
     this.inFlightDetailsCache.set(inFlightKey, work);
     return work;
+  }
+
+  isPackageDeepHydrated(pkg?: LuantiPackage | null): boolean {
+    this._deepHydratedVersion();
+    if (!pkg?.id) return false;
+    return this.deepHydratedIds.has(pkg.id.toLowerCase());
+  }
+
+  getCachedReviews(pkg?: LuantiPackage | null): CommunityReview[] | undefined {
+    if (!pkg?.id) return undefined;
+    return this.reviewsCache.get(pkg.id.toLowerCase());
+  }
+
+  getCachedReadme(pkg?: LuantiPackage | null): string | null | undefined {
+    if (!pkg?.id) return undefined;
+    if (pkg.readme) return pkg.readme;
+    return this.readmeCache.get(pkg.id.toLowerCase());
+  }
+
+  async fetchPackageReadme(pkg: LuantiPackage): Promise<string | undefined> {
+    if (!pkg?.id) return undefined;
+    const cacheKey = pkg.id.toLowerCase();
+    if (pkg.readme) {
+      this.readmeCache.set(cacheKey, pkg.readme);
+      return pkg.readme;
+    }
+    if (this.readmeCache.has(cacheKey)) {
+      return this.readmeCache.get(cacheKey) || undefined;
+    }
+    const existingInFlight = this.readmePromiseCache.get(cacheKey);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+
+    const promise = (async (): Promise<string | undefined> => {
+      const encAuthor = encodeURIComponent(pkg.author);
+      const encName = encodeURIComponent(pkg.name);
+      let readmeText: string | undefined;
+
+      if (this.edgeApiAvailable) {
+        try {
+          const repoParam = pkg.repo_url ? `?repo=${encodeURIComponent(pkg.repo_url)}` : '';
+          const res = await fetch(`/api/packages/${encAuthor}/${encName}/readme${repoParam}`);
+          if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+            const payload = await res.json();
+            if (payload && typeof payload.readme === 'string' && payload.readme.trim().length > 0) {
+              readmeText = payload.readme;
+            }
+          }
+        } catch {
+          // Proceed to direct repo fallback
+        }
+      }
+
+      if (!readmeText && pkg.git_repo_status !== 'broken_404') {
+        readmeText = await this.fetchRawReadmeFromRepo(pkg.repo_url, pkg);
+      }
+
+      this.readmeCache.set(cacheKey, readmeText || null);
+      if (readmeText) {
+        this._activePackage.update(curr =>
+          curr && curr.id.toLowerCase() === cacheKey ? { ...curr, readme: readmeText } : curr
+        );
+        this._packages.update(list =>
+          list.map(item => (item.id.toLowerCase() === cacheKey ? { ...item, readme: readmeText } : item))
+        );
+      }
+      return readmeText;
+    })().finally(() => {
+      this.readmePromiseCache.delete(cacheKey);
+    });
+
+    this.readmePromiseCache.set(cacheKey, promise);
+    return promise;
   }
 
   getCachedReleases(pkg?: LuantiPackage | null): PackageRelease[] | undefined {
@@ -4938,6 +5084,9 @@ export class PackageService {
       : { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` };
 
     this.startInEditTagsMode.set(editTags);
+    if (!this.deepHydratedIds.has(targetId)) {
+      this._isLoadingDetails.set(true);
+    }
     this._activePackage.set(hydratedPkg);
     this.updateSeoMeta(hydratedPkg);
     if (updateUrl && hydratedPkg.author && hydratedPkg.name) {
@@ -5094,6 +5243,9 @@ export class PackageService {
     );
 
     const currentActive = this._activePackage();
+    if (!this.deepHydratedIds.has(initialPkg.id.toLowerCase())) {
+      this._isLoadingDetails.set(true);
+    }
     if (!currentActive || currentActive.id.toLowerCase() !== initialPkg.id.toLowerCase()) {
       this._activePackage.set(initialPkg);
       this.updateSeoMeta(initialPkg);
@@ -5611,8 +5763,14 @@ export class PackageService {
   async fetchReviews(pkg: LuantiPackage, forceRefresh = false): Promise<CommunityReview[]> {
     const cacheKey = pkg.id.toLowerCase();
     const cached = this.reviewsCache.get(cacheKey);
-    if (cached && cached.length > 0 && !forceRefresh) {
-      this.applyReviewAverageToPackage(pkg, cached);
+    const revCounts = pkg.review_thread_counts;
+    const expectedTotal = revCounts
+      ? Number(revCounts.positive || 0) + Number(revCounts.neutral || 0) + Number(revCounts.negative || 0)
+      : 0;
+    if (cached !== undefined && !forceRefresh && (cached.length > 0 || expectedTotal === 0)) {
+      if (cached.length > 0) {
+        this.applyReviewAverageToPackage(pkg, cached);
+      }
       return cached;
     }
 
@@ -5755,6 +5913,9 @@ export class PackageService {
             });
           this._serverTop10Today.update(syncTop10);
           this._serverTop10Week.update(syncTop10);
+        }
+        if (data?.review?.id) {
+          this.pwaService.markReviewSeen(data.review.id);
         }
         this.clearBootCache();
         return { success: true, review: data.review };

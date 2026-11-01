@@ -363,7 +363,7 @@ import {
 
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-10">
 
-              <!-- Left Column: Synopsis, Screenshots, Dependencies, README & 1-Click Setup -->
+              <!-- Left Column: Screenshots, Synopsis, Dependencies, Collapsible README & 1-Click Setup -->
               <div class="lg:col-span-2 space-y-6">
 
                 <!-- Metrics Bar -->
@@ -391,6 +391,8 @@ import {
                     <span class="text-slate-300 font-mono uppercase px-2 py-0.5 rounded glass-pill text-xs">
                       License: {{ package.license || package.media_license }}
                     </span>
+                  } @else if (isHydratingDetails()) {
+                    <span class="w-24 h-5 rounded glass-pill skeleton-shimmer inline-block" aria-hidden="true"></span>
                   }
                   @if (package.file_size) {
                     <span class="text-sky-300 font-mono px-2 py-0.5 rounded glass-pill text-xs">
@@ -405,15 +407,7 @@ import {
                   }
                 </div>
 
-                <!-- Markdown Description / Synopsis -->
-                @if (renderedDescription(); as descHtml) {
-                  <div
-                    class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
-                    [innerHTML]="descHtml">
-                  </div>
-                }
-
-                <!-- Media & Screenshots Carousel (Consistent with HeroBillboardComponent + Click-to-Zoom Lightbox) -->
+                <!-- Media & Screenshots Carousel (Placed above Description, with Skeleton Preloader) -->
                 @if (mediaSlides().length > 0) {
                   <div class="space-y-3">
                     <div class="flex items-center justify-between">
@@ -421,20 +415,6 @@ import {
                         <svg lucideImage class="w-3.5 h-3.5 text-sky-400"></svg>
                         <span>{{ 'modal.screenshots' | translate }} ({{ mediaSlides().length }})</span>
                       </h3>
-                      @if (currentMediaSlide()?.type === 'image') {
-                        <button
-                          type="button"
-                          (click)="openLightbox(currentMediaSlide()!.url)"
-                          class="text-[11px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
-                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="11" cy="11" r="8"></circle>
-                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                            <line x1="11" y1="8" x2="11" y2="14"></line>
-                            <line x1="8" y1="11" x2="14" y2="11"></line>
-                          </svg>
-                          <span>{{ 'modal.enlargeImage' | translate }}</span>
-                        </button>
-                      }
                     </div>
 
                     <div
@@ -568,21 +548,32 @@ import {
                           </button>
                         </div>
 
-                        <!-- Frosted Pill Indicator Dock (Matching HeroBillboardComponent, no 1/N text counter) -->
-                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-950/55 backdrop-blur-md border border-white/10 shadow-lg">
-                          @for (slide of mediaSlides(); track slide.url; let idx = $index) {
+                        <!-- Frosted Pill Indicator Dock (Sliding 9-Dot Window with Tapered Edge Dots for Large Galleries) -->
+                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-950/55 backdrop-blur-md border border-white/10 shadow-lg max-w-[calc(100%-7.5rem)]">
+                          @for (dot of visibleMediaDots(); track dot.index) {
                             <button
                               type="button"
-                              (click)="goToMediaSlide(idx, $event)"
-                              [attr.aria-label]="'Go to media slide ' + (idx + 1)"
-                              class="h-1.5 rounded-full transition-all duration-500 ease-out overflow-hidden cursor-pointer"
-                              [class.w-6]="idx === mediaCarouselIndex()"
-                              [class.bg-sky-400]="idx === mediaCarouselIndex()"
-                              [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="idx === mediaCarouselIndex()"
-                              [class.w-2]="idx !== mediaCarouselIndex()"
-                              [class.bg-white/35]="idx !== mediaCarouselIndex()"
-                              [class.hover:bg-white/60]="idx !== mediaCarouselIndex()">
+                              (click)="goToMediaSlide(dot.index, $event)"
+                              [attr.aria-label]="'Go to media slide ' + (dot.index + 1)"
+                              class="rounded-full transition-all duration-300 ease-out overflow-hidden flex-shrink-0 cursor-pointer"
+                              [class.w-6]="dot.index === mediaCarouselIndex()"
+                              [class.bg-sky-400]="dot.index === mediaCarouselIndex()"
+                              [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="dot.index === mediaCarouselIndex()"
+                              [class.w-2]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'normal'"
+                              [class.bg-white/40]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'normal'"
+                              [class.w-1.5]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'sm'"
+                              [class.bg-white/25]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'sm'"
+                              [class.w-1]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'xs'"
+                              [class.bg-white/15]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'xs'"
+                              [class.h-1.5]="dot.index === mediaCarouselIndex() || dot.edgeScale !== 'xs'"
+                              [class.h-1]="dot.index !== mediaCarouselIndex() && dot.edgeScale === 'xs'"
+                              [class.hover:bg-white/60]="dot.index !== mediaCarouselIndex()">
                             </button>
+                          }
+                          @if (mediaSlides().length > MAX_VISIBLE_DOTS) {
+                            <span class="pl-1 ml-0.5 border-l border-white/15 text-[10px] font-mono font-semibold text-slate-300 leading-none whitespace-nowrap select-none">
+                              {{ mediaCarouselIndex() + 1 }}/{{ mediaSlides().length }}
+                            </span>
                           }
                         </div>
                       }
@@ -617,9 +608,40 @@ import {
                       </div>
                     }
                   </div>
+                } @else if (isHydratingDetails()) {
+                  <!-- Screenshots Skeleton Preloader -->
+                  <div class="space-y-3" aria-busy="true" aria-label="Loading screenshots">
+                    <div class="flex items-center justify-between">
+                      <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                        <svg lucideImage class="w-3.5 h-3.5 text-sky-400"></svg>
+                        <span>{{ 'modal.screenshots' | translate }}</span>
+                      </h3>
+                    </div>
+                    <div class="w-full aspect-video rounded-2xl skeleton-shimmer border border-white/10 shadow-xl"></div>
+                    <div class="flex items-center gap-3 overflow-hidden p-1 -mx-1">
+                      <div class="w-24 h-14 sm:w-28 sm:h-16 rounded-xl skeleton-shimmer flex-shrink-0 border border-white/10"></div>
+                      <div class="w-24 h-14 sm:w-28 sm:h-16 rounded-xl skeleton-shimmer flex-shrink-0 border border-white/10"></div>
+                      <div class="w-24 h-14 sm:w-28 sm:h-16 rounded-xl skeleton-shimmer flex-shrink-0 border border-white/10"></div>
+                    </div>
+                  </div>
                 }
 
-                <!-- Dependencies & Provided Mods Section (Always visible so dependency status is clear) -->
+                <!-- Markdown Description / Synopsis (Placed below Screenshots, with Skeleton Preloader before long_description arrives) -->
+                @if (isHydratingDetails() && !package.desc) {
+                  <div class="p-5 rounded-2xl glass-panel space-y-2.5" aria-busy="true" aria-label="Loading package description">
+                    <div class="w-1/3 h-4 rounded skeleton-shimmer"></div>
+                    <div class="w-full h-3.5 rounded skeleton-shimmer"></div>
+                    <div class="w-11/12 h-3.5 rounded skeleton-shimmer"></div>
+                    <div class="w-4/5 h-3.5 rounded skeleton-shimmer"></div>
+                  </div>
+                } @else if (renderedDescription(); as descHtml) {
+                  <div
+                    class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
+                    [innerHTML]="descHtml">
+                  </div>
+                }
+
+                <!-- Dependencies & Provided Mods Section (Shows skeleton while hydrating instead of false standalone placeholder) -->
                 <div class="space-y-3 p-4 rounded-2xl glass-panel">
                   <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wider">
                     {{ 'modal.dependencies' | translate }}
@@ -673,6 +695,15 @@ import {
                         </div>
                       </div>
                     }
+                  } @else if (isHydratingDetails()) {
+                    <div class="space-y-2 py-0.5" aria-busy="true" aria-label="Loading dependencies">
+                      <div class="w-28 h-3 rounded skeleton-shimmer"></div>
+                      <div class="flex flex-wrap gap-1.5">
+                        <div class="w-20 h-6 rounded-lg skeleton-shimmer"></div>
+                        <div class="w-24 h-6 rounded-lg skeleton-shimmer"></div>
+                        <div class="w-16 h-6 rounded-lg skeleton-shimmer"></div>
+                      </div>
+                    </div>
                   } @else {
                     <p class="text-xs text-slate-400">
                       {{ 'modal.noDependencies' | translate }}
@@ -680,43 +711,62 @@ import {
                   }
                 </div>
 
-                <!-- Repository README.md Markdown Section -->
-                @if (renderedReadme(); as readmeHtml) {
-                  <div class="p-5 rounded-2xl glass-panel space-y-3">
-                    <div class="flex items-center justify-between border-b border-white/10 pb-2.5">
-                      <h3 class="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
-                        <svg lucideBookOpen class="w-4 h-4 text-sky-400"></svg>
-                        <span>{{ 'modal.readmeTitle' | translate }}</span>
-                      </h3>
+                <!-- Collapsible Repository README.md Markdown Section (Collapsed by Default, Fetched on Demand) -->
+                @if (hasValidGitRepo || renderedReadme() || isHydratingDetails()) {
+                  <div class="p-4 sm:p-5 rounded-2xl glass-panel space-y-3">
+                    <div class="flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        (click)="toggleReadme()"
+                        [attr.aria-expanded]="isReadmeExpanded()"
+                        class="flex items-center gap-2 text-left group cursor-pointer flex-1 min-w-0">
+                        <svg lucideBookOpen class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+                        <span class="text-xs font-bold text-sky-400 group-hover:text-sky-300 uppercase tracking-wider transition">
+                          {{ 'modal.readmeTitle' | translate }}
+                        </span>
+                        <span class="px-2 py-0.5 rounded-md glass-pill text-[10px] font-semibold text-slate-300 group-hover:text-white transition">
+                          {{ isReadmeExpanded() ? 'Hide' : 'Show README' }}
+                        </span>
+                        <svg
+                          lucideChevronDown
+                          class="w-4 h-4 text-slate-400 group-hover:text-sky-300 transition-transform duration-200 flex-shrink-0"
+                          [class.rotate-180]="isReadmeExpanded()">
+                        </svg>
+                      </button>
+
                       <a
                         [href]="gitRepoUrl"
                         target="_blank"
                         rel="noopener noreferrer"
-                        class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
+                        (click)="$event.stopPropagation()"
+                        class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer flex-shrink-0">
                         <span>{{ (hasValidGitRepo ? 'modal.viewGitRepo' : 'modal.viewOnContentDb') | translate }}</span>
                         <svg lucideExternalLink class="w-3 h-3"></svg>
                       </a>
                     </div>
-                    <div
-                      class="luanti-markdown text-slate-200 text-sm leading-relaxed max-h-[32rem] overflow-y-auto pr-1.5 break-words"
-                      [innerHTML]="readmeHtml">
-                    </div>
-                  </div>
-                } @else if (packageService.isLoadingDetails()) {
-                  <div class="p-5 rounded-2xl glass-panel space-y-3" aria-busy="true">
-                    <div class="flex items-center justify-between border-b border-white/10 pb-2.5">
-                      <h3 class="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5">
-                        <svg lucideBookOpen class="w-4 h-4 text-sky-400"></svg>
-                        <span>{{ 'modal.readmeTitle' | translate }}</span>
-                      </h3>
-                      <div class="w-20 h-3.5 rounded skeleton-shimmer"></div>
-                    </div>
-                    <div class="space-y-2.5 py-1">
-                      <div class="w-2/5 h-4 rounded skeleton-shimmer"></div>
-                      <div class="w-full h-3 rounded skeleton-shimmer"></div>
-                      <div class="w-11/12 h-3 rounded skeleton-shimmer"></div>
-                      <div class="w-4/5 h-3 rounded skeleton-shimmer"></div>
-                    </div>
+
+                    @if (isReadmeExpanded()) {
+                      <div class="border-t border-white/10 pt-3">
+                        @if (isLoadingReadme()) {
+                          <div class="space-y-2.5 py-1" aria-busy="true" aria-label="Loading repository README">
+                            <div class="w-2/5 h-4 rounded skeleton-shimmer"></div>
+                            <div class="w-full h-3 rounded skeleton-shimmer"></div>
+                            <div class="w-11/12 h-3 rounded skeleton-shimmer"></div>
+                            <div class="w-4/5 h-3 rounded skeleton-shimmer"></div>
+                            <div class="w-3/5 h-3 rounded skeleton-shimmer"></div>
+                          </div>
+                        } @else if (renderedReadme(); as readmeHtml) {
+                          <div
+                            class="luanti-markdown text-slate-200 text-sm leading-relaxed max-h-[32rem] overflow-y-auto pr-1.5 break-words"
+                            [innerHTML]="readmeHtml">
+                          </div>
+                        } @else {
+                          <p class="text-xs text-slate-400 italic py-1">
+                            No README.md file found in the repository.
+                          </p>
+                        }
+                      </div>
+                    }
                   </div>
                 }
 
@@ -959,7 +1009,7 @@ import {
                   }
                 </div>
 
-                <!-- License Information (Only shown when license or media_license is available) -->
+                <!-- License Information (Only shown when license or media_license is available, with skeleton while hydrating) -->
                 @if (package.license || package.media_license) {
                   <div>
                     <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
@@ -973,6 +1023,13 @@ import {
                         <span class="block">{{ 'modal.mediaLicense' | translate }}: <strong class="text-white">{{ package.media_license }}</strong></span>
                       }
                     </p>
+                  </div>
+                } @else if (isHydratingDetails()) {
+                  <div class="space-y-1.5" aria-busy="true">
+                    <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
+                      {{ 'modal.license' | translate }}
+                    </span>
+                    <div class="w-36 h-4 rounded skeleton-shimmer"></div>
                   </div>
                 }
 
@@ -1171,6 +1228,12 @@ import {
                           </button>
                         </div>
                       </div>
+                    } @else if (isHydratingDetails() && (!package.tags || package.tags.length <= 1)) {
+                      <div class="flex flex-wrap gap-1.5" aria-busy="true">
+                        <div class="w-14 h-5 rounded-full skeleton-shimmer"></div>
+                        <div class="w-20 h-5 rounded-full skeleton-shimmer"></div>
+                        <div class="w-16 h-5 rounded-full skeleton-shimmer"></div>
+                      </div>
                     } @else if (package.tags && package.tags.length > 0) {
                       <div class="flex flex-wrap gap-1.5">
                         @for (tag of package.tags; track tag) {
@@ -1242,7 +1305,7 @@ import {
                   (click)="activeTab.set('reviews')"
                   [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap'"
                   class="cursor-pointer">
-                  {{ 'modal.tabReviews' | translate }} ({{ reviews().length }})
+                  {{ 'modal.tabReviews' | translate }}@if (!isLoadingReviews() || reviews().length > 0) { ({{ reviews().length }}) }
                 </button>
                 <button
                   type="button"
@@ -1363,7 +1426,28 @@ import {
                     }
                   </div>
 
-                  @if (reviews().length === 0) {
+                  @if (isLoadingReviews() && reviews().length === 0) {
+                    <div class="space-y-3" aria-busy="true" aria-label="Loading community reviews">
+                      @for (placeholder of [1, 2]; track placeholder) {
+                        <div class="p-3.5 rounded-2xl glass-panel space-y-2.5">
+                          <div class="flex items-center justify-between gap-2">
+                            <div class="flex items-center gap-2.5">
+                              <div class="w-7 h-7 rounded-xl skeleton-shimmer flex-shrink-0"></div>
+                              <div class="w-24 h-3.5 rounded skeleton-shimmer"></div>
+                              <div class="w-12 h-3.5 rounded skeleton-shimmer"></div>
+                              <div class="w-16 h-4 rounded-md skeleton-shimmer"></div>
+                            </div>
+                            <div class="w-16 h-3 rounded skeleton-shimmer"></div>
+                          </div>
+                          <div class="w-1/3 h-3.5 rounded skeleton-shimmer"></div>
+                          <div class="space-y-1.5">
+                            <div class="w-full h-3 rounded skeleton-shimmer"></div>
+                            <div class="w-4/5 h-3 rounded skeleton-shimmer"></div>
+                          </div>
+                        </div>
+                      }
+                    </div>
+                  } @else if (reviews().length === 0) {
                     <p class="text-xs text-slate-500 text-center py-4">{{ 'modal.noReviews' | translate }}</p>
                   } @else {
                     <!-- Reviews Source Summary Bar (Luanti Hub vs. ContentDB) -->
@@ -1985,6 +2069,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
+  readonly isLoadingReviews = signal<boolean>(true);
   readonly luantiHubReviewsCount = computed(() =>
     this.reviews().filter(r => r.source !== 'contentdb').length
   );
@@ -1993,6 +2078,14 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   );
   readonly releases = signal<PackageRelease[]>([]);
   readonly isLoadingReleases = signal<boolean>(true);
+  readonly isReadmeExpanded = signal<boolean>(false);
+  readonly isLoadingReadme = signal<boolean>(false);
+  readonly isHydratingDetails = computed<boolean>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return false;
+    if (this.packageService.isPackageDeepHydrated(pkg)) return false;
+    return this.packageService.isLoadingDetails();
+  });
   readonly RELEASES_PAGE_SIZE = 5;
   readonly MAX_RELEASES_CAP = 10;
   readonly releasesPage = signal<number>(1);
@@ -2068,11 +2161,44 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return slides;
   });
 
-  readonly currentMediaSlide = computed(() => {
+  readonly MAX_VISIBLE_DOTS = 9;
+
+  readonly visibleMediaDots = computed<Array<{ index: number; url: string; edgeScale: 'normal' | 'sm' | 'xs' }>>(() => {
     const slides = this.mediaSlides();
-    if (slides.length === 0) return null;
-    const idx = Math.min(Math.max(0, this.mediaCarouselIndex()), slides.length - 1);
-    return slides[idx];
+    const total = slides.length;
+    const maxDots = this.MAX_VISIBLE_DOTS;
+    if (total <= maxDots) {
+      return slides.map((s, index) => ({ index, url: s.url, edgeScale: 'normal' }));
+    }
+
+    const current = Math.min(Math.max(0, this.mediaCarouselIndex()), total - 1);
+    const half = Math.floor(maxDots / 2);
+    let start = Math.max(0, current - half);
+    let end = start + maxDots - 1;
+    if (end >= total) {
+      end = total - 1;
+      start = Math.max(0, end - maxDots + 1);
+    }
+
+    const hasMoreLeft = start > 0;
+    const hasMoreRight = end < total - 1;
+    const result: Array<{ index: number; url: string; edgeScale: 'normal' | 'sm' | 'xs' }> = [];
+
+    for (let idx = start; idx <= end; idx++) {
+      const offsetFromLeft = idx - start;
+      const offsetFromRight = end - idx;
+      let edgeScale: 'normal' | 'sm' | 'xs' = 'normal';
+
+      if (idx !== current) {
+        if ((hasMoreLeft && offsetFromLeft === 0) || (hasMoreRight && offsetFromRight === 0)) {
+          edgeScale = 'xs';
+        } else if ((hasMoreLeft && offsetFromLeft === 1) || (hasMoreRight && offsetFromRight === 1)) {
+          edgeScale = 'sm';
+        }
+      }
+      result.push({ index: idx, url: slides[idx].url, edgeScale });
+    }
+    return result;
   });
 
   readonly safeVideoEmbedUrl = computed<SafeResourceUrl | null>(() => {
@@ -2273,7 +2399,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const shortDesc = (pkg.short_desc || '').trim();
     const isPureGit = pkg.source === 'git' && (!pkg.sources || !pkg.sources.includes('official'));
 
-    if (rawReadme) {
+    // Only deduplicate description against README when the README accordion is actively expanded
+    if (rawReadme && this.isReadmeExpanded()) {
       const normDesc = this.normalizeTextForDedup(rawDesc);
       const normReadme = this.normalizeTextForDedup(rawReadme);
       const isDescDuplicateOfReadme =
@@ -2300,11 +2427,33 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   readonly renderedReadme = computed<SafeHtml | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
-    const rawReadme = (pkg?.readme || '').trim();
+    const rawReadme = (pkg?.readme || this.packageService.getCachedReadme(pkg) || '').trim();
     if (!rawReadme) return null;
     const rewritten = this.packageService.rewriteRelativeMarkdownUrls(rawReadme, this.getRawAssetBase(pkg));
     return this.parseSafeMarkdown(rewritten);
   });
+
+  async toggleReadme(): Promise<void> {
+    const nextExpanded = !this.isReadmeExpanded();
+    this.isReadmeExpanded.set(nextExpanded);
+    if (!nextExpanded) return;
+
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+
+    const existingReadme = (pkg.readme || this.packageService.getCachedReadme(pkg) || '').trim();
+    if (existingReadme || this.isLoadingReadme()) return;
+
+    const targetKey = this.loadedPackageKey;
+    this.isLoadingReadme.set(true);
+    try {
+      await this.packageService.fetchPackageReadme(pkg);
+    } finally {
+      if (this.loadedPackageKey === targetKey) {
+        this.isLoadingReadme.set(false);
+      }
+    }
+  }
 
   get shareUrl(): string {
     const pkg = this.packageService.activePackage() || this.package;
@@ -2525,6 +2674,17 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isLightboxZoomed.set(false);
     this.expandedReleaseKeys.set(new Set());
     this.loadingReleaseNotesKey.set(null);
+    this.isReadmeExpanded.set(false);
+    this.isLoadingReadme.set(false);
+
+    const initialCachedReviews = this.packageService.getCachedReviews(this.package);
+    if (initialCachedReviews !== undefined) {
+      this.reviews.set(initialCachedReviews);
+      this.isLoadingReviews.set(false);
+    } else {
+      this.reviews.set([]);
+      this.isLoadingReviews.set(true);
+    }
 
     const initialCachedReleases = this.packageService.getCachedReleases(this.package);
     if (initialCachedReleases) {
@@ -2563,19 +2723,33 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
+    const bundledCachedReviews = this.packageService.getCachedReviews(this.package);
+    if (bundledCachedReviews !== undefined) {
+      this.reviews.set(bundledCachedReviews);
+      this.isLoadingReviews.set(false);
+    }
+
     const bundledCachedReleases = this.packageService.getCachedReleases(this.package);
     if (bundledCachedReleases && bundledCachedReleases.length > 0) {
       this.releases.set(bundledCachedReleases);
       this.isLoadingReleases.set(false);
     }
 
-    this.packageService.fetchReviews(this.package, false).then(res => {
-      if (this.loadedPackageKey !== key) return;
-      this.reviews.set(res);
-      if (savedState && savedState.scrollTop > 0) {
-        this.restoreSavedScrollPosition(savedState.scrollTop);
-      }
-    });
+    this.packageService
+      .fetchReviews(this.package, false)
+      .then(res => {
+        if (this.loadedPackageKey !== key) return;
+        this.reviews.set(res);
+        this.isLoadingReviews.set(false);
+        if (savedState && savedState.scrollTop > 0) {
+          this.restoreSavedScrollPosition(savedState.scrollTop);
+        }
+      })
+      .catch(() => {
+        if (this.loadedPackageKey === key) {
+          this.isLoadingReviews.set(false);
+        }
+      });
     this.packageService
       .fetchPackageReleases(this.package)
       .then(res => {

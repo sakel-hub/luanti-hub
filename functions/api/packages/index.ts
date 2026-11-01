@@ -192,7 +192,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v4';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v5';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -263,6 +263,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     week: new Map()
   });
   let promotionsPromise = Promise.resolve<any[]>([]);
+  let recentReviewsPromise = Promise.resolve<any[]>([]);
 
   if (env.DB) {
     await ensureExtendedPackageColumns(env.DB);
@@ -369,6 +370,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           });
         })
         .catch(() => []);
+
+      recentReviewsPromise = env.DB.prepare(`
+        SELECT
+          r.id,
+          r.package_id,
+          r.rating,
+          r.title,
+          r.comment,
+          r.created_at,
+          u.username AS reviewer_username,
+          u.display_name AS reviewer_display_name,
+          p.title AS package_title,
+          p.type AS package_type,
+          p.thumbnail_url AS package_thumbnail
+        FROM reviews r
+        LEFT JOIN users u ON r.user_id = u.id
+        LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
+        WHERE COALESCE(p.status, 'active') = 'active'
+          AND r.created_at >= datetime('now', '-2 days')
+        ORDER BY r.created_at DESC
+        LIMIT 10
+      `).all()
+        .then((res: any) => res?.results || [])
+        .catch(() => []);
     }
   }
 
@@ -382,7 +407,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     rawTags,
     velocity,
     activePromotions,
-    latestBlogPost
+    latestBlogPost,
+    recentReviews
   ] = await Promise.all([
     upstreamPromise,
     scoresPromise,
@@ -393,7 +419,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     tagsPromise,
     velocityPromise,
     promotionsPromise,
-    blogPostPromise
+    blogPostPromise,
+    recentReviewsPromise
   ]);
 
   // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
@@ -763,7 +790,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week,
       top10Today,
       promotions: activePromotions,
-      latestBlogPost: latestBlogPost || null
+      latestBlogPost: latestBlogPost || null,
+      recentReviews: Array.isArray(recentReviews) ? recentReviews : []
     };
 
     if (!noCache && !q && types.length === 0 && !author) {
