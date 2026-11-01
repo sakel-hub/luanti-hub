@@ -273,8 +273,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         LIMIT 5
       `).all();
       recentlyUpdatedPackages = (recentlyUpdatedRes.results || []).map((p: any) => ({
-        ...p,
-        release_id: Math.max(1, Math.floor(new Date(p.updated_at).getTime() / 1000) || 1)
+        ...p
       }));
 
       const latestReviewsRes = await context.env.DB.prepare(`

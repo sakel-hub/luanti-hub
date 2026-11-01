@@ -826,8 +826,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                   );
                   const newestRelTime = Date.parse(String(newestRel?.released_at || '')) || 0;
                   const prevPkgTime = Date.parse(String(row.updated_at || '')) || 0;
+                  const relTimeAdvanced = newestRelTime > 0 && newestRelTime > prevPkgTime;
                   const needsSizeHeal = !row.download_size || Number(row.download_size) > 5 * 1024 * 1024;
-                  if (newestRelTime > prevPkgTime || needsSizeHeal) {
+                  if (relTimeAdvanced || needsSizeHeal) {
                     const sizeEst = await fetchAccurateGitZipSize(
                       row.repo_url,
                       row.author_name,
@@ -836,19 +837,33 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                         tag: newestRel?.tag_name && newestRel.tag_name !== 'HEAD' ? newestRel.tag_name : undefined
                       }
                     );
-                    await env.DB.prepare(
-                      `UPDATE packages
-                       SET updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
-                           download_size = COALESCE(?, download_size),
-                           file_size = COALESCE(?, file_size)
-                       WHERE id = ?`
-                    ).bind(
-                      newestRelTime > 0 ? new Date(newestRelTime).toISOString() : '',
-                      newestRelTime > 0 ? new Date(newestRelTime).toISOString() : '',
-                      sizeEst?.downloadSize || null,
-                      sizeEst?.fileSize || null,
-                      row.id
-                    ).run();
+                    if (relTimeAdvanced) {
+                      const nextIso = new Date(newestRelTime).toISOString();
+                      await env.DB.prepare(
+                        `UPDATE packages
+                         SET updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
+                             download_size = COALESCE(?, download_size),
+                             file_size = COALESCE(?, file_size)
+                         WHERE id = ?`
+                      ).bind(
+                        nextIso,
+                        nextIso,
+                        sizeEst?.downloadSize || null,
+                        sizeEst?.fileSize || null,
+                        row.id
+                      ).run();
+                    } else if (sizeEst?.downloadSize || sizeEst?.fileSize) {
+                      await env.DB.prepare(
+                        `UPDATE packages
+                         SET download_size = COALESCE(?, download_size),
+                             file_size = COALESCE(?, file_size)
+                         WHERE id = ?`
+                      ).bind(
+                        sizeEst?.downloadSize || null,
+                        sizeEst?.fileSize || null,
+                        row.id
+                      ).run();
+                    }
                   }
                 } else {
                   const smartRefs = await fetchGitSmartHttpRefs(

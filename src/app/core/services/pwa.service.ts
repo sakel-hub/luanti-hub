@@ -1183,11 +1183,22 @@ export class PwaService {
       return 0;
     }
 
+    const normalizeReleaseStampPart = (rawRel: unknown): string => {
+      const trimmed = String(rawRel ?? '').trim();
+      if (!trimmed || trimmed === '0') return '';
+      const num = Number(trimmed);
+      // Synthetic Unix epoch timestamps (>= 1_000_000_000, i.e. 10+ digits) are not sequential
+      // ContentDB release IDs (~1..99_999_999); normalize them to '' so dual-source packages
+      // never oscillate between a 5-digit ContentDB release ID and a 10-digit epoch timestamp.
+      if (Number.isFinite(num) && num >= 1_000_000_000) return '';
+      return trimmed;
+    };
+
     const computeStamp = (pkg: (typeof validCandidates)[number]): string => {
-      const rel = pkg.release_id ?? pkg.release ?? '';
+      const rel = normalizeReleaseStampPart(pkg.release_id ?? pkg.release ?? '');
       const upd = pkg.updated_at || '';
       const sha = pkg.latest_commit_sha || pkg.commit_sha || '';
-      return `${String(rel).trim()}|${String(upd).trim()}|${String(sha).trim()}`;
+      return `${rel}|${String(upd).trim()}|${String(sha).trim()}`;
     };
 
     // First-time baseline seed: record current release_id|updated_at stamps silently without notification flood
@@ -1257,20 +1268,41 @@ export class PwaService {
       }
 
       if (prevStamp !== newStamp || isForced) {
-        const [prevRel, prevUpd, prevSha = ''] = prevStamp.split('|');
-        const [newRel, newUpd, newSha = ''] = newStamp.split('|');
+        const [rawPrevRel, prevUpd, prevSha = ''] = prevStamp.split('|');
+        const [rawNewRel, newUpd, newSha = ''] = newStamp.split('|');
+        const prevRel = normalizeReleaseStampPart(rawPrevRel);
+        const newRel = normalizeReleaseStampPart(rawNewRel);
 
         let genuinelyAdvanced = isForced;
         if (!genuinelyAdvanced) {
           const prevRelNum = Number(prevRel);
           const newRelNum = Number(newRel);
+          const hasConcretePrevSha = Boolean(prevSha && prevSha !== 'HEAD' && prevSha !== 'latest');
+          const hasConcreteNewSha = Boolean(newSha && newSha !== 'HEAD' && newSha !== 'latest');
+          const sameConcreteSha =
+            hasConcretePrevSha && hasConcreteNewSha && prevSha.toLowerCase() === newSha.toLowerCase();
           const shaAdvanced =
-            Boolean(prevSha && newSha && prevSha !== newSha && newSha !== 'HEAD' && newSha !== 'latest');
+            hasConcretePrevSha && hasConcreteNewSha && prevSha.toLowerCase() !== newSha.toLowerCase();
 
-          if (shaAdvanced) {
+          if (sameConcreteSha) {
+            // If both stamps carry the exact same commit SHA, only notify if both also have
+            // real ContentDB release IDs (< 100_000_000) and the release ID strictly advanced.
+            if (
+              prevRel &&
+              newRel &&
+              prevRel !== newRel &&
+              Number.isFinite(prevRelNum) &&
+              Number.isFinite(newRelNum) &&
+              prevRelNum > 0 &&
+              newRelNum > 0 &&
+              newRelNum > prevRelNum
+            ) {
+              genuinelyAdvanced = true;
+            }
+          } else if (shaAdvanced) {
             genuinelyAdvanced = true;
           } else if (prevRel && newRel) {
-            // Both stamps have a release identifier: only notify when the release ID itself advanced.
+            // Both stamps have a real ContentDB release identifier: only notify when the release ID itself advanced.
             // Never notify if `prevRel === newRel` (e.g. when `updated_at` was merely hydrated from D1 cache).
             if (prevRel !== newRel) {
               if (Number.isFinite(prevRelNum) && Number.isFinite(newRelNum)) {
@@ -1279,8 +1311,16 @@ export class PwaService {
                 genuinelyAdvanced = true;
               }
             }
-          } else if (!prevRel && !newRel && prevUpd && newUpd && newUpd !== prevUpd) {
-            // Pure timestamp-tracked package: require both previous and new timestamps to exist and advance.
+          } else if (
+            !prevRel &&
+            !newRel &&
+            !hasConcretePrevSha &&
+            !hasConcreteNewSha &&
+            prevUpd &&
+            newUpd &&
+            newUpd !== prevUpd
+          ) {
+            // Pure timestamp-tracked package (no release ID and no commit SHA): require both timestamps to exist and advance.
             const prevMs = new Date(prevUpd).getTime();
             const newMs = new Date(newUpd).getTime();
             if (!isNaN(newMs) && !isNaN(prevMs) && newMs > prevMs) {

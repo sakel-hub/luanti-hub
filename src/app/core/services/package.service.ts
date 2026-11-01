@@ -127,7 +127,7 @@ export class PackageService {
   private readonly rawCdbCache = new Map<string, Promise<ReturnType<PackageService['parseCdbJsonText']>>>();
   private readonly discoveredReposCache = new Map<
     string,
-    Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }>>
+    Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom'; fullName: string; repoUrl: string; rawBase: string }>>
   >();
   private readonly inFlightDetailsCache = new Map<string, Promise<void>>();
 
@@ -1065,12 +1065,23 @@ export class PackageService {
       ? Math.max(cdbDl + lhDl, primary.downloads || 0, secondary.downloads || 0)
       : Math.max(primary.downloads || 0, secondary.downloads || 0);
 
+    const isRealContentDbRelease = (val: unknown): val is number => {
+      const n = Number(val);
+      return Number.isFinite(n) && n > 0 && n < 100_000_000;
+    };
+    const resolvedReleaseId = isRealContentDbRelease(primary.release_id)
+      ? primary.release_id
+      : isRealContentDbRelease(secondary.release_id)
+        ? secondary.release_id
+        : (primary.release_id ?? secondary.release_id);
+
     const merged: LuantiPackage = {
       ...secondary,
       ...primary,
       id: primary.id,
       author: primary.author,
       name: primary.name,
+      release_id: resolvedReleaseId,
       title: primary.title || secondary.title,
       short_desc: primary.short_desc || secondary.short_desc,
       desc: primary.desc || secondary.desc,
@@ -3053,9 +3064,12 @@ export class PackageService {
    * that are guaranteed to exist — avoiding red 404 console errors in Chrome DevTools.
    */
   private async getRepoRootListing(
-    forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab',
+    forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom',
     fullName: string
   ): Promise<Array<{ name: string; download_url?: string }>> {
+    if (forge === 'custom') {
+      return [];
+    }
     const cacheKey = `${forge}:${fullName.toLowerCase()}`;
     const cached = this.repoDirCache.get(cacheKey);
     if (cached) return cached;
@@ -3069,13 +3083,26 @@ export class PackageService {
         ? `https://git.minetest.land/api/v1/repos/${fullName}/contents`
         : forge === 'gitlab'
           ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(fullName)}/repository/tree`
-          : `https://api.github.com/repos/${fullName}/contents`;
+          : forge === 'bitbucket'
+            ? `https://api.bitbucket.org/2.0/repositories/${fullName}/src?pagelen=50`
+            : `https://api.github.com/repos/${fullName}/contents`;
 
     const requestPromise = (async () => {
       try {
         const res = await fetch(apiUrl, { headers: { Accept: 'application/json' } });
         if (res.ok) {
           const data = await res.json();
+          if (forge === 'bitbucket' && data && Array.isArray(data.values)) {
+            const listing = data.values
+              .filter((item: any) => item && item.path && item.type === 'commit_file')
+              .map((item: any) => ({
+                name: String(item.path).split('/').pop() || String(item.path),
+                download_url: item.links?.self?.href ? String(item.links.self.href) : undefined
+              }));
+            this.repoExplicit404Cache.delete(cacheKey);
+            this.repoDirCache.set(cacheKey, listing);
+            return listing;
+          }
           if (Array.isArray(data)) {
             const listing = data
               .filter((item: any) => item && item.name && (item.type === 'file' || item.type === 'blob'))
@@ -3113,7 +3140,7 @@ export class PackageService {
   private discoverConfirmedRepos(
     pkg: LuantiPackage,
     existingRepoUrl?: string
-  ): Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }>> {
+  ): Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom'; fullName: string; repoUrl: string; rawBase: string }>> {
     const pkgCacheKey = (pkg?.id || `${pkg?.author}/${pkg?.name}`).toLowerCase();
     const existingPromise = this.discoveredReposCache.get(pkgCacheKey);
     if (existingPromise) {
@@ -3121,8 +3148,8 @@ export class PackageService {
     }
 
     const promise = (async () => {
-      const results: Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab'; fullName: string; repoUrl: string; rawBase: string }> = [];
-      const pushUnique = (forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab', fullName: string, repoUrl: string, rawBase: string) => {
+      const results: Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom'; fullName: string; repoUrl: string; rawBase: string }> = [];
+      const pushUnique = (forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom', fullName: string, repoUrl: string, rawBase: string) => {
         const key = `${forge}:${fullName.toLowerCase()}`;
         if (!results.some(r => `${r.forge}:${r.fullName.toLowerCase()}` === key)) {
           results.push({ forge, fullName, repoUrl, rawBase });
@@ -3146,9 +3173,11 @@ export class PackageService {
               pushUnique('gitlab', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/${fullName}/-/raw/HEAD`);
             } else if (host.includes('github.com')) {
               pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
+            } else if (host.includes('bitbucket.org')) {
+              pushUnique('bitbucket', fullName, `https://bitbucket.org/${fullName}`, `https://bitbucket.org/${fullName}/raw/HEAD`);
             } else {
-              // Custom Gitea / Forgejo instance
-              pushUnique('codeberg', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/api/v1/repos/${fullName}/raw`);
+              // Custom Gitea / Forgejo / self-hosted Git instance — do not route to codeberg.org!
+              pushUnique('custom', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/${fullName}/raw/branch/master`);
             }
           }
         } catch {
@@ -3536,7 +3565,9 @@ export class PackageService {
               ? `https://gitlab.com/${owner}/${repo}/-/raw/HEAD/.cdb.json`
               : host.includes('github.com')
                 ? `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.cdb.json`
-                : null;
+                : host.includes('bitbucket.org')
+                  ? `https://bitbucket.org/${owner}/${repo}/raw/HEAD/.cdb.json`
+                  : null;
         if (!rawCdbUrl) return null;
         const res = await fetch(rawCdbUrl);
         if (!res.ok) return null;
@@ -3917,11 +3948,13 @@ export class PackageService {
                     }
                     const lhDl = Number(bgData.luantihub_downloads || 0);
                     const cdbDl = Number(bgData.contentdb_downloads ?? bgData.downloads ?? 0);
-                    if (lhDl > 0 || cdbDl > 0) {
+                    const bgStatus = bgData.git_repo_status;
+                    if (lhDl > 0 || cdbDl > 0 || bgStatus === 'verified') {
                       this._activePackage.update(curr => {
                         if (curr && curr.id.toLowerCase() === cacheKey) {
                           return {
                             ...curr,
+                            git_repo_status: bgStatus === 'verified' ? 'verified' : curr.git_repo_status,
                             contentdb_downloads: Math.max(curr.contentdb_downloads || 0, cdbDl),
                             luantihub_downloads: Math.max(curr.luantihub_downloads || 0, lhDl),
                             downloads: Math.max(curr.downloads || 0, cdbDl + lhDl)
@@ -4223,8 +4256,8 @@ export class PackageService {
           }
         }
 
-        // Probe Git repository metadata only when opening full details OR when a pure Git package still lacks a license
-        if ((deepFetch || (!resolvedLicense && isPureGitOnly)) && !hasBundledEdgeResponse) {
+        // Probe Git repository metadata only when the package still lacks a license and Edge did not already bundle metadata
+        if (!resolvedLicense && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
           if (gitMeta.gitRepoStatus === 'verified') {
             gitRepoStatus = 'verified';

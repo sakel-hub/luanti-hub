@@ -2384,6 +2384,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         if (u.hostname === 'gitlab.com') {
           return `https://gitlab.com/${owner}/${repo}/-/raw/${branch}`;
         }
+        if (u.hostname.includes('bitbucket.org')) {
+          return `https://bitbucket.org/${owner}/${repo}/raw/${branch}`;
+        }
       }
     } catch {
       // ignore

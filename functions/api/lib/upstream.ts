@@ -792,6 +792,9 @@ export function buildGitBranchArchiveUrl(
       : `https://github.com/${encOwner}/${encRepo}/archive/refs/heads/${safeBranch}.zip`;
   }
   const { provider, host, owner, repo } = target;
+  if (host.includes('bitbucket.org')) {
+    return `https://bitbucket.org/${owner}/${repo}/get/${isHead ? 'HEAD' : safeBranch}.zip`;
+  }
   if (provider === 'codeberg') {
     return `https://${host}/${owner}/${repo}/archive/${isHead ? 'HEAD' : safeBranch}.zip`;
   }
@@ -1605,6 +1608,24 @@ export async function syncDebouncedGitVersionStamp(
   }
 
   if (prev === cleanNext) return false;
+
+  // Guard against representation switches (e.g. a 7-40 char hex commit SHA vs a non-hex tag label)
+  // so switching between a tag name and its underlying commit SHA does not falsely bump updated_at.
+  const isHexSha = (s: string) => /^[0-9a-f]{7,40}$/i.test(s);
+  const prevIsHex = isHexSha(prev);
+  const nextIsHex = isHexSha(cleanNext);
+  if (prevIsHex !== nextIsHex) {
+    if (nextIsHex) {
+      // Normalize stored fingerprint to the concrete hex SHA without bumping updated_at
+      try {
+        await db.prepare(`UPDATE packages SET latest_commit_sha = ? WHERE id = ?`).bind(cleanNext, d1Pkg.id).run();
+        d1Pkg.latest_commit_sha = cleanNext;
+      } catch {
+        // Non-fatal
+      }
+    }
+    return false;
+  }
 
   // For branch-only commit updates (non-tag), enforce a 6-hour server debounce window
   if (!isTaggedRelease) {
@@ -2510,13 +2531,19 @@ export async function scanGitRepoMetadataCached(
     pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
   } else if (host.includes('github.com')) {
     pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
+  } else if (host.includes('bitbucket.org')) {
+    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/HEAD`, `https://bitbucket.org/${owner}/${repo}`);
+    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/master`, `https://bitbucket.org/${owner}/${repo}`);
+    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/main`, `https://bitbucket.org/${owner}/${repo}`);
   }
 
-  // Always include multi-forge fallbacks (GitHub HEAD, Codeberg v1 API raw, GitLab HEAD)
-  pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
-  pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
-  pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
-  pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
+  // Only include multi-forge fallbacks when no explicit repository URL was provided
+  if (!normalizedInputUrl) {
+    pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
+    pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
+    pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
+    pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
+  }
 
   const hardDeps: string[] = [];
   const softDeps: string[] = [];
@@ -3672,6 +3699,13 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
       const glBase = `https://gitlab.com/${owner}/${repo}/-/raw/HEAD`;
       for (const file of ['README.md', 'readme.md', 'README.txt', 'readme.txt']) {
         pushCandidate(`${glBase}/${file}`, glBase);
+      }
+    } else if (host.includes('bitbucket.org')) {
+      for (const branch of ['HEAD', 'master', 'main']) {
+        const bbBase = `https://bitbucket.org/${owner}/${repo}/raw/${branch}`;
+        for (const file of ['README.md', 'readme.md', 'Readme.md', 'README.txt', 'readme.txt']) {
+          pushCandidate(`${bbBase}/${file}`, bbBase);
+        }
       }
     } else {
       const giteaBase = `${u.origin}/api/v1/repos/${owner}/${repo}/raw`;
