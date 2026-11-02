@@ -4,6 +4,7 @@ import {
   Input,
   ViewChild,
   ElementRef,
+  NgZone,
   inject,
   signal,
   computed,
@@ -114,8 +115,7 @@ import {
 
           <div
             #modalScrollContainer
-            (scroll)="onModalContainerScroll()"
-            class="overflow-y-auto flex-1 flex flex-col">
+            class="overflow-y-auto flex-1 flex flex-col luanti-modal-scroll">
 
             <!-- Admin-Only Package Moderation Bar (Delist, Restore & Safe Permanent Removal) -->
             @if (authService.isAdmin()) {
@@ -157,7 +157,8 @@ import {
               [fallbackThumbnail]="package.thumbnail"
               appImgFallback
               [alt]="package.title"
-              class="w-full h-full object-cover object-center filter brightness-100 transition-all duration-300"
+              decoding="async"
+              class="w-full h-full object-cover object-center"
             />
             <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/30 to-transparent w-full sm:w-2/3"></div>
             <div class="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/20 to-transparent"></div>
@@ -469,6 +470,7 @@ import {
                                     [fallbackThumbnail]="package.thumbnail"
                                     appImgFallback
                                     [alt]="package.title + ' video preview'"
+                                    decoding="async"
                                     class="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
                                   />
                                   <div class="absolute inset-0 bg-slate-950/35 group-hover:bg-slate-950/20 transition-colors flex items-center justify-center">
@@ -508,7 +510,8 @@ import {
                                   [fallbackThumbnail]="package.thumbnail"
                                   appImgFallback
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
-                                  loading="lazy"
+                                  [attr.loading]="idx === mediaCarouselIndex() ? 'eager' : 'lazy'"
+                                  decoding="async"
                                   class="w-full h-full object-cover object-center group-hover:scale-[1.02] transition-transform duration-500"
                                 />
                                 <button
@@ -597,7 +600,7 @@ import {
                             [class.opacity-100]="mediaCarouselIndex() === idx"
                             [class.opacity-65]="mediaCarouselIndex() !== idx"
                             class="relative w-24 h-14 sm:w-28 sm:h-16 rounded-xl overflow-hidden flex-shrink-0 border border-white/10 hover:border-sky-400/60 hover:opacity-100 transition cursor-pointer">
-                            <img [src]="slide.thumbnail" [alt]="package.title" loading="lazy" class="w-full h-full object-cover" />
+                            <img [src]="slide.thumbnail" [alt]="package.title" loading="lazy" decoding="async" class="w-full h-full object-cover" />
                             @if (slide.type === 'video') {
                               <div class="absolute inset-0 bg-slate-950/35 flex items-center justify-center">
                                 <div class="w-7 h-7 rounded-lg glass-btn flex items-center justify-center text-slate-100">
@@ -2089,6 +2092,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly ngZone = inject(NgZone);
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
@@ -2505,6 +2509,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   private loadedPackageKey = '';
   private lastKnownScrollTop = 0;
+  private scrollRafId: number | null = null;
+  private cleanupScrollListener: (() => void) | null = null;
 
   private persistCurrentViewState(): void {
     if (!this.loadedPackageKey) return;
@@ -2566,10 +2572,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (savedState && savedState.scrollTop > 0) {
       this.restoreSavedScrollPosition(savedState.scrollTop);
     }
+    this.setupPassiveScrollListener();
     this.setupSimilarIntersectionObserver();
   }
 
   ngOnDestroy(): void {
+    this.teardownPassiveScrollListener();
     this.persistCurrentViewState();
     this.disconnectSimilarObserver();
     this.packageService.registerModalSubOverlayCloser(null);
@@ -2585,19 +2593,46 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.persistCurrentViewState();
   }
 
+  private setupPassiveScrollListener(): void {
+    this.teardownPassiveScrollListener();
+    const container = this.modalScrollContainerRef?.nativeElement;
+    if (!container) return;
+
+    this.ngZone.runOutsideAngular(() => {
+      const onScroll = () => {
+        if (this.scrollRafId !== null) return;
+        if (typeof requestAnimationFrame === 'function') {
+          this.scrollRafId = requestAnimationFrame(() => {
+            this.scrollRafId = null;
+            this.onModalContainerScroll();
+          });
+        } else {
+          this.onModalContainerScroll();
+        }
+      };
+      container.addEventListener('scroll', onScroll, { passive: true });
+      this.cleanupScrollListener = () => {
+        container.removeEventListener('scroll', onScroll);
+      };
+    });
+  }
+
+  private teardownPassiveScrollListener(): void {
+    if (this.scrollRafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.scrollRafId);
+      this.scrollRafId = null;
+    }
+    if (this.cleanupScrollListener) {
+      this.cleanupScrollListener();
+      this.cleanupScrollListener = null;
+    }
+  }
+
   onModalContainerScroll(): void {
     const container = this.modalScrollContainerRef?.nativeElement;
     if (container) {
       this.lastKnownScrollTop = container.scrollTop;
       this.persistCurrentViewState();
-    }
-    if (this.isSimilarNearViewport()) return;
-    const sentinel = this.similarSentinelRef?.nativeElement;
-    if (!container || !sentinel) return;
-    const containerRect = container.getBoundingClientRect();
-    const sentinelRect = sentinel.getBoundingClientRect();
-    if (sentinelRect.top - containerRect.bottom <= 240) {
-      this.triggerSimilarPackagesLoad();
     }
   }
 

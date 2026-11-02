@@ -486,7 +486,11 @@ select:disabled {
    ========================================================================== */
 
 /* Prevent nested multi-pass backdrop-filter explosion inside .glass-card (~1,300 GPU RenderSurfaces across 164 cards)
-   so the browser compositor keeps all scrolled card tiles resident in GPU memory without blank tile pop-in */
+   and on non-button container panels inside .glass-modal so the browser compositor keeps all scrolled tiles
+   resident in GPU memory without blank/black tile dropouts during fast scrolling */
+.luanti-modal-backdrop .glass-modal,
+.glass-modal .glass-panel,
+.glass-modal .glass-input,
 .glass-card .glass-pill,
 .glass-card .glass-badge,
 .glass-card .glass-badge-sky,
@@ -509,6 +513,12 @@ select:disabled {
 .glass-card .glass-icon-btn-amber-active {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+.luanti-modal-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  will-change: scroll-position;
 }
 
 /* Disable expensive nested multi-pass backdrop-filters on mobile GPUs */
@@ -850,7 +860,7 @@ html.wco-active {
   }
   100% {
     opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
+    transform: none;
   }
 }
 
@@ -915,7 +925,6 @@ html.wco-active {
 
 .luanti-dialog-panel {
   animation: luantiDialogIn 280ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  will-change: transform, opacity;
 }
 
 .luanti-drawer-panel {
