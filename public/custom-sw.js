@@ -271,6 +271,11 @@
     if (!manifest || typeof manifest !== 'object') return null;
     const hashTable = manifest.hashTable && typeof manifest.hashTable === 'object' ? manifest.hashTable : {};
     const indexHash = hashTable['/index.html'] || hashTable['index.html'] || '';
+    const customSwHash = hashTable['/custom-sw.js'] || hashTable['custom-sw.js'] || '';
+    const remoteBuildTs = String(
+      (manifest.appData && manifest.appData.buildTimestamp) ||
+      (typeof manifest.timestamp === 'number' ? manifest.timestamp : '')
+    ).trim();
 
     let remoteMain = '';
     let remoteStyles = '';
@@ -286,11 +291,8 @@
       remoteStyles = keys.find((k) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(k)) || '';
     }
 
-    if (remoteMain || indexHash) {
-      return `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}`;
-    }
-    if (typeof manifest.timestamp === 'number') {
-      return String(manifest.timestamp);
+    if (remoteMain || indexHash || remoteBuildTs) {
+      return `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
     }
     return null;
   }

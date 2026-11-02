@@ -6304,6 +6304,46 @@ supported_games = minetest_game, voxelibre
     await ensureExtendedPackageColumns(mockDb);
     expect(prepareCalls).toBe(0);
 
+    // Verify PwaService.checkForUpdate detects backend-only deployments via <meta name="lh-build-timestamp"> & manifest.timestamp
+    const pwaService = TestBed.inject(PwaService);
+    const metaEl = document.createElement('meta');
+    metaEl.setAttribute('name', 'lh-build-timestamp');
+    metaEl.setAttribute('content', '1793620000000');
+    document.head.appendChild(metaEl);
+
+    const origFetch = globalThis.fetch;
+    try {
+      pwaService.updateAvailable.set(false);
+      (pwaService as any).bootManifestSignature = null;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            configVersion: 1,
+            timestamp: 1793629999999,
+            appData: { buildTimestamp: 1793629999999 },
+            assetGroups: [
+              {
+                name: 'app',
+                urls: ['/main-IKR2CUGR.js', '/styles-J7YB6QKE.css', '/index.html']
+              }
+            ],
+            hashTable: {
+              '/index.html': 'same_hash',
+              '/custom-sw.js': 'same_sw_hash'
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )) as any;
+
+      const detected = await pwaService.checkForUpdate(true);
+      expect(detected).toBe(true);
+      expect(pwaService.updateAvailable()).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+      metaEl.remove();
+      pwaService.updateAvailable.set(false);
+    }
+
     pkgService.setPromotions([]);
   });
 });

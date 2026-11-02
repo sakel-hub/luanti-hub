@@ -2845,17 +2845,32 @@ export class PwaService {
         }
       }
 
-      // 3. Compare manifest /index.html hash or timestamp across checks in the same session
+      // 3. Compare DOM <meta name="lh-build-timestamp"> against manifest timestamp / appData.buildTimestamp
+      const remoteBuildTs = String(
+        manifest?.appData?.buildTimestamp ?? manifest?.timestamp ?? ''
+      ).trim();
+      const domBuildTsMeta = document
+        .querySelector('meta[name="lh-build-timestamp"]')
+        ?.getAttribute('content')
+        ?.trim();
+      if (domBuildTsMeta && remoteBuildTs && domBuildTsMeta !== remoteBuildTs) {
+        this.latestDetectedUpdateVersion = remoteBuildTs;
+        return true;
+      }
+
+      // 4. Compare manifest /index.html hash, /custom-sw.js hash, and build timestamp across checks in the same session
       const indexHash = manifest?.hashTable?.['/index.html'] || '';
-      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}`;
-      if (signature !== '||') {
+      const customSwHash = manifest?.hashTable?.['/custom-sw.js'] || '';
+      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+      if (signature !== '||||') {
         if (this.bootManifestSignature === null) {
           this.bootManifestSignature = signature;
           this.syncNotificationStateToIndexedDb().catch(() => {});
         } else if (this.bootManifestSignature !== signature) {
           this.bootManifestSignature = signature;
           this.syncNotificationStateToIndexedDb().catch(() => {});
-          this.latestDetectedUpdateVersion = indexHash || String(manifest?.timestamp || Date.now());
+          this.latestDetectedUpdateVersion =
+            remoteBuildTs || indexHash || String(manifest?.timestamp || Date.now());
           return true;
         }
       }
