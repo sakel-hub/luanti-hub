@@ -6338,6 +6338,16 @@ supported_games = minetest_game, voxelibre
       const detected = await pwaService.checkForUpdate(true);
       expect(detected).toBe(true);
       expect(pwaService.updateAvailable()).toBe(true);
+
+      // Simulate reload into the new build where DOM <meta name="lh-build-timestamp"> now matches remote manifest,
+      // even if a stale pre-reload bootManifestSignature existed prior to check
+      pwaService.updateAvailable.set(false);
+      metaEl.setAttribute('content', '1793629999999');
+      (pwaService as any).bootManifestSignature = '/main-OLD.js|/styles-OLD.css|old_hash';
+
+      const secondCheckAfterReload = await pwaService.checkForUpdate(true);
+      expect(secondCheckAfterReload).toBe(false);
+      expect(pwaService.updateAvailable()).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
       metaEl.remove();

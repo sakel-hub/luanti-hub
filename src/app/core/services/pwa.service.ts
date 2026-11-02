@@ -489,12 +489,6 @@ export class PwaService {
       const state = await readAllNotifStateEntries();
       if (!state || Object.keys(state).length === 0) return;
 
-      if (typeof state['bootManifestSignature'] === 'string' && state['bootManifestSignature']) {
-        if (!this.bootManifestSignature) {
-          this.bootManifestSignature = state['bootManifestSignature'];
-        }
-      }
-
       if (Array.isArray(state['seenTags']) && state['seenTags'].length > 0) {
         for (const tag of state['seenTags']) {
           if (typeof tag === 'string' && tag) {
@@ -2815,6 +2809,14 @@ export class PwaService {
 
       // 1. Compare main-*.js bundle hash against DOM <script src>
       const remoteMain = urls.find((u: string) => /\/main-[A-Za-z0-9]+\.js$/.test(u));
+      const remoteStyles = urls.find((u: string) => /\/styles-[A-Za-z0-9]+\.css$/.test(u));
+      const remoteBuildTs = String(
+        manifest?.appData?.buildTimestamp ?? manifest?.timestamp ?? ''
+      ).trim();
+      const indexHash = manifest?.hashTable?.['/index.html'] || '';
+      const customSwHash = manifest?.hashTable?.['/custom-sw.js'] || '';
+      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+
       if (remoteMain) {
         const scripts = Array.from(document.querySelectorAll('script[src]'))
           .map(s => s.getAttribute('src') || '');
@@ -2824,13 +2826,16 @@ export class PwaService {
           const currentFilename = currentMain.split('/').pop() || '';
           if (remoteFilename && currentFilename && remoteFilename !== currentFilename) {
             this.latestDetectedUpdateVersion = remoteFilename;
+            if (signature !== '||||') {
+              this.bootManifestSignature = signature;
+              this.syncNotificationStateToIndexedDb().catch(() => {});
+            }
             return true;
           }
         }
       }
 
       // 2. Compare styles-*.css bundle hash against DOM <link rel="stylesheet" href>
-      const remoteStyles = urls.find((u: string) => /\/styles-[A-Za-z0-9]+\.css$/.test(u));
       if (remoteStyles) {
         const links = Array.from(document.querySelectorAll('link[rel="stylesheet"][href]'))
           .map(l => l.getAttribute('href') || '');
@@ -2840,28 +2845,39 @@ export class PwaService {
           const currentStyleFile = currentStyles.split('/').pop()?.split('?')[0] || '';
           if (remoteStyleFile && currentStyleFile && remoteStyleFile !== currentStyleFile) {
             this.latestDetectedUpdateVersion = remoteStyleFile;
+            if (signature !== '||||') {
+              this.bootManifestSignature = signature;
+              this.syncNotificationStateToIndexedDb().catch(() => {});
+            }
             return true;
           }
         }
       }
 
       // 3. Compare DOM <meta name="lh-build-timestamp"> against manifest timestamp / appData.buildTimestamp
-      const remoteBuildTs = String(
-        manifest?.appData?.buildTimestamp ?? manifest?.timestamp ?? ''
-      ).trim();
       const domBuildTsMeta = document
         .querySelector('meta[name="lh-build-timestamp"]')
         ?.getAttribute('content')
         ?.trim();
-      if (domBuildTsMeta && remoteBuildTs && domBuildTsMeta !== remoteBuildTs) {
-        this.latestDetectedUpdateVersion = remoteBuildTs;
-        return true;
+      if (domBuildTsMeta && remoteBuildTs) {
+        if (domBuildTsMeta !== remoteBuildTs) {
+          this.latestDetectedUpdateVersion = remoteBuildTs;
+          if (signature !== '||||') {
+            this.bootManifestSignature = signature;
+            this.syncNotificationStateToIndexedDb().catch(() => {});
+          }
+          return true;
+        }
+        // DOM build timestamp, main-*.js, and styles-*.css all match the remote manifest:
+        // record the current signature as baseline and report up to date without false-positive Step 4 mismatch.
+        if (signature !== '||||' && this.bootManifestSignature !== signature) {
+          this.bootManifestSignature = signature;
+          this.syncNotificationStateToIndexedDb().catch(() => {});
+        }
+        return false;
       }
 
-      // 4. Compare manifest /index.html hash, /custom-sw.js hash, and build timestamp across checks in the same session
-      const indexHash = manifest?.hashTable?.['/index.html'] || '';
-      const customSwHash = manifest?.hashTable?.['/custom-sw.js'] || '';
-      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+      // 4. Fallback when <meta name="lh-build-timestamp"> is not present in DOM: compare manifest signature across checks in the same session
       if (signature !== '||||') {
         if (this.bootManifestSignature === null) {
           this.bootManifestSignature = signature;
@@ -2969,6 +2985,9 @@ export class PwaService {
 
   async forceClearCacheAndReload(): Promise<void> {
     try {
+      this.bootManifestSignature = null;
+      await writeNotifStateEntries({ bootManifestSignature: '' }).catch(() => {});
+
       if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const reg of registrations) {
