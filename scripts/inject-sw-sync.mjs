@@ -17,13 +17,16 @@ if (fs.existsSync(ngswPath) && fs.existsSync(customSwPath)) {
     } catch {
       // Ignore chmod error if read-only filesystem
     }
-    fs.writeFileSync(
-      ngswPath,
-      `${ngswContent.trimEnd()}\n\n// --- LuantiHub Background Sync & Periodic Sync Extension ---\n${customSwContent}\n`,
-      'utf8'
-    );
-    console.log('[inject-sw-sync] Appended Background Sync & Periodic Sync listeners to ngsw-worker.js');
+    const combinedSwContent = `${ngswContent.trimEnd()}\n\n// --- LuantiHub Background Sync & Periodic Sync Extension ---\n${customSwContent}\n`;
+    fs.writeFileSync(ngswPath, combinedSwContent, 'utf8');
+    const swAliasPath = path.join(path.dirname(ngswPath), 'sw.js');
+    fs.writeFileSync(swAliasPath, combinedSwContent, 'utf8');
+    console.log('[inject-sw-sync] Appended Background Sync, Periodic Sync & Push listeners to ngsw-worker.js and sw.js');
   } else {
+    const swAliasPath = path.join(path.dirname(ngswPath), 'sw.js');
+    if (!fs.existsSync(swAliasPath)) {
+      fs.writeFileSync(swAliasPath, ngswContent, 'utf8');
+    }
     console.log('[inject-sw-sync] ngsw-worker.js already contains Background Sync & Periodic Sync listeners');
   }
 } else {

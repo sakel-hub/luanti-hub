@@ -23,6 +23,11 @@ import { SettingsService } from './settings.service';
 import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
 import { AuthService, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
+import {
+  isGitProviderId,
+  detectGitProviderFromUrl,
+  GitProviderId
+} from '../config/git-providers.config';
 
 const PAGE_SIZE = 32;
 const CAROUSEL_CAP = 24;
@@ -735,7 +740,9 @@ export class PackageService {
     if (typeof localStorage === 'undefined') return;
     try {
       localStorage.removeItem('lh_hydrated_meta_v1');
-      const raw = localStorage.getItem('lh_hydrated_meta_v2');
+      localStorage.removeItem('lh_hydrated_meta_v2');
+      localStorage.removeItem('lh_hydrated_meta_v3');
+      const raw = localStorage.getItem('lh_hydrated_meta_v4');
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
@@ -762,7 +769,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v2', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v4', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -773,7 +780,11 @@ export class PackageService {
     if (!this.edgeApiAvailable || !pkg?.author || !pkg?.name) return;
     const lic = fields.license || pkg.license || '';
     const cdbDl = Number(fields.contentdb_downloads ?? pkg.contentdb_downloads ?? 0);
-    if (!lic && cdbDl <= 0) return;
+    const hasGitAsset =
+      this.isGitScreenshotUrl(fields.banner) ||
+      this.isGitScreenshotUrl(fields.thumbnail) ||
+      this.isGitScreenshotUrl(pkg.banner);
+    if (!lic && cdbDl <= 0 && !hasGitAsset) return;
 
     const key = pkg.id.toLowerCase();
     const resolvedScreenshots = Array.isArray(fields.screenshots) && fields.screenshots.length > 0
@@ -968,7 +979,7 @@ export class PackageService {
       0,
       Number(
         item?.contentdb_downloads ??
-          (item?.provider !== 'github' && item?.provider !== 'codeberg' && item?.provider !== 'gitlab' && item?.provider !== 'mesehub'
+          (!isGitProviderId(item?.provider)
             ? item?.downloads
             : 0) ??
           0
@@ -992,10 +1003,18 @@ export class PackageService {
       item.banner,
       item.banner_url,
       item.thumbnail,
-      item.thumbnail_url
+      item.thumbnail_url,
+      cachedMeta?.banner,
+      cachedMeta?.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
-    const thumbnail = gitShotCandidate || item.thumbnail || item.thumbnail_url || 'logo.svg';
-    let banner = gitShotCandidate || item.banner || item.banner_url || item.screenshots?.[0]?.url || item.screenshots?.[0];
+    const thumbnail = gitShotCandidate || item.thumbnail || item.thumbnail_url || cachedMeta?.thumbnail || 'logo.svg';
+    let banner =
+      gitShotCandidate ||
+      item.banner ||
+      item.banner_url ||
+      cachedMeta?.banner ||
+      item.screenshots?.[0]?.url ||
+      item.screenshots?.[0];
     if (!banner && thumbnail && thumbnail.includes('thumbnail.png')) {
       banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
     }
@@ -1041,9 +1060,7 @@ export class PackageService {
       (explicitSources.length > 0 && !explicitSources.includes('git') && item.source !== 'git') ||
       (item.source === 'official' && !explicitSources.includes('git'));
     const rawProvider = typeof item.provider === 'string' ? item.provider.toLowerCase() : '';
-    const isGitProvider =
-      !isExplicitOfficialOnly &&
-      ['github', 'codeberg', 'gitlab', 'mesehub'].includes(rawProvider);
+    const isGitProvider = !isExplicitOfficialOnly && isGitProviderId(rawProvider);
     const source: PackageSource =
       explicitSources.includes('git') || item.source === 'git' || isGitProvider
         ? 'git'
@@ -1067,9 +1084,10 @@ export class PackageService {
     if (hasGit) sources.push('git');
     if (sources.length === 0) sources.push(source);
 
-    const mergedItemScreenshots = Array.isArray(item.screenshots)
-      ? this.mergePackageScreenshots([gitShotCandidate], item.screenshots)
-      : undefined;
+    const mergedItemScreenshots =
+      Array.isArray(item.screenshots) || Array.isArray(cachedMeta?.screenshots)
+        ? this.mergePackageScreenshots([gitShotCandidate], item.screenshots, cachedMeta?.screenshots)
+        : undefined;
     const screenshots = mergedItemScreenshots && mergedItemScreenshots.length > 0
       ? mergedItemScreenshots
       : undefined;
@@ -1152,7 +1170,10 @@ export class PackageService {
       maintainers: maintainers.length > 0 ? maintainers : undefined,
       review_thread_counts: reviewThreadCounts,
       provider:
-        item.provider ||
+        (isAuthLoginOrSupportedProvider =>
+          isAuthLoginOrSupportedProvider ? item.provider : undefined)(
+          item.provider && item.provider !== 'bitbucket' && item.provider !== 'custom'
+        ) ||
         (repoUrl?.includes('codeberg.org')
           ? 'codeberg'
           : repoUrl?.includes('git.minetest.land')
@@ -1182,7 +1203,12 @@ export class PackageService {
 
     const hasFullDownloads = hasOfficial ? contentdbDownloads > 0 : downloads > 0;
     const hasRichTags = pkg.tags.some(t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase()));
-    if (hasFullDownloads && Boolean(pkg.license) && (hasRichTags || !hasOfficial)) {
+    const gitShotAlreadyChecked = Boolean((cachedMeta as any)?.git_shot_checked);
+    const needsGitScreenshotCheck =
+      (hasGit || Boolean(pkg.repo_url)) &&
+      !this.isGitScreenshotUrl(pkg.banner) &&
+      !gitShotAlreadyChecked;
+    if (hasFullDownloads && Boolean(pkg.license) && (hasRichTags || !hasOfficial) && !needsGitScreenshotCheck) {
       this.hydratedIds.add(pkg.id.toLowerCase());
     }
 
@@ -1836,6 +1862,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v5');
         sessionStorage.removeItem('lh_boot_cache_v6');
         sessionStorage.removeItem('lh_boot_cache_v7');
+        sessionStorage.removeItem('lh_boot_cache_v8');
       }
     } catch {
       // Ignore storage errors
@@ -2124,11 +2151,18 @@ export class PackageService {
   private needsTileHydration(pkg: LuantiPackage | null | undefined): boolean {
     if (!pkg || pkg._promo || String(pkg.id || '').startsWith('promo:') || !pkg.author || !pkg.name) return false;
     const isOfficial = pkg.sources?.includes('official') || pkg.source === 'official';
+    const isGit = pkg.sources?.includes('git') || pkg.source === 'git';
     const hasDownloads = isOfficial ? (pkg.contentdb_downloads || 0) > 0 : (pkg.downloads || 0) > 0;
     const hasRichTags = (pkg.tags || []).some(
       t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
     );
-    return !pkg.license || !hasDownloads || (isOfficial && !hasRichTags);
+    const cachedMeta = this.hydratedMetaCache.get(pkg.id.toLowerCase()) as any;
+    const needsGitScreenshot =
+      (isGit || Boolean(pkg.repo_url)) &&
+      !this.isGitScreenshotUrl(pkg.banner) &&
+      !cachedMeta?.git_shot_checked &&
+      !this.hydratedIds.has(pkg.id.toLowerCase());
+    return !pkg.license || !hasDownloads || (isOfficial && !hasRichTags) || needsGitScreenshot;
   }
 
   private queueInitialVisibleHydration(): void {
@@ -2204,7 +2238,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v9');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -2269,7 +2303,7 @@ export class PackageService {
     try {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v7',
+          'lh_boot_cache_v9',
           JSON.stringify({
             ts,
             edge: this.edgeApiAvailable,
@@ -2286,18 +2320,25 @@ export class PackageService {
   private initBackgroundCatalogRefresh(): void {
     if (typeof window === 'undefined') return;
 
-    // 1. Periodic 5-minute silent refresh when online (runs even when minimized or in background)
+    // 1. Background wakeup & Service Worker handoff when online
     if (this.backgroundRefreshTimer) {
       clearInterval(this.backgroundRefreshTimer);
     }
     this.backgroundRefreshTimer = setInterval(() => {
-      if (this.pwaService.isOnline()) {
-        this.refreshCatalogInBackground().catch(() => {});
+      if (!this.pwaService.isOnline()) return;
+      const isHiddenOrUnfocused =
+        typeof document !== 'undefined' &&
+        (document.visibilityState === 'hidden' ||
+          (typeof document.hasFocus === 'function' && !document.hasFocus()));
+      if (isHiddenOrUnfocused) {
+        // Window is minimized or in background: let the Service Worker run unthrottled update & catalog checks
         this.pwaService.triggerSwBackgroundCatalogCheck();
+      } else {
+        this.refreshCatalogInBackground().catch(() => {});
       }
     }, 5 * 60 * 1000);
 
-    // 2. Unified Service Worker Broadcast (`periodicsync` / `sync`) & Wakeup Listener via PwaService
+    // 2. Unified Service Worker Broadcast (`periodicsync` / `sync` / `push`) & Wakeup Listener via PwaService
     this.pwaService.registerCatalogSyncHandler((event) => {
       if (event.source === 'sw-broadcast' && event.payload) {
         const bootPayload = this.extractBootPayload(event.payload);
@@ -2389,7 +2430,9 @@ export class PackageService {
           try {
             sessionStorage.removeItem('lh_boot_cache_v5');
             sessionStorage.removeItem('lh_boot_cache_v6');
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v7');
+            sessionStorage.removeItem('lh_boot_cache_v7');
+            sessionStorage.removeItem('lh_boot_cache_v8');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v9');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -2658,6 +2701,20 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
+          const preferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail].find(u =>
+            this.isGitScreenshotUrl(u)
+          );
+          const mergedShots = this.mergePackageScreenshots(
+            [preferredGitShot],
+            h.screenshots,
+            pkg.screenshots
+          );
+          const resolvedThumb = preferredGitShot || pkg.thumbnail || h.thumbnail;
+          const resolvedBanner =
+            preferredGitShot ||
+            pkg.banner ||
+            h.banner ||
+            (mergedShots.length > 0 ? mergedShots[0] : undefined);
 
           const patch: Partial<LuantiPackage> = {
             license: lic,
@@ -2670,12 +2727,19 @@ export class PackageService {
             file_size: sizeFormatted,
             video_url: resolvedVideo.video_url,
             video_thumbnail_url: resolvedVideo.video_thumbnail_url,
-            repo_url: repoUrl
+            repo_url: repoUrl,
+            ...(resolvedThumb ? { thumbnail: resolvedThumb } : {}),
+            ...(resolvedBanner ? { banner: resolvedBanner } : {}),
+            ...(mergedShots.length > 0 ? { screenshots: mergedShots } : {})
           };
 
           updatesByLowerId.set(lowerKey, patch);
           const prevMeta = this.hydratedMetaCache.get(lowerKey) || {};
-          this.hydratedMetaCache.set(lowerKey, { ...prevMeta, ...patch });
+          this.hydratedMetaCache.set(lowerKey, {
+            ...prevMeta,
+            ...patch,
+            ...(repoUrl ? { git_shot_checked: true } : {})
+          } as Partial<LuantiPackage>);
         }
 
         if (updatesByLowerId.size > 0) {
@@ -3448,7 +3512,7 @@ export class PackageService {
         : forge === 'gitlab'
           ? `https://gitlab.com/api/v4/projects/${encodeURIComponent(fullName)}/repository/tree`
           : forge === 'bitbucket'
-            ? `https://api.bitbucket.org/2.0/repositories/${fullName}/src?pagelen=50`
+            ? `https://api.bitbucket.org/2.0/repositories/${fullName.toLowerCase()}/src?pagelen=100`
             : `https://api.github.com/repos/${fullName}/contents`;
 
     const requestPromise = (async () => {
@@ -3538,7 +3602,7 @@ export class PackageService {
             } else if (host.includes('github.com')) {
               pushUnique('github', fullName, `https://github.com/${fullName}`, `https://raw.githubusercontent.com/${fullName}/HEAD`);
             } else if (host.includes('bitbucket.org')) {
-              pushUnique('bitbucket', fullName, `https://bitbucket.org/${fullName}`, `https://bitbucket.org/${fullName}/raw/HEAD`);
+              pushUnique('bitbucket', fullName, `https://bitbucket.org/${fullName}`, `https://api.bitbucket.org/2.0/repositories/${fullName.toLowerCase()}/src/master`);
             } else {
               // Custom Gitea / Forgejo / self-hosted Git instance — do not route to codeberg.org!
               pushUnique('custom', fullName, `https://${u.hostname}/${fullName}`, `https://${u.hostname}/${fullName}/raw/branch/master`);
@@ -4343,7 +4407,8 @@ export class PackageService {
           Boolean(pkg.provider && pkg.provider !== 'contentdb');
 
         let edgeResolved = false;
-        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly || !pkg.video_url)) {
+        const needsGitAssetFromEdge = Boolean(pkg.repo_url) && !this.isGitScreenshotUrl(pkg.banner);
+        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly || !pkg.video_url || needsGitAssetFromEdge)) {
           try {
             const edgePromise = fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).then(async res => {
               if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
@@ -4378,9 +4443,31 @@ export class PackageService {
                       bgData.video_thumbnail_url,
                       this.extractLongDescription(bgData.long_description) || bgData.desc
                     );
-                    if (lhDl > 0 || cdbDl > 0 || bgStatus === 'verified' || bgVideo.video_url) {
+                    const bgGitShot = [bgData.banner, bgData.thumbnail].find(u =>
+                      this.isGitScreenshotUrl(u)
+                    );
+                    const bgScreenshots = this.mergePackageScreenshots(
+                      [bgGitShot],
+                      bgData.screenshots
+                    );
+                    if (
+                      lhDl > 0 ||
+                      cdbDl > 0 ||
+                      bgStatus === 'verified' ||
+                      bgVideo.video_url ||
+                      bgGitShot ||
+                      bgScreenshots.length > 0
+                    ) {
                       this._activePackage.update(curr => {
                         if (curr && curr.id.toLowerCase() === cacheKey) {
+                          const mergedShots = this.mergePackageScreenshots(
+                            [bgGitShot, curr.banner, curr.thumbnail],
+                            bgScreenshots,
+                            curr.screenshots
+                          );
+                          const bestGitShot = [bgGitShot, curr.banner, curr.thumbnail].find(u =>
+                            this.isGitScreenshotUrl(u)
+                          );
                           return {
                             ...curr,
                             git_repo_status: bgStatus === 'verified' ? 'verified' : curr.git_repo_status,
@@ -4388,22 +4475,35 @@ export class PackageService {
                             luantihub_downloads: Math.max(curr.luantihub_downloads || 0, lhDl),
                             downloads: Math.max(curr.downloads || 0, cdbDl + lhDl),
                             video_url: curr.video_url || bgVideo.video_url,
-                            video_thumbnail_url: curr.video_thumbnail_url || bgVideo.video_thumbnail_url
+                            video_thumbnail_url: curr.video_thumbnail_url || bgVideo.video_thumbnail_url,
+                            thumbnail: bestGitShot || curr.thumbnail,
+                            banner: bestGitShot || mergedShots[0] || curr.banner,
+                            screenshots: mergedShots.length > 0 ? mergedShots : curr.screenshots
                           };
                         }
                         return curr;
                       });
-                      if (bgVideo.video_url) {
+                      if (bgVideo.video_url || bgGitShot || bgScreenshots.length > 0) {
                         this._packages.update(list =>
-                          list.map(item =>
-                            item.id.toLowerCase() === cacheKey
-                              ? {
-                                  ...item,
-                                  video_url: item.video_url || bgVideo.video_url,
-                                  video_thumbnail_url: item.video_thumbnail_url || bgVideo.video_thumbnail_url
-                                }
-                              : item
-                          )
+                          list.map(item => {
+                            if (item.id.toLowerCase() !== cacheKey) return item;
+                            const mergedShots = this.mergePackageScreenshots(
+                              [bgGitShot, item.banner, item.thumbnail],
+                              bgScreenshots,
+                              item.screenshots
+                            );
+                            const bestGitShot = [bgGitShot, item.banner, item.thumbnail].find(u =>
+                              this.isGitScreenshotUrl(u)
+                            );
+                            return {
+                              ...item,
+                              video_url: item.video_url || bgVideo.video_url,
+                              video_thumbnail_url: item.video_thumbnail_url || bgVideo.video_thumbnail_url,
+                              thumbnail: bestGitShot || item.thumbnail,
+                              banner: bestGitShot || mergedShots[0] || item.banner,
+                              screenshots: mergedShots.length > 0 ? mergedShots : item.screenshots
+                            };
+                          })
                         );
                       }
                     }
@@ -4707,7 +4807,7 @@ export class PackageService {
           }
         }
 
-        // Probe Git repository metadata only when the package still lacks a license and Edge did not already bundle metadata
+        // Probe Git repository metadata when the package still lacks a license, or probe for screenshot.png when a Git repo is linked
         let probedGitScreenshot: string | undefined;
         if (!resolvedLicense && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
@@ -4760,6 +4860,27 @@ export class PackageService {
             }
             if (!data.long_description && !data.desc && cdb.long_description) {
               data.long_description = cdb.long_description;
+            }
+          }
+        } else if (
+          repoUrl &&
+          (deepFetch ||
+            isPureGitOnly ||
+            pkg.sources?.includes('git') ||
+            pkg.source === 'git' ||
+            !repoUrl.toLowerCase().includes('github.com')) &&
+          !this.isGitScreenshotUrl(data.banner) &&
+          !this.isGitScreenshotUrl(pkg.banner)
+        ) {
+          const confirmedRepos = await this.discoverConfirmedRepos(pkg, repoUrl);
+          for (const repo of confirmedRepos) {
+            const listing = await this.getRepoRootListing(repo.forge, repo.fullName);
+            const screenshotEntry = listing.find(f => f.name.toLowerCase() === 'screenshot.png');
+            if (screenshotEntry) {
+              probedGitScreenshot =
+                screenshotEntry.download_url || `${repo.rawBase}/${encodeURIComponent(screenshotEntry.name)}`;
+              gitRepoStatus = 'verified';
+              break;
             }
           }
         }
@@ -4918,7 +5039,7 @@ export class PackageService {
         const targetNameLower = (pkg.name || '').toLowerCase();
 
         // Persist compact hydrated tile metadata locally and queue debounced D1 batch writeback
-        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0) {
+        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || preferredGitShot) {
           const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
           this.hydratedMetaCache.set(targetIdLower, {
             ...prevMeta,
@@ -4933,8 +5054,16 @@ export class PackageService {
             file_size: sizeFormatted || prevMeta.file_size,
             video_url: resolvedVideo.video_url || prevMeta.video_url,
             video_thumbnail_url: resolvedVideo.video_thumbnail_url || prevMeta.video_thumbnail_url,
-            repo_url: repoUrl || prevMeta.repo_url
-          });
+            repo_url: repoUrl || prevMeta.repo_url,
+            ...(repoUrl ? { git_shot_checked: true } : {}),
+            ...(preferredGitShot
+              ? {
+                  thumbnail: preferredGitShot,
+                  banner: preferredGitShot,
+                  screenshots
+                }
+              : {})
+          } as Partial<LuantiPackage>);
           this.scheduleHydratedMetaPersist();
           this.queueD1Writeback(pkg, updatedFields);
         }

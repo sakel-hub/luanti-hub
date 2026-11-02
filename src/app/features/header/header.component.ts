@@ -26,6 +26,8 @@ import {
   LucideSettings,
   LucideUser,
   LucideChevronDown,
+  LucideChevronLeft,
+  LucideChevronRight,
   LucideRefreshCw,
   LucideTrash,
   LucideHouse,
@@ -62,6 +64,8 @@ import {
     LucideSettings,
     LucideUser,
     LucideChevronDown,
+    LucideChevronLeft,
+    LucideChevronRight,
     LucideRefreshCw,
     LucideTrash,
     LucideHouse,
@@ -89,10 +93,33 @@ import {
     }
 
     <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header luanti-wco-header transition-colors duration-200">
-      <div class="w-full px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-2 lg:gap-4">
+      <div class="luanti-app-header-inner w-full px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-2 lg:gap-4">
 
-        <!-- Left: Logo & Category Tabs -->
-        <div class="flex items-center gap-2.5 2xl:gap-4 flex-shrink-0 justify-start">
+        <!-- Left: WCO/Standalone History Nav, Logo & Category Tabs -->
+        <div class="flex items-center gap-2 2xl:gap-3.5 flex-shrink-0 justify-start">
+          @if (pwaService.isWcoActive() || pwaService.isInstalled()) {
+            <div class="hidden sm:flex items-center gap-1 flex-shrink-0 luanti-wco-no-drag" role="group" aria-label="History navigation">
+              <button
+                type="button"
+                (click)="pwaService.navigateBack()"
+                [disabled]="!pwaService.canNavigateBack()"
+                aria-label="Navigate back"
+                appTooltip="Back"
+                class="w-7 h-7 rounded-lg glass-icon-btn flex items-center justify-center text-slate-300 hover:text-white disabled:opacity-35 disabled:pointer-events-none transition cursor-pointer">
+                <svg lucideChevronLeft class="w-4 h-4"></svg>
+              </button>
+              <button
+                type="button"
+                (click)="pwaService.navigateForward()"
+                [disabled]="!pwaService.canNavigateForward()"
+                aria-label="Navigate forward"
+                appTooltip="Forward"
+                class="w-7 h-7 rounded-lg glass-icon-btn flex items-center justify-center text-slate-300 hover:text-white disabled:opacity-35 disabled:pointer-events-none transition cursor-pointer">
+                <svg lucideChevronRight class="w-4 h-4"></svg>
+              </button>
+            </div>
+          }
+
           <a
             href="/"
             (click)="onHomeClick($event)"

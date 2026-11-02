@@ -5625,4 +5625,278 @@ supported_games = minetest_game, voxelibre
       globalThis.fetch = origFetch;
     }
   });
+
+  it('should enforce single-source-of-truth Git provider config (Bitbucket excluded from auth login, included for Git repo discovery & tile hydration)', async () => {
+    const {
+      ALL_GIT_PROVIDER_IDS,
+      AUTH_LOGIN_GIT_PROVIDER_IDS,
+      isGitProviderId,
+      isAuthLoginGitProvider,
+      detectGitProviderFromUrl,
+      buildProviderRawBaseCandidates,
+      buildProviderRootListingApiUrl,
+      buildProviderRawFileUrl
+    } = await import('./core/config/git-providers.config');
+
+    // 1. Bitbucket is recognized as a Git provider for repo scanning, but NEVER exposed as an OAuth login option
+    expect(ALL_GIT_PROVIDER_IDS).toContain('bitbucket');
+    expect(isGitProviderId('bitbucket')).toBe(true);
+    expect(isGitProviderId('codeberg')).toBe(true);
+    expect(isGitProviderId('contentdb')).toBe(false);
+    expect(isAuthLoginGitProvider('bitbucket')).toBe(false);
+    expect(isAuthLoginGitProvider('custom')).toBe(false);
+    expect(AUTH_LOGIN_GIT_PROVIDER_IDS).toEqual(['codeberg', 'mesehub', 'gitlab', 'github']);
+    expect(AUTH_LOGIN_GIT_PROVIDER_IDS).not.toContain('bitbucket');
+
+    // 2. Provider URL detection and raw base / root listing helpers
+    expect(detectGitProviderFromUrl('https://bitbucket.org/minetest_gamers/everness/src/master/')?.provider).toBe('bitbucket');
+    expect(detectGitProviderFromUrl('https://codeberg.org/Wuzzy/Lazarr')?.provider).toBe('codeberg');
+    const bbCandidates = buildProviderRawBaseCandidates(
+      'https://bitbucket.org/minetest_gamers/everness/src/master/',
+      'SaKeL',
+      'everness',
+      'master'
+    );
+    expect(bbCandidates.map(c => c.base)).toContain('https://bitbucket.org/minetest_gamers/everness/raw/master');
+    expect(
+      buildProviderRootListingApiUrl(
+        'bitbucket',
+        'bitbucket.org',
+        'minetest_gamers',
+        'everness',
+        'master'
+      )
+    ).toBe('https://api.bitbucket.org/2.0/repositories/minetest_gamers/everness/src/master/?pagelen=100');
+    expect(
+      buildProviderRawFileUrl('bitbucket', 'bitbucket.org', 'minetest_gamers', 'everness', 'master', 'screenshot.png')
+    ).toBe('https://api.bitbucket.org/2.0/repositories/minetest_gamers/everness/src/master/screenshot.png');
+
+    // 3. PackageService.needsTileHydration flags dual-source Git packages whose banner is still a ContentDB URL
+    const pkgService = TestBed.inject(PackageService);
+    const gitShot = 'https://bitbucket.org/minetest_gamers/everness/raw/master/screenshot.png';
+    const cdbThumb = 'https://content.luanti.org/thumbnails/1/everness.png';
+    const cdbShot1 = 'https://content.luanti.org/uploads/everness_shot_1.png';
+
+    const evernessTile = (pkgService as any).normalizePackage({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      source: 'git',
+      sources: ['official', 'git'],
+      provider: 'bitbucket',
+      repo: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+      license: 'LGPL-2.1-only',
+      media_license: 'CC-BY-SA-4.0',
+      thumbnail: cdbThumb,
+      banner: cdbThumb,
+      screenshots: [cdbShot1]
+    });
+
+    expect((pkgService as any).needsTileHydration(evernessTile)).toBe(true);
+
+    // 4. Verify /api/packages/hydrate scans D1/upstream packages that have a repo_url but still lack a Git banner_url
+    const { onRequestPost: onHydratePost } = await import('../../functions/api/packages/hydrate');
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith('/mod.conf') && url.includes('everness')) {
+        return new Response('name = everness\ntitle = Everness\nlicense = LGPL-2.1-only\n', { status: 200 });
+      }
+      if (url.endsWith('/screenshot.png') && url.includes('everness')) {
+        return new Response('', { status: 200, headers: { 'Content-Type': 'image/png' } });
+      }
+      return new Response('Not found', { status: 404 });
+    });
+
+    try {
+      const mockDb = {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            all: async () => {
+              if (sql.includes('FROM packages')) {
+                return {
+                  results: [
+                    {
+                      id: 'SaKeL/everness',
+                      author_name: 'SaKeL',
+                      name: 'everness',
+                      type: 'mod',
+                      provider: 'bitbucket',
+                      repo_url: 'https://bitbucket.org/minetest_gamers/everness/src/master/',
+                      license: 'LGPL-2.1-only',
+                      media_license: 'CC-BY-SA-4.0',
+                      thumbnail_url: cdbThumb,
+                      banner_url: null,
+                      screenshots: JSON.stringify([cdbShot1]),
+                      tags: JSON.stringify(['mod', 'git', 'contentdb', 'environment']),
+                      git_repo_status: 'verified',
+                      updated_at: '2026-11-01T00:00:00Z'
+                    }
+                  ]
+                };
+              }
+              return { results: [] };
+            },
+            run: async () => ({ success: true })
+          })
+        })
+      };
+
+      const hydrateRes = await onHydratePost({
+        request: new Request('https://luantihub.org/api/packages/hydrate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: ['SaKeL/everness'] })
+        }),
+        env: { DB: mockDb }
+      });
+      expect(hydrateRes.status).toBe(200);
+      const hydrateJson = await hydrateRes.json();
+      expect(hydrateJson.hydrated['sakel/everness']).toBeDefined();
+      expect(hydrateJson.hydrated['sakel/everness'].thumbnail).toContain('everness');
+      expect(hydrateJson.hydrated['sakel/everness'].thumbnail).toContain('/screenshot.png');
+      expect(hydrateJson.hydrated['sakel/everness'].banner).toBe(hydrateJson.hydrated['sakel/everness'].thumbnail);
+      expect(hydrateJson.hydrated['sakel/everness'].screenshots).toEqual([
+        hydrateJson.hydrated['sakel/everness'].thumbnail,
+        cdbShot1
+      ]);
+
+      // Verify that an 'official' ContentDB package with repo_url & video_url already set (e.g. SaKeL/everness from D1)
+      // still triggers needsTileHydration until its Git screenshot.png has been checked
+      const pkgService = TestBed.inject(PackageService);
+      (pkgService as any).hydratedIds.delete('sakel/everness');
+      (pkgService as any).hydratedMetaCache.delete('sakel/everness');
+      const normalizedPreHydrated = (pkgService as any).normalizePackage({
+        id: 'SaKeL/everness',
+        author: 'SaKeL',
+        name: 'everness',
+        title: 'Everness',
+        type: 'mod',
+        provider: 'contentdb',
+        source: 'official',
+        sources: ['official'],
+        license: 'LGPL-3.0-only',
+        downloads: 45000,
+        contentdb_downloads: 45000,
+        tags: ['mapgen', 'biomes', 'environment'],
+        repo_url: 'https://bitbucket.org/SaKeL/everness/src/master/',
+        video_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        thumbnail: cdbThumb,
+        banner: cdbShot1
+      });
+      expect((pkgService as any).hydratedIds.has('sakel/everness')).toBe(false);
+      expect((pkgService as any).needsTileHydration(normalizedPreHydrated)).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should support Window Controls Overlay (WCO) state, geometrychange, and Back/Forward history navigation', () => {
+    const pwaService = TestBed.inject(PwaService);
+    const origWco = (navigator as any).windowControlsOverlay;
+
+    const listeners: Array<() => void> = [];
+    const mockWco = {
+      visible: true,
+      getTitlebarAreaRect: () => ({ x: 78, y: 0, width: 1180, height: 38 }),
+      addEventListener: (type: string, cb: () => void) => {
+        if (type === 'geometrychange') {
+          listeners.push(cb);
+        }
+      }
+    };
+
+    try {
+      Object.defineProperty(navigator, 'windowControlsOverlay', {
+        configurable: true,
+        value: mockWco
+      });
+
+      pwaService.initWindowControlsOverlay();
+      expect(pwaService.isWcoActive()).toBe(true);
+      expect(pwaService.wcoTitlebarRect()).toEqual({ x: 78, y: 0, width: 1180, height: 38 });
+      expect(document.documentElement.classList.contains('wco-active')).toBe(true);
+
+      // Simulate geometrychange when user toggles WCO off in titlebar
+      mockWco.visible = false;
+      listeners.forEach(fn => fn());
+      expect(pwaService.isWcoActive()).toBe(false);
+      expect(pwaService.wcoTitlebarRect()).toBeNull();
+      expect(document.documentElement.classList.contains('wco-active')).toBe(false);
+
+      // Verify history Back / Forward state tracking and Header buttons
+      mockWco.visible = true;
+      listeners.forEach(fn => fn());
+      expect(pwaService.isWcoActive()).toBe(true);
+
+      const backSpy = vi.spyOn(window.history, 'back').mockImplementation(() => {});
+      const forwardSpy = vi.spyOn(window.history, 'forward').mockImplementation(() => {});
+
+      window.history.pushState({ page: 1 }, '', '/mods');
+      expect(pwaService.canNavigateBack()).toBe(true);
+
+      pwaService.navigateBack();
+      expect(backSpy).toHaveBeenCalled();
+      expect(pwaService.canNavigateForward()).toBe(true);
+
+      pwaService.navigateForward();
+      expect(forwardSpy).toHaveBeenCalled();
+
+      backSpy.mockRestore();
+      forwardSpy.mockRestore();
+    } finally {
+      if (origWco !== undefined) {
+        Object.defineProperty(navigator, 'windowControlsOverlay', {
+          configurable: true,
+          value: origWco
+        });
+      } else {
+        delete (navigator as any).windowControlsOverlay;
+      }
+      document.documentElement.classList.remove('wco-active');
+    }
+  });
+
+  it('should hand off to Service Worker on visibilitychange (hidden) and handle LH_APP_UPDATE_DETECTED while minimized', async () => {
+    const pwaService = TestBed.inject(PwaService);
+    const triggerSpy = vi.spyOn(pwaService, 'triggerSwBackgroundCatalogCheck').mockImplementation(() => {});
+    const syncIdbSpy = vi.spyOn(pwaService, 'syncNotificationStateToIndexedDb').mockResolvedValue();
+    const origVisDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+
+    try {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'hidden'
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await new Promise(resolve => setTimeout(resolve, 15));
+
+      expect(syncIdbSpy).toHaveBeenCalled();
+      expect(triggerSpy).toHaveBeenCalled();
+
+      // Simulate Service Worker broadcasting LH_APP_UPDATE_DETECTED while minimized
+      (pwaService as any).syncBroadcastChannel?.onmessage?.({
+        data: {
+          type: 'LH_APP_UPDATE_DETECTED',
+          signature: 'main-NEW123.js|styles-NEW456.css|hash789',
+          tag: 'lh-app-update-main-NEW123.js|styles-NEW456.css|hash789',
+          notified: true,
+          ts: Date.now()
+        }
+      } as MessageEvent);
+
+      expect(pwaService.updateAvailable()).toBe(true);
+      expect(pwaService.hasSeenNotificationTag('lh-app-update-main-NEW123.js|styles-NEW456.css|hash789')).toBe(true);
+    } finally {
+      triggerSpy.mockRestore();
+      syncIdbSpy.mockRestore();
+      if (origVisDescriptor) {
+        Object.defineProperty(document, 'visibilityState', origVisDescriptor);
+      } else {
+        delete (document as any).visibilityState;
+      }
+    }
+  });
 });

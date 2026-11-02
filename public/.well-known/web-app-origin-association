@@ -2,6 +2,9 @@
   "web_apps": [
     {
       "web_app_identity": "https://luantihub.org/"
+    },
+    {
+      "web_app_identity": "https://www.luantihub.org/"
     }
   ]
 }

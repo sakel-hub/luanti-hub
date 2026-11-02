@@ -1,6 +1,10 @@
 /**
- * LuantiHub Service Worker Extension: Background Sync (`sync`) & Periodic Background Sync (`periodicsync`)
- * Follows W3C Background Synchronization & PWABuilder Service Worker best practices.
+ * LuantiHub Service Worker Extension:
+ * - W3C Background Sync (`sync`)
+ * - W3C Periodic Background Sync (`periodicsync`)
+ * - W3C Push Notifications (`push`, `pushsubscriptionchange`, `notificationclick`)
+ * - W3C Badging API (`self.navigator.setAppBadge` / `clearAppBadge`)
+ * Follows Microsoft Edge PWA & PWABuilder Service Worker best practices.
  */
 (function () {
   if (typeof self === 'undefined' || self.__lhCustomSwSyncInstalled) {
@@ -88,6 +92,20 @@
       });
     } catch {
       // ignore
+    }
+  }
+
+  async function setSwAppBadge(count) {
+    try {
+      const nav = self.navigator;
+      if (!nav) return;
+      if (count > 0 && typeof nav.setAppBadge === 'function') {
+        await nav.setAppBadge(count);
+      } else if (count <= 0 && typeof nav.clearAppBadge === 'function') {
+        await nav.clearAppBadge();
+      }
+    } catch {
+      // Ignore Badging API errors on unsupported platforms
     }
   }
 
@@ -249,9 +267,94 @@
     return `${rel}|${String(upd).trim()}|${String(sha).trim()}`;
   }
 
+  function extractNgswBundleSignatureInSw(manifest) {
+    if (!manifest || typeof manifest !== 'object') return null;
+    const hashTable = manifest.hashTable && typeof manifest.hashTable === 'object' ? manifest.hashTable : {};
+    const indexHash = hashTable['/index.html'] || hashTable['index.html'] || '';
+
+    let remoteMain = '';
+    let remoteStyles = '';
+    if (Array.isArray(manifest.assetGroups)) {
+      const appGroup = manifest.assetGroups.find((g) => g && g.name === 'app') || manifest.assetGroups[0];
+      const urls = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
+      remoteMain = urls.find((u) => /\/main-[A-Za-z0-9_-]+\.js$/.test(u)) || '';
+      remoteStyles = urls.find((u) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(u)) || '';
+    }
+    if (!remoteMain && !remoteStyles) {
+      const keys = Object.keys(hashTable).sort();
+      remoteMain = keys.find((k) => /\/main-[A-Za-z0-9_-]+\.js$/.test(k)) || '';
+      remoteStyles = keys.find((k) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(k)) || '';
+    }
+
+    if (remoteMain || indexHash) {
+      return `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}`;
+    }
+    if (typeof manifest.timestamp === 'number') {
+      return String(manifest.timestamp);
+    }
+    return null;
+  }
+
+  /**
+   * Checks `/ngsw.json` directly inside the Service Worker so app updates are detected
+   * and notified even while the PWA window is minimized, unfocused, or closed.
+   */
+  async function checkNgswAppUpdateInSw(state, prefs, fireSwNotif, stateUpdates) {
+    if (!prefs || prefs.notifyAppUpdates === false) return false;
+    const baselineSig = typeof state.bootManifestSignature === 'string' ? state.bootManifestSignature : '';
+
+    try {
+      const res = await fetch(`/ngsw.json?ngsw-bypass=true&ngsw-cache-bust=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache'
+        }
+      });
+      if (!res || !res.ok) return false;
+      const manifest = await res.json();
+      const remoteSig = extractNgswBundleSignatureInSw(manifest);
+      if (!remoteSig) return false;
+
+      if (!baselineSig) {
+        if (stateUpdates && typeof stateUpdates === 'object') {
+          stateUpdates.bootManifestSignature = remoteSig;
+        }
+        return false;
+      }
+
+      if (remoteSig === baselineSig) return false;
+
+      if (stateUpdates && typeof stateUpdates === 'object') {
+        stateUpdates.bootManifestSignature = remoteSig;
+      }
+
+      const updateTag = `lh-app-update-${remoteSig.slice(0, 48)}`;
+      const fired = await fireSwNotif('LuantiHub Update Available', {
+        body: 'A new version of LuantiHub is ready. Click to reload and update.',
+        icon: '/icons/notif-app-update.png',
+        badge: '/icons/icon-72x72.png',
+        tag: updateTag,
+        data: { action: 'reload_update', signature: remoteSig }
+      });
+
+      await broadcastSyncMessage({
+        type: 'LH_APP_UPDATE_DETECTED',
+        signature: remoteSig,
+        tag: updateTag,
+        notified: fired,
+        ts: Date.now()
+      });
+      return fired;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Evaluates and displays OS-level notifications directly from the Service Worker
-   * when all client windows are minimized, occluded, in a background tab, or closed.
+   * whenever no client window is actively focused (minimized, occluded, in a background tab, or closed),
+   * and updates the OS taskbar/dock badge count via `self.navigator.setAppBadge()`.
    */
   async function evaluateBackgroundNotificationsInSw(bootPayload) {
     const notifiedTags = [];
@@ -288,6 +391,9 @@
         }
       };
 
+      // 0. Evaluate App Update (`/ngsw.json`) in Service Worker
+      await checkNgswAppUpdateInSw(state, prefs, fireSwNotif, stateUpdates);
+
       // 1. Evaluate New Git Packages
       if (prefs.notifyNewGitPackages && Array.isArray(state.knownGitPackages) && state.knownGitPackages.length > 0) {
         const knownGitSet = new Set(state.knownGitPackages.map((id) => String(id).toLowerCase()));
@@ -323,11 +429,11 @@
         for (const item of newlyDiscoveredGit.slice(0, 3)) {
           const typeLabel = String(item.pkg.type || 'mod').toUpperCase();
           const displayTitle = item.pkg.title || item.name;
-          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/icon-192x192.png';
+          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/notif-new-package.png';
           await fireSwNotif(`New Git Package · [${typeLabel}] ${displayTitle}`, {
             body: `by ${item.author} — ${item.pkg.short_desc || 'New community Git repository published on LuantiHub.'}`,
             icon: thumb,
-            badge: '/icons/badge-mono-96x96.png',
+            badge: '/icons/icon-72x72.png',
             tag: `lh-new-git-pkg-${item.resolvedId.toLowerCase()}`,
             data: { packageId: item.resolvedId }
           });
@@ -342,7 +448,10 @@
         Object.keys(state.knownPackageVersions).length > 0
       ) {
         const knownMap = Object.assign({}, state.knownPackageVersions);
-        const cooldownMap = Object.assign({}, state.packageUpdateCooldowns || {});
+        const cooldownMap = Object.assign(
+          {},
+          state.packageUpdateCooldowns || state.packageUpdateCooldown || {}
+        );
         let mapChanged = false;
         let cooldownChanged = false;
         const updatedList = [];
@@ -419,11 +528,11 @@
           cooldownChanged = true;
           const typeLabel = String(item.pkg.type || 'mod').toUpperCase();
           const displayTitle = item.pkg.title || item.name;
-          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/icon-192x192.png';
+          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/notif-package-update.png';
           await fireSwNotif(`Package Updated · [${typeLabel}] ${displayTitle}`, {
             body: `by ${item.author} — ${item.pkg.short_desc || 'New release available on LuantiHub.'}`,
             icon: thumb,
-            badge: '/icons/badge-mono-96x96.png',
+            badge: '/icons/icon-72x72.png',
             tag: `lh-pkg-update-${item.lowerId}-${item.stamp}`,
             data: { packageId: item.resolvedId }
           });
@@ -451,7 +560,7 @@
             await fireSwNotif(`${badge} · ${promo.title}`, {
               body: promo.short_desc || 'Check out the featured promotion on LuantiHub.',
               icon: promo.banner_url || '/icons/icon-192x192.png',
-              badge: '/icons/badge-mono-96x96.png',
+              badge: '/icons/icon-72x72.png',
               tag: `lh-promo-${id}`,
               data: { ctaUrl: promo.cta_url }
             });
@@ -462,8 +571,64 @@
         }
       }
 
+      // 4. Evaluate Latest Luanti Blog Post
+      const blogPost = bootPayload?.latestBlogPost;
+      if (prefs.notifyPromotions && blogPost && blogPost.title && blogPost.url && Array.isArray(state.seenBlogPosts)) {
+        const seenBlogSet = new Set(state.seenBlogPosts.map((u) => String(u).trim()));
+        const postKey = String(blogPost.url || blogPost.title).trim();
+        if (postKey && !seenBlogSet.has(postKey)) {
+          seenBlogSet.add(postKey);
+          stateUpdates.seenBlogPosts = Array.from(seenBlogSet).slice(-50);
+          await fireSwNotif(`Luanti Blog · ${blogPost.title}`, {
+            body: blogPost.summary || 'Read the latest official Luanti blog post.',
+            icon: blogPost.image_url || '/icons/icon-192x192.png',
+            badge: '/icons/icon-72x72.png',
+            tag: `lh-blog-${postKey.slice(-48)}`,
+            data: { ctaUrl: blogPost.url }
+          });
+        }
+      }
+
+      // 5. Evaluate New Community Reviews
+      const recentReviews = Array.isArray(bootPayload?.recentReviews) ? bootPayload.recentReviews : [];
+      if (prefs.notifyNewReviews && recentReviews.length > 0 && Array.isArray(state.seenReviewIds) && state.seenReviewIds.length > 0) {
+        const seenRevSet = new Set(state.seenReviewIds.map((id) => String(id).trim()));
+        let revChanged = false;
+        const newRevs = [];
+        for (const rev of recentReviews) {
+          const revId = String(rev?.id || '').trim();
+          const pkgId = String(rev?.package_id || rev?.packageId || '').trim();
+          if (!revId || !pkgId) continue;
+          if (!seenRevSet.has(revId)) {
+            seenRevSet.add(revId);
+            revChanged = true;
+            newRevs.push({ rev, revId, pkgId });
+          }
+        }
+        if (revChanged) {
+          stateUpdates.seenReviewIds = Array.from(seenRevSet).slice(-500);
+        }
+        for (const item of newRevs.slice(0, 3)) {
+          const rating = Math.max(1, Math.min(5, Math.round(Number(item.rev.rating) || 5)));
+          const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
+          const pkgTitle = item.rev.package_title || item.pkgId.split('/')[1] || item.pkgId;
+          const reviewer = item.rev.reviewer_display_name || item.rev.reviewer_username || 'Community Member';
+          const thumb = item.rev.package_thumbnail || '/icons/icon-192x192.png';
+          await fireSwNotif(`New Review · ${pkgTitle} (${stars})`, {
+            body: `${reviewer}: "${String(item.rev.comment || item.rev.title || '').slice(0, 120)}"`,
+            icon: thumb,
+            badge: '/icons/icon-72x72.png',
+            tag: `lh-new-review-${item.revId}`,
+            data: { packageId: item.pkgId }
+          });
+        }
+      }
+
       if (notifiedTags.length > 0) {
         stateUpdates.seenTags = seenTagsList.slice(-300);
+        const nextBadgeCount = Math.max(0, Number(state.unreadBadgeCount || 0)) + notifiedTags.length;
+        stateUpdates.unreadBadgeCount = nextBadgeCount;
+        await setSwAppBadge(nextBadgeCount);
       }
 
       if (Object.keys(stateUpdates).length > 0) {
@@ -523,18 +688,22 @@
 
       const bootPayload = Array.isArray(parsed) ? { packages: parsed } : parsed;
 
-      let hasVisibleClient = false;
+      let hasFocusedClient = false;
       try {
         if (self.clients && typeof self.clients.matchAll === 'function') {
           const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-          hasVisibleClient = Array.isArray(clientList) && clientList.some((c) => c && c.visibilityState === 'visible');
+          // Only skip SW notifications if a client window is BOTH visible AND actively focused.
+          // When minimized or in the background (`c.focused === false`), the Service Worker dispatches notifications immediately.
+          hasFocusedClient =
+            Array.isArray(clientList) &&
+            clientList.some((c) => c && c.focused === true && c.visibilityState === 'visible');
         }
       } catch {
-        hasVisibleClient = false;
+        hasFocusedClient = false;
       }
 
       let notifiedTags = [];
-      if (!hasVisibleClient) {
+      if (!hasFocusedClient) {
         notifiedTags = await evaluateBackgroundNotificationsInSw(bootPayload);
       }
 
@@ -581,15 +750,75 @@
     }
   });
 
-  // 3. Direct Message Trigger from Backgrounded/Minimized Client Windows
+  // 3. W3C Push API (`push` & `pushsubscriptionchange`) per PWABuilder Push Notifications best practices
+  self.addEventListener('push', (event) => {
+    event.waitUntil(
+      (async () => {
+        let payload = null;
+        if (event && event.data) {
+          try {
+            payload = event.data.json();
+          } catch {
+            try {
+              const text = event.data.text();
+              if (text) {
+                payload = { title: 'LuantiHub', body: text };
+              }
+            } catch {
+              payload = null;
+            }
+          }
+        }
+
+        if (payload && (payload.title || payload.body)) {
+          const state = await readAllNotifStateFromSw();
+          const prefs = state.prefs && typeof state.prefs === 'object' ? state.prefs : null;
+          if (!prefs || prefs.notificationsEnabled !== false) {
+            const title = String(payload.title || 'LuantiHub');
+            const tag = String(payload.tag || `lh-push-${Date.now()}`);
+            await self.registration.showNotification(title, {
+              body: String(payload.body || ''),
+              icon: payload.icon || '/icons/icon-192x192.png',
+              badge: payload.badge || '/icons/icon-72x72.png',
+              tag,
+              data: payload.data || { packageId: payload.packageId, ctaUrl: payload.url }
+            });
+            const nextBadgeCount = Math.max(0, Number(state.unreadBadgeCount || 0)) + 1;
+            await writeNotifStateFromSw({ unreadBadgeCount: nextBadgeCount });
+            await setSwAppBadge(nextBadgeCount);
+          }
+        } else {
+          await fetchAndCacheBootCatalogInSw();
+        }
+      })()
+    );
+  });
+
+  self.addEventListener('pushsubscriptionchange', (event) => {
+    event.waitUntil(
+      broadcastSyncMessage({
+        type: 'LH_PUSH_SUBSCRIPTION_CHANGED',
+        ts: Date.now()
+      })
+    );
+  });
+
+  // 4. Direct Message Trigger from Backgrounded/Minimized Client Windows
   self.addEventListener('message', (event) => {
     const data = event && event.data;
     if (data && data.type === 'LH_TRIGGER_BG_SYNC') {
       event.waitUntil(fetchAndCacheBootCatalogInSw());
+    } else if (data && data.type === 'LH_CLEAR_BADGE') {
+      event.waitUntil(
+        (async () => {
+          await writeNotifStateFromSw({ unreadBadgeCount: 0 });
+          await setSwAppBadge(0);
+        })()
+      );
     }
   });
 
-  // 4. Native OS Notification Click Handler (focuses minimized/background window or opens new window)
+  // 5. Native OS Notification Click Handler (focuses minimized/background window or opens new window)
   self.addEventListener('notificationclick', (event) => {
     if (!event || !event.notification) return;
     const notifData = event.notification.data || {};
@@ -614,6 +843,8 @@
     event.waitUntil(
       (async () => {
         try {
+          await writeNotifStateFromSw({ unreadBadgeCount: 0 });
+          await setSwAppBadge(0);
           if (self.clients && typeof self.clients.matchAll === 'function') {
             const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
             if (Array.isArray(clientList) && clientList.length > 0) {

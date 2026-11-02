@@ -39,7 +39,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const mediaLic = String(item.media_license || item.license || '').trim();
       const cdbDl = Math.max(0, Number(item.contentdb_downloads ?? item.downloads ?? 0) || 0);
       const totalDl = Math.max(cdbDl, Number(item.downloads || 0) || 0);
-      if (!lic && cdbDl <= 0) continue;
+      const hasGitBanner = isGitRepositoryAssetUrl(item.banner) || isGitRepositoryAssetUrl(item.thumbnail);
+      if (!lic && cdbDl <= 0 && !hasGitBanner) continue;
 
       const tagsArr = Array.isArray(item.tags)
         ? item.tags.map((t: any) => String(typeof t === 'string' ? t : t?.name || '').trim()).filter(Boolean)
@@ -160,7 +161,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           `SELECT * FROM packages WHERE LOWER(id) IN (${placeholders}) AND status = 'active'`
         ).bind(...lowerParams).all();
 
-        const d1VideoScanRows: any[] = [];
+        const d1RepoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
           if (!row?.id) continue;
           const lowerKey = String(row.id).toLowerCase();
@@ -171,6 +172,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const cdbDl = Number(row.contentdb_downloads || 0);
           const lhDl = Number(row.luantihub_downloads || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
+          const gitShotD1 = isGitRepositoryAssetUrl(row.banner_url)
+            ? String(row.banner_url)
+            : (isGitRepositoryAssetUrl(row.thumbnail_url) ? String(row.thumbnail_url) : undefined);
+          const rowScreenshots = mergeScreenshotsPreferringGit(
+            [gitShotD1, row.banner_url, row.thumbnail_url],
+            parseJsonArray(row.screenshots)
+          );
 
           hydratedMap[lowerKey] = {
             id: row.id,
@@ -184,56 +192,113 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             file_size: row.file_size || undefined,
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
-            repo_url: row.repo_url || undefined
+            repo_url: row.repo_url || undefined,
+            thumbnail: gitShotD1 || (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? row.thumbnail_url : undefined),
+            banner: gitShotD1 || (row.banner_url && row.banner_url !== 'logo.svg' ? row.banner_url : undefined),
+            screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
 
           if (row.license && (cdbDl > 0 || row.provider !== 'contentdb') && hasRealTags) {
             missingIds.delete(lowerKey);
-            if (!row.video_url && row.repo_url && d1VideoScanRows.length < 4) {
-              d1VideoScanRows.push(row);
+            if ((!row.video_url || !gitShotD1) && row.repo_url && d1RepoScanRows.length < 12) {
+              d1RepoScanRows.push(row);
             }
           }
         }
 
-        if (d1VideoScanRows.length > 0) {
-          const videoUpdateStmts: any[] = [];
+        if (d1RepoScanRows.length > 0) {
+          const repoUpdateStmts: any[] = [];
           await Promise.all(
-            d1VideoScanRows.map(async (row) => {
+            d1RepoScanRows.map(async (row) => {
               const lowerKey = String(row.id).toLowerCase();
               const author = String(row.author_name || String(row.id).split('/')[0] || '');
               const name = String(row.name || String(row.id).split('/')[1] || '');
               if (!author || !name) return;
-              const gitScan = await scanGitRepoMetadataCached(
-                author,
-                name,
-                row.type || 'mod',
-                row.repo_url,
-                21600
-              ).catch(() => null);
+              const existingRowShots = parseJsonArray(row.screenshots);
+              const needsUpstreamScreenshots =
+                row.provider === 'contentdb' &&
+                !existingRowShots.some((s: string) => !isGitRepositoryAssetUrl(s));
+              const [gitScan, upstreamDetail] = await Promise.all([
+                scanGitRepoMetadataCached(
+                  author,
+                  name,
+                  row.type || 'mod',
+                  row.repo_url,
+                  21600
+                ).catch(() => null),
+                needsUpstreamScreenshots
+                  ? fetchUpstreamJsonCached<any>(
+                      `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
+                      3600
+                    ).catch(() => null)
+                  : Promise.resolve(null)
+              ]);
               const resolvedVid = extractEmbeddedVideo(
                 gitScan?.cdbMeta?.video_url,
                 row.video_thumbnail_url,
                 row.long_desc || gitScan?.cdbMeta?.long_description || gitScan?.longDesc
               );
-              if (resolvedVid.video_url && hydratedMap[lowerKey]) {
-                hydratedMap[lowerKey].video_url = resolvedVid.video_url;
-                hydratedMap[lowerKey].video_thumbnail_url = resolvedVid.video_thumbnail_url;
-                videoUpdateStmts.push(
+              const scannedGitShot = gitScan?.screenshotUrl;
+              const scannedCdbShots = gitScan?.cdbMeta?.screenshots || [];
+              const mergedRowShots = mergeScreenshotsPreferringGit(
+                [scannedGitShot, ...scannedCdbShots],
+                hydratedMap[lowerKey]?.screenshots,
+                existingRowShots,
+                upstreamDetail?.screenshots
+              );
+              const primaryGitShot = scannedGitShot || (isGitRepositoryAssetUrl(mergedRowShots[0]) ? mergedRowShots[0] : undefined);
+
+              if (hydratedMap[lowerKey]) {
+                if (resolvedVid.video_url) {
+                  hydratedMap[lowerKey].video_url = resolvedVid.video_url;
+                  hydratedMap[lowerKey].video_thumbnail_url = resolvedVid.video_thumbnail_url;
+                }
+                if (primaryGitShot) {
+                  hydratedMap[lowerKey].thumbnail = primaryGitShot;
+                  hydratedMap[lowerKey].banner = primaryGitShot;
+                }
+                if (mergedRowShots.length > 0) {
+                  hydratedMap[lowerKey].screenshots = mergedRowShots;
+                }
+              }
+
+              if (resolvedVid.video_url || primaryGitShot || mergedRowShots.length > 0) {
+                repoUpdateStmts.push(
                   env.DB.prepare(`
                     UPDATE packages
                     SET video_url = COALESCE(video_url, ?),
-                        video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                        video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                        thumbnail_url = CASE
+                          WHEN ? IS NOT NULL AND ? != '' THEN ?
+                          ELSE thumbnail_url
+                        END,
+                        banner_url = CASE
+                          WHEN ? IS NOT NULL AND ? != '' THEN ?
+                          ELSE banner_url
+                        END,
+                        screenshots = COALESCE(?, screenshots)
                     WHERE id = ?
-                  `).bind(resolvedVid.video_url, resolvedVid.video_thumbnail_url || null, row.id)
+                  `).bind(
+                    resolvedVid.video_url || null,
+                    resolvedVid.video_thumbnail_url || null,
+                    primaryGitShot || null,
+                    primaryGitShot || null,
+                    primaryGitShot || null,
+                    primaryGitShot || null,
+                    primaryGitShot || null,
+                    primaryGitShot || null,
+                    mergedRowShots.length > 0 ? JSON.stringify(mergedRowShots) : null,
+                    row.id
+                  )
                 );
               }
             })
           );
-          if (videoUpdateStmts.length > 0) {
+          if (repoUpdateStmts.length > 0) {
             if (typeof env.DB.batch === 'function') {
-              await env.DB.batch(videoUpdateStmts).catch(() => {});
+              await env.DB.batch(repoUpdateStmts).catch(() => {});
             } else {
-              for (const stmt of videoUpdateStmts) {
+              for (const stmt of repoUpdateStmts) {
                 stmt.run().catch(() => {});
               }
             }
@@ -247,7 +312,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const toFetchUpstream = rawIds.filter(id => missingIds.has(id.toLowerCase())).slice(0, 24);
     if (toFetchUpstream.length > 0) {
       const persistStatements: any[] = [];
-      let repoScanBudget = 6; // Cap server-side Git repo scans per batch to preserve Worker subrequest quota
+      let repoScanBudget = 12; // Cap server-side Git repo scans per batch (6h Edge-cached) to preserve Worker subrequest quota
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
@@ -278,62 +343,82 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           let title = detail?.title || name;
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
-          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE) when ContentDB is offline,
-          // package is Git-only, or license / video_url is missing. Cached for 6h at Cloudflare Edge.
-              let gitScanShot: string | undefined;
-              if ((!detail || !lic || (!videoUrl && repoUrl)) && repoScanBudget > 0) {
-                repoScanBudget--;
-                const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
-                if (gitScan && gitScan.gitRepoStatus === 'verified') {
-                  lic = lic || gitScan.license || gitScan.mediaLicense || '';
-                  mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
-                  repoUrl = repoUrl || gitScan.repoUrl || '';
-                  minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
-                  shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
-                  title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
-                  if (gitScan.detectedType) pkgType = gitScan.detectedType;
-                  if (gitScan.screenshotUrl) gitScanShot = gitScan.screenshotUrl;
-                  if (gitScan.cdbMeta?.tags?.length) {
-                    detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
-                  }
-                  if (!videoUrl && gitScan.cdbMeta?.video_url) {
-                    const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
-                    videoUrl = extractedVid.video_url;
-                    videoThumbUrl = extractedVid.video_thumbnail_url || videoThumbUrl;
-                  }
-                }
+          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png)
+          // Cached for 6h at Cloudflare Edge.
+          let gitScanShot: string | undefined;
+          let gitScanCdbShots: string[] = [];
+          const hasExistingGitShot = isGitRepositoryAssetUrl(existing.banner) || isGitRepositoryAssetUrl(existing.thumbnail);
+          if ((!detail || !lic || !videoUrl || !hasExistingGitShot) && repoUrl && repoScanBudget > 0) {
+            repoScanBudget--;
+            const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
+            if (gitScan && gitScan.gitRepoStatus === 'verified') {
+              lic = lic || gitScan.license || gitScan.mediaLicense || '';
+              mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
+              repoUrl = repoUrl || gitScan.repoUrl || '';
+              minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
+              shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
+              title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
+              if (gitScan.detectedType) pkgType = gitScan.detectedType;
+              if (gitScan.screenshotUrl) gitScanShot = gitScan.screenshotUrl;
+              if (gitScan.cdbMeta?.screenshots?.length) {
+                gitScanCdbShots = gitScan.cdbMeta.screenshots;
               }
+              if (gitScan.cdbMeta?.tags?.length) {
+                detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
+              }
+              if (!videoUrl && gitScan.cdbMeta?.video_url) {
+                const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
+                videoUrl = extractedVid.video_url;
+                videoThumbUrl = extractedVid.video_thumbnail_url || videoThumbUrl;
+              }
+            }
+          }
 
-              if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
+          if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
-              const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
-              const resolvedHydrateThumb = gitScanShot || detail?.thumbnail || null;
-              const resolvedHydrateBanner = gitScanShot || detail?.screenshots?.[0]?.url || detail?.screenshots?.[0] || null;
-              hydratedMap[lowerKey] = {
-                id: canonicalId,
-                license: lic,
-                media_license: mediaLic,
-                min_minetest_version: minVer,
-                contentdb_downloads: cdbDl,
-                luantihub_downloads: lhDl,
-                downloads: totalDl,
-                tags: detailTags.length > 0 ? detailTags : undefined,
-                download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
-                video_url: videoUrl,
-                video_thumbnail_url: videoThumbUrl,
-                repo_url: repoUrl || undefined,
-                thumbnail: gitScanShot || undefined,
-                banner: gitScanShot || undefined
-              };
+          const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
+          const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
+            [gitScanShot, ...gitScanCdbShots, existing.banner, existing.thumbnail],
+            existing.screenshots,
+            detail?.screenshots
+          );
+          const primaryGitShot =
+            gitScanShot ||
+            (isGitRepositoryAssetUrl(mergedHydrateScreenshots[0]) ? mergedHydrateScreenshots[0] : undefined);
+          const resolvedHydrateThumb = primaryGitShot || detail?.thumbnail || existing.thumbnail || null;
+          const resolvedHydrateBanner =
+            primaryGitShot ||
+            mergedHydrateScreenshots[0] ||
+            detail?.screenshots?.[0]?.url ||
+            detail?.screenshots?.[0] ||
+            existing.banner ||
+            null;
+          hydratedMap[lowerKey] = {
+            id: canonicalId,
+            license: lic,
+            media_license: mediaLic,
+            min_minetest_version: minVer,
+            contentdb_downloads: cdbDl,
+            luantihub_downloads: lhDl,
+            downloads: totalDl,
+            tags: detailTags.length > 0 ? detailTags : undefined,
+            download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
+            video_url: videoUrl,
+            video_thumbnail_url: videoThumbUrl,
+            repo_url: repoUrl || undefined,
+            thumbnail: primaryGitShot || resolvedHydrateThumb || undefined,
+            banner: primaryGitShot || resolvedHydrateBanner || undefined,
+            screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
+          };
 
-              if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0)) {
+              if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0 || primaryGitShot)) {
                 persistStatements.push(
                   env.DB.prepare(`
                     INSERT INTO packages (
                       id, author_name, name, title, type, short_desc, repo_url, provider,
-                      thumbnail_url, banner_url, license, media_license, min_minetest_version,
+                      thumbnail_url, banner_url, screenshots, license, media_license, min_minetest_version,
                       tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       thumbnail_url = CASE
                         WHEN excluded.thumbnail_url IS NOT NULL
@@ -365,6 +450,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                         THEN packages.banner_url
                         ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
                       END,
+                      screenshots = COALESCE(excluded.screenshots, packages.screenshots),
                       license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
                       media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
                       min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
@@ -384,17 +470,18 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                     repoUrl,
                     resolvedHydrateThumb,
                     resolvedHydrateBanner,
-                lic,
-                mediaLic,
-                minVer,
-                detailTags.length > 0 ? JSON.stringify(detailTags) : null,
-                totalDl,
-                cdbDl,
-                videoUrl || null,
-                videoThumbUrl || null
-              )
-            );
-          }
+                    mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
+                    lic,
+                    mediaLic,
+                    minVer,
+                    detailTags.length > 0 ? JSON.stringify(detailTags) : null,
+                    totalDl,
+                    cdbDl,
+                    videoUrl || null,
+                    videoThumbUrl || null
+                  )
+                );
+              }
         })
       );
 

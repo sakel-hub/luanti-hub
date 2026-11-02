@@ -461,7 +461,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const noCache =
     reqUrl?.searchParams.get('nocache') === '1' || reqUrl?.searchParams.get('refresh') === '1';
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v9/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v11/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);

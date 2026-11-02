@@ -381,6 +381,10 @@ export class PwaService {
   readonly backgroundSyncSupported = signal<boolean>(
     typeof window !== 'undefined' && 'SyncManager' in window
   );
+  readonly isWcoActive = signal<boolean>(false);
+  readonly wcoTitlebarRect = signal<{ x: number; y: number; width: number; height: number } | null>(null);
+  readonly canNavigateBack = signal<boolean>(false);
+  readonly canNavigateForward = signal<boolean>(false);
 
   private deferredPrompt: any = null;
   private messageClearTimer: any = null;
@@ -393,11 +397,14 @@ export class PwaService {
   private bootManifestSignature: string | null = null;
   private lastNotificationClickSig = '';
   private lastNotificationClickAt = 0;
+  private navHistoryCursor = 0;
+  private navHistoryMaxCursor = 0;
   private readonly localAssetDataUrlCache = new Map<string, string>();
 
   constructor() {
     this.initSwUpdate();
     this.initInstallPrompt();
+    this.initWindowControlsOverlay();
     this.initNotificationClickRouting();
     this.initPermissionStatusWatcher();
     this.initNetworkStatusWatcher();
@@ -409,6 +416,7 @@ export class PwaService {
     effect(() => {
       const prefs = {
         notificationsEnabled: this.settingsService.notificationsEnabled(),
+        notifyAppUpdates: this.settingsService.notifyAppUpdates(),
         notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
         notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
         notifyNewReviews: this.settingsService.notifyNewReviews(),
@@ -423,7 +431,7 @@ export class PwaService {
   /**
    * Synchronizes notification preferences and deduplication stamps from `localStorage` into
    * IndexedDB (`lh_pwa_notif_state_db`) so the Service Worker can evaluate and dispatch
-   * background notifications when all app windows are minimized or closed.
+   * background notifications when all app windows are minimized, unfocused, or closed.
    */
   async syncNotificationStateToIndexedDb(customPrefs?: Record<string, any>): Promise<void> {
     if (typeof localStorage === 'undefined') return;
@@ -438,6 +446,7 @@ export class PwaService {
       };
       const prefs = customPrefs || {
         notificationsEnabled: this.settingsService.notificationsEnabled(),
+        notifyAppUpdates: this.settingsService.notifyAppUpdates(),
         notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
         notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
         notifyNewReviews: this.settingsService.notifyNewReviews(),
@@ -445,15 +454,24 @@ export class PwaService {
         favorites: this.settingsService.favorites(),
         downloadedPackages: this.settingsService.downloadedPackages()
       };
-      await writeNotifStateEntries({
+      const seenReviews = parseJsonSafe(SEEN_REVIEWS_KEY, null);
+      const packageUpdateCooldown = parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {});
+      const entries: Record<string, any> = {
         prefs,
         seenTags: parseJsonSafe(SEEN_NOTIFICATION_TAGS_KEY, []),
         knownGitPackages: parseJsonSafe(KNOWN_GIT_PACKAGES_KEY, null),
         knownPackageVersions: parseJsonSafe(KNOWN_PACKAGE_VERSIONS_KEY, null),
         seenPromotions: parseJsonSafe(SEEN_PROMOTIONS_KEY, []),
-        seenReviews: parseJsonSafe(SEEN_REVIEWS_KEY, null),
-        packageUpdateCooldown: parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {})
-      });
+        seenBlogPosts: parseJsonSafe(SEEN_BLOG_POSTS_KEY, []),
+        seenReviews,
+        seenReviewIds: seenReviews,
+        packageUpdateCooldown,
+        packageUpdateCooldowns: packageUpdateCooldown
+      };
+      if (this.bootManifestSignature) {
+        entries['bootManifestSignature'] = this.bootManifestSignature;
+      }
+      await writeNotifStateEntries(entries);
     } catch {
       // Ignore IndexedDB sync errors
     }
@@ -469,6 +487,12 @@ export class PwaService {
     try {
       const state = await readAllNotifStateEntries();
       if (!state || Object.keys(state).length === 0) return;
+
+      if (typeof state['bootManifestSignature'] === 'string' && state['bootManifestSignature']) {
+        if (!this.bootManifestSignature) {
+          this.bootManifestSignature = state['bootManifestSignature'];
+        }
+      }
 
       if (Array.isArray(state['seenTags']) && state['seenTags'].length > 0) {
         for (const tag of state['seenTags']) {
@@ -489,6 +513,39 @@ export class PwaService {
             ])
           ).slice(-100);
           localStorage.setItem(SEEN_PROMOTIONS_KEY, JSON.stringify(merged));
+        } catch {}
+      }
+
+      if (Array.isArray(state['seenBlogPosts']) && state['seenBlogPosts'].length > 0) {
+        try {
+          const raw = localStorage.getItem(SEEN_BLOG_POSTS_KEY);
+          const existing = raw ? JSON.parse(raw) : [];
+          const merged = Array.from(
+            new Set([
+              ...(Array.isArray(existing) ? existing : []),
+              ...state['seenBlogPosts'].filter((id: any) => typeof id === 'string')
+            ])
+          ).slice(-50);
+          localStorage.setItem(SEEN_BLOG_POSTS_KEY, JSON.stringify(merged));
+        } catch {}
+      }
+
+      const swSeenReviews = Array.isArray(state['seenReviewIds'])
+        ? state['seenReviewIds']
+        : Array.isArray(state['seenReviews'])
+          ? state['seenReviews']
+          : null;
+      if (swSeenReviews && swSeenReviews.length > 0) {
+        try {
+          const raw = localStorage.getItem(SEEN_REVIEWS_KEY);
+          const existing = raw ? JSON.parse(raw) : [];
+          const merged = Array.from(
+            new Set([
+              ...(Array.isArray(existing) ? existing : []),
+              ...swSeenReviews.filter((id: any) => typeof id === 'string')
+            ])
+          ).slice(-500);
+          localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(merged));
         } catch {}
       }
 
@@ -592,6 +649,16 @@ export class PwaService {
           payload: data.payload,
           ts: Number(data.ts || Date.now())
         });
+      } else if (data.type === 'LH_APP_UPDATE_DETECTED') {
+        if (typeof data.tag === 'string' && data.tag) {
+          this.markNotificationTagSeen(data.tag, false);
+        }
+        const sig = String(data.signature || 'ready').trim();
+        this.latestDetectedUpdateVersion = sig;
+        this.updateAvailable.set(true);
+        if (!data.notified) {
+          this.notifyAppUpdateAvailable(sig);
+        }
       } else if (data.type === 'LH_OUTBOX_SYNC_COMPLETED') {
         writeFallbackOutbox([]);
       } else if (data.type === 'LH_NOTIFICATION_CLICK' && data.data) {
@@ -851,19 +918,43 @@ export class PwaService {
           }
         }, 5000);
 
-        // 3. Periodic background check every 15 minutes (including backgrounded PWA windows)
+        // Periodic wakeup check: delegates to the Service Worker when minimized/unfocused so update notifications fire immediately in the background
         setInterval(() => {
-          if (this.isOnline()) {
+          if (!this.isOnline()) return;
+          const isHiddenOrUnfocused =
+            typeof document !== 'undefined' &&
+            (document.visibilityState === 'hidden' ||
+              (typeof document.hasFocus === 'function' && !document.hasFocus()));
+          if (isHiddenOrUnfocused) {
+            this.triggerSwBackgroundCatalogCheck();
+          } else {
             this.checkForUpdate(false);
           }
-        }, 15 * 60 * 1000);
+        }, 5 * 60 * 1000);
       }
     }
 
-    // 4. Always check for updates whenever returning to the tab / PWA window (even if SW controller is not attached yet)
+    // 3. Event-driven background sync & visibility/focus handoff (W3C / Edge / PWABuilder best practices)
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      let lastHandoffAt = 0;
+      const handoffToServiceWorker = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastHandoffAt < 5000) return;
+        lastHandoffAt = now;
+        this.syncNotificationStateToIndexedDb()
+          .catch(() => {})
+          .finally(() => {
+            this.requestCatalogBackgroundSync().catch(() => {});
+            this.registerPeriodicCatalogSync().catch(() => {});
+            this.triggerSwBackgroundCatalogCheck();
+          });
+      };
+
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && this.isOnline()) {
+        if (document.visibilityState === 'hidden') {
+          handoffToServiceWorker(true);
+        } else if (document.visibilityState === 'visible' && this.isOnline()) {
+          this.syncAppBadge(0).catch(() => {});
           this.reconcileNotifStateFromIndexedDb()
             .catch(() => {})
             .finally(() => {
@@ -872,6 +963,212 @@ export class PwaService {
             });
         }
       });
+
+      window.addEventListener('blur', () => {
+        handoffToServiceWorker(false);
+      });
+
+      window.addEventListener('focus', () => {
+        if (this.isOnline()) {
+          this.syncAppBadge(0).catch(() => {});
+          this.reconcileNotifStateFromIndexedDb().catch(() => {});
+        }
+      });
+
+      window.addEventListener('pagehide', () => {
+        handoffToServiceWorker(true);
+      });
+    }
+  }
+
+  /**
+   * Initializes desktop PWA Window Controls Overlay (`navigator.windowControlsOverlay`)
+   * geometry tracking, `.wco-active` root class toggling, and history Back/Forward state tracking.
+   */
+  initWindowControlsOverlay(): void {
+    if (typeof window === 'undefined') return;
+
+    const updateWcoState = () => {
+      try {
+        const wco = typeof navigator !== 'undefined' ? (navigator as any).windowControlsOverlay : null;
+        const mm = typeof window.matchMedia === 'function' ? window.matchMedia.bind(window) : null;
+        const mqlMatches = Boolean(mm && mm('(display-mode: window-controls-overlay)')?.matches);
+        const visible = Boolean(wco?.visible || mqlMatches);
+        this.isWcoActive.set(visible);
+
+        if (wco && typeof wco.getTitlebarAreaRect === 'function' && visible) {
+          const rect = wco.getTitlebarAreaRect();
+          if (rect && typeof rect.width === 'number') {
+            this.wcoTitlebarRect.set({
+              x: Number(rect.x || 0),
+              y: Number(rect.y || 0),
+              width: Number(rect.width || 0),
+              height: Number(rect.height || 0)
+            });
+          } else {
+            this.wcoTitlebarRect.set(null);
+          }
+        } else {
+          this.wcoTitlebarRect.set(null);
+        }
+
+        if (typeof document !== 'undefined' && document.documentElement?.classList) {
+          document.documentElement.classList.toggle('wco-active', visible);
+        }
+      } catch {
+        // Ignore unsupported WCO environments
+      }
+    };
+
+    updateWcoState();
+
+    try {
+      const wco = typeof navigator !== 'undefined' ? (navigator as any).windowControlsOverlay : null;
+      if (wco && typeof wco.addEventListener === 'function') {
+        let debounceTimer: any = null;
+        wco.addEventListener('geometrychange', () => {
+          if (debounceTimer) clearTimeout(debounceTimer);
+          updateWcoState();
+          debounceTimer = setTimeout(() => updateWcoState(), 80);
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      if (typeof window.matchMedia === 'function') {
+        const wcoMql = window.matchMedia('(display-mode: window-controls-overlay)');
+        if (typeof wcoMql?.addEventListener === 'function') {
+          wcoMql.addEventListener('change', () => updateWcoState());
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    this.initNavigationHistoryTracker();
+  }
+
+  private initNavigationHistoryTracker(): void {
+    if (typeof window === 'undefined') return;
+
+    this.updateNavigationHistoryState();
+
+    try {
+      const navApi = (window as any).navigation;
+      if (navApi && typeof navApi.addEventListener === 'function') {
+        navApi.addEventListener('currententrychange', () => {
+          this.updateNavigationHistoryState();
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    window.addEventListener('popstate', () => {
+      this.updateNavigationHistoryState();
+    });
+
+    try {
+      if (typeof window.history !== 'undefined' && window.history) {
+        const currentPush = window.history.pushState;
+        const origPushState: typeof window.history.pushState =
+          (currentPush as any)?.__lhOrigPushState || currentPush;
+        if (typeof origPushState === 'function') {
+          const self = this;
+          const wrappedPush = function (this: History, data: any, unused: string, url?: string | URL | null) {
+            self.navHistoryCursor += 1;
+            self.navHistoryMaxCursor = self.navHistoryCursor;
+            const nextData =
+              data && typeof data === 'object'
+                ? { ...data, __lhNavIdx: self.navHistoryCursor }
+                : { __lhNavIdx: self.navHistoryCursor };
+            const res = origPushState.call(this, nextData, unused, url);
+            self.updateNavigationHistoryState(false);
+            return res;
+          };
+          (wrappedPush as any).__lhOrigPushState = origPushState;
+          window.history.pushState = wrappedPush;
+        }
+
+        const currentReplace = window.history.replaceState;
+        const origReplaceState: typeof window.history.replaceState =
+          (currentReplace as any)?.__lhOrigReplaceState || currentReplace;
+        if (typeof origReplaceState === 'function') {
+          const self = this;
+          const wrappedReplace = function (this: History, data: any, unused: string, url?: string | URL | null) {
+            const nextData =
+              data && typeof data === 'object'
+                ? { ...data, __lhNavIdx: self.navHistoryCursor }
+                : { __lhNavIdx: self.navHistoryCursor };
+            const res = origReplaceState.call(this, nextData, unused, url);
+            self.updateNavigationHistoryState(false);
+            return res;
+          };
+          (wrappedReplace as any).__lhOrigReplaceState = origReplaceState;
+          window.history.replaceState = wrappedReplace;
+        }
+      }
+    } catch {
+      // ignore history wrapping errors
+    }
+  }
+
+  updateNavigationHistoryState(syncFromHistoryState = true): void {
+    if (typeof window === 'undefined') return;
+    try {
+      if (syncFromHistoryState) {
+        const state = window.history?.state;
+        const idx =
+          state && typeof state === 'object' && typeof state.__lhNavIdx === 'number'
+            ? state.__lhNavIdx
+            : typeof state?.navigationId === 'number'
+              ? state.navigationId - 1
+              : null;
+        if (typeof idx === 'number' && idx >= 0) {
+          this.navHistoryCursor = idx;
+          if (idx > this.navHistoryMaxCursor) {
+            this.navHistoryMaxCursor = idx;
+          }
+        }
+      }
+
+      const navApi = (window as any).navigation;
+      const navBack = Boolean(navApi && typeof navApi.canGoBack === 'boolean' && navApi.canGoBack);
+      const navForward = Boolean(navApi && typeof navApi.canGoForward === 'boolean' && navApi.canGoForward);
+      const historyLen = Number(window.history?.length || 1);
+
+      this.canNavigateBack.set(navBack || this.navHistoryCursor > 0 || historyLen > 1);
+      this.canNavigateForward.set(navForward || this.navHistoryCursor < this.navHistoryMaxCursor);
+    } catch {
+      // ignore
+    }
+  }
+
+  navigateBack(): void {
+    if (typeof window === 'undefined' || !window.history) return;
+    try {
+      if (this.navHistoryCursor > 0) {
+        this.navHistoryCursor -= 1;
+      }
+      window.history.back();
+      this.updateNavigationHistoryState(false);
+    } catch {
+      // ignore
+    }
+  }
+
+  navigateForward(): void {
+    if (typeof window === 'undefined' || !window.history) return;
+    try {
+      if (this.navHistoryCursor < this.navHistoryMaxCursor) {
+        this.navHistoryCursor += 1;
+      }
+      window.history.forward();
+      this.updateNavigationHistoryState(false);
+    } catch {
+      // ignore
     }
   }
 
@@ -2102,6 +2399,7 @@ export class PwaService {
       const supportsDirectCors =
         host === 'raw.githubusercontent.com' ||
         host === 'avatars.githubusercontent.com' ||
+        host === 'api.bitbucket.org' ||
         host === 'blog.luanti.org';
 
       if (supportsDirectCors) {
@@ -2512,7 +2810,10 @@ export class PwaService {
       if (signature !== '||') {
         if (this.bootManifestSignature === null) {
           this.bootManifestSignature = signature;
+          this.syncNotificationStateToIndexedDb().catch(() => {});
         } else if (this.bootManifestSignature !== signature) {
+          this.bootManifestSignature = signature;
+          this.syncNotificationStateToIndexedDb().catch(() => {});
           this.latestDetectedUpdateVersion = indexHash || String(manifest?.timestamp || Date.now());
           return true;
         }

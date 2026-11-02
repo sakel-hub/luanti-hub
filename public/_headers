@@ -3,14 +3,21 @@
 
 /ngsw-worker.js
   Cache-Control: no-cache, no-store, must-revalidate
+  Service-Worker-Allowed: /
+
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate
+  Service-Worker-Allowed: /
 
 /custom-sw.js
   Cache-Control: no-cache, no-store, must-revalidate
+  Service-Worker-Allowed: /
 
 /index.html
   Cache-Control: no-cache, no-store, must-revalidate
 
 /manifest.webmanifest
+  Content-Type: application/manifest+json
   Cache-Control: no-cache, no-store, must-revalidate
 
 /.well-known/web-app-origin-association

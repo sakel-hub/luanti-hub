@@ -13,7 +13,9 @@ import {
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
   isGitRepositoryAssetUrl,
-  mergeScreenshotsPreferringGit
+  mergeScreenshotsPreferringGit,
+  isGitProviderId,
+  detectGitProviderFromUrl
 } from '../lib/upstream';
 
 interface Env {
@@ -224,7 +226,9 @@ const ALLOWED_IMAGE_PROXY_HOSTS = new Set([
   'codeberg.org',
   'gitlab.com',
   'git.minetest.land',
-  'mese.hub'
+  'mese.hub',
+  'bitbucket.org',
+  'api.bitbucket.org'
 ]);
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
@@ -295,11 +299,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v6';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v3_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v5_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -691,8 +695,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const parsedTags = parseJsonArray(p.tags);
     const rawProvider = String(p.provider || '').toLowerCase();
+    const detectedRepoProvider =
+      rawProvider !== 'contentdb' && p.repo_url
+        ? detectGitProviderFromUrl(p.repo_url)?.provider
+        : undefined;
     const isGitSource =
-      ['github', 'codeberg', 'gitlab', 'mesehub'].includes(rawProvider) ||
+      isGitProviderId(rawProvider) ||
+      isGitProviderId(detectedRepoProvider) ||
       parsedTags.includes('git');
     const isAlsoOfficial = Boolean(matchedUpstream) || rawProvider === 'contentdb' || parsedTags.includes('contentdb');
 
@@ -863,15 +872,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
-    // Pre-hydrate licenses, tags & ContentDB downloads on the server for top carousel & Git Community packages (cached 1h at Cloudflare Edge + saved to D1)
+    // Pre-hydrate licenses, tags, Git screenshots & ContentDB downloads on the server for top carousel & Git Community packages (cached 1h at Cloudflare Edge + saved to D1)
     const carouselPool: any[] = [];
     const pushPool = (items: any[]) => {
       for (const it of items) {
+        const needsGitScreenshotScan =
+          (it?.sources?.includes('git') || Boolean(it?.repo_url)) &&
+          !isGitRepositoryAssetUrl(it?.banner);
         if (
           it &&
           it.author &&
           it.name &&
-          (!it.license || (it.sources?.includes('official') && !(Number(it.contentdb_downloads || 0) > 0))) &&
+          (!it.license ||
+            (it.sources?.includes('official') && !(Number(it.contentdb_downloads || 0) > 0)) ||
+            needsGitScreenshotScan) &&
           !carouselPool.some(x => x.id === it.id)
         ) {
           carouselPool.push(it);
@@ -888,7 +902,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const batchToHydrate = carouselPool.slice(0, 32);
     if (batchToHydrate.length > 0) {
-      let bootRepoScanBudget = 4;
+      let bootRepoScanBudget = 10;
       const bootHydrateStmts: any[] = [];
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
@@ -896,10 +910,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`,
             3600
           ).catch(() => null);
-          if (!detail) return;
-          const resolvedLic = detail.license || detail.media_license || pkg.license || '';
-          const resolvedMediaLic = detail.media_license || detail.license || pkg.media_license || '';
-          const detailTags = Array.isArray(detail.tags)
+          if (!detail && !pkg.repo_url) return;
+          const resolvedLic = detail?.license || detail?.media_license || pkg.license || '';
+          const resolvedMediaLic = detail?.media_license || detail?.license || pkg.media_license || '';
+          const detailTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
           if (resolvedLic) {
@@ -909,19 +923,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
           }
-          if (typeof detail.downloads === 'number' && detail.downloads > 0) {
+          if (typeof detail?.downloads === 'number' && detail.downloads > 0) {
             pkg.contentdb_downloads = Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads);
             pkg.downloads = Math.max(
               Number(pkg.downloads || 0),
               pkg.contentdb_downloads + Number(pkg.luantihub_downloads || 0)
             );
           }
-          const candidateRepo = pkg.repo_url || detail.repo || detail.repo_url || '';
+          const candidateRepo = pkg.repo_url || detail?.repo || detail?.repo_url || '';
           if (candidateRepo && !pkg.repo_url) {
             pkg.repo_url = candidateRepo;
           }
-          let rawVideoUrl = detail.video_url || pkg.video_url;
-          if (!rawVideoUrl && candidateRepo && bootRepoScanBudget > 0) {
+          let rawVideoUrl = detail?.video_url || pkg.video_url;
+          const needsGitAssetCheck = !isGitRepositoryAssetUrl(pkg.banner);
+          if ((!rawVideoUrl || needsGitAssetCheck) && candidateRepo && bootRepoScanBudget > 0) {
             bootRepoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(
               pkg.author,
@@ -933,15 +948,26 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             if (gitScan?.cdbMeta?.video_url) {
               rawVideoUrl = gitScan.cdbMeta.video_url;
             }
-            if (gitScan?.screenshotUrl) {
-              pkg.thumbnail = gitScan.screenshotUrl;
-              pkg.banner = gitScan.screenshotUrl;
+            if (gitScan?.screenshotUrl || (gitScan?.cdbMeta?.screenshots && gitScan.cdbMeta.screenshots.length > 0)) {
+              const mergedShots = mergeScreenshotsPreferringGit(
+                [gitScan?.screenshotUrl, ...(gitScan?.cdbMeta?.screenshots || [])],
+                pkg.screenshots,
+                detail?.screenshots
+              );
+              const primaryGitShot = gitScan?.screenshotUrl || mergedShots[0];
+              if (primaryGitShot) {
+                pkg.thumbnail = primaryGitShot;
+                pkg.banner = primaryGitShot;
+              }
+              if (mergedShots.length > 0) {
+                pkg.screenshots = mergedShots;
+              }
             }
           }
           const resolvedVideo = extractEmbeddedVideo(
             rawVideoUrl,
-            detail.video_thumbnail_url || pkg.video_thumbnail_url,
-            typeof detail.long_description === 'string' ? detail.long_description : undefined
+            detail?.video_thumbnail_url || pkg.video_thumbnail_url,
+            typeof detail?.long_description === 'string' ? detail.long_description : undefined
           );
           if (resolvedVideo.video_url && !pkg.video_url) {
             pkg.video_url = resolvedVideo.video_url;
@@ -949,14 +975,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (resolvedVideo.video_thumbnail_url && !pkg.video_thumbnail_url) {
             pkg.video_thumbnail_url = resolvedVideo.video_thumbnail_url;
           }
-          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0)) {
+          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0 || isGitRepositoryAssetUrl(pkg.banner))) {
             bootHydrateStmts.push(
               env.DB.prepare(`
                 INSERT INTO packages (
                   id, author_name, name, title, type, short_desc, repo_url, provider,
-                  thumbnail_url, banner_url, license, media_license, tags, status,
+                  thumbnail_url, banner_url, screenshots, license, media_license, tags, status,
                   downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   thumbnail_url = CASE
                     WHEN excluded.thumbnail_url IS NOT NULL
@@ -988,6 +1014,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                     THEN packages.banner_url
                     ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
                   END,
+                  screenshots = COALESCE(excluded.screenshots, packages.screenshots),
                   license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
                   media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
                   tags = COALESCE(excluded.tags, packages.tags),
@@ -1002,9 +1029,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 pkg.title || pkg.name,
                 ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod',
                 pkg.short_desc || pkg.short_description || null,
-                pkg.repo_url || detail.repo || '',
+                pkg.repo_url || detail?.repo || '',
                 pkg.thumbnail || null,
                 pkg.banner || null,
+                Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
                 resolvedLic,
                 resolvedMediaLic,
                 pkg.tags?.length > 0 ? JSON.stringify(pkg.tags) : null,

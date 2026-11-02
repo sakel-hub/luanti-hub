@@ -446,7 +446,11 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     }
 
     // Start package detail hydration immediately at T=0ms in parallel with hover-intent timer
-    const preloadDetailsPromise = (!this.package?.video_url && this.package)
+    const needsHoverHydration =
+      Boolean(this.package) &&
+      (!this.package.video_url ||
+        (Boolean(this.package.repo_url) && !this.packageService.isGitScreenshotUrl(this.package.banner)));
+    const preloadDetailsPromise = needsHoverHydration
       ? this.packageService.loadPackageDetails(this.package, false)
       : null;
 

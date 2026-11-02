@@ -14,8 +14,17 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="application-name" content="Luanti Hub" />
 
-    <!-- Instant Canonical Host Redirect (luanti-hub.pages.dev -> luantihub.org) -->
-    <script>if(location.hostname==='luanti-hub.pages.dev')location.replace('https://luantihub.org'+location.pathname+location.search+location.hash);</script>
+    <!-- Instant Canonical Host Redirect (luanti-hub.pages.dev -> luantihub.org) & Early PWA Service Worker Registration (PWABuilder & W3C Offline/Sync Support on both luantihub.org and www.luantihub.org) -->
+    <script>
+      if (location.hostname === 'luanti-hub.pages.dev') {
+        location.replace('https://luantihub.org' + location.pathname + location.search + location.hash);
+      }
+      if ('serviceWorker' in navigator && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        window.addEventListener('DOMContentLoaded', function () {
+          navigator.serviceWorker.register('/ngsw-worker.js', { scope: '/' }).catch(function () {});
+        });
+      }
+    </script>
 
     <!-- Canonical & Internationalization (hreflang) -->
     <link rel="canonical" id="canonical-link" href="https://luantihub.org/" />

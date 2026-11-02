@@ -2869,6 +2869,29 @@ export function extractGitBranchHint(rawUrl?: string): string | undefined {
   return undefined;
 }
 
+import {
+  buildProviderRawBaseCandidates,
+  isGitProviderId,
+  isAuthLoginGitProvider,
+  detectGitProviderFromUrl,
+  buildProviderRootListingApiUrl,
+  buildProviderRawFileUrl,
+  GIT_PROVIDER_CONFIGS,
+  ALL_GIT_PROVIDER_IDS,
+  AUTH_LOGIN_GIT_PROVIDER_IDS
+} from '../../../src/app/core/config/git-providers.config';
+export {
+  buildProviderRawBaseCandidates,
+  isGitProviderId,
+  isAuthLoginGitProvider,
+  detectGitProviderFromUrl,
+  buildProviderRootListingApiUrl,
+  buildProviderRawFileUrl,
+  GIT_PROVIDER_CONFIGS,
+  ALL_GIT_PROVIDER_IDS,
+  AUTH_LOGIN_GIT_PROVIDER_IDS
+};
+
 /**
  * Agnostic server-side Git repository scanner modeled after `luanti-org/contentdb`
  * (`app/tasks/luanticheck/tree.py` & `app/tasks/importtasks.py`).
@@ -2886,28 +2909,10 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v4/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v5/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
-  }
-
-  let owner = author;
-  let repo = name;
-  let host = '';
-
-  if (normalizedInputUrl) {
-    try {
-      const u = new URL(normalizedInputUrl);
-      const parts = u.pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) {
-        host = u.hostname.toLowerCase();
-        owner = parts[0];
-        repo = parts[1];
-      }
-    } catch {
-      // Fallback to author/name
-    }
   }
 
   const confFile =
@@ -2918,47 +2923,13 @@ export async function scanGitRepoMetadataCached(
         : pkgType === 'modpack'
           ? 'modpack.conf'
           : 'mod.conf';
-  const lowerOwner = owner.toLowerCase();
 
-  const rawBaseCandidates: Array<{ base: string; repoUrl: string }> = [];
-  const pushCandidate = (base: string, repoUrl: string) => {
-    if (!rawBaseCandidates.some(c => c.base === base)) {
-      rawBaseCandidates.push({ base, repoUrl });
-    }
-  };
-
-  if (host.includes('codeberg.org')) {
-    pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
-    pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
-  } else if (host.includes('minetest.land')) {
-    pushCandidate(`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw`, `https://git.minetest.land/${owner}/${repo}`);
-    pushCandidate(`https://git.minetest.land/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://git.minetest.land/${lowerOwner}/${repo}`);
-  } else if (host.includes('gitlab.com')) {
-    if (branchHint) {
-      pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/${branchHint}`, `https://gitlab.com/${owner}/${repo}`);
-    }
-    pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
-  } else if (host.includes('github.com')) {
-    if (branchHint) {
-      pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/${branchHint}`, `https://github.com/${owner}/${repo}`);
-    }
-    pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
-  } else if (host.includes('bitbucket.org')) {
-    if (branchHint) {
-      pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/${branchHint}`, `https://bitbucket.org/${owner}/${repo}`);
-    }
-    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/master`, `https://bitbucket.org/${owner}/${repo}`);
-    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/main`, `https://bitbucket.org/${owner}/${repo}`);
-    pushCandidate(`https://bitbucket.org/${owner}/${repo}/raw/HEAD`, `https://bitbucket.org/${owner}/${repo}`);
-  }
-
-  // Only include multi-forge fallbacks when no explicit repository URL was provided
-  if (!normalizedInputUrl) {
-    pushCandidate(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD`, `https://github.com/${owner}/${repo}`);
-    pushCandidate(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw`, `https://codeberg.org/${owner}/${repo}`);
-    pushCandidate(`https://codeberg.org/api/v1/repos/${lowerOwner}/${repo}/raw`, `https://codeberg.org/${lowerOwner}/${repo}`);
-    pushCandidate(`https://gitlab.com/${owner}/${repo}/-/raw/HEAD`, `https://gitlab.com/${owner}/${repo}`);
-  }
+  const rawBaseCandidates = buildProviderRawBaseCandidates(
+    normalizedInputUrl,
+    author,
+    name,
+    branchHint
+  );
 
   const hardDeps: string[] = [];
   const softDeps: string[] = [];
@@ -2987,21 +2958,48 @@ export async function scanGitRepoMetadataCached(
       .split(/\s+#/)[0]
       .trim();
 
+  const probeRawScreenshotUrl = async (baseUrl: string, signal: AbortSignal): Promise<string | undefined> => {
+    const shotUrl = `${baseUrl}/screenshot.png`;
+    try {
+      const headRes = await fetchWithAnubisSupport(shotUrl, { method: 'HEAD', signal }).catch(() => null);
+      if (headRes && headRes.ok) {
+        const ct = (headRes.headers?.get('content-type') || '').toLowerCase();
+        if (!ct.includes('text/html')) {
+          return shotUrl;
+        }
+      }
+      if (!headRes || headRes.status === 405 || headRes.status === 403 || headRes.status === 501) {
+        const getRes = await fetchWithAnubisSupport(shotUrl, {
+          method: 'GET',
+          headers: { Range: 'bytes=0-63' },
+          signal
+        }).catch(() => null);
+        if (getRes && (getRes.ok || getRes.status === 206)) {
+          const ct = (getRes.headers?.get('content-type') || '').toLowerCase();
+          if (!ct.includes('text/html')) {
+            return shotUrl;
+          }
+        }
+      }
+    } catch {
+      // Ignore screenshot probe error
+    }
+    return undefined;
+  };
+
   const tryCandidates = async (candidates: Array<{ base: string; repoUrl: string }>): Promise<boolean> => {
     for (const cand of candidates) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1600);
       try {
-        const [res, cdbRes, shotRes] = await Promise.all([
+        const [res, cdbRes, probedScreenshotUrl] = await Promise.all([
           fetchWithAnubisSupport(`${cand.base}/${confFile}`, { signal: controller.signal }),
           fetchWithAnubisSupport(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null),
-          fetchWithAnubisSupport(`${cand.base}/screenshot.png`, { method: 'HEAD', signal: controller.signal }).catch(() => null)
+          probeRawScreenshotUrl(cand.base, controller.signal)
         ]);
         clearTimeout(timer);
 
-        const hasCandidateScreenshot =
-          Boolean(shotRes && shotRes.ok) &&
-          !(shotRes?.headers?.get('content-type') || '').toLowerCase().includes('text/html');
+        const hasCandidateScreenshot = Boolean(probedScreenshotUrl);
 
         if (cdbRes && cdbRes.ok) {
           const cdbText = await cdbRes.text().catch(() => '');
@@ -3010,8 +3008,8 @@ export async function scanGitRepoMetadataCached(
             cdbMeta = parsedCdb;
             resolvedRepoUrl = cand.repoUrl;
             resolvedRawBaseUrl = cand.base;
-            if (hasCandidateScreenshot) {
-              screenshotUrl = `${cand.base}/screenshot.png`;
+            if (probedScreenshotUrl) {
+              screenshotUrl = probedScreenshotUrl;
             }
             gitRepoStatus = 'verified';
             if (parsedCdb.type) detectedType = parsedCdb.type;

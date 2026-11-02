@@ -6,7 +6,7 @@
   "lang": "en",
   "dir": "ltr",
   "display": "standalone",
-  "display_override": ["standalone", "window-controls-overlay"],
+  "display_override": ["window-controls-overlay", "standalone"],
   "orientation": "any",
   "scope": "/",
   "start_url": "/",
@@ -14,6 +14,7 @@
   "related_applications": [],
   "scope_extensions": [
     { "origin": "https://luantihub.org" },
+    { "origin": "https://www.luantihub.org" },
     { "origin": "https://luanti-hub.pages.dev" },
     { "origin": "https://content.luanti.org" },
     { "origin": "https://contentdb.milcho.org" }
