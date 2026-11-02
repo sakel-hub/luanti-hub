@@ -267,7 +267,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
-    const pkgDetailMatch = p.match(/^\/__api_pkg_detail_v[234]\/(?:full\/|lite\/)?([^/]+)\/([^/]+)$/i);
+    const pkgDetailMatch = p.match(
+      /(?:\/__api_pkg_detail_v\d+\/|\/pkg-detail-v\d+\/)(?:full-readme\/|full\/|lite\/)?([^/]+)\/([^/]+)$/i
+    );
     if (pkgDetailMatch) {
       const a = encodeURIComponent(pkgDetailMatch[1].toLowerCase());
       const n = encodeURIComponent(pkgDetailMatch[2].toLowerCase());
@@ -280,6 +282,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/lite/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/lite/${a}/${n}`);
     }
   }
 
@@ -467,10 +472,15 @@ let extendedColumnsEnsured = false;
 /**
  * Ensures all extended metadata columns (including `content_warnings`, `ai_disclosures`,
  * `maintainers`, `max_minetest_version`, `contentdb_downloads`, `luantihub_downloads`, etc.)
- * exist on `packages` in Cloudflare D1 at runtime without requiring manual CLI migration.
+ * exist on `packages` in Cloudflare D1.
+ *
+ * Production D1 already has all columns, tables, and indexes migrated. To avoid running
+ * 15 `PRAGMA` / `CREATE ... IF NOT EXISTS` read queries on every cold Worker isolate start,
+ * this helper is a zero-query no-op unless `force === true` (used only when recovering from
+ * a missing-column/table error during a write mutation).
  */
 export async function ensureExtendedPackageColumns(db: any, force = false): Promise<void> {
-  if (!db || (extendedColumnsEnsured && !force)) return;
+  if (!db || !force || extendedColumnsEnsured) return;
   const requiredCols: Array<[string, string]> = [
     ['tags', 'TEXT'],
     ['dependencies', 'TEXT'],
@@ -592,15 +602,19 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
       `CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))`,
       `CREATE INDEX IF NOT EXISTS idx_identities_lower_prov_user ON user_identities(LOWER(provider_username))`
     ];
-    for (const stmt of indexStatements) {
-      await db.prepare(stmt).run().catch(() => {});
+    if (typeof db.batch === 'function') {
+      await db.batch(indexStatements.map(s => db.prepare(s))).catch(() => {});
+    } else {
+      for (const stmt of indexStatements) {
+        await db.prepare(stmt).run().catch(() => {});
+      }
     }
 
     if (existing.size > 0) {
       extendedColumnsEnsured = true;
     }
   } catch {
-    // Ignore schema inspection errors; will retry on next request
+    // Ignore schema inspection errors; will retry on next forced request
   }
 }
 

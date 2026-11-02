@@ -396,8 +396,22 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let recentReviewsPromise = Promise.resolve<any[]>([]);
 
   if (env.DB) {
-    await ensureExtendedPackageColumns(env.DB);
-    let query = `SELECT * FROM packages WHERE status = 'active'`;
+    // One-time automatic purge of legacy unowned mirrored ContentDB rows that bloated `packages` and `releases`
+    const cleanupKey = 'https://cache.luantihub.internal/__d1_contentdb_mirror_cleanup_v1';
+    readEdgeCacheJson<boolean>(cleanupKey)
+      .then(async (done) => {
+        if (done) return;
+        await writeEdgeCacheJson(cleanupKey, true, 86400 * 30);
+        await env.DB.prepare(
+          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND status = 'active'`
+        ).run().catch(() => {});
+        await env.DB.prepare(
+          `DELETE FROM releases WHERE package_id NOT IN (SELECT id FROM packages)`
+        ).run().catch(() => {});
+      })
+      .catch(() => {});
+
+    let query = `SELECT * FROM packages WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
     const params: any[] = [];
 
     if (types.length === 1) {

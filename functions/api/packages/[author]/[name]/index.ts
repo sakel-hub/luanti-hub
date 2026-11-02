@@ -417,18 +417,12 @@ async function recordWebPackageView(
   await writeEdgeCacheJson(edgeDedupKey, { ts: now }, 600);
 
   try {
-    await ensureExtendedPackageColumns(db);
-    const canonicalRow = await db.prepare(
-      `SELECT id FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
-    ).bind(packageId).first().catch(() => null);
-    const effectivePkgId = canonicalRow?.id || packageId;
-
     await db.prepare(`
       INSERT INTO package_daily_downloads (package_id, download_date, downloads_count, views_web)
       VALUES (?, DATE('now'), 0, 1)
       ON CONFLICT(package_id, download_date)
       DO UPDATE SET views_web = COALESCE(views_web, 0) + 1
-    `).bind(effectivePkgId).run();
+    `).bind(packageId).run();
 
     const cookies = parseCookies(request);
     const sessionToken = cookies['lh_session'];
@@ -444,7 +438,7 @@ async function recordWebPackageView(
         DO UPDATE SET
           view_count = view_count + 1,
           last_viewed_at = CURRENT_TIMESTAMP
-      `).bind(userId, effectivePkgId).run().catch(() => {});
+      `).bind(userId, packageId).run().catch(() => {});
     }
     return true;
   } catch {
@@ -491,94 +485,6 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
     if (cachedEdge) {
-      // Always merge fresh D1 reviews and live 2-minute cached Git tags on full detail requests
-      if (!isLite) {
-        try {
-          if (cachedEdge.repo_url) {
-            const liveGitTags = await fetchGitRepoReleasesAndTags(
-              cachedEdge.repo_url,
-              cachedEdge.author || author,
-              cachedEdge.name || name,
-              cachedEdge.min_minetest_version || '5.0.0',
-              false
-            ).catch(() => []);
-            if (liveGitTags.length > 0) {
-              cachedEdge.releases_list = mergeUpstreamAndGitReleases(
-                Array.isArray(cachedEdge.releases_list) ? cachedEdge.releases_list : [],
-                liveGitTags,
-                cachedEdge.author || author,
-                cachedEdge.name || name,
-                {
-                  usePackagedDownloadUrls: false,
-                  isOfficialContentDbBase: cachedEdge.source === 'official'
-                }
-              );
-              if (cachedEdge.releases_list[0]?.commit_sha) {
-                cachedEdge.latest_commit_sha = cachedEdge.releases_list[0].commit_sha;
-              }
-            }
-          }
-          let freshLocalReviews: any[] = [];
-          if (context.env.DB) {
-            const freshLocalRevRes = await context.env.DB.prepare(`
-              SELECT r.id, r.rating, r.title, r.comment, r.created_at,
-                     u.username, u.display_name, u.avatar_url
-              FROM reviews r
-              LEFT JOIN users u ON r.user_id = u.id
-              WHERE LOWER(r.package_id) = LOWER(?)
-              ORDER BY r.created_at DESC
-            `).bind(pkgId).all().catch(() => ({ results: [] }));
-            freshLocalReviews = freshLocalRevRes?.results || [];
-          }
-          let existingOfficialOnly = Array.isArray(cachedEdge.reviews_list)
-            ? cachedEdge.reviews_list.filter((r: any) => r && r.source === 'contentdb')
-            : [];
-          const expectedCdbCount =
-            Number(cachedEdge.review_thread_counts?.positive || 0) +
-            Number(cachedEdge.review_thread_counts?.neutral || 0) +
-            Number(cachedEdge.review_thread_counts?.negative || 0);
-          if (existingOfficialOnly.length === 0 && expectedCdbCount > 0) {
-            const liveOfficial = await fetchUpstreamJsonCached<any[]>(
-              `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/reviews/`,
-              300
-            ).catch(() => null);
-            if (Array.isArray(liveOfficial) && liveOfficial.length > 0) {
-              existingOfficialOnly = liveOfficial.map((r: any, idx: number) =>
-                normalizeContentDbReviewItem(r, idx, pkgId)
-              );
-            }
-          }
-          const normalizedFreshLocal = freshLocalReviews.map((r: any) => ({
-            id: `lh_${r.id}`,
-            package_id: pkgId,
-            source: 'luantihub',
-            rating: Number(r.rating) || 5,
-            title: r.title || undefined,
-            comment: r.comment || '',
-            created_at: r.created_at,
-            author: {
-              username: r.username || 'community_user',
-              display_name: r.display_name || r.username || 'Community Member',
-              avatar_url: r.avatar_url || `https://github.com/${r.username || 'octocat'}.png`
-            }
-          }));
-          cachedEdge.reviews_list = [...normalizedFreshLocal, ...existingOfficialOnly].sort(
-            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
-          );
-          if (freshLocalReviews.length > 0) {
-            const sum = freshLocalReviews.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
-            cachedEdge.score = Number((sum / freshLocalReviews.length).toFixed(1));
-          } else if (existingOfficialOnly.length > 0) {
-            const sum = existingOfficialOnly.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
-            cachedEdge.score = Number((sum / existingOfficialOnly.length).toFixed(1));
-          } else {
-            cachedEdge.score = computeStarRating({ reviews: cachedEdge.review_thread_counts }, 0, undefined);
-          }
-        } catch {
-          // Ignore D1 refresh error
-        }
-      }
-
       return new Response(JSON.stringify(cachedEdge), {
         headers: {
           'Content-Type': 'application/json',
@@ -598,10 +504,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1Reviews: any[] = [];
   let d1DailyDownloadsSum = 0;
   if (context.env.DB) {
-    await ensureExtendedPackageColumns(context.env.DB);
     d1Pkg = await context.env.DB.prepare(
-      `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, author, name).first();
+      `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+    ).bind(pkgId, pkgId.toLowerCase(), author, name).first();
 
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({
@@ -615,6 +520,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
 
     const effectivePkgId = d1Pkg?.id || pkgId;
+    const effectivePkgIdLower = String(effectivePkgId).toLowerCase();
 
     // Fast path for ?lite=1 when D1 already holds hydrated ContentDB downloads & license
     const d1TagsFast = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
@@ -631,8 +537,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
       const [revAvgFast, liteGitScan] = await Promise.all([
         context.env.DB.prepare(
-          `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-        ).bind(effectivePkgId).first().catch(() => null),
+          `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
+        ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
         (!d1Pkg.video_url || !hasStoredGitShotLite) && d1Pkg.repo_url
           ? scanGitRepoMetadataCached(
               d1Pkg.author_name || author,
@@ -730,11 +636,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       if (isLite) {
         const [revAvgRow, dailyDlRow] = await Promise.all([
           context.env.DB.prepare(
-            `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(effectivePkgId).first().catch(() => null),
+            `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
+          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }))
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
+          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 }))
         ]);
         if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
           d1ReviewAvg = Number(revAvgRow.avg_rating);
@@ -744,34 +650,32 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         }
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
       } else {
-        const [revAvgRow, revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
-          context.env.DB.prepare(
-            `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(effectivePkgId).first(),
+        const [revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
           context.env.DB.prepare(`
             SELECT r.id, r.rating, r.title, r.comment, r.created_at,
                    u.username, u.display_name, u.avatar_url
             FROM reviews r
             LEFT JOIN users u ON r.user_id = u.id
-            WHERE LOWER(r.package_id) = LOWER(?)
+            WHERE r.package_id IN (?, ?)
             ORDER BY r.created_at DESC
-          `).bind(effectivePkgId).all().catch(() => ({ results: [] })),
+          `).bind(effectivePkgId, effectivePkgIdLower).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
-            `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC`
-          ).bind(effectivePkgId).all().catch(() => ({ results: [] })),
+            `SELECT * FROM releases WHERE package_id IN (?, ?) ORDER BY released_at DESC`
+          ).bind(effectivePkgId, effectivePkgIdLower).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(effectivePkgId).first().catch(() => ({ total_lh: 0 }))
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
+          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 }))
         ]);
 
-        if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
-          d1ReviewAvg = Number(revAvgRow.avg_rating);
+        d1Reviews = revRowsRes?.results || [];
+        if (d1Reviews.length > 0) {
+          const sum = d1Reviews.reduce((acc: number, r: any) => acc + (Number(r.rating) || 5), 0);
+          d1ReviewAvg = sum / d1Reviews.length;
         } else if (d1Pkg && Number(d1Pkg.score) > 0) {
           // Heal legacy DEFAULT 5.0 score in D1 when no reviews exist
           d1Pkg.score = 0;
           context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
         }
-        d1Reviews = revRowsRes?.results || [];
         d1Releases = relRowsRes?.results || [];
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
 

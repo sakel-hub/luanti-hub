@@ -32,7 +32,8 @@ import {
   parseGitRepoTarget,
   parseGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
-  parseLuantiBlogFeed
+  parseLuantiBlogFeed,
+  ensureExtendedPackageColumns
 } from '../../functions/api/lib/upstream';
 import {
   createSessionToken,
@@ -3718,11 +3719,12 @@ supported_games = minetest_game, voxelibre
       expect(sentPayloads.length).toBe(0);
 
       // 2nd pass with new release_id / updated_at fires notification with package thumbnail
+      const recentUpdateIso = new Date(Date.now() - 60_000).toISOString();
       const updatedCatalog = [
         {
           ...initialCatalog[0],
           release_id: 'v1.1.0',
-          updated_at: '2026-10-31T12:00:00Z'
+          updated_at: recentUpdateIso
         }
       ];
       const notifiedCount = await pwaService.checkAndNotifyUpdatedPackages(updatedCatalog, {
@@ -3741,7 +3743,7 @@ supported_games = minetest_game, voxelibre
           {
             ...initialCatalog[0],
             release_id: 'v1.2.0',
-            updated_at: '2026-10-31T14:00:00Z'
+            updated_at: new Date(Date.now() - 30_000).toISOString()
           }
         ],
         { isBaselineSeedAllowed: false }
@@ -6287,6 +6289,20 @@ supported_games = minetest_game, voxelibre
     expect(claims?.provider).toBe('github');
     expect(claims?.role).toBe('admin');
     expect(claims?.verified).toBe(true);
+
+    // Verify ensureExtendedPackageColumns(db) executes zero D1 queries unless forced
+    let prepareCalls = 0;
+    const mockDb = {
+      prepare: () => {
+        prepareCalls += 1;
+        return {
+          all: async () => ({ results: [] }),
+          run: async () => ({})
+        };
+      }
+    };
+    await ensureExtendedPackageColumns(mockDb);
+    expect(prepareCalls).toBe(0);
 
     pkgService.setPromotions([]);
   });
