@@ -15,7 +15,7 @@ interface Env {
 export async function onRequestPost(context: { request: Request; env: Env }) {
   const { request, env } = context;
 
-  let body: { ids?: string[]; items?: any[] } = {};
+  let body: { ids?: string[] } = {};
   try {
     body = await request.json();
   } catch {
@@ -28,124 +28,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     await ensureExtendedPackageColumns(env.DB);
   }
 
-  // 1. Batch-persist client-hydrated ContentDB metadata into D1 so future boots serve it at 0ms
-  const incomingItems = Array.isArray(body.items) ? body.items.slice(0, 60) : [];
-  if (env.DB && incomingItems.length > 0) {
-    const statements: any[] = [];
-    for (const item of incomingItems) {
-      if (!item || !item.author || !item.name) continue;
-      const pkgId = String(item.id || `${item.author}/${item.name}`).trim();
-      const lic = String(item.license || item.media_license || '').trim();
-      const mediaLic = String(item.media_license || item.license || '').trim();
-      const cdbDl = Math.max(0, Number(item.contentdb_downloads ?? item.downloads ?? 0) || 0);
-      const totalDl = Math.max(cdbDl, Number(item.downloads || 0) || 0);
-      const hasGitBanner = isGitRepositoryAssetUrl(item.banner) || isGitRepositoryAssetUrl(item.thumbnail);
-      if (!lic && cdbDl <= 0 && !hasGitBanner) continue;
-
-      const tagsArr = Array.isArray(item.tags)
-        ? item.tags.map((t: any) => String(typeof t === 'string' ? t : t?.name || '').trim()).filter(Boolean)
-        : [];
-      const screenshotsArr = mergeScreenshotsPreferringGit(
-        [item.banner, item.thumbnail],
-        item.screenshots
-      );
-      const longDescText = typeof item.long_desc === 'string' && item.long_desc.trim()
-        ? item.long_desc.trim()
-        : null;
-      const pkgType = ['mod', 'game', 'txp', 'modpack'].includes(item.type) ? item.type : 'mod';
-
-      statements.push(
-        env.DB.prepare(`
-          INSERT INTO packages (
-            id, author_name, name, title, type, short_desc, long_desc, repo_url, provider,
-            thumbnail_url, banner_url, license, media_license, min_minetest_version,
-            tags, screenshots, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url, file_size
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            short_desc = COALESCE(excluded.short_desc, packages.short_desc),
-            long_desc = COALESCE(excluded.long_desc, packages.long_desc),
-            repo_url = CASE WHEN excluded.repo_url != '' THEN excluded.repo_url ELSE packages.repo_url END,
-            thumbnail_url = CASE
-              WHEN excluded.thumbnail_url IS NOT NULL
-                AND excluded.thumbnail_url != ''
-                AND excluded.thumbnail_url != 'logo.svg'
-                AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
-                AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-              THEN excluded.thumbnail_url
-              WHEN packages.thumbnail_url IS NOT NULL
-                AND packages.thumbnail_url != ''
-                AND packages.thumbnail_url != 'logo.svg'
-                AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
-                AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-              THEN packages.thumbnail_url
-              ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
-            END,
-            banner_url = CASE
-              WHEN excluded.banner_url IS NOT NULL
-                AND excluded.banner_url != ''
-                AND excluded.banner_url != 'logo.svg'
-                AND excluded.banner_url NOT LIKE '%content.luanti.org%'
-                AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
-              THEN excluded.banner_url
-              WHEN packages.banner_url IS NOT NULL
-                AND packages.banner_url != ''
-                AND packages.banner_url != 'logo.svg'
-                AND packages.banner_url NOT LIKE '%content.luanti.org%'
-                AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
-              THEN packages.banner_url
-              ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
-            END,
-            license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-            media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-            min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
-            tags = COALESCE(excluded.tags, packages.tags),
-            screenshots = COALESCE(excluded.screenshots, packages.screenshots),
-            contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-            downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
-            video_url = COALESCE(excluded.video_url, packages.video_url),
-            video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
-            file_size = COALESCE(excluded.file_size, packages.file_size)
-        `).bind(
-          pkgId,
-          String(item.author).trim(),
-          String(item.name).trim(),
-          String(item.title || item.name).trim(),
-          pkgType,
-          item.short_desc ? String(item.short_desc).slice(0, 500) : null,
-          longDescText,
-          item.repo_url ? String(item.repo_url).trim() : '',
-          item.thumbnail && item.thumbnail !== 'logo.svg' ? String(item.thumbnail) : null,
-          item.banner && item.banner !== 'logo.svg' ? String(item.banner) : null,
-          lic,
-          mediaLic,
-          item.min_minetest_version ? String(item.min_minetest_version).trim() : '5.0.0',
-          tagsArr.length > 0 ? JSON.stringify(tagsArr) : null,
-          screenshotsArr.length > 0 ? JSON.stringify(screenshotsArr) : null,
-          totalDl,
-          cdbDl,
-          item.video_url ? String(item.video_url) : null,
-          item.video_thumbnail_url ? String(item.video_thumbnail_url) : null,
-          item.file_size ? String(item.file_size) : null
-        )
-      );
-    }
-
-    if (statements.length > 0) {
-      try {
-        if (typeof env.DB.batch === 'function') {
-          await env.DB.batch(statements);
-        } else {
-          for (const stmt of statements) {
-            await stmt.run().catch(() => {});
-          }
-        }
-      } catch {
-        // Non-fatal batch persistence error
-      }
-    }
-  }
-
-  // 2. Resolve any requested package IDs in batch (D1 lookup + upstream edge cache fallback)
+  // Resolve requested package IDs in batch (D1 lookup + server-side upstream edge cache fallback)
   const rawIds = Array.isArray(body.ids)
     ? Array.from(new Set(body.ids.map(id => String(id || '').trim()).filter(id => id.includes('/')))).slice(0, 32)
     : [];
@@ -182,6 +65,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           hydratedMap[lowerKey] = {
             id: row.id,
+            author_id: row.author_id && !String(row.author_id).startsWith('ext_') ? String(row.author_id) : undefined,
             license: row.license || row.media_license || '',
             media_license: row.media_license || row.license || '',
             min_minetest_version: row.min_minetest_version || '5.0.0',

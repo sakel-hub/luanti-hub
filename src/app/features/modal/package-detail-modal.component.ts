@@ -2315,40 +2315,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   });
 
   readonly isPackageAuthor = computed(() => {
-    const user = this.authService.currentUser();
     const pkg = this.packageService.activePackage() || this.package;
-    if (!user || !pkg) return false;
-
-    const handles = new Set<string>();
-    if (user.username) handles.add(user.username.toLowerCase());
-    for (const id of user.identities || []) {
-      if (id?.username) handles.add(id.username.toLowerCase());
-    }
-
-    const pkgAuthor = (pkg.author || (pkg as any).author_name || '').toLowerCase();
-    if (pkgAuthor && handles.has(pkgAuthor)) return true;
-
-    const pkgId = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
-    if ((user.packages || []).some((up: any) => {
-      const upAuthor = up.author || up.author_name || user.username;
-      const upId = String(up.id || `${upAuthor}/${up.name}`).toLowerCase();
-      return upId === pkgId;
-    })) {
-      return true;
-    }
-
-    if (pkg.repo_url) {
-      try {
-        const parts = new URL(pkg.repo_url).pathname.split('/').filter(Boolean);
-        if (parts.length >= 2 && handles.has(parts[0].toLowerCase())) {
-          return true;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    return false;
+    return this.authService.isPackageAuthor(pkg);
   });
 
   readonly isPackageDelisted = computed(() => {

@@ -1,13 +1,15 @@
 import {
   createSessionToken,
   verifySessionToken,
-  verifyOAuthStateToken,
+  parseOAuthStateToken,
+  buildSessionCookie,
+  buildClearOAuthStateCookies,
   parseCookies,
   checkIsAdmin,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from '../lib/session';
-import { syncAuthorContentDbPackages, fetchWithAnubisSupport } from '../../lib/upstream';
+import { fetchWithAnubisSupport } from '../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -210,25 +212,112 @@ async function exchangeOAuthTokenWithRetry(
   throw rateLimitError;
 }
 
+function buildPopupCompletionHtml(
+  targetOrigin: string,
+  payload: { type: 'LH_OAUTH_COMPLETE'; success: boolean; provider: string; error?: string },
+  fallbackRedirectUrl: string
+): string {
+  const safePayloadJson = JSON.stringify(payload).replace(/</g, '\\u003c');
+  const safeOriginJson = JSON.stringify(targetOrigin).replace(/</g, '\\u003c');
+  const safeFallbackUrlJson = JSON.stringify(fallbackRedirectUrl).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Completing Sign-In – LuantiHub</title>
+  <style>
+    body { background: #020617; color: #f8fafc; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .msg { font-size: 14px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="msg">Completing sign-in…</div>
+  <script>
+    (function () {
+      var msg = ${safePayloadJson};
+      var targetOrigin = ${safeOriginJson};
+      var fallbackUrl = ${safeFallbackUrlJson};
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          var bc = new BroadcastChannel('lh-auth-sync');
+          bc.postMessage(msg);
+          bc.close();
+        }
+      } catch (e) {}
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(msg, targetOrigin || '*');
+          window.close();
+          setTimeout(function () {
+            if (!window.closed) {
+              window.location.replace(fallbackUrl);
+            }
+          }, 350);
+          return;
+        }
+      } catch (e) {}
+      window.location.replace(fallbackUrl);
+    })();
+  </script>
+</body>
+</html>`;
+}
+
 async function buildSuccessRedirectResponse(
-  origin: string,
-  isHttps: boolean,
+  returnOrigin: string,
+  requestUrl: URL,
   userId: string,
-  sessionSecret?: string
+  sessionSecret?: string,
+  provider = 'github',
+  isPopup = false
 ): Promise<Response> {
   const sessionToken = await createSessionToken(userId, sessionSecret);
   const headers = new Headers();
-  headers.set('Location', `${origin}/?auth_success=1`);
+  const redirectTarget = `${returnOrigin}/?auth_success=1`;
   headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-  headers.append(
-    'Set-Cookie',
-    `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
-  );
-  headers.append(
-    'Set-Cookie',
-    `lh_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
-  );
+  headers.append('Set-Cookie', buildSessionCookie(sessionToken, requestUrl, 86400 * 30));
+  for (const clearCookie of buildClearOAuthStateCookies(requestUrl)) {
+    headers.append('Set-Cookie', clearCookie);
+  }
+  if (isPopup) {
+    headers.set('Content-Type', 'text/html; charset=utf-8');
+    return new Response(
+      buildPopupCompletionHtml(
+        returnOrigin,
+        { type: 'LH_OAUTH_COMPLETE', success: true, provider },
+        redirectTarget
+      ),
+      { status: 200, headers }
+    );
+  }
+  headers.set('Location', redirectTarget);
   return new Response(null, { status: 302, headers });
+}
+
+function buildErrorRedirectResponse(
+  returnOrigin: string,
+  errorCode: string,
+  provider: string,
+  isPopup = false
+): Response {
+  const errorRedirectUrl = `${returnOrigin}/?auth_error=${encodeURIComponent(errorCode)}&provider=${encodeURIComponent(provider)}`;
+  if (isPopup) {
+    return new Response(
+      buildPopupCompletionHtml(
+        returnOrigin,
+        { type: 'LH_OAUTH_COMPLETE', success: false, provider, error: errorCode },
+        errorRedirectUrl
+      ),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate'
+        }
+      }
+    );
+  }
+  return Response.redirect(errorRedirectUrl, 302);
 }
 
 export async function onRequestGet(context: {
@@ -239,10 +328,12 @@ export async function onRequestGet(context: {
 }) {
   const { provider } = context.params;
   const url = new URL(context.request.url);
-  const isHttps = url.protocol === 'https:';
   const code = url.searchParams.get('code');
   const stateParam = url.searchParams.get('state');
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
+  const stateMeta = await parseOAuthStateToken(stateParam, provider, sessionSecret);
+  const returnOrigin = stateMeta.origin || url.origin;
+  const isPopup = Boolean(stateMeta.popup);
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
     codeberg: resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
@@ -254,22 +345,16 @@ export async function onRequestGet(context: {
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 
   if (!code) {
-    return Response.redirect(
-      `${url.origin}/?auth_error=auth_cancelled&provider=${encodeURIComponent(provider)}`,
-      302
-    );
+    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, isPopup);
   }
 
   const cookies = parseCookies(context.request);
   const expectedState = cookies['lh_oauth_state'];
   const isCookieStateValid = Boolean(stateParam && expectedState && stateParam === expectedState);
-  const isHmacStateValid = await verifyOAuthStateToken(stateParam, provider, sessionSecret);
+  const isHmacStateValid = stateMeta.valid;
 
   if (!isCookieStateValid && !isHmacStateValid) {
-    return Response.redirect(
-      `${url.origin}/?auth_error=session_expired&provider=${encodeURIComponent(provider)}`,
-      302
-    );
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
   }
 
   const existingSessionUserId = cookies['lh_session']
@@ -280,7 +365,7 @@ export async function onRequestGet(context: {
   const cachedCodeKey = `${provider}:${code}`;
   const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
   if (completedUserId) {
-    return buildSuccessRedirectResponse(url.origin, isHttps, completedUserId, sessionSecret);
+    return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, provider, isPopup);
   }
 
   // Fast-path: If this exact authorization code is currently being processed by a concurrent request
@@ -288,7 +373,7 @@ export async function onRequestGet(context: {
   if (existingInFlight) {
     try {
       const resolvedUserId = await existingInFlight;
-      return buildSuccessRedirectResponse(url.origin, isHttps, resolvedUserId, sessionSecret);
+      return buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
     } catch {
       // Fall through to standard flow if in-flight promise failed
     }
@@ -642,23 +727,18 @@ export async function onRequestGet(context: {
         }
       }
 
-      // 3. Automatic ContentDB & Git Package Matching (Zero-Click Claiming!)
+      // 3. Link unclaimed packages on the exact same Git forge provider and username
       if (provider !== 'contentdb' && userId) {
         await context.env.DB.prepare(`
           UPDATE packages SET author_id = ?
           WHERE (author_id IS NULL OR author_id LIKE 'ext_%')
-            AND (LOWER(author_name) = LOWER(?) OR LOWER(repo_url) LIKE LOWER(?))
-        `).bind(userId, providerUsername, `%/${providerUsername}/%`).run();
-      }
-
-      // Sync upstream ContentDB packages authored by this verified username in background
-      if (userId) {
-        const syncPromise = syncAuthorContentDbPackages(context.env.DB, userId, providerUsername).catch(() => {});
-        if (typeof context.waitUntil === 'function') {
-          context.waitUntil(syncPromise);
-        } else {
-          await syncPromise;
-        }
+            AND LOWER(provider) = LOWER(?)
+            AND LOWER(author_name) = LOWER(?)
+        `).bind(
+          userId,
+          provider,
+          providerUsername
+        ).run();
       }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
@@ -678,12 +758,12 @@ export async function onRequestGet(context: {
   try {
     const resolvedUserId = await inFlightPromise;
     await writeCompletedOAuthCodeToEdgeCache(provider, code, resolvedUserId);
-    return await buildSuccessRedirectResponse(url.origin, isHttps, resolvedUserId, sessionSecret);
+    return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
   } catch (err: any) {
     // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache
     const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
     if (edgeResolvedUserId) {
-      return await buildSuccessRedirectResponse(url.origin, isHttps, edgeResolvedUserId, sessionSecret);
+      return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, provider, isPopup);
     }
 
     // 2. If GitHub's front-end load balancer returned HTTP 429, the authorization code is still unconsumed.
@@ -700,7 +780,7 @@ export async function onRequestGet(context: {
 
     // 3. If another isolate consumed the code and the user already has a valid session cookie, redirect to success
     if (existingSessionUserId && !isRateLimited429) {
-      return await buildSuccessRedirectResponse(url.origin, isHttps, existingSessionUserId, sessionSecret);
+      return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, provider, isPopup);
     }
 
     console.error('[OAuth Callback Error]:', provider, errMsg);
@@ -708,10 +788,7 @@ export async function onRequestGet(context: {
       ? 'provider_busy'
       : 'provider_unavailable';
 
-    return Response.redirect(
-      `${url.origin}/?auth_error=${encodeURIComponent(publicErrorCode)}&provider=${encodeURIComponent(provider)}`,
-      302
-    );
+    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, isPopup);
   } finally {
     inFlightOAuthCodes.delete(cachedCodeKey);
   }

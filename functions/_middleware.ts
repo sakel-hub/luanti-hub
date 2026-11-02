@@ -51,6 +51,16 @@ export function checkEdgeRateLimit(
   return { allowed: true, retryAfterSeconds: 0 };
 }
 
+function isTrustedLuantiHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^www\./, '');
+  return (
+    h === 'luantihub.org' ||
+    h.endsWith('.luantihub.org') ||
+    h === 'luanti-hub.pages.dev' ||
+    h.endsWith('.luanti-hub.pages.dev')
+  );
+}
+
 function isSameHostOrigin(headerValue: string | null, requestHost: string): boolean {
   if (!headerValue) return true;
   try {
@@ -58,6 +68,7 @@ function isSameHostOrigin(headerValue: string | null, requestHost: string): bool
     const originHost = parsed.hostname.toLowerCase().replace(/^www\./, '');
     const targetHost = requestHost.split(':')[0].toLowerCase().replace(/^www\./, '');
     if (originHost === targetHost) return true;
+    if (isTrustedLuantiHost(originHost) && isTrustedLuantiHost(targetHost)) return true;
     if (
       (originHost === 'localhost' || originHost === '127.0.0.1') &&
       (targetHost === 'localhost' || targetHost === '127.0.0.1')

@@ -87,16 +87,16 @@ import {
     @if (isMobileMenuOpen()) {
       <div
         (click)="closeMobileMenu($event)"
-        class="lg:hidden z-30 luanti-modal-backdrop cursor-pointer"
+        [class]="pwaService.isWcoCompact() ? 'z-30 luanti-modal-backdrop cursor-pointer' : 'lg:hidden z-30 luanti-modal-backdrop cursor-pointer'"
         aria-hidden="true">
       </div>
     }
 
     <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header luanti-wco-header transition-colors duration-200">
-      <div class="luanti-app-header-inner w-full px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-2 lg:gap-4">
+      <div class="luanti-app-header-inner w-full min-w-0 px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-1.5 sm:gap-2 lg:gap-3">
 
         <!-- Left: WCO/Standalone History Nav, Logo & Category Tabs -->
-        <div class="flex items-center gap-2 2xl:gap-3.5 flex-shrink-0 justify-start">
+        <div class="flex items-center gap-1.5 sm:gap-2 2xl:gap-3.5 flex-shrink-0 justify-start">
           @if (pwaService.isWcoActive() || pwaService.isInstalled()) {
             <div class="hidden sm:flex items-center gap-1 flex-shrink-0 luanti-wco-no-drag" role="group" aria-label="History navigation">
               <button
@@ -130,8 +130,10 @@ import {
             </h1>
           </a>
 
-          <!-- Category Nav Tabs (Wide Desktop 2xl+) -->
-          <nav class="hidden 2xl:flex items-center gap-1.5 text-xs font-semibold flex-shrink-0" aria-label="Category navigation">
+          <!-- Category Nav Tabs (Wide Desktop 2xl+, moved to Row 2 when WCO titlebar overlay is active) -->
+          <nav
+            [class]="pwaService.isWcoActive() ? 'hidden' : 'hidden 2xl:flex items-center gap-1.5 text-xs font-semibold flex-shrink-0'"
+            aria-label="Category navigation">
             <a
               href="/"
               (click)="selectNavTab('all', $event)"
@@ -205,7 +207,7 @@ import {
         </div>
 
         <!-- Center: Elastic Debounced Search Input -->
-        <div class="flex-1 min-w-[140px] sm:min-w-[220px] md:min-w-[260px] max-w-xl mx-1.5 sm:mx-3 relative">
+        <div class="flex-1 min-w-[72px] sm:min-w-[110px] md:min-w-[140px] max-w-xl mx-1 sm:mx-2.5 relative">
           <div class="relative">
             <input
               type="search"
@@ -237,7 +239,7 @@ import {
         <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 justify-end">
 
           <!-- Prominent "Install App" Button (lg+, hidden when already installed or running in standalone PWA) -->
-          @if (!pwaService.isInstalled()) {
+          @if (!pwaService.isInstalled() && !pwaService.isWcoCompact()) {
             <button
               type="button"
               (click)="pwaService.installPwa()"
@@ -250,17 +252,19 @@ import {
           }
 
           <!-- Submit Mod Button (lg+) -->
-          <a
-            href="/submit"
-            (click)="onSubmitNavClick($event)"
-            [appTooltip]="'header.submitRepoTooltip' | translate"
-            class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
-            <svg lucidePlus class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
-            <span class="whitespace-nowrap">{{ 'header.submitRepo' | translate }}</span>
-          </a>
+          @if (!pwaService.isWcoCompact()) {
+            <a
+              href="/submit"
+              (click)="onSubmitNavClick($event)"
+              [appTooltip]="'header.submitRepoTooltip' | translate"
+              class="hidden lg:flex h-9 px-3 rounded-lg glass-btn text-white font-medium text-xs items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer no-underline">
+              <svg lucidePlus class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
+              <span class="whitespace-nowrap">{{ 'header.submitRepo' | translate }}</span>
+            </a>
+          }
 
           <!-- Language Selector Dropdown (lg+) -->
-          <div #langMenuContainer class="hidden lg:block relative flex-shrink-0">
+          <div #langMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleLanguageMenu($event)"
@@ -297,7 +301,7 @@ import {
           </div>
 
           <!-- Ko-fi Support Menu Toggle (lg+) -->
-          <div #kofiMenuContainer class="hidden lg:block relative flex-shrink-0">
+          <div #kofiMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleKofiMenu($event)"
@@ -362,7 +366,7 @@ import {
           </div>
 
           <!-- PWA & Cache Settings Menu Toggle (lg+) -->
-          <div #settingsMenuContainer class="hidden lg:block relative flex-shrink-0">
+          <div #settingsMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleSettingsMenu($event)"
@@ -466,10 +470,10 @@ import {
               (click)="authService.openProfileDrawer()"
               class="relative h-9 flex items-center gap-2 p-1 rounded-xl glass-btn transition flex-shrink-0 cursor-pointer">
               <img [src]="user.avatar_url" [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
-              <span class="hidden lg:inline text-xs font-bold text-white pr-2 max-w-[96px] truncate">
+              <span [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:inline text-xs font-bold text-white pr-2 max-w-[96px] truncate'">
                 {{ user.display_name || user.username }}
               </span>
-              @if (authService.isAdmin()) {
+              @if (authService.isAdmin() && !pwaService.isWcoCompact()) {
                 <span class="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[9px] font-black uppercase mr-1">
                   <svg lucideShieldAlert class="w-2.5 h-2.5"></svg>
                   Admin
@@ -498,13 +502,13 @@ import {
             </button>
           }
 
-          <!-- Hamburger Menu Button for Small / Tablet Screens (< lg) -->
+          <!-- Hamburger Menu Button for Small / Tablet Screens (< lg or compact WCO titlebar) -->
           <button
             type="button"
             (click)="toggleMobileMenu($event)"
             [attr.aria-expanded]="isMobileMenuOpen()"
             aria-label="Toggle navigation menu"
-            class="lg:hidden h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-200 hover:text-white transition flex-shrink-0 cursor-pointer">
+            [class]="pwaService.isWcoCompact() ? 'h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-200 hover:text-white transition flex-shrink-0 cursor-pointer' : 'lg:hidden h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-200 hover:text-white transition flex-shrink-0 cursor-pointer'">
             @if (isMobileMenuOpen()) {
               <svg lucideX class="w-5 h-5 text-sky-400"></svg>
             } @else {
@@ -516,8 +520,9 @@ import {
 
       </div>
 
-      <!-- Translucent Frosted-Glass Category Navigation Strip (< 2xl) -->
-      <div class="2xl:hidden border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full">
+      <!-- Translucent Frosted-Glass Category Navigation Strip (< 2xl or whenever WCO titlebar overlay is active) -->
+      <div
+        [class]="pwaService.isWcoActive() ? 'border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full' : '2xl:hidden border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full'">
         <a
           href="/"
           (click)="selectNavTab('all', $event)"
@@ -578,11 +583,11 @@ import {
         </button>
       </div>
 
-      <!-- Mobile / Tablet Hamburger Drawer Menu (< lg) -->
+      <!-- Mobile / Tablet Hamburger Drawer Menu (< lg or compact WCO titlebar) -->
       @if (isMobileMenuOpen()) {
         <div
           (click)="$event.stopPropagation()"
-          class="lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto">
+          [class]="pwaService.isWcoCompact() ? 'border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto' : 'lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto'">
 
           <!-- Quick Actions Grid -->
           <div [class]="pwaService.isInstalled() ? 'grid grid-cols-1 sm:grid-cols-2 gap-2' : 'grid grid-cols-1 sm:grid-cols-3 gap-2'">

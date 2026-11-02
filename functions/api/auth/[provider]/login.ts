@@ -1,4 +1,4 @@
-import { createOAuthStateToken } from '../lib/session';
+import { createOAuthStateToken, buildOAuthStateCookie } from '../lib/session';
 
 interface Env {
   CODEBERG_CLIENT_ID?: string;
@@ -37,8 +37,13 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const { provider } = context.params;
   const url = new URL(context.request.url);
   const loginHint = (url.searchParams.get('login') || '').trim();
+  const isPopup = url.searchParams.get('popup') === '1';
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
-  const state = await createOAuthStateToken(provider, cleanEnvValue(context.env.SESSION_SECRET) || undefined);
+  const state = await createOAuthStateToken(
+    provider,
+    cleanEnvValue(context.env.SESSION_SECRET) || undefined,
+    { origin: url.origin, popup: isPopup }
+  );
 
   let authUrl = '';
   let clientId = '';
@@ -98,13 +103,12 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     );
   }
 
-  const isHttps = url.protocol === 'https:';
   return new Response(null, {
     status: 302,
     headers: {
       Location: authUrl,
       'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Set-Cookie': `lh_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${isHttps ? '; Secure' : ''}`
+      'Set-Cookie': buildOAuthStateCookie(state, url, 600)
     }
   });
 }

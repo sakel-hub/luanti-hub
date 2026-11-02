@@ -201,9 +201,10 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
             </button>
             <button
               type="button"
+              (click)="$event.stopPropagation()"
               [appTooltip]="'auth.directLoginDesc' | translate"
               aria-label="About direct sign-in"
-              class="text-slate-400 hover:text-sky-300 transition cursor-pointer p-0.5">
+              class="text-slate-400 hover:text-sky-300 transition cursor-help p-0.5">
               <svg lucideInfo class="w-3.5 h-3.5"></svg>
             </button>
           </div>
@@ -251,9 +252,10 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
                   </label>
                   <button
                     type="button"
+                    (click)="$event.stopPropagation()"
                     appTooltip="Optional: Provide a read-only Personal Access Token or API key from your selected platform (or your Admin Secret) to verify creator ownership or sign in as an Administrator."
                     aria-label="Why provide an access token?"
-                    class="text-slate-400 hover:text-sky-300 transition flex items-center gap-1 text-[10px] cursor-pointer">
+                    class="text-slate-400 hover:text-sky-300 transition flex items-center gap-1 text-[10px] cursor-help">
                     <svg lucideInfo class="w-3.5 h-3.5"></svg>
                   </button>
                 </div>

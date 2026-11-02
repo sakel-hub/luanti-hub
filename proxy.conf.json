@@ -41,7 +41,7 @@
       "^/blog-api": ""
     },
     "headers": {
-      "Accept": "application/rss+xml, application/xml, application/feed+json, application/json",
+      "Accept": "application/rss+xml, application/xml, application/feed+json, application/json, text/html, */*",
       "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
     }
   }

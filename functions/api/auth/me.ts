@@ -1,15 +1,15 @@
 import {
   createSessionToken,
   verifySessionToken,
+  buildSessionCookie,
+  buildClearSessionCookies,
   parseCookies,
   checkIsAdmin,
-  isProtectedAdminHandle,
   verifyProviderToken,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount
 } from './lib/session';
 import {
-  syncAuthorContentDbPackages,
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   invalidateEdgeCacheKeys,
@@ -58,16 +58,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const user = await reconcileAndMergeUserAccount(context.env.DB, userId);
 
     if (!user) {
-      const isHttps = new URL(context.request.url).protocol === 'https:';
-      return Response.json(
-        { user: null, oauthProviders },
-        {
-          headers: {
-            'Cache-Control': 'no-store',
-            'Set-Cookie': `lh_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
-          }
-        }
-      );
+      const clearHeaders = new Headers({ 'Cache-Control': 'no-store' });
+      for (const c of buildClearSessionCookies(context.request.url)) {
+        clearHeaders.append('Set-Cookie', c);
+      }
+      return Response.json({ user: null, oauthProviders }, { headers: clearHeaders });
     }
 
     const resolvedUserId = String(user.id);
@@ -94,12 +89,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
-    // 4. Fetch User's Published / Claimed Packages (Only match author_name against VERIFIED identities)
+    // 4. Fetch User's Published / Claimed Packages (Only match author_id or exact VERIFIED identities)
     const verifiedHandles = Array.from(
       new Set(
         identities
           .filter((i: any) => Boolean(i.verified))
-          .map((i: any) => String(i.username || '').toLowerCase())
+          .map((i: any) => String(i.username || '').trim().toLowerCase())
           .filter(Boolean)
       )
     );
@@ -306,9 +301,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
     if (resolvedUserId !== userId) {
       const refreshedToken = await createSessionToken(resolvedUserId, context.env.SESSION_SECRET);
-      const isHttps = new URL(context.request.url).protocol === 'https:';
-      headers['Set-Cookie'] =
-        `lh_session=${refreshedToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`;
+      headers['Set-Cookie'] = buildSessionCookie(refreshedToken, context.request.url, 86400 * 30);
     }
 
     return Response.json({
@@ -366,68 +359,27 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return Response.json({ error: 'Please enter a valid username (2–39 alphanumeric characters).' }, { status: 400 });
     }
 
-    let verifiedUsername = rawUsername;
-    let providerUserId = rawUsername.toLowerCase();
-    let displayName = rawUsername;
-    let avatarUrl = `https://github.com/${rawUsername}.png`;
-    let profileUrl = `https://github.com/${rawUsername}`;
-    let isCryptographicallyVerified = false;
-
-    // 1. If a Personal Access Token or Admin Secret was provided, verify it live against the provider API
-    if (rawToken) {
-      const tokenCheck = await verifyProviderToken(provider, rawToken, rawUsername, context.env.ADMIN_SECRET);
-      if (!tokenCheck.verified) {
-        return Response.json(
-          { error: 'Invalid Personal Access Token or Admin Secret for the selected provider.' },
-          { status: 401 }
-        );
-      }
-      isCryptographicallyVerified = true;
-      verifiedUsername = tokenCheck.username || rawUsername;
-      providerUserId = tokenCheck.providerUserId || verifiedUsername.toLowerCase();
-      displayName = tokenCheck.displayName || verifiedUsername;
-      if (tokenCheck.avatarUrl) avatarUrl = tokenCheck.avatarUrl;
-      if (tokenCheck.profileUrl) profileUrl = tokenCheck.profileUrl;
-    } else {
-      // 2. Unauthenticated Handle Sign-In: block impersonation of protected Admin handles
-      if (isProtectedAdminHandle(rawUsername, provider, context.env.ADMIN_USERS)) {
-        return Response.json(
-          {
-            error: 'This administrator handle is protected. Please sign in via OAuth or provide a Personal Access Token.'
-          },
-          { status: 403 }
-        );
-      }
-
-      if (provider === 'contentdb') {
-        avatarUrl = `https://content.luanti.org/users/${rawUsername}/avatar/`;
-        profileUrl = `https://content.luanti.org/users/${rawUsername}/`;
-      } else if (provider === 'codeberg') {
-        avatarUrl = `https://codeberg.org/${rawUsername}.png`;
-        profileUrl = `https://codeberg.org/${rawUsername}`;
-      } else if (provider === 'mesehub') {
-        avatarUrl = `https://git.minetest.land/${rawUsername}.png`;
-        profileUrl = `https://git.minetest.land/${rawUsername}`;
-      } else if (provider === 'gitlab') {
-        profileUrl = `https://gitlab.com/${rawUsername}`;
-      } else if (provider === 'github') {
-        try {
-          const ghRes = await fetch(`https://api.github.com/users/${encodeURIComponent(rawUsername)}`, {
-            headers: { 'User-Agent': 'LuantiHub' }
-          });
-          if (ghRes.ok) {
-            const ghUser = await ghRes.json() as any;
-            verifiedUsername = ghUser.login || rawUsername;
-            providerUserId = String(ghUser.id || verifiedUsername.toLowerCase());
-            displayName = ghUser.name || verifiedUsername;
-            avatarUrl = ghUser.avatar_url || avatarUrl;
-            profileUrl = ghUser.html_url || profileUrl;
-          }
-        } catch {
-          // Keep defaults
-        }
-      }
+    if (!rawToken) {
+      return Response.json(
+        { error: 'Please sign in via OAuth or provide a Personal Access Token.' },
+        { status: 401 }
+      );
     }
+
+    const tokenCheck = await verifyProviderToken(provider, rawToken, rawUsername, context.env.ADMIN_SECRET);
+    if (!tokenCheck.verified) {
+      return Response.json(
+        { error: 'Invalid Personal Access Token or Admin Secret for the selected provider.' },
+        { status: 401 }
+      );
+    }
+
+    const isCryptographicallyVerified = true;
+    const verifiedUsername = tokenCheck.username || rawUsername;
+    const providerUserId = tokenCheck.providerUserId || verifiedUsername.toLowerCase();
+    const displayName = tokenCheck.displayName || verifiedUsername;
+    const avatarUrl = tokenCheck.avatarUrl || `https://github.com/${rawUsername}.png`;
+    const profileUrl = tokenCheck.profileUrl || `https://github.com/${rawUsername}`;
 
     const verifiedFlag = isCryptographicallyVerified ? 1 : 0;
     const isAdmin = checkIsAdmin(
@@ -539,19 +491,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       if (reconciledUser?.id) {
         userId = String(reconciledUser.id);
       }
-
-      // Auto-sync ContentDB packages for this author only when verified or creating initial portfolio view
-      await syncAuthorContentDbPackages(context.env.DB, userId, verifiedUsername);
     }
 
     const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET);
-    const url = new URL(context.request.url);
-    const isHttps = url.protocol === 'https:';
 
     return new Response(JSON.stringify({ success: true, userId, verified: isCryptographicallyVerified }), {
       headers: {
         'Content-Type': 'application/json',
-        'Set-Cookie': `lh_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${86400 * 30}${isHttps ? '; Secure' : ''}`
+        'Set-Cookie': buildSessionCookie(sessionToken, context.request.url, 86400 * 30)
       }
     });
   } catch (err: any) {

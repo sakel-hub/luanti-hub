@@ -166,7 +166,7 @@ import {
                     <!-- Frosted Glass & High-Contrast CTA Buttons -->
                     @if (slidePkg._promo; as promo) {
                       <div class="flex items-center gap-3 pt-2 flex-wrap">
-                        @if (isInternalPromoUrl(promo.cta_url)) {
+                        @if (promo.id.startsWith('blog:') || isInternalPromoUrl(promo.cta_url)) {
                           <button
                             type="button"
                             (click)="onPromoCtaClick(promo.cta_url, $event)"
@@ -345,6 +345,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   private seenPromoIds = new Set<string>();
   private intervalTimer: any = null;
   private touchStartX = 0;
+  private lastTouchTime = 0;
 
   constructor() {
     effect(() => {
@@ -400,6 +401,13 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   onPromoCtaClick(url?: string | null, event?: Event): void {
     if (event) event.stopPropagation();
     const raw = (url || '').trim();
+    const activePromo = this.currentPkg()?._promo;
+    const activePromoId = activePromo?.id || '';
+    if (raw === '/blog/latest' || activePromoId.startsWith('blog:')) {
+      const slideBanner = activePromo?.banner_url || this.currentPkg()?.banner || this.currentPkg()?.thumbnail;
+      this.packageService.openBlogArticleModal(undefined, slideBanner);
+      return;
+    }
     if (!raw) return;
 
     let targetPath = raw;
@@ -502,34 +510,39 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   }
 
   private restartAutoSlide(): void {
-    if (!this.isPaused()) {
-      this.startAutoSlide();
-    }
+    this.startAutoSlide();
   }
 
   onMouseEnter(): void {
+    if (Date.now() - this.lastTouchTime < 800) return;
     this.isPaused.set(true);
   }
 
   onMouseLeave(): void {
+    if (Date.now() - this.lastTouchTime < 800) return;
     this.isPaused.set(false);
+    this.startAutoSlide();
   }
 
   onTouchStart(e: TouchEvent): void {
-    this.touchStartX = e.changedTouches[0].screenX;
+    this.lastTouchTime = Date.now();
+    this.touchStartX = e.changedTouches[0]?.screenX ?? 0;
     this.isPaused.set(true);
   }
 
   onTouchEnd(e: TouchEvent): void {
-    const touchEndX = e.changedTouches[0].screenX;
+    this.lastTouchTime = Date.now();
+    const touchEndX = e.changedTouches[0]?.screenX ?? this.touchStartX;
     const diff = touchEndX - this.touchStartX;
+    this.isPaused.set(false);
     if (Math.abs(diff) > 40) {
       if (diff > 0) {
         this.prev();
       } else {
         this.next();
       }
+    } else {
+      this.startAutoSlide();
     }
-    this.isPaused.set(false);
   }
 }

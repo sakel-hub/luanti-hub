@@ -453,13 +453,29 @@ async function recordWebPackageView(
   }
 }
 
+const pkgDetailRefreshCooldown = new Map<string, number>();
+
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const pkgId = `${author}/${name}`;
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
-  const noCache =
+  const requestedNoCache =
     reqUrl?.searchParams.get('nocache') === '1' || reqUrl?.searchParams.get('refresh') === '1';
+  let noCache = false;
+  if (requestedNoCache && context.request) {
+    const cookies = parseCookies(context.request);
+    const sessionUserId = cookies['lh_session']
+      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
+      : null;
+    const now = Date.now();
+    const lowerPkgKey = pkgId.toLowerCase();
+    const lastRefresh = pkgDetailRefreshCooldown.get(lowerPkgKey) || 0;
+    if (sessionUserId && now - lastRefresh > 60_000) {
+      noCache = true;
+      pkgDetailRefreshCooldown.set(lowerPkgKey, now);
+    }
+  }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
   const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v11/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
@@ -673,6 +689,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const fastLitePayload = {
         id: d1Pkg.id,
         author: d1Pkg.author_name || author,
+        author_id: d1Pkg.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
         name: d1Pkg.name || name,
         title: d1Pkg.title || name,
         type: d1Pkg.type || 'mod',
@@ -945,6 +962,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           const fastFullPayload = {
             id: effectivePkgId,
             author: d1Pkg.author_name || author,
+            author_id: d1Pkg.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
             name: d1Pkg.name || name,
             title: d1Pkg.title || name,
             type: d1Pkg.type || 'mod',
@@ -1419,6 +1437,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const pureGitPayload = {
         id: `${resolvedAuthor}/${resolvedName}`,
         author: resolvedAuthor,
+        author_id: d1Pkg?.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
         name: resolvedName,
         title: mergedTitle,
         type: resolvedType,
@@ -1920,8 +1939,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     if (!isLite && d1Releases.length === 0 && bundledReleases.length > 0) {
       (async () => {
         try {
-          for (const rel of bundledReleases.slice(0, MAX_PACKAGE_RELEASES)) {
-            await context.env.DB.prepare(`
+          const releaseStmts = bundledReleases.slice(0, MAX_PACKAGE_RELEASES).map(rel =>
+            context.env.DB.prepare(`
               INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, max_minetest_version, changelog, released_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).bind(
@@ -1934,7 +1953,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               rel.max_minetest_version || null,
               sanitizeReleaseNotesText(rel.changelog || rel.release_notes, rel.tag_name || rel.version) || null,
               rel.released_at || rel.release_date || null
-            ).run();
+            )
+          );
+          if (typeof context.env.DB.batch === 'function') {
+            await context.env.DB.batch(releaseStmts);
+          } else {
+            for (const stmt of releaseStmts) {
+              await stmt.run();
+            }
           }
         } catch {
           // Non-fatal release cache sync
@@ -1946,6 +1972,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const enriched = {
     ...upstreamData,
     id: canonicalId,
+    author_id: d1Pkg?.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
     thumbnail: resolvedThumb || upstreamData.thumbnail || undefined,
     banner: resolvedBanner || upstreamData.banner || undefined,
     license: resolvedLicense,

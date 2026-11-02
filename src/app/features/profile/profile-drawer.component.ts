@@ -192,40 +192,9 @@ import {
             }
           </div>
 
-          <!-- TAB 1: MY PACKAGES & CONTENTDB PORTFOLIO SYNC -->
+          <!-- TAB 1: MY PACKAGES -->
           @if (activeTab() === 'packages') {
             <div class="space-y-4 flex-1 luanti-tab-enter">
-              <!-- ContentDB Importer / Sync -->
-              <div class="p-4 rounded-2xl glass-panel space-y-3">
-                <div class="flex items-center gap-2">
-                  <svg lucideGlobe class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
-                  <h4 class="text-xs font-bold text-sky-400 uppercase tracking-wider">
-                    {{ 'profile.syncTitle' | translate }}
-                  </h4>
-                </div>
-                <p class="text-xs text-slate-300 leading-relaxed">
-                  {{ 'profile.syncDesc' | translate }}
-                </p>
-                <div class="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    [(ngModel)]="cdbUsernameInput"
-                    [placeholder]="'profile.syncPlaceholder' | translate"
-                    class="flex-1 glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    (click)="onSyncContentDb()"
-                    [disabled]="isSyncing() || !cdbUsernameInput.trim()"
-                    class="px-4 py-2 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-xs transition whitespace-nowrap cursor-pointer">
-                    {{ isSyncing() ? ('profile.syncing' | translate) : ('profile.syncBtn' | translate) }}
-                  </button>
-                </div>
-                @if (syncFeedback()) {
-                  <p class="text-xs text-emerald-400 font-medium">{{ syncFeedback() }}</p>
-                }
-              </div>
-
               <!-- User's Published Packages -->
               <div class="space-y-2.5">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
@@ -1366,10 +1335,6 @@ export class ProfileDrawerComponent implements OnInit {
   readonly promoFeedback = signal<string | null>(null);
   readonly promoFeedbackIsError = signal(false);
 
-  cdbUsernameInput = '';
-  readonly isSyncing = signal(false);
-  readonly syncFeedback = signal<string | null>(null);
-
   editDisplayName = '';
   editBio = '';
   readonly isSavingProfile = signal(false);
@@ -1430,17 +1395,25 @@ export class ProfileDrawerComponent implements OnInit {
     });
   }
 
-  // Merge D1 user.packages with catalog packages matching the user's username or linked identities
+  // Merge D1 user.packages with catalog packages matching the user's claimed author_id or verified identities
   readonly userPackages = computed<LuantiPackage[]>(() => {
     const user = this.authService.currentUser();
     if (!user) return [];
 
-    const handles = new Set<string>([
-      user.username.toLowerCase(),
-      ...user.identities.map(i => i.username.toLowerCase())
-    ]);
+    const verifiedHandles = new Set<string>(
+      (user.identities || [])
+        .filter(i => Boolean(i.verified) && Boolean(i.username))
+        .map(i => i.username.toLowerCase())
+    );
+    if (verifiedHandles.size > 0 && user.username) {
+      verifiedHandles.add(user.username.toLowerCase());
+    }
 
-    const fromCatalog = this.packageService.packages().filter(p => handles.has(p.author.toLowerCase()));
+    const fromCatalog = this.packageService.packages().filter(
+      p =>
+        (p.author_id && !String(p.author_id).startsWith('ext_') && String(p.author_id) === String(user.id)) ||
+        verifiedHandles.has(p.author.toLowerCase())
+    );
     const parseTagsOrDeps = (raw: any, fallback: string[] = []): string[] => {
       if (Array.isArray(raw)) return raw;
       if (typeof raw === 'string' && raw.trim().startsWith('[')) {
@@ -1460,6 +1433,7 @@ export class ProfileDrawerComponent implements OnInit {
       return {
         id: p.id || `${resolvedAuthor}/${p.name}`,
         author: resolvedAuthor,
+        author_id: p.author_id || user.id,
         name: p.name,
         title: p.title || p.name,
         type: p.type || 'mod',
@@ -1797,22 +1771,6 @@ export class ProfileDrawerComponent implements OnInit {
     );
     this.managingPackageId.set(null);
     this.confirmingPackageId.set(null);
-  }
-
-  async onSyncContentDb(): Promise<void> {
-    if (!this.cdbUsernameInput.trim()) return;
-    this.isSyncing.set(true);
-    this.syncFeedback.set(null);
-
-    const res = await this.authService.syncContentDbAccount(this.cdbUsernameInput.trim());
-    this.isSyncing.set(false);
-
-    if (res.success) {
-      this.syncFeedback.set(`Synchronized ${res.count || 0} packages from ContentDB!`);
-      this.cdbUsernameInput = '';
-    } else {
-      this.syncFeedback.set(res.message || 'Could not find ContentDB packages.');
-    }
   }
 
   async onSaveAccount(): Promise<void> {

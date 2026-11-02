@@ -4,10 +4,14 @@ import {
   writeEdgeCacheJson,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
+import { parseCookies, verifySessionToken } from '../auth/lib/session';
 
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
 }
+
+const authorRefreshCooldown = new Map<string, number>();
 
 export async function onRequestGet(context: {
   request: Request;
@@ -20,10 +24,22 @@ export async function onRequestGet(context: {
   }
 
   const lowerUsername = rawUsername.toLowerCase();
-  const baseHandle = lowerUsername.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
   const cacheKey = `/__api_author_profile_v2/${encodeURIComponent(lowerUsername)}`;
   const url = new URL(context.request.url);
-  const noCache = url.searchParams.get('nocache') === '1';
+  const requestedNoCache = url.searchParams.get('nocache') === '1';
+  let noCache = false;
+  if (requestedNoCache) {
+    const cookies = parseCookies(context.request);
+    const sessionUserId = cookies['lh_session']
+      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
+      : null;
+    const now = Date.now();
+    const lastRefresh = authorRefreshCooldown.get(lowerUsername) || 0;
+    if (sessionUserId && now - lastRefresh > 60_000) {
+      noCache = true;
+      authorRefreshCooldown.set(lowerUsername, now);
+    }
+  }
 
   if (!noCache) {
     const cached = await readEdgeCacheJson<any>(cacheKey);
@@ -99,22 +115,12 @@ export async function onRequestGet(context: {
         FROM user_identities ui
         JOIN users u ON u.id = ui.user_id
         WHERE LOWER(ui.provider_username) = LOWER(?)
-           OR LOWER(ui.provider_username) = LOWER(?)
         ORDER BY ui.verified DESC, u.created_at ASC
         LIMIT 1
-      `).bind(rawUsername, baseHandle).first();
+      `).bind(rawUsername).first();
       if (identityMatch) {
         userRow = identityMatch;
       }
-    }
-
-    if (!userRow && baseHandle && baseHandle !== lowerUsername) {
-      userRow = await context.env.DB.prepare(`
-        SELECT id, username, display_name, avatar_url, bio, created_at
-        FROM users
-        WHERE LOWER(username) = LOWER(?)
-        LIMIT 1
-      `).bind(baseHandle).first();
     }
 
     const seen = new Set<string>();

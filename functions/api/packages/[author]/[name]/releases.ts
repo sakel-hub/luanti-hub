@@ -14,17 +14,36 @@ import {
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
 
+import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
+
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
 }
+
+const releasesRefreshCooldown = new Map<string, number>();
 
 export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   const { author, name } = context.params;
   const packageId = `${author}/${name}`;
   const reqUrl = context.request?.url ? new URL(context.request.url) : null;
   const isNotesQuery = reqUrl?.searchParams.get('notes') === '1';
-  const forceRefresh =
+  const requestedForceRefresh =
     reqUrl?.searchParams.get('refresh') === '1' || reqUrl?.searchParams.get('nocache') === '1';
+  let forceRefresh = false;
+  if (requestedForceRefresh && context.request) {
+    const cookies = parseCookies(context.request);
+    const sessionUserId = cookies['lh_session']
+      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
+      : null;
+    const now = Date.now();
+    const lowerPkgKey = packageId.toLowerCase();
+    const lastRefresh = releasesRefreshCooldown.get(lowerPkgKey) || 0;
+    if (sessionUserId && now - lastRefresh > 60_000) {
+      forceRefresh = true;
+      releasesRefreshCooldown.set(lowerPkgKey, now);
+    }
+  }
 
   let d1Pkg: any = null;
   let d1Releases: any[] = [];
@@ -233,24 +252,33 @@ export async function onRequestGet(context: { request: Request; params: { author
 
       if (hasNewerRelease || forceRefresh) {
         try {
-          await context.env.DB.prepare(
-            `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
-          ).bind(d1Pkg.id).run();
+          const releaseStmts: any[] = [
+            context.env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(d1Pkg.id)
+          ];
           for (const rel of mergedReleases.slice(0, MAX_PACKAGE_RELEASES)) {
-            await context.env.DB.prepare(`
-              INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, max_minetest_version, changelog, released_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
-            `).bind(
-              d1Pkg.id,
-              rel.version || rel.title || 'latest',
-              rel.tag_name || rel.version || 'latest',
-              rel.commit_sha || '',
-              rel.upstream_url || rel.download_url || rel.url || '',
-              rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
-              rel.max_minetest_version || null,
-              rel.changelog || rel.release_notes || null,
-              rel.released_at || rel.release_date || ''
-            ).run();
+            releaseStmts.push(
+              context.env.DB.prepare(`
+                INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, max_minetest_version, changelog, released_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+              `).bind(
+                d1Pkg.id,
+                rel.version || rel.title || 'latest',
+                rel.tag_name || rel.version || 'latest',
+                rel.commit_sha || '',
+                rel.upstream_url || rel.download_url || rel.url || '',
+                rel.min_minetest_version || d1Pkg.min_minetest_version || '5.0.0',
+                rel.max_minetest_version || null,
+                rel.changelog || rel.release_notes || null,
+                rel.released_at || rel.release_date || ''
+              )
+            );
+          }
+          if (typeof context.env.DB.batch === 'function') {
+            await context.env.DB.batch(releaseStmts);
+          } else {
+            for (const stmt of releaseStmts) {
+              await stmt.run();
+            }
           }
           const newestRelTime = Date.parse(String(topMerged?.released_at || topMerged?.release_date || '')) || 0;
           const prevPkgTime = Date.parse(String(d1Pkg.updated_at || '')) || 0;

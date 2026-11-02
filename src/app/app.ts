@@ -1,7 +1,7 @@
 import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, computed, WritableSignal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
-import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
+import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { HeaderComponent } from './features/header/header.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
@@ -10,10 +10,11 @@ import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { FrostedPreloaderComponent } from './shared/components/frosted-preloader.component';
+import { ImgFallbackDirective } from './shared/directives/img-fallback.directive';
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
-import { LuantiPackage } from './core/models/package.model';
+import { LuantiBlogPost, LuantiPackage, sanitizeAndFormatBlogHtml } from './core/models/package.model';
 import { TranslatePipe } from './core/i18n/translate.pipe';
 import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } from '@lucide/angular';
 
@@ -33,6 +34,7 @@ import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } f
     ProfileDrawerComponent,
     AuthorDrawerComponent,
     FrostedPreloaderComponent,
+    ImgFallbackDirective,
     LucideX,
     LucideShieldCheck,
     LucideCheck,
@@ -88,6 +90,40 @@ export class App {
   readonly renderLegalModal = signal(false);
   readonly isClosingLegalModal = signal(false);
 
+  readonly displayedBlogArticle = signal<LuantiBlogPost | null>(null);
+  readonly renderBlogArticleModal = signal(false);
+  readonly isClosingBlogArticleModal = signal(false);
+
+  readonly formattedBlogArticleDate = computed<string>(() => {
+    const post = this.packageService.activeBlogArticle() || this.displayedBlogArticle();
+    if (!post?.published_at) return '';
+    const parsedMs = Date.parse(String(post.published_at));
+    if (!Number.isFinite(parsedMs) || parsedMs <= 0) return '';
+    try {
+      return new Date(parsedMs).toLocaleDateString('en-US', {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'UTC'
+      });
+    } catch {
+      return '';
+    }
+  });
+
+  readonly safeBlogArticleHtml = computed<SafeHtml>(() => {
+    const post = this.packageService.activeBlogArticle() || this.displayedBlogArticle();
+    if (!post) return this.sanitizer.bypassSecurityTrustHtml('');
+    const rawHtml =
+      post.content_html ||
+      `<p>${String(post.summary || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')}</p>`;
+    const formatted = sanitizeAndFormatBlogHtml(rawHtml, post.image_url);
+    return this.sanitizer.bypassSecurityTrustHtml(formatted);
+  });
+
   private pkgCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private videoTheaterCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private savedScrollY = 0;
@@ -140,6 +176,16 @@ export class App {
     this.bindAnimatedOverlay(() => this.authService.isProfileDrawerOpen(), this.renderProfileDrawer, this.isClosingProfileDrawer, 220);
     this.bindAnimatedOverlay(() => Boolean(this.packageService.activeAuthorUsername()), this.renderAuthorDrawer, this.isClosingAuthorDrawer, 220);
     this.bindAnimatedOverlay(() => this.packageService.isLegalModalOpen(), this.renderLegalModal, this.isClosingLegalModal, 200);
+    this.bindAnimatedOverlay(() => Boolean(this.packageService.activeBlogArticle()), this.renderBlogArticleModal, this.isClosingBlogArticleModal, 200);
+
+    effect(() => {
+      const activeBlog = this.packageService.activeBlogArticle();
+      if (activeBlog) {
+        this.displayedBlogArticle.set(activeBlog);
+      } else if (!this.renderBlogArticleModal()) {
+        this.displayedBlogArticle.set(null);
+      }
+    });
 
     // Lock background scroll whenever a modal or drawer is open while preserving scroll position
     effect(() => {
@@ -147,6 +193,7 @@ export class App {
       const anyModalOpen = Boolean(
         this.packageService.activePackage() ||
         this.packageService.activeVideoTheater() ||
+        this.packageService.activeBlogArticle() ||
         this.packageService.activeAuthorUsername() ||
         this.packageService.isSubmitModalOpen() ||
         this.packageService.isSetupModalOpen() ||
@@ -245,6 +292,8 @@ export class App {
     } else if (event.key === 'Escape') {
       if (this.packageService.activeVideoTheater()) {
         this.packageService.closeVideoTheater();
+      } else if (this.packageService.activeBlogArticle()) {
+        this.packageService.closeBlogArticleModal();
       } else if (this.authService.isAuthModalOpen()) {
         this.authService.closeAuthModal();
       } else if (this.authService.isProfileDrawerOpen()) {

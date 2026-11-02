@@ -382,6 +382,7 @@ export class PwaService {
     typeof window !== 'undefined' && 'SyncManager' in window
   );
   readonly isWcoActive = signal<boolean>(false);
+  readonly isWcoCompact = signal<boolean>(false);
   readonly wcoTitlebarRect = signal<{ x: number; y: number; width: number; height: number } | null>(null);
   readonly canNavigateBack = signal<boolean>(false);
   readonly canNavigateForward = signal<boolean>(false);
@@ -996,24 +997,46 @@ export class PwaService {
         const visible = Boolean(wco?.visible || mqlMatches);
         this.isWcoActive.set(visible);
 
+        const docEl = typeof document !== 'undefined' ? document.documentElement : null;
         if (wco && typeof wco.getTitlebarAreaRect === 'function' && visible) {
           const rect = wco.getTitlebarAreaRect();
-          if (rect && typeof rect.width === 'number') {
-            this.wcoTitlebarRect.set({
-              x: Number(rect.x || 0),
-              y: Number(rect.y || 0),
-              width: Number(rect.width || 0),
-              height: Number(rect.height || 0)
-            });
+          if (rect && typeof rect.width === 'number' && rect.width > 0) {
+            const x = Math.max(0, Number(rect.x || 0));
+            const y = Math.max(0, Number(rect.y || 0));
+            const width = Math.max(0, Number(rect.width || 0));
+            const height = Math.max(38, Number(rect.height || 38));
+            const winW = Number(window.innerWidth || x + width);
+            const rightInset = Math.max(0, winW - x - width);
+            this.wcoTitlebarRect.set({ x, y, width, height });
+            this.isWcoCompact.set(width < 1180);
+            if (docEl?.style) {
+              docEl.style.setProperty('--wco-titlebar-x', `${x}px`);
+              docEl.style.setProperty('--wco-titlebar-width', `${width}px`);
+              docEl.style.setProperty('--wco-titlebar-height', `${height}px`);
+              docEl.style.setProperty('--wco-right-inset', `${rightInset}px`);
+            }
           } else {
             this.wcoTitlebarRect.set(null);
+            const estWidth = Math.max(0, Number(window.innerWidth || 1280) - 225);
+            this.isWcoCompact.set(estWidth < 1180);
           }
+        } else if (visible) {
+          this.wcoTitlebarRect.set(null);
+          const estWidth = Math.max(0, Number(window.innerWidth || 1280) - 225);
+          this.isWcoCompact.set(estWidth < 1180);
         } else {
           this.wcoTitlebarRect.set(null);
+          this.isWcoCompact.set(false);
+          if (docEl?.style) {
+            docEl.style.removeProperty('--wco-titlebar-x');
+            docEl.style.removeProperty('--wco-titlebar-width');
+            docEl.style.removeProperty('--wco-titlebar-height');
+            docEl.style.removeProperty('--wco-right-inset');
+          }
         }
 
-        if (typeof document !== 'undefined' && document.documentElement?.classList) {
-          document.documentElement.classList.toggle('wco-active', visible);
+        if (docEl?.classList) {
+          docEl.classList.toggle('wco-active', visible);
         }
       } catch {
         // Ignore unsupported WCO environments
@@ -1021,6 +1044,12 @@ export class PwaService {
     };
 
     updateWcoState();
+
+    try {
+      window.addEventListener('resize', () => updateWcoState(), { passive: true });
+    } catch {
+      // ignore
+    }
 
     try {
       const wco = typeof navigator !== 'undefined' ? (navigator as any).windowControlsOverlay : null;
@@ -1196,12 +1225,13 @@ export class PwaService {
       }
 
       window.addEventListener('beforeinstallprompt', (e: Event) => {
-        e.preventDefault();
         if (this.isStandaloneDisplayMode()) {
           this.isInstalled.set(true);
           this.canInstall.set(false);
           return;
         }
+        // Store the BeforeInstallPromptEvent without calling e.preventDefault() so Chromium does not log
+        // "Banner not shown: beforeinstallpromptevent.preventDefault() called" and preserves the address-bar install chip.
         this.deferredPrompt = e;
         this.isInstalled.set(false);
         this.canInstall.set(true);

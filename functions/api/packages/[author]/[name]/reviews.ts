@@ -10,6 +10,7 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
+  verifyStrictPackageAuthorOwnership,
   reconcileAndMergeUserAccount
 } from '../../../auth/lib/session';
 
@@ -270,13 +271,18 @@ export async function onRequestPost(context: { request: Request; params: { autho
   let authorAvatarUrl = reconciledUser?.avatar_url || `https://github.com/${authorUsername}.png`;
 
   if (context.env.DB) {
+    await ensureExtendedPackageColumns(context.env.DB);
     const [userRow, pkgRow] = await Promise.all([
       reconciledUser
         ? Promise.resolve(reconciledUser)
         : context.env.DB.prepare(`SELECT id, username, display_name, avatar_url FROM users WHERE id = ?`).bind(userId).first(),
       context.env.DB.prepare(
-        `SELECT id, author_id, author_name, repo_url FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-      ).bind(packageId, author, name).first()
+        `SELECT id, author_id, author_name, repo_url, maintainers FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+      ).bind(packageId, author, name).first().catch(() =>
+        context.env.DB.prepare(
+          `SELECT id, author_id, author_name, repo_url FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+        ).bind(packageId, author, name).first()
+      )
     ]);
 
     if (userRow) {
@@ -290,27 +296,13 @@ export async function onRequestPost(context: { request: Request; params: { autho
       ).bind(userId, authorUsername, authorDisplayName, authorAvatarUrl).run().catch(() => {});
     }
 
-    const userHandles = new Set<string>();
-    if (userRow?.username) userHandles.add(String(userRow.username).toLowerCase());
-    for (const ident of identities) {
-      if (ident?.username) userHandles.add(String(ident.username).toLowerCase());
-    }
+    const effectiveUserObj = userRow || {
+      id: userId,
+      username: authorUsername,
+      display_name: authorDisplayName
+    };
 
-    let repoOwner = '';
-    if (pkgRow?.repo_url) {
-      try {
-        const parts = new URL(pkgRow.repo_url).pathname.split('/').filter(Boolean);
-        if (parts.length >= 2) repoOwner = parts[0].toLowerCase();
-      } catch {
-        // Ignore invalid URL
-      }
-    }
-
-    const isPackageAuthor =
-      (pkgRow?.author_id && String(pkgRow.author_id) === String(userId)) ||
-      userHandles.has(author.toLowerCase()) ||
-      (pkgRow?.author_name && userHandles.has(String(pkgRow.author_name).toLowerCase())) ||
-      (repoOwner && userHandles.has(repoOwner));
+    const isPackageAuthor = verifyStrictPackageAuthorOwnership(effectiveUserObj, identities, pkgRow, author);
 
     if (isPackageAuthor) {
       return Response.json(

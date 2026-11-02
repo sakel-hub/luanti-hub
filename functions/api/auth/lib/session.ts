@@ -94,13 +94,108 @@ function fromBase64Url(b64Url: string): string {
   return atob(b64);
 }
 
+export function isTrustedLuantiHubOrigin(rawOrigin?: string | null): boolean {
+  if (!rawOrigin || typeof rawOrigin !== 'string') return false;
+  try {
+    const parsed = new URL(rawOrigin.trim());
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol === 'https:') {
+      return (
+        host === 'luantihub.org' ||
+        host === 'www.luantihub.org' ||
+        host.endsWith('.luantihub.org') ||
+        host === 'luanti-hub.pages.dev' ||
+        host.endsWith('.luanti-hub.pages.dev')
+      );
+    }
+    if (parsed.protocol === 'http:') {
+      return host === 'localhost' || host === '127.0.0.1';
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function getSharedCookieDomain(requestUrl: URL | string): string | null {
+  try {
+    const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;
+    const host = u.hostname.toLowerCase();
+    if (host === 'luantihub.org' || host.endsWith('.luantihub.org')) {
+      return '.luantihub.org';
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildSessionCookie(
+  token: string,
+  requestUrl: URL | string,
+  maxAgeSeconds = 86400 * 30
+): string {
+  const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;
+  const isHttps = u.protocol === 'https:';
+  const domain = getSharedCookieDomain(u);
+  return `lh_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${domain ? `; Domain=${domain}` : ''}${isHttps ? '; Secure' : ''}`;
+}
+
+export function buildClearSessionCookies(requestUrl: URL | string): string[] {
+  const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;
+  const isHttps = u.protocol === 'https:';
+  const domain = getSharedCookieDomain(u);
+  const cookies = [
+    `lh_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+  ];
+  if (domain) {
+    cookies.push(
+      `lh_session=; Path=/; Domain=${domain}; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+    );
+  }
+  return cookies;
+}
+
+export function buildOAuthStateCookie(
+  state: string,
+  requestUrl: URL | string,
+  maxAgeSeconds = 600
+): string {
+  const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;
+  const isHttps = u.protocol === 'https:';
+  const domain = getSharedCookieDomain(u);
+  return `lh_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${domain ? `; Domain=${domain}` : ''}${isHttps ? '; Secure' : ''}`;
+}
+
+export function buildClearOAuthStateCookies(requestUrl: URL | string): string[] {
+  const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;
+  const isHttps = u.protocol === 'https:';
+  const domain = getSharedCookieDomain(u);
+  const cookies = [
+    `lh_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+  ];
+  if (domain) {
+    cookies.push(
+      `lh_oauth_state=; Path=/; Domain=${domain}; HttpOnly; SameSite=Lax; Max-Age=0${isHttps ? '; Secure' : ''}`
+    );
+  }
+  return cookies;
+}
+
 export async function createOAuthStateToken(
   provider: string,
-  secret: string = DEFAULT_SECRET
+  secret: string = DEFAULT_SECRET,
+  options?: { origin?: string; popup?: boolean }
 ): Promise<string> {
+  const trustedOrigin =
+    options?.origin && isTrustedLuantiHubOrigin(options.origin)
+      ? new URL(options.origin.trim()).origin
+      : undefined;
   const payload = JSON.stringify({
     p: provider.trim().toLowerCase(),
     n: crypto.randomUUID().slice(0, 8),
+    ...(trustedOrigin ? { o: trustedOrigin } : {}),
+    ...(options?.popup ? { pop: 1 } : {}),
     exp: Date.now() + 15 * 60 * 1000 // 15 minutes
   });
   const enc = new TextEncoder();
@@ -111,29 +206,56 @@ export async function createOAuthStateToken(
   return `${b64Payload}.${b64Sig}`;
 }
 
-export async function verifyOAuthStateToken(
+export async function parseOAuthStateToken(
   token: string | undefined | null,
   expectedProvider: string,
   secret: string = DEFAULT_SECRET
-): Promise<boolean> {
+): Promise<{ valid: boolean; origin?: string; popup?: boolean }> {
   try {
-    if (!token) return false;
+    if (!token) return { valid: false };
     const [b64Payload, b64Sig] = token.split('.');
-    if (!b64Payload || !b64Sig) return false;
+    if (!b64Payload || !b64Sig) return { valid: false };
 
     const payload = fromBase64Url(b64Payload);
     const data = JSON.parse(payload);
-    if (!data?.p || data.p !== expectedProvider.trim().toLowerCase()) return false;
-    if (!data?.exp || Date.now() > data.exp) return false;
+    if (!data?.p || data.p !== expectedProvider.trim().toLowerCase()) return { valid: false };
+    if (!data?.exp || Date.now() > data.exp) return { valid: false };
 
     const key = await getKey(secret);
     const enc = new TextEncoder();
     const sigStr = fromBase64Url(b64Sig);
     const sigBytes = Uint8Array.from(sigStr, c => c.charCodeAt(0));
 
-    return await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
+    const isValid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
+    if (!isValid) return { valid: false };
+
+    return {
+      valid: true,
+      origin: data.o && isTrustedLuantiHubOrigin(data.o) ? new URL(data.o).origin : undefined,
+      popup: Boolean(data.pop)
+    };
   } catch {
-    return false;
+    return { valid: false };
+  }
+}
+
+export async function verifyOAuthStateToken(
+  token: string | undefined | null,
+  expectedProvider: string,
+  secret: string = DEFAULT_SECRET
+): Promise<boolean> {
+  const parsed = await parseOAuthStateToken(token, expectedProvider, secret);
+  return parsed.valid;
+}
+
+function extractTokenExp(token: string): number {
+  try {
+    const [b64Payload] = token.split('.');
+    if (!b64Payload) return 0;
+    const data = JSON.parse(atob(b64Payload));
+    return typeof data?.exp === 'number' ? data.exp : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -145,7 +267,17 @@ export function parseCookies(request: Request): Record<string, string> {
     if (idx > 0) {
       const k = cookie.slice(0, idx).trim();
       const v = cookie.slice(idx + 1).trim();
-      if (k && v) cookies[k] = decodeURIComponent(v);
+      if (k && v) {
+        const decoded = decodeURIComponent(v);
+        if (k === 'lh_session' && cookies[k]) {
+          // If both a legacy host-only and a shared .luantihub.org cookie exist, prefer the newest token
+          if (extractTokenExp(decoded) >= extractTokenExp(cookies[k])) {
+            cookies[k] = decoded;
+          }
+        } else {
+          cookies[k] = decoded;
+        }
+      }
     }
   }
   return cookies;
@@ -237,6 +369,12 @@ export function verifyStrictPackageAuthorOwnership(
 ): boolean {
   if (!user || !user.id || !pkgRow) return false;
 
+  // 1. Explicitly verified & claimed package ownership in D1 (via Git submission OAuth check or Admin/Moderator approval)
+  const pkgAuthorId = String(pkgRow.author_id || '').trim();
+  if (pkgAuthorId && !pkgAuthorId.startsWith('ext_') && pkgAuthorId === String(user.id)) {
+    return true;
+  }
+
   const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
   if (verifiedIdentities.length === 0) {
     return false;
@@ -256,29 +394,14 @@ export function verifyStrictPackageAuthorOwnership(
     }
   }
 
-  // 1. Verified identity on the exact package forge provider matching repoOwner or pkgAuthor
+  // 2. Verified identity on the exact package forge provider matching repoOwner or pkgAuthor
   const hasExactProviderMatch = verifiedIdentities.some(id => {
     const idProvider = String(id.provider || '').trim().toLowerCase();
     const idUsername = String(id.username || id.provider_username || '').trim().toLowerCase();
     if (!idProvider || !idUsername || idProvider !== pkgProvider) return false;
     return (pkgAuthor && idUsername === pkgAuthor) || (repoOwner && idUsername === repoOwner);
   });
-  if (hasExactProviderMatch) {
-    return true;
-  }
-
-  // 2. Submitter user_id match (e.g. verified organization member who published via Pre-Flight Audit)
-  const pkgAuthorId = String(pkgRow.author_id || '').trim();
-  if (pkgAuthorId && !pkgAuthorId.startsWith('ext_') && pkgAuthorId === String(user.id)) {
-    const hasVerifiedOnPkgProvider = verifiedIdentities.some(
-      id => String(id.provider || '').trim().toLowerCase() === pkgProvider
-    );
-    if (hasVerifiedOnPkgProvider) {
-      return true;
-    }
-  }
-
-  return false;
+  return hasExactProviderMatch;
 }
 
 /**
@@ -298,15 +421,13 @@ export function verifyStrictAuthorPortfolioOwnership(
   if (verifiedIdentities.length === 0) return false;
 
   const userLower = String(user.username || '').trim().toLowerCase();
-  const baseUserLower = userLower.replace(/_(gi|gl|co|cd|me)$/i, '');
-  if (userLower === targetLower || baseUserLower === targetLower) {
+  if (userLower === targetLower) {
     return true;
   }
 
   return verifiedIdentities.some(id => {
     const idUsername = String(id.username || id.provider_username || '').trim().toLowerCase();
-    const baseIdUsername = idUsername.replace(/_(gi|gl|co|cd|me)$/i, '');
-    return idUsername === targetLower || baseIdUsername === targetLower;
+    return idUsername === targetLower;
   });
 }
 

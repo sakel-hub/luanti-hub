@@ -186,6 +186,7 @@ export class AuthService {
   readonly openReportsCount = computed(() => this._currentUser()?.open_reports_count || 0);
   readonly linkedIdentities = computed(() => this._currentUser()?.identities || []);
   private backgroundAuthDigestTimer: ReturnType<typeof setInterval> | null = null;
+  private oauthPopupPollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.pwaService.registerNotificationClickHandler((data: any) => {
@@ -235,9 +236,60 @@ export class AuthService {
       }
       this.openProfileDrawer();
     });
+    this.initOAuthPopupListener();
     this.handleUrlAuthParams();
     this.initAuth();
     this.initBackgroundAuthDigestRefresh();
+  }
+
+  private handleOAuthPopupMessage(data: any): void {
+    if (!data || data.type !== 'LH_OAUTH_COMPLETE') return;
+    if (this.oauthPopupPollTimer) {
+      clearInterval(this.oauthPopupPollTimer);
+      this.oauthPopupPollTimer = null;
+    }
+    this._isOAuthRedirecting.set(false);
+    const providerParam = data.provider as GitProvider | undefined;
+    if (providerParam && ['codeberg', 'mesehub', 'gitlab', 'github', 'contentdb'].includes(providerParam)) {
+      this._selectedProvider.set(providerParam);
+    }
+    if (data.success) {
+      this.clearAuthCache();
+      this._authError.set(null);
+      this._isAuthModalOpen.set(false);
+      this._isCompletingOAuth.set(true);
+      this.initAuth(true).then(() => {
+        if (this._currentUser() && (typeof window === 'undefined' || !window.location.pathname.startsWith('/package/'))) {
+          this._isProfileDrawerOpen.set(true);
+        }
+      });
+    } else if (data.error) {
+      this.clearAuthCache();
+      this._isCompletingOAuth.set(false);
+      this._authError.set(formatFriendlyAuthError(String(data.error), providerParam || this._selectedProvider()));
+      this._isAuthModalOpen.set(true);
+    }
+  }
+
+  private initOAuthPopupListener(): void {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('message', (event: MessageEvent) => {
+      if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
+        this.handleOAuthPopupMessage(event.data);
+      }
+    });
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('lh-auth-sync');
+        bc.onmessage = (event: MessageEvent) => {
+          if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
+            this.handleOAuthPopupMessage(event.data);
+          }
+        };
+      }
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
   }
 
   private initBackgroundAuthDigestRefresh(): void {
@@ -379,24 +431,39 @@ export class AuthService {
   }
 
   /**
-   * Checks whether the current user is an administrator or the cryptographically verified
-   * owner of the given package on its hosting forge provider.
+   * Checks whether the current user is the cryptographically verified or claimed
+   * author/owner of the given package.
    */
-  canManagePackage(pkg?: Partial<LuantiPackage> | null): boolean {
+  isPackageAuthor(pkg?: Partial<LuantiPackage> | null): boolean {
     const user = this._currentUser();
     if (!user || !pkg) return false;
-    if (this.isAdmin()) return true;
+
+    const pkgAuthorId = String((pkg as any).author_id || '').trim();
+    if (pkgAuthorId && user.id && !pkgAuthorId.startsWith('ext_') && pkgAuthorId === String(user.id)) {
+      return true;
+    }
 
     const provider = this.inferPackageProvider(pkg);
+    const matchesVerifiedIdentityOnProvider = (ownerHandle: string): boolean => {
+      const targetOwner = ownerHandle.trim().toLowerCase();
+      if (!targetOwner) return false;
+      return (user.identities || []).some(
+        id =>
+          id.provider === provider &&
+          Boolean(id.verified) &&
+          String(id.username || '').trim().toLowerCase() === targetOwner
+      );
+    };
+
     const pkgAuthor = String(pkg.author || (pkg as any).author_name || '').trim();
-    if (pkgAuthor && this.hasVerifiedProviderOwnership(provider, pkgAuthor)) {
+    if (pkgAuthor && matchesVerifiedIdentityOnProvider(pkgAuthor)) {
       return true;
     }
 
     if (pkg.repo_url) {
       try {
         const parts = new URL(pkg.repo_url).pathname.split('/').filter(Boolean);
-        if (parts.length >= 2 && this.hasVerifiedProviderOwnership(provider, parts[0])) {
+        if (parts.length >= 2 && matchesVerifiedIdentityOnProvider(parts[0])) {
           return true;
         }
       } catch {
@@ -405,16 +472,27 @@ export class AuthService {
     }
 
     const pkgId = String(pkg.id || `${pkgAuthor}/${pkg.name || ''}`).toLowerCase();
-    const isSubmittedByCurrentUser = (user.packages || []).some((up: any) => {
+    const isClaimedByCurrentUser = (user.packages || []).some((up: any) => {
       const upAuthor = up.author || up.author_name || user.username;
       const upId = String(up.id || `${upAuthor}/${up.name}`).toLowerCase();
-      return upId === pkgId && String(up.author_id || '') === String(user.id);
+      return upId === pkgId && (!up.author_id || String(up.author_id) === String(user.id));
     });
-    if (isSubmittedByCurrentUser && this.hasVerifiedProviderOwnership(provider)) {
+    if (isClaimedByCurrentUser) {
       return true;
     }
 
     return false;
+  }
+
+  /**
+   * Checks whether the current user is an administrator or the cryptographically verified
+   * owner of the given package on its hosting forge provider.
+   */
+  canManagePackage(pkg?: Partial<LuantiPackage> | null): boolean {
+    const user = this._currentUser();
+    if (!user || !pkg) return false;
+    if (this.isAdmin()) return true;
+    return this.isPackageAuthor(pkg);
   }
 
   /**
@@ -427,23 +505,18 @@ export class AuthService {
     if (this.isAdmin()) return true;
 
     const targetLower = username.trim().toLowerCase();
-    const baseTarget = targetLower.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
     if (!targetLower) return false;
 
     const verifiedIdentities = (user.identities || []).filter(id => Boolean(id.verified));
     if (verifiedIdentities.length === 0) return false;
 
-    const userLower = String(user.username || '').trim().toLowerCase();
-    const baseUser = userLower.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
-    if (userLower === targetLower || (baseTarget && baseUser === baseTarget)) {
+    if (String(user.username || '').trim().toLowerCase() === targetLower) {
       return true;
     }
 
-    return verifiedIdentities.some(id => {
-      const h = String(id.username || '').trim().toLowerCase();
-      const b = h.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
-      return h === targetLower || (baseTarget && b === baseTarget);
-    });
+    return verifiedIdentities.some(
+      id => String(id.username || '').trim().toLowerCase() === targetLower
+    );
   }
 
   async initAuth(forceRefresh = false): Promise<void> {
@@ -576,6 +649,40 @@ export class AuthService {
         const query = new URLSearchParams();
         if (cleanHint) query.set('login', cleanHint);
         if (forceAccountSelect) query.set('prompt', 'select_account');
+
+        // When running as an installed standalone/WCO PWA, open OAuth in a centered popup window
+        // so the main PWA window never leaves scope or displays the browser's out-of-scope URL bar
+        if (this.pwaService.isInstalled() && typeof window.open === 'function') {
+          const popupQuery = new URLSearchParams(query);
+          popupQuery.set('popup', '1');
+          const popupUrl = `/api/auth/${provider}/login?${popupQuery.toString()}`;
+          const width = 560;
+          const height = 700;
+          const left = Math.max(0, Math.round((window.screenX || 0) + ((window.outerWidth || 1024) - width) / 2));
+          const top = Math.max(0, Math.round((window.screenY || 0) + ((window.outerHeight || 768) - height) / 2));
+          const popupWin = window.open(
+            popupUrl,
+            'lh_oauth_popup',
+            `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=yes,status=no,resizable=yes,scrollbars=yes`
+          );
+          if (popupWin) {
+            if (this.oauthPopupPollTimer) {
+              clearInterval(this.oauthPopupPollTimer);
+            }
+            this.oauthPopupPollTimer = setInterval(() => {
+              if (popupWin.closed) {
+                if (this.oauthPopupPollTimer) {
+                  clearInterval(this.oauthPopupPollTimer);
+                  this.oauthPopupPollTimer = null;
+                }
+                this._isOAuthRedirecting.set(false);
+                this.initAuth(true).catch(() => {});
+              }
+            }, 500);
+            return;
+          }
+        }
+
         const qs = query.toString();
         window.location.href = `/api/auth/${provider}/login${qs ? `?${qs}` : ''}`;
       }
@@ -792,31 +899,6 @@ export class AuthService {
       this.settingsService.isAuthenticatedSession.set(false);
       this._currentUser.set(null);
       this.closeProfileDrawer();
-    }
-  }
-
-  async syncContentDbAccount(contentDbUsername: string): Promise<{ success: boolean; count?: number; message?: string }> {
-    const clean = contentDbUsername.trim();
-    if (!clean) {
-      return { success: false, message: 'Enter a valid ContentDB author username.' };
-    }
-    try {
-      const res = await fetch(`/api/users/${encodeURIComponent(clean)}/sync-contentdb`, {
-        method: 'POST'
-      });
-      const contentType = res.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) {
-        const data = await res.json();
-        if (!res.ok) {
-          return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to sync ContentDB account.') };
-        }
-        this.clearAuthCache();
-        await this.initAuth(true);
-        return { success: true, count: data.syncedCount };
-      }
-      return { success: false, message: 'ContentDB sync endpoint unreachable.' };
-    } catch (err: any) {
-      return { success: false, message: sanitizeUserFacingError(err, 'Connection error syncing ContentDB.') };
     }
   }
 

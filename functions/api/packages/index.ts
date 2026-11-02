@@ -18,9 +18,14 @@ import {
   detectGitProviderFromUrl
 } from '../lib/upstream';
 
+import { parseCookies, verifySessionToken } from '../auth/lib/session';
+
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
 }
+
+let lastCatalogNoCacheAt = 0;
 
 const DEFAULT_CONTENTDB_TAGS = [
   { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
@@ -279,7 +284,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     .filter(t => Boolean(t) && t !== 'all');
   const author = (url.searchParams.get('author') || '').trim();
   const isBootBundle = url.searchParams.get('boot') === '1';
-  const noCache = url.searchParams.get('nocache') === '1';
+  const requestedNoCache = url.searchParams.get('nocache') === '1';
+  let noCache = false;
+  if (requestedNoCache) {
+    const cookies = parseCookies(request);
+    const sessionUserId = cookies['lh_session']
+      ? await verifySessionToken(cookies['lh_session'], env.SESSION_SECRET)
+      : null;
+    const now = Date.now();
+    if (sessionUserId && now - lastCatalogNoCacheAt > 60_000) {
+      noCache = true;
+      lastCatalogNoCacheAt = now;
+    }
+  }
   const requestedFmt = (url.searchParams.get('fmt') || '').trim().toLowerCase();
   const protocolVersion = (url.searchParams.get('protocol_version') || '').trim();
 
@@ -767,6 +784,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ...(matchedUpstream || {}),
       id: `${canonicalAuthor}/${canonicalName}`,
       author: canonicalAuthor,
+      author_id: p.author_id && !String(p.author_id).startsWith('ext_') ? String(p.author_id) : undefined,
       name: canonicalName,
       aliases: aliases.length > 0 ? aliases : undefined,
       title: matchedUpstream?.title || p.title || canonicalName,

@@ -64,35 +64,38 @@ export async function onRequestPost(context: {
     await ensureModerationColumns(env.DB);
     await ensureExtendedPackageColumns(env.DB);
 
-  // Mode 1: Community or Automated Git-404 Report Submission
+  // Mode 1: Authenticated Community Report Submission
   if (body.action === 'report') {
+    if (!userId) {
+      return Response.json({ error: 'Please sign in to submit a moderation report.' }, { status: 401 });
+    }
     const reason = body.reason || 'other';
     const details = (body.details || '').trim();
     if (!details || details.length < 5) {
       return Response.json({ error: 'Please provide details explaining the issue (at least 5 characters).' }, { status: 400 });
     }
 
-    // Deduplicate open 'broken' reports for the same package so automated 404 Git health checks never spam admins
-    if (reason === 'broken') {
-      const existingOpen = await env.DB.prepare(`
-        SELECT id FROM moderation_reports
-        WHERE LOWER(package_id) = LOWER(?) AND reason = 'broken' AND status = 'open'
-        LIMIT 1
-      `).bind(packageId).first();
+    // Deduplicate open reports per package + reporter (and globally for 'broken' reports)
+    const existingOpen = await env.DB.prepare(`
+      SELECT id FROM moderation_reports
+      WHERE LOWER(package_id) = LOWER(?)
+        AND status = 'open'
+        AND (reporter_user_id = ? OR (? = 'broken' AND reason = 'broken'))
+      LIMIT 1
+    `).bind(packageId, userId, reason).first();
 
-      if (existingOpen) {
-        return Response.json({
-          success: true,
-          deduplicated: true,
-          message: 'An open broken-repository report already exists in the moderation queue for this package.'
-        });
-      }
+    if (existingOpen) {
+      return Response.json({
+        success: true,
+        deduplicated: true,
+        message: 'An open report already exists in the moderation queue for this package.'
+      });
     }
 
     await env.DB.prepare(`
       INSERT INTO moderation_reports (package_id, reporter_user_id, reason, details, status)
       VALUES (?, ?, ?, ?, 'open')
-    `).bind(packageId, userId || 'system-git-monitor', reason, details.slice(0, 1000)).run();
+    `).bind(packageId, userId, reason, details.slice(0, 1000)).run();
 
     return Response.json({
       success: true,

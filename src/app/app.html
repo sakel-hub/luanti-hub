@@ -184,6 +184,74 @@
     </div>
   }
 
+  <!-- Official Luanti Blog Article Reader Dialog (Matched to Package Detail Dialog Layout & Width) -->
+  @if (renderBlogArticleModal() && (packageService.activeBlogArticle() || displayedBlogArticle()); as blogPost) {
+    <div
+      (click)="packageService.closeBlogArticleModal()"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="blog-article-modal-title"
+      [class.is-closing]="isClosingBlogArticleModal()"
+      class="z-50 flex items-center justify-center p-0 sm:p-4 overflow-y-auto luanti-modal-backdrop">
+      <div
+        (click)="$event.stopPropagation()"
+        class="relative w-full max-w-5xl xl:max-w-[1120px] max-h-screen sm:max-h-[94vh] glass-modal rounded-none sm:rounded-3xl overflow-hidden flex flex-col luanti-dialog-panel my-auto">
+
+        <div class="overflow-y-auto flex-1 flex flex-col">
+          <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio, Matched to Package Detail Dialog) -->
+          <div class="relative w-full aspect-video min-h-[260px] sm:min-h-[380px] lg:min-h-[480px] max-h-[630px] bg-slate-950 flex-shrink-0 overflow-hidden">
+            <img
+              [src]="blogPost.image_url || '/banners/luanti-5-18-0.png'"
+              [fallbackThumbnail]="'/banners/luanti-5-18-0.png'"
+              appImgFallback
+              [alt]="blogPost.title"
+              class="w-full h-full object-cover object-center filter brightness-100 transition-all duration-300"
+            />
+            <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/30 to-transparent w-full sm:w-2/3"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/20 to-transparent"></div>
+
+            <!-- Floating Frosted Glass Close Button (Top Right) -->
+            <button
+              type="button"
+              (click)="packageService.closeBlogArticleModal()"
+              [attr.aria-label]="'modal.close' | translate"
+              class="absolute top-4 right-4 p-2 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 z-30 cursor-pointer">
+              <svg lucideX class="w-4 h-4 sm:w-5 sm:h-5"></svg>
+            </button>
+
+            <!-- Foreground Hero Content (Matched to Hero & Package Detail Dialog) -->
+            <div class="absolute bottom-5 left-5 sm:left-8 right-5 sm:right-8 flex flex-col justify-end gap-3 z-20">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-sky-500/20 text-sky-300 border border-sky-400/40 shadow-[0_0_16px_rgba(56,189,248,0.25)] backdrop-blur-md">
+                  LUANTI BLOG{{ formattedBlogArticleDate() ? ' · ' + (formattedBlogArticleDate() | uppercase) : '' }}
+                </span>
+                @if (blogPost.author) {
+                  <span class="glass-badge glass-badge-sky font-mono">
+                    {{ 'card.byAuthor' | translate }} {{ blogPost.author.includes(' ') ? blogPost.author : '&#64;' + blogPost.author }}
+                  </span>
+                }
+              </div>
+              <h2 id="blog-article-modal-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
+                {{ blogPost.title }}
+              </h2>
+            </div>
+          </div>
+
+          <!-- Formatted Blog Article Content Body (Matched to Package Detail Dialog Padding & Panel Style) -->
+          <div class="p-6 sm:p-8 lg:p-10 space-y-7">
+            <div class="p-5 sm:p-7 rounded-2xl glass-panel">
+              <article
+                class="luanti-markdown luanti-blog-article text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
+                [innerHTML]="safeBlogArticleHtml()">
+              </article>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  }
+
   <!-- Official Legal, DMCA & Safe Harbor Modal (/legal) -->
   @if (renderLegalModal()) {
     <div

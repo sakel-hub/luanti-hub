@@ -5899,4 +5899,300 @@ supported_games = minetest_game, voxelibre
       }
     }
   });
+
+  it('should share lh_session cookies across .luantihub.org and preserve initiating PWA origin & popup mode across OAuth redirects', async () => {
+    const {
+      createOAuthStateToken,
+      parseOAuthStateToken,
+      buildSessionCookie,
+      buildClearSessionCookies
+    } = await import('../../functions/api/auth/lib/session');
+
+    // 1. Verify Domain=.luantihub.org cookie sharing between www.luantihub.org and luantihub.org
+    const apexCookie = buildSessionCookie('tok123', 'https://luantihub.org/api/auth/github/callback');
+    const wwwCookie = buildSessionCookie('tok123', 'https://www.luantihub.org/api/auth/me');
+    const localCookie = buildSessionCookie('tok123', 'http://localhost:4200/api/auth/me');
+    expect(apexCookie).toContain('Domain=.luantihub.org');
+    expect(wwwCookie).toContain('Domain=.luantihub.org');
+    expect(localCookie).not.toContain('Domain=');
+
+    const clearCookies = buildClearSessionCookies('https://luantihub.org/api/auth/logout');
+    expect(clearCookies.length).toBe(2);
+    expect(clearCookies.some(c => c.includes('Domain=.luantihub.org'))).toBe(true);
+
+    // 2. Verify HMAC OAuth state preserves trusted initiating origin (e.g. https://www.luantihub.org) and popup mode
+    const stateWww = await createOAuthStateToken('github', 'test-secret', {
+      origin: 'https://www.luantihub.org',
+      popup: true
+    });
+    const parsedWww = await parseOAuthStateToken(stateWww, 'github', 'test-secret');
+    expect(parsedWww.valid).toBe(true);
+    expect(parsedWww.origin).toBe('https://www.luantihub.org');
+    expect(parsedWww.popup).toBe(true);
+
+    // Reject untrusted origin in state token
+    const stateEvil = await createOAuthStateToken('github', 'test-secret', {
+      origin: 'https://evil.example.com'
+    });
+    const parsedEvil = await parseOAuthStateToken(stateEvil, 'github', 'test-secret');
+    expect(parsedEvil.valid).toBe(true);
+    expect(parsedEvil.origin).toBeUndefined();
+  });
+
+  it('should enforce strict package ownership via claimed author_id or verified forge ownership (without heuristic suffix stripping) and block self-reviews', async () => {
+    const {
+      verifyStrictPackageAuthorOwnership
+    } = await import('../../functions/api/auth/lib/session');
+    const authService = TestBed.inject(AuthService);
+    const packageService = TestBed.inject(PackageService);
+
+    const sessionUser: any = {
+      id: '42',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'https://avatars.githubusercontent.com/u/1?v=4',
+      bio: null,
+      website_url: null,
+      provider: 'github' as const,
+      role: 'admin' as const,
+      identities: [
+        { provider: 'github' as const, provider_username: 'sakel-hub', profile_url: 'https://github.com/sakel-hub', verified: true }
+      ],
+      verifiedHandles: ['sakel-hub']
+    };
+
+    // Unclaimed package with different author handle ('SaKeL' vs 'sakel-hub') and Bitbucket repo must NOT match via heuristic suffix stripping
+    expect(
+      verifyStrictPackageAuthorOwnership(
+        sessionUser,
+        sessionUser.identities,
+        {
+          author_id: 'ext_sakel',
+          author_name: 'SaKeL',
+          repo_url: 'https://bitbucket.org/minetest_gamers/everness'
+        },
+        'SaKeL'
+      )
+    ).toBe(false);
+
+    // Once claimed (author_id === sessionUser.id), strict ownership succeeds on both server and client
+    expect(
+      verifyStrictPackageAuthorOwnership(
+        sessionUser,
+        sessionUser.identities,
+        {
+          author_id: '42',
+          author_name: 'SaKeL',
+          repo_url: 'https://bitbucket.org/minetest_gamers/everness'
+        },
+        'SaKeL'
+      )
+    ).toBe(true);
+
+    (authService as any)._currentUser.set(sessionUser);
+    const unclaimedPkg: any = {
+      id: 'SaKeL/everness',
+      name: 'everness',
+      title: 'Everness',
+      author: 'SaKeL',
+      type: 'mod',
+      short_description: 'Everness mod',
+      repo: 'https://bitbucket.org/minetest_gamers/everness'
+    };
+    expect(authService.isPackageAuthor(unclaimedPkg)).toBe(false);
+
+    const claimedEvernessPkg: any = {
+      ...unclaimedPkg,
+      author_id: '42'
+    };
+    expect(authService.isPackageAuthor(claimedEvernessPkg)).toBe(true);
+    expect(authService.canManagePackage(claimedEvernessPkg)).toBe(true);
+
+    const submitResult = await packageService.submitReview(claimedEvernessPkg, {
+      rating: 5,
+      title: 'Self review attempt',
+      comment: 'Trying to review my own claimed package should be blocked.'
+    });
+    expect(submitResult.success).toBe(false);
+    expect(submitResult.message).toContain('cannot rate or review their own packages');
+  });
+
+  it('should block unauthenticated tokenless sign-in on POST /api/auth/me and require auth on package moderation report', async () => {
+    const { onRequestPost: onAuthMePost } = await import('../../functions/api/auth/me');
+    const { onRequestPost: onModeratePost } = await import('../../functions/api/packages/[author]/[name]/moderate');
+
+    const unauthSignInReq = new Request('https://luantihub.org/api/auth/me', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'github', username: 'SaKeL' })
+    });
+    const signInRes = await onAuthMePost({
+      request: unauthSignInReq,
+      env: { DB: undefined }
+    } as any);
+    expect(signInRes.status).toBe(401);
+
+    const unauthReportReq = new Request('https://luantihub.org/api/packages/SaKeL/everness/moderate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'report', reason: 'spam' })
+    });
+    const reportRes = await onModeratePost({
+      request: unauthReportReq,
+      env: { DB: { prepare: () => ({ bind: () => ({ first: async () => null, run: async () => ({}) }) }) } as any },
+      params: { author: 'SaKeL', name: 'everness' }
+    } as any);
+    expect(reportRes.status).toBe(401);
+  });
+
+  it('should support tap-to-toggle tooltips on touch devices for info icons, reset hero auto-slide timer on manual switch, open in-app Luanti Blog Article Dialog, and adapt WCO titlebar layout responsively', async () => {
+    const { sanitizeAndFormatBlogHtml, enrichLuantiBlogPostFromArticleHtml } = await import('./core/models/package.model');
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+
+    // 1. Verify Luanti Blog feed HTML formatting, removal of "All Blog Posts" secondary CTA, and in-app Blog Article Dialog
+    const sampleFeedJson = JSON.stringify({
+      version: 'https://jsonfeed.org/version/1.1',
+      title: 'Luanti Blog',
+      items: [
+        {
+          id: 'https://blog.luanti.org/2026/08/21/5.17.0-released/',
+          url: 'https://blog.luanti.org/2026/08/21/5.17.0-released/',
+          title: 'Luanti 5.17.0 – Released!',
+          content_html:
+            '<figure><img src="/static/blog/5.17.0/cover.webp" /><figcaption>Cover</figcaption></figure>' +
+            '<h2>Highlights</h2><p>Read the <a href="/2026/08/21/changelog/">full changelog</a> and see <img src="/static/blog/5.17.0/gamepad.webp" />.</p>' +
+            '<script>alert(1)</script>',
+          image: 'https://blog.luanti.org/static/blog/5.17.0/cover.webp',
+          date_published: '2026-08-21T12:00:00Z'
+        }
+      ]
+    });
+
+    const parsedBlog = parseLuantiBlogFeed(sampleFeedJson);
+    expect(parsedBlog).toBeTruthy();
+    expect(parsedBlog?.content_html).toBeTruthy();
+    expect(parsedBlog?.content_html).toContain('<h2>Highlights</h2>');
+    expect(parsedBlog?.content_html).toContain('href="https://blog.luanti.org/2026/08/21/changelog/"');
+    expect(parsedBlog?.content_html).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(parsedBlog?.content_html).toContain('src="https://blog.luanti.org/static/blog/5.17.0/gamepad.webp"');
+    expect(parsedBlog?.content_html).not.toContain('<script>');
+    // Leading duplicate cover figure is stripped so it isn't shown twice under the modal cover banner
+    expect(parsedBlog?.content_html).not.toContain('cover.webp');
+    expect(sanitizeAndFormatBlogHtml('<p onclick="evil()">Safe</p>')).toBe('<p>Safe</p>');
+
+    // Verify enrichLuantiBlogPostFromArticleHtml preserves Jekyll _layouts/post.html credits ("Cover image by Zenon Seth.") and author
+    const renderedArticleHtml = `
+      <header class="hero hero-shadow is-medium is-primary">
+        <div class="hero-image" style="background-image: url('/static/blog/2026_cdb_incident/cover.webp');"></div>
+        <div class="hero-body">
+          <div class="container">
+            <h1 class="title">URGENT: ContentDB security incident: 22–26 October 2026</h1>
+            <p class="subtitle">Written by Luanti team</p>
+          </div>
+        </div>
+      </header>
+      <main class="container my-6">
+        <article class="content">
+          <script type="application/ld+json">{"@type":"BlogPosting","image":"https://blog.luanti.org/static/blog/2026_cdb_incident/cover.webp"}</script>
+          <p>If you have any questions or concerns, or notice anything suspicious, please contact us at <a href="mailto:security@luanti.org">security@luanti.org</a>.</p>
+          <p class="mt-6 has-text-grey">Cover image by Zenon Seth.</p>
+        </article>
+      </main>
+    `;
+    const enrichedBlog = enrichLuantiBlogPostFromArticleHtml(parsedBlog!, renderedArticleHtml);
+    expect(enrichedBlog.author).toBe('Luanti team');
+    expect(enrichedBlog.content_html).toContain('Cover image by Zenon Seth.');
+    expect(enrichedBlog.content_html).not.toContain('application/ld+json');
+
+    pkgService.setLatestBlogPost(parsedBlog!);
+    const blogSlide = pkgService.heroShowcasePackages()[0];
+    expect(blogSlide._promo?.cta_label).toBe('Read Article');
+    expect(blogSlide._promo?.secondary_cta_label).toBeUndefined();
+    expect(blogSlide._promo?.secondary_cta_url).toBeUndefined();
+
+    // Clicking "Read Article" on the Hero Billboard opens the in-app Blog Article Dialog instead of navigating externally
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    heroFixture.detectChanges();
+    const heroComp = heroFixture.componentInstance;
+    heroComp.currentIndex.set(0);
+    heroComp.onPromoCtaClick(blogSlide._promo!.cta_url, new MouseEvent('click'));
+    expect(pkgService.activeBlogArticle()?.title).toBe('Luanti 5.17.0 – Released!');
+    expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+    // Updating blog post with a payload that lacks a cover image must preserve the real hero cover image
+    pkgService.setLatestBlogPost({
+      ...parsedBlog!,
+      image_url: '/banners/luanti-5-18-0.png'
+    });
+    expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+    pkgService.closeBlogArticleModal();
+    expect(pkgService.activeBlogArticle()).toBeNull();
+
+    // 2. Verify Hero Billboard auto-slide timer resets from 0 when manually switching slides even while hovered (isPaused() === true)
+    const twoSlides = [
+      blogSlide,
+      (pkgService as any).normalizePackage({
+        id: 'Wuzzy/mineclone2',
+        author: 'Wuzzy',
+        name: 'mineclone2',
+        title: 'VoxeLibre',
+        type: 'game',
+        short_desc: 'Survival sandbox game',
+        downloads: 500000
+      })
+    ];
+    (pkgService as any)._packages.set([twoSlides[1]]);
+    heroFixture.detectChanges();
+
+    heroComp.onMouseEnter();
+    expect(heroComp.isPaused()).toBe(true);
+    const startSpy = vi.spyOn(heroComp as any, 'startAutoSlide');
+    heroComp.next(new MouseEvent('click'));
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    heroComp.goTo(0, new MouseEvent('click'));
+    expect(startSpy).toHaveBeenCalledTimes(2);
+    startSpy.mockRestore();
+
+    // 3. Verify Responsive WCO titlebar geometry variables and isWcoCompact threshold (< 1180px)
+    const origWco = (navigator as any).windowControlsOverlay;
+    const wcoListeners: Array<() => void> = [];
+    let currentRect = { x: 80, y: 0, width: 920, height: 38 };
+    try {
+      Object.defineProperty(navigator, 'windowControlsOverlay', {
+        configurable: true,
+        value: {
+          visible: true,
+          getTitlebarAreaRect: () => currentRect,
+          addEventListener: (type: string, cb: () => void) => {
+            if (type === 'geometrychange') wcoListeners.push(cb);
+          }
+        }
+      });
+
+      pwaService.initWindowControlsOverlay();
+      expect(pwaService.isWcoActive()).toBe(true);
+      expect(pwaService.isWcoCompact()).toBe(true);
+      expect(document.documentElement.style.getPropertyValue('--wco-titlebar-width')).toBe('920px');
+      expect(document.documentElement.style.getPropertyValue('--wco-titlebar-x')).toBe('80px');
+
+      currentRect = { x: 80, y: 0, width: 1360, height: 38 };
+      wcoListeners.forEach(fn => fn());
+      expect(pwaService.isWcoCompact()).toBe(false);
+      expect(document.documentElement.style.getPropertyValue('--wco-titlebar-width')).toBe('1360px');
+    } finally {
+      if (origWco !== undefined) {
+        Object.defineProperty(navigator, 'windowControlsOverlay', {
+          configurable: true,
+          value: origWco
+        });
+      } else {
+        delete (navigator as any).windowControlsOverlay;
+      }
+      document.documentElement.classList.remove('wco-active');
+      document.documentElement.style.removeProperty('--wco-titlebar-x');
+      document.documentElement.style.removeProperty('--wco-titlebar-width');
+      document.documentElement.style.removeProperty('--wco-titlebar-height');
+      document.documentElement.style.removeProperty('--wco-right-inset');
+    }
+  });
 });

@@ -31,6 +31,7 @@ export class TooltipDirective implements OnInit, OnDestroy {
   }
   @Input() appTooltipDelay: number = 180;
   @Input() appTooltipMultiline: boolean = false;
+  @Input() appTooltipTap: boolean = false;
 
   private tooltipEl: HTMLElement | null = null;
   private currentTooltipId: string | null = null;
@@ -38,6 +39,7 @@ export class TooltipDirective implements OnInit, OnDestroy {
   private lastTouchTime = 0;
   private cleanups: (() => void)[] = [];
   private escapeCleanup: (() => void) | null = null;
+  private outsideTapCleanup: (() => void) | null = null;
 
   private static activeInstance: TooltipDirective | null = null;
   private static globalListenersInitialized = false;
@@ -65,6 +67,23 @@ export class TooltipDirective implements OnInit, OnDestroy {
     });
   }
 
+  private isInteractiveTapTarget(native: HTMLElement): boolean {
+    if (this.appTooltipTap || this.appTooltipMultiline) return true;
+    if (!native) return false;
+    if (native.classList?.contains('cursor-help') || native.hasAttribute?.('data-tooltip-tap')) {
+      return true;
+    }
+    if (native.tagName === 'SPAN') {
+      return true;
+    }
+    if (typeof native.querySelector === 'function') {
+      if (native.querySelector('[lucideInfo], [lucideAlertCircle], [lucideHelpCircle]')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   ngOnInit(): void {
     if (typeof window === 'undefined' || !this.el?.nativeElement) return;
     const native = this.el.nativeElement as HTMLElement;
@@ -79,12 +98,15 @@ export class TooltipDirective implements OnInit, OnDestroy {
       };
 
       const onMouseLeave = () => {
+        if (Date.now() - this.lastTouchTime < 800) return;
         this.hide();
       };
 
       const onTouchStart = () => {
         this.lastTouchTime = Date.now();
-        this.hide();
+        if (!this.isInteractiveTapTarget(native)) {
+          this.hide();
+        }
       };
 
       const onFocusIn = () => {
@@ -96,7 +118,19 @@ export class TooltipDirective implements OnInit, OnDestroy {
         this.hide();
       };
 
-      const onClick = () => {
+      const onClick = (e: MouseEvent) => {
+        if (this.isInteractiveTapTarget(native)) {
+          if (native.classList?.contains('cursor-help') || this.appTooltipMultiline || this.appTooltipTap) {
+            e.stopPropagation();
+          }
+          if (TooltipDirective.activeInstance === this && this.tooltipEl) {
+            this.hide();
+          } else {
+            this.clearTimeout();
+            this.show(true);
+          }
+          return;
+        }
         this.hide();
       };
 
@@ -105,7 +139,7 @@ export class TooltipDirective implements OnInit, OnDestroy {
       native.addEventListener('touchstart', onTouchStart, { passive: true });
       native.addEventListener('focusin', onFocusIn, { passive: true });
       native.addEventListener('focusout', onFocusOut, { passive: true });
-      native.addEventListener('click', onClick, { passive: true });
+      native.addEventListener('click', onClick);
 
       this.cleanups.push(
         () => native.removeEventListener('mouseenter', onMouseEnter),
@@ -162,13 +196,17 @@ export class TooltipDirective implements OnInit, OnDestroy {
     return text;
   }
 
-  private show(): void {
+  private show(forceShow = false): void {
     if (this.tooltipEl || typeof document === 'undefined' || !this.el?.nativeElement) return;
     const native = this.el.nativeElement as HTMLElement;
 
-    // Element must still be connected to DOM and actively hovered/focused
+    // Element must still be connected to DOM and actively hovered/focused (unless triggered by tap)
     if (!native.isConnected) return;
-    if (typeof native.matches === 'function' && !native.matches(':hover, :focus-visible, :focus-within')) {
+    if (
+      !forceShow &&
+      typeof native.matches === 'function' &&
+      !native.matches(':hover, :focus-visible, :focus-within')
+    ) {
       return;
     }
 
@@ -232,6 +270,21 @@ export class TooltipDirective implements OnInit, OnDestroy {
     };
     document.addEventListener('keydown', onDocKey, { once: true });
     this.escapeCleanup = () => document.removeEventListener('keydown', onDocKey);
+
+    // Dismiss when tapping/clicking anywhere outside the trigger element
+    const onOutsidePointerDown = (e: Event) => {
+      const target = e.target as Node | null;
+      if (target && native.contains(target)) {
+        return;
+      }
+      this.hide();
+    };
+    document.addEventListener('pointerdown', onOutsidePointerDown, { capture: true, passive: true });
+    document.addEventListener('touchstart', onOutsidePointerDown, { capture: true, passive: true });
+    this.outsideTapCleanup = () => {
+      document.removeEventListener('pointerdown', onOutsidePointerDown, { capture: true } as EventListenerOptions);
+      document.removeEventListener('touchstart', onOutsidePointerDown, { capture: true } as EventListenerOptions);
+    };
   }
 
   private positionTooltip(): void {
@@ -268,7 +321,16 @@ export class TooltipDirective implements OnInit, OnDestroy {
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
 
-    if (top < padding && this.appTooltipPlacement === 'top') {
+    if (
+      (this.appTooltipPlacement === 'right' && left + tipRect.width > viewportWidth - padding) ||
+      (this.appTooltipPlacement === 'left' && left < padding)
+    ) {
+      top = hostRect.bottom + gap;
+      if (top + tipRect.height > viewportHeight - padding) {
+        top = hostRect.top - tipRect.height - gap;
+      }
+      left = hostRect.left + (hostRect.width - tipRect.width) / 2;
+    } else if (top < padding && this.appTooltipPlacement === 'top') {
       top = hostRect.bottom + gap;
     } else if (top + tipRect.height > viewportHeight - padding && this.appTooltipPlacement === 'bottom') {
       top = hostRect.top - tipRect.height - gap;
@@ -298,6 +360,10 @@ export class TooltipDirective implements OnInit, OnDestroy {
     if (this.escapeCleanup) {
       this.escapeCleanup();
       this.escapeCleanup = null;
+    }
+    if (this.outsideTapCleanup) {
+      this.outsideTapCleanup();
+      this.outsideTapCleanup = null;
     }
     if (this.tooltipEl) {
       this.tooltipEl.remove();

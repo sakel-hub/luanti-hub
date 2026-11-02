@@ -29,6 +29,7 @@ export interface LuantiBlogPost {
   id: string;
   title: string;
   summary: string;
+  content_html?: string;
   url: string;
   image_url: string;
   published_at: string;
@@ -38,6 +39,7 @@ export interface LuantiBlogPost {
 export interface LuantiPackage {
   id: string; // "author/name"
   author: string;
+  author_id?: string; // Verified D1 user ID when claimed by a registered author
   name: string; // technical name from mod.conf
   title: string; // Display title
   type: PackageType;
@@ -429,6 +431,89 @@ function extractFirstImageFromHtml(rawHtml: string): string | null {
 }
 
 /**
+ * Sanitizes and formats raw HTML from the official Luanti Blog feed (`feed.json` / `feed.rss`)
+ * for safe, styled rendering inside the in-app Luanti Blog Article Dialog.
+ */
+export function sanitizeAndFormatBlogHtml(rawHtml?: string | null, heroImageUrl?: string | null): string {
+  if (!rawHtml) return '';
+  let html = String(rawHtml)
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1')
+    .trim();
+  if (!html) return '';
+
+  // Decode entity-escaped HTML tags when coming from XML-escaped RSS <description>
+  if (!/<[a-zA-Z]/.test(html) && /&lt;[a-zA-Z]/.test(html)) {
+    html = decodeHtmlAndXmlEntities(html);
+  }
+
+  // Strip dangerous elements and inline event handlers
+  html = html
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+
+  // Rewrite relative src/poster URLs on media elements and add lazy loading to images
+  html = html.replace(/<img\b([^>]*)>/gi, (_full, attrs: string) => {
+    let updatedAttrs = attrs.replace(
+      /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
+      (srcFull, d, s, u) => {
+        const rawSrc = d ?? s ?? u ?? '';
+        const resolved = resolveBlogAssetUrl(decodeHtmlAndXmlEntities(rawSrc));
+        return resolved ? `src="${resolved}"` : srcFull;
+      }
+    );
+    if (!/\bloading\s*=/i.test(updatedAttrs)) {
+      updatedAttrs += ' loading="lazy" decoding="async"';
+    }
+    return `<img${updatedAttrs}>`;
+  });
+
+  // Rewrite relative href URLs on anchor tags and ensure external links open safely in a new tab
+  html = html.replace(/<a\b([^>]*)>/gi, (_full, attrs: string) => {
+    let resolvedHref = '';
+    let updatedAttrs = attrs.replace(
+      /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
+      (_hrefFull, d, s, u) => {
+        const rawHref = (d ?? s ?? u ?? '').trim();
+        if (!rawHref || /^(javascript|data|vbscript):/i.test(rawHref)) {
+          return 'href="#"';
+        }
+        if (rawHref.startsWith('#') || /^mailto:/i.test(rawHref)) {
+          resolvedHref = rawHref;
+          return `href="${rawHref}"`;
+        }
+        const resolved = resolveBlogAssetUrl(decodeHtmlAndXmlEntities(rawHref));
+        resolvedHref = resolved || '#';
+        return `href="${resolvedHref}"`;
+      }
+    );
+    if (resolvedHref && !resolvedHref.startsWith('#')) {
+      updatedAttrs = updatedAttrs
+        .replace(/\btarget\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/\brel\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+      updatedAttrs += ' target="_blank" rel="noopener noreferrer"';
+    }
+    return `<a${updatedAttrs}>`;
+  });
+
+  // Strip duplicate leading hero banner image/figure if it matches the dialog cover image
+  if (heroImageUrl) {
+    const normalizedHero = resolveBlogAssetUrl(heroImageUrl) || heroImageUrl;
+    const leadingFigureMatch = html.match(/^\s*<figure\b[^>]*>[\s\S]*?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/figure>\s*/i);
+    if (leadingFigureMatch?.[1] && leadingFigureMatch[1] === normalizedHero) {
+      html = html.slice(leadingFigureMatch[0].length).trim();
+    } else {
+      const leadingImgMatch = html.match(/^\s*(?:<p>\s*)?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>(?:\s*<\/p>)?\s*/i);
+      if (leadingImgMatch?.[1] && leadingImgMatch[1] === normalizedHero) {
+        html = html.slice(leadingImgMatch[0].length).trim();
+      }
+    }
+  }
+
+  return html.trim();
+}
+
+/**
  * Parses either the official Luanti Blog RSS 2.0 feed (`https://blog.luanti.org/feed.rss`)
  * or JSON Feed (`https://blog.luanti.org/feed.json`) and returns the latest article metadata.
  */
@@ -451,10 +536,18 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
       const summary =
         extractCleanBlogSummary(first.summary || first.content_text || rawHtml) ||
         'Read the latest official announcement and development update on the Luanti Blog.';
+      const attachmentImg = Array.isArray(first.attachments)
+        ? first.attachments.find(
+            (a: any) =>
+              String(a?.mime_type || '').toLowerCase().startsWith('image/') ||
+              /\.(webp|png|jpe?g|gif|avif)$/i.test(String(a?.url || ''))
+          )?.url
+        : undefined;
       const imageUrl =
-        resolveBlogAssetUrl(first.image || first.banner_image) ||
+        resolveBlogAssetUrl(first.image || first.banner_image || attachmentImg) ||
         extractFirstImageFromHtml(rawHtml) ||
         '/banners/luanti-5-18-0.png';
+      const contentHtml = sanitizeAndFormatBlogHtml(rawHtml, imageUrl);
       const pubTime = Date.parse(String(first.date_published || first.date_modified || ''));
       const publishedAt = Number.isFinite(pubTime) && pubTime > 0
         ? new Date(pubTime).toISOString()
@@ -470,6 +563,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
         id: String(first.id || url).trim(),
         title,
         summary,
+        ...(contentHtml ? { content_html: contentHtml } : {}),
         url,
         image_url: imageUrl,
         published_at: publishedAt,
@@ -494,7 +588,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
   const rawTitle = extractTag('title');
   const rawLink = extractTag('link') || extractTag('guid');
   const rawGuid = extractTag('guid') || rawLink;
-  const rawDesc = extractTag('description') || extractTag('content:encoded');
+  const rawDesc = extractTag('content:encoded') || extractTag('description');
   const rawPubDate = extractTag('pubDate') || extractTag('dc:date');
   const rawAuthor = extractTag('dc:creator') || extractTag('author');
 
@@ -511,6 +605,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
   const summary =
     extractCleanBlogSummary(rawDesc) ||
     'Read the latest official announcement and development update on the Luanti Blog.';
+  const contentHtml = sanitizeAndFormatBlogHtml(rawDesc, imageUrl);
 
   const pubTime = Date.parse(rawPubDate);
   const publishedAt = Number.isFinite(pubTime) && pubTime > 0
@@ -523,10 +618,83 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
     id: decodeHtmlAndXmlEntities(rawGuid || url).trim(),
     title,
     summary,
+    ...(contentHtml ? { content_html: contentHtml } : {}),
     url,
     image_url: imageUrl,
     published_at: publishedAt,
     ...(cleanAuthor ? { author: cleanAuthor } : {})
   };
 }
+
+/**
+ * Enriches a parsed `LuantiBlogPost` with the full rendered `<article class="content">` HTML
+ * from the article webpage on `blog.luanti.org` (`_layouts/post.html`), which includes
+ * Jekyll frontmatter footers (`Cover image by ...` and `Thanks to our post contributors this month: ...`)
+ * as well as `Written by ...` author attribution and hero cover image metadata that are omitted from `feed.rss` / `feed.json`.
+ */
+export function enrichLuantiBlogPostFromArticleHtml(
+  post: LuantiBlogPost,
+  articlePageHtml?: string | null
+): LuantiBlogPost {
+  if (!post || !articlePageHtml || typeof articlePageHtml !== 'string') {
+    return post;
+  }
+
+  let bestImageUrl = post.image_url;
+  const isFallbackImg = !bestImageUrl || bestImageUrl === '/banners/luanti-5-18-0.png' || bestImageUrl === '/promo.png';
+  if (isFallbackImg) {
+    const heroBgMatch = articlePageHtml.match(/class=["'][^"']*\bhero-image\b[^"']*["'][^>]*style=["'][^"']*url\((?:['"]?)([^'")]+)(?:['"]?)\)/i);
+    const jsonLdImgMatch = articlePageHtml.match(/"@type"\s*:\s*"BlogPosting"[\s\S]*?"image"\s*:\s*"([^"]+)"/i);
+    const extractedImg = resolveBlogAssetUrl(heroBgMatch?.[1] || jsonLdImgMatch?.[1]);
+    if (extractedImg) {
+      bestImageUrl = extractedImg;
+    }
+  }
+
+  let bestAuthor = post.author;
+  if (!bestAuthor) {
+    const subtitleMatch = articlePageHtml.match(/<header\b[^>]*class=["'][^"']*\bhero\b[\s\S]*?<p\b[^>]*class=["'][^"']*\bsubtitle\b[^"']*["'][^>]*>([\s\S]*?)<\/p>/i);
+    if (subtitleMatch?.[1]) {
+      const subtitleText = decodeHtmlAndXmlEntities(
+        subtitleMatch[1]
+          .replace(/<br\b[^>]*>[\s\S]*$/i, '')
+          .replace(/<[^>]+>/g, ' ')
+      )
+        .replace(/\s+/g, ' ')
+        .trim();
+      const writtenByMatch = subtitleText.match(/^Written by\s+(.+)$/i);
+      if (writtenByMatch?.[1]) {
+        bestAuthor = writtenByMatch[1].trim();
+      }
+    }
+  }
+
+  const articleMatch =
+    articlePageHtml.match(/<article\b[^>]*class=["'][^"']*\bcontent\b[^"']*["'][^>]*>([\s\S]*?)<\/article>/i) ||
+    articlePageHtml.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i);
+
+  let enrichedContentHtml = post.content_html;
+  if (articleMatch?.[1]) {
+    const sanitizedArticle = sanitizeAndFormatBlogHtml(articleMatch[1], bestImageUrl);
+    if (sanitizedArticle) {
+      enrichedContentHtml = sanitizedArticle;
+    }
+  } else {
+    const creditMatch = articlePageHtml.match(/<p\b[^>]*class=["'][^"']*\bhas-text-grey\b[^"']*["'][^>]*>[\s\S]*?Cover image by[\s\S]*?<\/p>/i);
+    if (creditMatch?.[0] && enrichedContentHtml && !enrichedContentHtml.includes('Cover image by')) {
+      const sanitizedCredit = sanitizeAndFormatBlogHtml(creditMatch[0], bestImageUrl);
+      if (sanitizedCredit) {
+        enrichedContentHtml = `${enrichedContentHtml}\n${sanitizedCredit}`;
+      }
+    }
+  }
+
+  return {
+    ...post,
+    image_url: bestImageUrl,
+    ...(enrichedContentHtml ? { content_html: enrichedContentHtml } : {}),
+    ...(bestAuthor ? { author: bestAuthor } : {})
+  };
+}
+
 

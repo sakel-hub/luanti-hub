@@ -17,7 +17,8 @@ import {
   ReleaseNotesPayload,
   HeroPromotion,
   LuantiBlogPost,
-  parseLuantiBlogFeed
+  parseLuantiBlogFeed,
+  enrichLuantiBlogPostFromArticleHtml
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
@@ -94,12 +95,12 @@ export class PackageService {
   private readonly _promotions = signal<HeroPromotion[]>([]);
   private readonly _adminPromotions = signal<HeroPromotion[]>([]);
   private readonly _latestBlogPost = signal<LuantiBlogPost | null>(null);
+  private readonly _activeBlogArticle = signal<LuantiBlogPost | null>(null);
   private readonly _promoClockTick = signal<number>(Date.now());
 
   private searchDebounceTimer: any = null;
   private bootCacheSyncTimer: any = null;
   private hydratedMetaPersistTimer: any = null;
-  private d1WritebackTimer: any = null;
   private backgroundRefreshTimer: any = null;
   private lastCatalogSyncAt = 0;
   private isBackgroundRefreshing = false;
@@ -112,14 +113,12 @@ export class PackageService {
   private readonly deepHydratedIds = new Set<string>();
   private readonly _deepHydratedVersion = signal<number>(0);
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
-  private readonly pendingD1Writeback = new Map<string, any>();
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
   private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
   private readonly releaseNotesCache = new Map<string, ReleaseNotesPayload>();
   private readonly readmeCache = new Map<string, string | null>();
   private readonly readmePromiseCache = new Map<string, Promise<string | undefined>>();
-  private readonly reportedBrokenGitIds = new Set<string>();
   private readonly hydrationQueue: LuantiPackage[] = [];
   private activeHydrationWorkers = 0;
 
@@ -161,6 +160,7 @@ export class PackageService {
   readonly promotions = this._promotions.asReadonly();
   readonly adminPromotions = this._adminPromotions.asReadonly();
   readonly latestBlogPost = this._latestBlogPost.asReadonly();
+  readonly activeBlogArticle = this._activeBlogArticle.asReadonly();
 
   readonly activePromotions = computed<HeroPromotion[]>(() => {
     const nowMs = this._promoClockTick();
@@ -366,8 +366,6 @@ export class PackageService {
       banner_url: post.image_url && post.image_url !== '/promo.png' ? post.image_url : '/banners/luanti-5-18-0.png',
       cta_label: 'Read Article',
       cta_url: post.url,
-      secondary_cta_label: 'All Blog Posts',
-      secondary_cta_url: 'https://blog.luanti.org/',
       badge_text: badgeText,
       starts_at: post.published_at || new Date(0).toISOString(),
       expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
@@ -405,8 +403,57 @@ export class PackageService {
     this.refreshPromoClock();
   }
 
+  private mergeBlogPostPreservingImage(
+    incoming: LuantiBlogPost,
+    existing?: LuantiBlogPost | null,
+    overrideImageUrl?: string
+  ): LuantiBlogPost {
+    const isFallbackImg = (url?: string | null) =>
+      !url || url === '/banners/luanti-5-18-0.png' || url === '/promo.png';
+    const bestImage =
+      (!isFallbackImg(overrideImageUrl) ? overrideImageUrl : undefined) ||
+      (!isFallbackImg(incoming.image_url) ? incoming.image_url : undefined) ||
+      (!isFallbackImg(existing?.image_url) ? existing?.image_url : undefined) ||
+      incoming.image_url ||
+      existing?.image_url ||
+      '/banners/luanti-5-18-0.png';
+    return {
+      ...existing,
+      ...incoming,
+      image_url: bestImage,
+      content_html: incoming.content_html || existing?.content_html
+    };
+  }
+
   setLatestBlogPost(post: LuantiBlogPost | null): void {
-    this._latestBlogPost.set(post && post.title && post.url ? post : null);
+    if (!post || !post.title || !post.url) {
+      this._latestBlogPost.set(null);
+      return;
+    }
+    const merged = this.mergeBlogPostPreservingImage(post, this._latestBlogPost());
+    this._latestBlogPost.set(merged);
+    if (this._activeBlogArticle()) {
+      this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(merged, this._activeBlogArticle()));
+    }
+  }
+
+  openBlogArticleModal(post?: LuantiBlogPost | null, slideBannerUrl?: string): void {
+    const base = post ?? this._latestBlogPost();
+    if (!base || !base.title) return;
+    const merged = this.mergeBlogPostPreservingImage(base, this._latestBlogPost(), slideBannerUrl);
+    this._latestBlogPost.set(merged);
+    this._activeBlogArticle.set(merged);
+    const hasArticlePageCredits = Boolean(
+      merged.content_html &&
+        (merged.content_html.includes('has-text-grey') || merged.content_html.includes('Cover image by'))
+    );
+    if (!hasArticlePageCredits) {
+      this.ensureLatestBlogPostLoaded(false, true);
+    }
+  }
+
+  closeBlogArticleModal(): void {
+    this._activeBlogArticle.set(null);
   }
 
   // High-performance O(1) per-package filtered & sorted list
@@ -776,92 +823,6 @@ export class PackageService {
     }, 400);
   }
 
-  private queueD1Writeback(pkg: LuantiPackage, fields: Partial<LuantiPackage>): void {
-    if (!this.edgeApiAvailable || !pkg?.author || !pkg?.name) return;
-    const lic = fields.license || pkg.license || '';
-    const cdbDl = Number(fields.contentdb_downloads ?? pkg.contentdb_downloads ?? 0);
-    const hasGitAsset =
-      this.isGitScreenshotUrl(fields.banner) ||
-      this.isGitScreenshotUrl(fields.thumbnail) ||
-      this.isGitScreenshotUrl(pkg.banner);
-    if (!lic && cdbDl <= 0 && !hasGitAsset) return;
-
-    const key = pkg.id.toLowerCase();
-    const resolvedScreenshots = Array.isArray(fields.screenshots) && fields.screenshots.length > 0
-      ? fields.screenshots
-      : (Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? pkg.screenshots : undefined);
-    this.pendingD1Writeback.set(key, {
-      id: pkg.id,
-      author: pkg.author,
-      name: pkg.name,
-      title: pkg.title,
-      type: pkg.type,
-      short_desc: fields.short_desc || pkg.short_desc,
-      long_desc: fields.desc || pkg.desc || undefined,
-      screenshots: resolvedScreenshots,
-      license: lic,
-      media_license: fields.media_license || pkg.media_license || lic,
-      min_minetest_version: fields.min_minetest_version || pkg.min_minetest_version || '5.0.0',
-      tags: fields.tags || pkg.tags,
-      contentdb_downloads: cdbDl,
-      downloads: Number(fields.downloads ?? pkg.downloads ?? cdbDl),
-      file_size: fields.file_size || pkg.file_size,
-      video_url: fields.video_url || pkg.video_url,
-      video_thumbnail_url: fields.video_thumbnail_url || pkg.video_thumbnail_url,
-      repo_url: fields.repo_url || pkg.repo_url,
-      thumbnail: fields.thumbnail || pkg.thumbnail,
-      banner: fields.banner || pkg.banner
-    });
-
-    if (this.d1WritebackTimer) {
-      clearTimeout(this.d1WritebackTimer);
-    }
-    this.d1WritebackTimer = setTimeout(() => {
-      this.flushD1WritebackBatch();
-    }, 1200);
-  }
-
-  private async flushD1WritebackBatch(): Promise<void> {
-    if (!this.edgeApiAvailable || this.pendingD1Writeback.size === 0) return;
-    const batch = Array.from(this.pendingD1Writeback.values()).slice(0, 50);
-    for (const item of batch) {
-      this.pendingD1Writeback.delete(String(item.id).toLowerCase());
-    }
-    const outboxId = `hydrate:${batch.map(b => String(b.id).toLowerCase()).join(',')}`;
-    const queueHydrateMutation = () => {
-      this.pwaService
-        .queueBackgroundMutation({
-          id: outboxId,
-          url: '/api/packages/hydrate',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: { items: batch }
-        })
-        .catch(() => {});
-    };
-
-    if (!this.pwaService.isOnline()) {
-      queueHydrateMutation();
-      return;
-    }
-    try {
-      const res = await fetch('/api/packages/hydrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: batch })
-      });
-      if (!res || (!res.ok && res.status >= 500)) {
-        throw new Error('D1 writeback failed');
-      }
-    } catch {
-      // Queue failed D1 writeback batch for Service Worker Background Sync
-      queueHydrateMutation();
-    }
-    if (this.pendingD1Writeback.size > 0) {
-      this.d1WritebackTimer = setTimeout(() => this.flushD1WritebackBatch(), 1500);
-    }
-  }
-
   private buildSearchBlob(pkg: Partial<LuantiPackage>): string {
     return [
       pkg.title || '',
@@ -1130,9 +1091,13 @@ export class PackageService {
     const resolvedLic = item.license || item.media_license || cachedMeta?.license || cachedMeta?.media_license || '';
     const resolvedMediaLic = item.media_license || item.license || cachedMeta?.media_license || cachedMeta?.license || '';
 
+    const rawAuthorId = String(item.author_id || cachedMeta?.author_id || '').trim();
+    const resolvedAuthorId = rawAuthorId && !rawAuthorId.startsWith('ext_') ? rawAuthorId : undefined;
+
     const pkg: LuantiPackage = {
       id: pkgId,
       author: resolvedAuthor,
+      ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
       name: item.name,
       title: item.title || item.name,
       type: item.type || 'mod',
@@ -1365,11 +1330,16 @@ export class PackageService {
         ? secondary.release_id
         : (primary.release_id ?? secondary.release_id);
 
+    const resolvedAuthorId =
+      (primary.author_id && !String(primary.author_id).startsWith('ext_') ? primary.author_id : undefined) ||
+      (secondary.author_id && !String(secondary.author_id).startsWith('ext_') ? secondary.author_id : undefined);
+
     const merged: LuantiPackage = {
       ...secondary,
       ...primary,
       id: primary.id,
       author: primary.author,
+      ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
       name: primary.name,
       release_id: resolvedReleaseId,
       title: primary.title || secondary.title,
@@ -1431,7 +1401,7 @@ export class PackageService {
     const byNameType = new Map<string, number>();
     const nameTypeCounts = new Map<string, number>();
     const normalizeBaseAuthor = (author: string) =>
-      String(author || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      String(author || '').trim().toLowerCase();
 
     for (const pkg of list) {
       const ntKey = `${normalizeBaseAuthor(pkg.author)}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
@@ -1612,6 +1582,9 @@ export class PackageService {
       path === '/legal';
 
     const isFirstSync = !this.initialUrlSynced;
+    if (!isFirstSync) {
+      this._activeBlogArticle.set(null);
+    }
     const edgeSeed =
       typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__
         ? (window as any).__LUANTI_INITIAL_PACKAGE__
@@ -1891,13 +1864,21 @@ export class PackageService {
         payload.latestBlogPost && payload.latestBlogPost.title && payload.latestBlogPost.url
           ? payload.latestBlogPost
           : null;
-      this._latestBlogPost.set(validBlog);
-      if (validBlog) {
-        this.pwaService.checkAndNotifyBlogPost(validBlog);
+      this.setLatestBlogPost(validBlog);
+      const mergedBlog = this._latestBlogPost();
+      if (mergedBlog) {
+        this.pwaService.checkAndNotifyBlogPost(mergedBlog);
       }
     }
-    if (!this._latestBlogPost()) {
+    const currentBlogAfterBoot = this._latestBlogPost();
+    if (!currentBlogAfterBoot) {
       this.ensureLatestBlogPostLoaded();
+    } else if (
+      !currentBlogAfterBoot.content_html ||
+      (!currentBlogAfterBoot.content_html.includes('has-text-grey') &&
+        !currentBlogAfterBoot.content_html.includes('Cover image by'))
+    ) {
+      this.ensureLatestBlogPostLoaded(false, true);
     }
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
@@ -2003,13 +1984,58 @@ export class PackageService {
     this.queueInitialVisibleHydration();
   }
 
+  private async fetchAndEnrichBlogArticlePage(
+    post: LuantiBlogPost,
+    isLocalhost: boolean
+  ): Promise<LuantiBlogPost> {
+    if (!post?.url) return post;
+    const pageCandidates: string[] = [];
+    try {
+      const parsedUrl = new URL(post.url);
+      if (isLocalhost && parsedUrl.hostname === 'blog.luanti.org') {
+        pageCandidates.push(`/blog-api${parsedUrl.pathname}${parsedUrl.search}`);
+      }
+      pageCandidates.push(post.url);
+      if (isLocalhost) {
+        pageCandidates.push(`https://api.allorigins.win/raw?url=${encodeURIComponent(post.url)}`);
+      }
+    } catch {
+      pageCandidates.push(post.url);
+    }
+
+    for (const candidateUrl of pageCandidates) {
+      try {
+        const res = await fetch(candidateUrl, {
+          headers: {
+            Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8'
+          }
+        });
+        if (!res || !res.ok) continue;
+        const html = await res.text();
+        if (!html || (!html.includes('<article') && !html.includes('Cover image by'))) {
+          continue;
+        }
+        return enrichLuantiBlogPostFromArticleHtml(post, html);
+      } catch {
+        // Try next candidate
+      }
+    }
+    return post;
+  }
+
   /**
    * Client-side fallback for fetching the latest Luanti Blog article from `https://blog.luanti.org/feed.rss`
    * (or `/blog-api/feed.rss` in local dev) when `/api/packages/?boot=1` is served from an older cache
-   * or proxied to an endpoint that did not include `latestBlogPost`.
+   * or proxied to an endpoint that did not include `latestBlogPost` or rendered article page credits.
    */
-  private ensureLatestBlogPostLoaded(forceInTest = false): void {
-    if (this._latestBlogPost() || this.blogFeedInFlight) return;
+  private ensureLatestBlogPostLoaded(forceInTest = false, forceContentRefresh = false): void {
+    const current = this._latestBlogPost();
+    const hasFullArticleCredits = Boolean(
+      current?.content_html &&
+        (current.content_html.includes('has-text-grey') || current.content_html.includes('Cover image by'))
+    );
+    if ((current && (!forceContentRefresh || hasFullArticleCredits)) || this.blogFeedInFlight) return;
+    if (!forceInTest && !forceContentRefresh && this.edgeApiAvailable) return;
     const isUnitTestEnv =
       typeof (globalThis as any).describe === 'function' &&
       typeof (globalThis as any).it === 'function';
@@ -2037,30 +2063,44 @@ export class PackageService {
           : [])
       ];
       try {
-        for (const url of feedUrls) {
-          try {
-            const res = await fetch(url, {
-              headers: {
-                Accept: 'application/rss+xml, application/xml, application/feed+json, application/json, text/xml;q=0.9, */*;q=0.8'
+        let basePost: LuantiBlogPost | null = this._latestBlogPost();
+        if (!basePost || !basePost.content_html) {
+          for (const url of feedUrls) {
+            try {
+              const res = await fetch(url, {
+                headers: {
+                  Accept: 'application/rss+xml, application/xml, application/feed+json, application/json, text/xml;q=0.9, */*;q=0.8'
+                }
+              });
+              if (!res || !res.ok) continue;
+              const text = await res.text();
+              if (!text || text.trimStart().startsWith('<!doctype html') || text.trimStart().startsWith('<!DOCTYPE html')) {
+                continue;
               }
-            });
-            if (!res || !res.ok) continue;
-            const text = await res.text();
-            if (!text || text.trimStart().startsWith('<!doctype html') || text.trimStart().startsWith('<!DOCTYPE html')) {
-              continue;
-            }
-            const post = parseLuantiBlogFeed(text);
-            if (post && post.title && post.url) {
-              if (!this._latestBlogPost()) {
-                this._latestBlogPost.set(post);
-                this.pwaService.checkAndNotifyBlogPost(post);
-                this.scheduleBootCachePersist();
+              const parsed = parseLuantiBlogFeed(text);
+              if (parsed && parsed.title && parsed.url) {
+                basePost = this.mergeBlogPostPreservingImage(parsed, this._latestBlogPost());
+                this._latestBlogPost.set(basePost);
+                if (this._activeBlogArticle()) {
+                  this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(basePost, this._activeBlogArticle()));
+                }
+                break;
               }
-              return;
+            } catch {
+              // Try next feed URL
             }
-          } catch {
-            // Try next feed URL
           }
+        }
+
+        if (basePost && basePost.title && basePost.url) {
+          const enriched = await this.fetchAndEnrichBlogArticlePage(basePost, isLocalhost);
+          const merged = this.mergeBlogPostPreservingImage(enriched, this._latestBlogPost());
+          this._latestBlogPost.set(merged);
+          if (this._activeBlogArticle()) {
+            this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(merged, this._activeBlogArticle()));
+          }
+          this.pwaService.checkAndNotifyBlogPost(merged);
+          this.scheduleBootCachePersist();
         }
       } finally {
         this.blogFeedInFlight = null;
@@ -2605,6 +2645,8 @@ export class PackageService {
     }
   }
 
+  private hydrationDrainScheduled = false;
+
   /**
    * Queue background hydration of a package's full ContentDB metrics (downloads, license, tags, min_minetest_version)
    * with priority support for currently visible search/category tiles.
@@ -2628,7 +2670,13 @@ export class PackageService {
     } else {
       this.hydrationQueue.push(pkg);
     }
-    this.drainHydrationQueue();
+    if (!this.hydrationDrainScheduled) {
+      this.hydrationDrainScheduled = true;
+      queueMicrotask(() => {
+        this.hydrationDrainScheduled = false;
+        this.drainHydrationQueue();
+      });
+    }
   }
 
   prioritizeVisiblePackages(packages: LuantiPackage[]): void {
@@ -2640,7 +2688,7 @@ export class PackageService {
 
   private drainHydrationQueue(): void {
     const MAX_CONCURRENT = 6;
-    if (this.edgeApiAvailable && this.hydrationQueue.length >= 2 && this.activeHydrationWorkers < MAX_CONCURRENT) {
+    if (this.edgeApiAvailable && this.hydrationQueue.length >= 1 && this.activeHydrationWorkers < MAX_CONCURRENT) {
       const batch = this.hydrationQueue.splice(0, 24);
       if (batch.length > 0) {
         this.activeHydrationWorkers++;
@@ -2716,7 +2764,11 @@ export class PackageService {
             h.banner ||
             (mergedShots.length > 0 ? mergedShots[0] : undefined);
 
+          const resolvedAuthorId =
+            (h.author_id && !String(h.author_id).startsWith('ext_') ? String(h.author_id) : undefined) ||
+            pkg.author_id;
           const patch: Partial<LuantiPackage> = {
+            ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
             license: lic,
             media_license: mediaLic,
             contentdb_downloads: cdbDl,
@@ -2849,6 +2901,7 @@ export class PackageService {
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
     this._activeVideoTheater.set(null);
+    this._activeBlogArticle.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
@@ -2883,6 +2936,7 @@ export class PackageService {
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
     this._activeVideoTheater.set(null);
+    this._activeBlogArticle.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
@@ -3495,7 +3549,9 @@ export class PackageService {
     forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom',
     fullName: string
   ): Promise<Array<{ name: string; download_url?: string }>> {
-    if (forge === 'custom') {
+    // When Cloudflare Edge Functions are active (`edgeApiAvailable`), all repository metadata scanning
+    // runs server-side at `/api/packages/*` to avoid browser CORS errors and forge rate limits.
+    if (forge === 'custom' || this.edgeApiAvailable) {
       return [];
     }
     const cacheKey = `${forge}:${fullName.toLowerCase()}`;
@@ -3534,10 +3590,25 @@ export class PackageService {
           if (Array.isArray(data)) {
             const listing = data
               .filter((item: any) => item && item.name && (item.type === 'file' || item.type === 'blob'))
-              .map((item: any) => ({
-                name: String(item.name),
-                download_url: item.download_url ? String(item.download_url) : undefined
-              }));
+              .map((item: any) => {
+                const fileName = String(item.name);
+                const isImageAsset = /\.(?:png|jpe?g|webp|gif|svg)$/i.test(fileName);
+                // Codeberg's default `item.download_url` (`/raw/branch/main/...`) and GitLab's `/-/raw/HEAD/...`
+                // do not send `Access-Control-Allow-Origin` headers on browser `fetch()` requests.
+                // Use their CORS-enabled REST API raw file routes for text/metadata files (`.cdb.json`, `mod.conf`, etc.).
+                const resolvedDownloadUrl =
+                  forge === 'codeberg'
+                    ? `https://codeberg.org/api/v1/repos/${fullName}/raw/${encodeURIComponent(fileName)}`
+                    : forge === 'gitlab'
+                      ? (isImageAsset
+                          ? `https://gitlab.com/${fullName}/-/raw/HEAD/${encodeURIComponent(fileName)}`
+                          : `https://gitlab.com/api/v4/projects/${encodeURIComponent(fullName)}/repository/files/${encodeURIComponent(fileName)}/raw?ref=HEAD`)
+                      : (item.download_url ? String(item.download_url) : undefined);
+                return {
+                  name: fileName,
+                  download_url: resolvedDownloadUrl
+                };
+              });
             this.repoExplicit404Cache.delete(cacheKey);
             this.repoDirCache.set(cacheKey, listing);
             return listing;
@@ -3615,7 +3686,7 @@ export class PackageService {
         return results;
       }
 
-      if (!pkg?.name || !pkg?.author) return results;
+      if (!pkg?.name || !pkg?.author || this.edgeApiAvailable) return results;
       const targetName = pkg.name.toLowerCase();
       const targetAuthor = pkg.author.toLowerCase();
 
@@ -3713,8 +3784,10 @@ export class PackageService {
 
   /**
    * Fetches an upstream ContentDB JSON endpoint with automatic fallback to `contentdb.milcho.org` mirror.
-   * Always prioritizes official `content.luanti.org/api` (`/cdb-api` on localhost) first, and only falls back
-   * to `contentdb.milcho.org/api` (`/mirror-api`) if the primary ContentDB request fails.
+   * On localhost (`ng serve` or unit tests), queries `/cdb-api` and `/mirror-api` via the dev proxy.
+   * In production (`!isLocalhost`), neither `content.luanti.org` nor `contentdb.milcho.org` sends
+   * `Access-Control-Allow-Origin` headers on `/api/packages/*` or `/api/users/*`, so requests are routed
+   * through same-origin `/api/*` Cloudflare Pages Functions to prevent browser CORS errors.
    */
   private async fetchUpstreamWithMirrorFallback(subpath: string): Promise<any | null> {
     let cleanPath = subpath.startsWith('/') ? subpath : `/${subpath}`;
@@ -3726,17 +3799,47 @@ export class PackageService {
       typeof window !== 'undefined' &&
       (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
 
+    if (this.edgeApiAvailable || !isLocalhost) {
+      if (!this.edgeApiAvailable) {
+        return null;
+      }
+      let edgeRoute: string | null = null;
+      let unwrapAuthor = false;
+      const pkgDetailMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(?:for-client\/.*)?$/);
+      const pkgSubMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(dependencies|releases|reviews)\/?$/);
+      const userMatch = cleanPath.match(/^\/users\/([^/?#]+)\/?$/);
+
+      if (pkgDetailMatch) {
+        edgeRoute = `/api/packages/${pkgDetailMatch[1]}/${pkgDetailMatch[2]}/?lite=1`;
+      } else if (pkgSubMatch) {
+        const sub = pkgSubMatch[3];
+        edgeRoute = `/api/packages/${pkgSubMatch[1]}/${pkgSubMatch[2]}/${sub}${sub === 'dependencies' ? '/' : ''}`;
+      } else if (userMatch) {
+        edgeRoute = `/api/authors/${userMatch[1]}`;
+        unwrapAuthor = true;
+      } else if (cleanPath.startsWith('/scores')) {
+        edgeRoute = '/api/scores';
+      }
+
+      if (!edgeRoute) {
+        return null;
+      }
+      try {
+        const res = await fetch(edgeRoute, { headers: { Accept: 'application/json' } });
+        if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          const json = await res.json();
+          return unwrapAuthor ? (json?.author || json) : json;
+        }
+      } catch {
+        // Ignore network error
+      }
+      return null;
+    }
+
     const preferOfficialDetail = !cleanPath.includes('/for-client/');
-
-    const remoteBases = (this.contentDbOnline || preferOfficialDetail)
-      ? ['https://content.luanti.org/api', 'https://contentdb.milcho.org/api']
-      : ['https://contentdb.milcho.org/api', 'https://content.luanti.org/api'];
-
-    const bases = isLocalhost
-      ? ((this.contentDbOnline || preferOfficialDetail)
-          ? ['/cdb-api', '/mirror-api']
-          : ['/mirror-api', '/cdb-api'])
-      : remoteBases;
+    const bases = (this.contentDbOnline || preferOfficialDetail)
+      ? ['/cdb-api', '/mirror-api']
+      : ['/mirror-api', '/cdb-api'];
 
     const isSinglePkgDetail = /^\/packages\/[^/?#]+\/[^/?#]+\/?$/.test(cleanPath);
 
@@ -3975,6 +4078,7 @@ export class PackageService {
     repoUrl?: string,
     checkListingFirst = false
   ): Promise<ReturnType<PackageService['parseCdbJsonText']>> {
+    if (this.edgeApiAvailable) return Promise.resolve(null);
     const normalized = this.normalizeGitRepoUrl(repoUrl);
     if (!normalized) return Promise.resolve(null);
     const cacheKey = normalized.toLowerCase();
@@ -3989,6 +4093,11 @@ export class PackageService {
         const owner = parts[0];
         const repo = parts[1].replace(/\.git$/i, '');
         const host = u.hostname.toLowerCase();
+        // MeseHub (`git.minetest.land`) enforces Anubis anti-bot PoW without browser CORS headers;
+        // Cloudflare Edge Functions scan MeseHub `.cdb.json` server-side via `fetchWithAnubisSupport`.
+        if (host.includes('git.minetest.land') && this.edgeApiAvailable) {
+          return null;
+        }
         const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
         const fullName = isGitlabHost ? parts.join('/').replace(/\.git$/i, '') : `${owner}/${repo}`;
         const forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom' =
@@ -4025,17 +4134,14 @@ export class PackageService {
             : host.includes('git.minetest.land')
               ? [`https://git.minetest.land/api/v1/repos/${owner}/${repo}/raw/.cdb.json`]
               : isGitlabHost
-                ? [`https://${u.hostname}/${fullName}/-/raw/HEAD/.cdb.json`]
+                ? [`https://${u.hostname}/api/v4/projects/${encodeURIComponent(fullName)}/repository/files/.cdb.json/raw?ref=HEAD`]
                 : host.includes('github.com')
                   ? [`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/.cdb.json`]
                   : host.includes('bitbucket.org')
                     ? [
                         `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/master/.cdb.json`,
                         `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/main/.cdb.json`,
-                        `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/HEAD/.cdb.json`,
-                        `https://bitbucket.org/${owner}/${repo}/raw/master/.cdb.json`,
-                        `https://bitbucket.org/${owner}/${repo}/raw/main/.cdb.json`,
-                        `https://bitbucket.org/${owner}/${repo}/raw/HEAD/.cdb.json`
+                        `https://api.bitbucket.org/2.0/repositories/${owner.toLowerCase()}/${repo.toLowerCase()}/src/HEAD/.cdb.json`
                       ]
                     : [])
         ];
@@ -4108,30 +4214,6 @@ export class PackageService {
       // Keep original if URL parsing fails
     }
     return trimmed;
-  }
-
-  private async autoReportBrokenGitRepo(pkg: LuantiPackage, attemptedUrl: string): Promise<void> {
-    if (!pkg?.author || !pkg?.name || !this.edgeApiAvailable) return;
-    const key = pkg.id.toLowerCase();
-    if (this.reportedBrokenGitIds.has(key)) return;
-    this.reportedBrokenGitIds.add(key);
-
-    try {
-      const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/moderate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'report',
-          reason: 'broken',
-          details: `[Automated 404 Git Detection] Repository URL (${attemptedUrl}) returned HTTP 404 across GitHub, Codeberg, and GitLab. Flagged for admin/moderator review to prevent stale content packages.`
-        })
-      });
-      if (res.ok && this.authService.isAdmin()) {
-        this.authService.fetchModerationQueue();
-      }
-    } catch {
-      // Best-effort non-blocking report to moderation queue
-    }
   }
 
   private parseCdbJsonText(rawText: string): {
@@ -4407,114 +4489,14 @@ export class PackageService {
           Boolean(pkg.provider && pkg.provider !== 'contentdb');
 
         let edgeResolved = false;
-        const needsGitAssetFromEdge = Boolean(pkg.repo_url) && !this.isGitScreenshotUrl(pkg.banner);
-        if (this.edgeApiAvailable && (deepFetch || isPureGitOnly || !pkg.video_url || needsGitAssetFromEdge)) {
+        if (this.edgeApiAvailable) {
           try {
-            const edgePromise = fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).then(async res => {
-              if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-                return await res.json();
-              }
-              return null;
-            }).catch(() => null);
-
-            if (deepFetch && !isPureGitOnly) {
-              // Race the Edge call against a 280ms timer: if Edge/D1 is warm it resolves in <50ms;
-              // if cold, we immediately start upstream ContentDB hydration in parallel rather than blocking for seconds.
-              const fastResult = await Promise.race([
-                edgePromise.then(res => ({ done: true, res })),
-                new Promise<{ done: false; res: null }>(resolve => setTimeout(() => resolve({ done: false, res: null }), 280))
-              ]);
-              if (fastResult.done && fastResult.res) {
-                data = fastResult.res;
-                edgeResolved = Boolean(data && Object.keys(data).length > 0);
-              } else {
-                // Edge is still working on a cold cache miss; let it finish in background to sync D1 reviews/downloads/video
-                edgePromise.then(bgData => {
-                  if (bgData && typeof bgData === 'object' && Object.keys(bgData).length > 0) {
-                    if (Array.isArray(bgData.reviews_list)) {
-                      const normalizedBundled = this.normalizeContentDbReviews(bgData.reviews_list, pkg.id);
-                      this.reviewsCache.set(cacheKey, normalizedBundled);
-                    }
-                    const lhDl = Number(bgData.luantihub_downloads || 0);
-                    const cdbDl = Number(bgData.contentdb_downloads ?? bgData.downloads ?? 0);
-                    const bgStatus = bgData.git_repo_status;
-                    const bgVideo = this.extractEmbeddedVideo(
-                      bgData.video_url,
-                      bgData.video_thumbnail_url,
-                      this.extractLongDescription(bgData.long_description) || bgData.desc
-                    );
-                    const bgGitShot = [bgData.banner, bgData.thumbnail].find(u =>
-                      this.isGitScreenshotUrl(u)
-                    );
-                    const bgScreenshots = this.mergePackageScreenshots(
-                      [bgGitShot],
-                      bgData.screenshots
-                    );
-                    if (
-                      lhDl > 0 ||
-                      cdbDl > 0 ||
-                      bgStatus === 'verified' ||
-                      bgVideo.video_url ||
-                      bgGitShot ||
-                      bgScreenshots.length > 0
-                    ) {
-                      this._activePackage.update(curr => {
-                        if (curr && curr.id.toLowerCase() === cacheKey) {
-                          const mergedShots = this.mergePackageScreenshots(
-                            [bgGitShot, curr.banner, curr.thumbnail],
-                            bgScreenshots,
-                            curr.screenshots
-                          );
-                          const bestGitShot = [bgGitShot, curr.banner, curr.thumbnail].find(u =>
-                            this.isGitScreenshotUrl(u)
-                          );
-                          return {
-                            ...curr,
-                            git_repo_status: bgStatus === 'verified' ? 'verified' : curr.git_repo_status,
-                            contentdb_downloads: Math.max(curr.contentdb_downloads || 0, cdbDl),
-                            luantihub_downloads: Math.max(curr.luantihub_downloads || 0, lhDl),
-                            downloads: Math.max(curr.downloads || 0, cdbDl + lhDl),
-                            video_url: curr.video_url || bgVideo.video_url,
-                            video_thumbnail_url: curr.video_thumbnail_url || bgVideo.video_thumbnail_url,
-                            thumbnail: bestGitShot || curr.thumbnail,
-                            banner: bestGitShot || mergedShots[0] || curr.banner,
-                            screenshots: mergedShots.length > 0 ? mergedShots : curr.screenshots
-                          };
-                        }
-                        return curr;
-                      });
-                      if (bgVideo.video_url || bgGitShot || bgScreenshots.length > 0) {
-                        this._packages.update(list =>
-                          list.map(item => {
-                            if (item.id.toLowerCase() !== cacheKey) return item;
-                            const mergedShots = this.mergePackageScreenshots(
-                              [bgGitShot, item.banner, item.thumbnail],
-                              bgScreenshots,
-                              item.screenshots
-                            );
-                            const bestGitShot = [bgGitShot, item.banner, item.thumbnail].find(u =>
-                              this.isGitScreenshotUrl(u)
-                            );
-                            return {
-                              ...item,
-                              video_url: item.video_url || bgVideo.video_url,
-                              video_thumbnail_url: item.video_thumbnail_url || bgVideo.video_thumbnail_url,
-                              thumbnail: bestGitShot || item.thumbnail,
-                              banner: bestGitShot || mergedShots[0] || item.banner,
-                              screenshots: mergedShots.length > 0 ? mergedShots : item.screenshots
-                            };
-                          })
-                        );
-                      }
-                    }
-                  }
-                });
-              }
-            } else {
-              const resJson = await edgePromise;
-              if (resJson) {
+            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).catch(() => null);
+            if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+              const resJson = await res.json().catch(() => null);
+              if (resJson && typeof resJson === 'object' && Object.keys(resJson).length > 0) {
                 data = resJson;
-                edgeResolved = Boolean(data && Object.keys(data).length > 0);
+                edgeResolved = true;
               }
             }
           } catch {
@@ -4527,7 +4509,14 @@ export class PackageService {
           data.file_size = undefined;
         }
 
-        // Query ContentDB directly from the browser when light-hydrating tiles (saving Worker quota) or when Edge API lacked full detail
+        const hasBundledEdgeResponse = Boolean(
+          this.edgeApiAvailable &&
+          edgeResolved &&
+          data &&
+          (data.git_repo_status || Array.isArray(data.reviews_list) || data.license || data.downloads !== undefined)
+        );
+
+        // Query ContentDB upstream fallback only when Edge API did not resolve (e.g. local ng serve without wrangler)
         const hasScreenshots = Array.isArray(data?.screenshots) && data.screenshots.length > 0;
         const hasDistinctLongDesc = Boolean(
           data?.long_description &&
@@ -4537,12 +4526,14 @@ export class PackageService {
         const hasFullDetailInEdge = hasScreenshots || hasDistinctLongDesc;
 
         const needsUpstreamDetail =
-          !edgeResolved ||
-          !data ||
-          Object.keys(data).length === 0 ||
-          !data.license ||
-          (deepFetch && !hasFullDetailInEdge) ||
-          !(Number(data.downloads ?? data.downloads_count ?? 0) > 0);
+          !this.edgeApiAvailable &&
+          !hasBundledEdgeResponse &&
+          (!edgeResolved ||
+            !data ||
+            Object.keys(data).length === 0 ||
+            !data.license ||
+            (deepFetch && !hasFullDetailInEdge) ||
+            !(Number(data.downloads ?? data.downloads_count ?? 0) > 0));
 
         if (!isPureGitOnly && needsUpstreamDetail) {
           try {
@@ -4550,10 +4541,13 @@ export class PackageService {
               // Fast single-request tile hydration: 1 call to /packages/:author/:name/ returns license, tags, downloads, min_minetest_version & video
               // (`fetchUpstreamWithMirrorFallback` automatically rewrites to `/for-client/?formspec_version=8` if falling back to the mirror)
               let pkgDetailData = await this.fetchUpstreamWithMirrorFallback(`/packages/${encAuthor}/${encName}/`);
-              if ((!pkgDetailData || Object.keys(pkgDetailData).length === 0) && this.edgeApiAvailable) {
+              if (!edgeResolved && (!pkgDetailData || !pkgDetailData.video_url)) {
                 const res = await fetch(`/api/packages/${encAuthor}/${encName}/?lite=1`).catch(() => null);
                 if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
-                  pkgDetailData = await res.json();
+                  const liteEdgeData = await res.json().catch(() => null);
+                  if (liteEdgeData && typeof liteEdgeData === 'object') {
+                    pkgDetailData = { ...(pkgDetailData || {}), ...liteEdgeData };
+                  }
                 }
               }
               if (pkgDetailData && Object.keys(pkgDetailData).length > 0) {
@@ -4680,8 +4674,6 @@ export class PackageService {
           pkg.file_size ||
           undefined;
 
-        const hasBundledEdgeResponse = Boolean(this.edgeApiAvailable && data && (data.git_repo_status || Array.isArray(data.reviews_list)));
-
         // Populate in-memory reviews and releases caches directly from bundled response
         if (Array.isArray(data.reviews_list)) {
           const normalizedBundled = this.normalizeContentDbReviews(data.reviews_list, pkg.id);
@@ -4775,9 +4767,8 @@ export class PackageService {
           : data.min_minetest_version;
         let minVersion = (rawMinVerVal && String(rawMinVerVal).toLowerCase() !== 'none' ? String(rawMinVerVal) : '') || pkg.min_minetest_version || '5.0.0';
 
-        // Probe `.cdb.json` when a pure Git package lacks a license OR when `video_url` is still missing and `repoUrl` is known
-        // (uses cached 200 OK directory listing first when `resolvedLicense` is already present so repos without `.cdb.json` never log 404s).
-        if ((!resolvedLicense || (!data.video_url && !pkg.video_url)) && repoUrl) {
+        // Probe `.cdb.json` client-side only when Edge API did not already bundle/scan the Git repository
+        if (!hasBundledEdgeResponse && (!resolvedLicense || (!data.video_url && !pkg.video_url)) && repoUrl) {
           const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl, Boolean(resolvedLicense));
           if (cdbRaw) {
             gitRepoStatus = 'verified';
@@ -4807,9 +4798,9 @@ export class PackageService {
           }
         }
 
-        // Probe Git repository metadata when the package still lacks a license, or probe for screenshot.png when a Git repo is linked
+        // Probe Git repository metadata client-side only when Edge API is offline (e.g. local ng serve)
         let probedGitScreenshot: string | undefined;
-        if (!resolvedLicense && !hasBundledEdgeResponse) {
+        if (!this.edgeApiAvailable && !resolvedLicense && !hasBundledEdgeResponse) {
           const gitMeta = await this.probeGitRepoMetadata(pkg, repoUrl, deepFetch);
           if (gitMeta.screenshotUrl) {
             probedGitScreenshot = gitMeta.screenshotUrl;
@@ -4821,8 +4812,6 @@ export class PackageService {
             }
           } else if (gitMeta.gitRepoStatus === 'broken_404' && deepFetch) {
             gitRepoStatus = 'broken_404';
-            const attempted = repoUrl || `https://github.com/${pkg.author}/${pkg.name}`;
-            this.autoReportBrokenGitRepo(pkg, attempted);
           }
           if (deps.length === 0 && gitMeta.deps.length > 0) {
             deps = gitMeta.deps;
@@ -4863,6 +4852,8 @@ export class PackageService {
             }
           }
         } else if (
+          !this.edgeApiAvailable &&
+          !hasBundledEdgeResponse &&
           repoUrl &&
           (deepFetch ||
             isPureGitOnly ||
@@ -4989,7 +4980,12 @@ export class PackageService {
             }
           }));
 
+        const resolvedAuthorId =
+          (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
+          pkg.author_id;
+
         const updatedFields: Partial<LuantiPackage> = {
+          ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
           license: resolvedLicense,
           media_license: resolvedMediaLicense,
           desc: extractedLongDesc,
@@ -5038,11 +5034,12 @@ export class PackageService {
         const targetAuthorLower = (pkg.author || '').toLowerCase();
         const targetNameLower = (pkg.name || '').toLowerCase();
 
-        // Persist compact hydrated tile metadata locally and queue debounced D1 batch writeback
-        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || preferredGitShot) {
+        // Persist compact hydrated tile metadata locally
+        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || preferredGitShot || resolvedAuthorId) {
           const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
           this.hydratedMetaCache.set(targetIdLower, {
             ...prevMeta,
+            ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
             license: resolvedLicense || prevMeta.license,
             media_license: resolvedMediaLicense || prevMeta.media_license,
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
@@ -5065,7 +5062,6 @@ export class PackageService {
               : {})
           } as Partial<LuantiPackage>);
           this.scheduleHydratedMetaPersist();
-          this.queueD1Writeback(pkg, updatedFields);
         }
 
         this._activePackage.update(current => {
@@ -5225,6 +5221,9 @@ export class PackageService {
     pkg: LuantiPackage,
     forceRefresh = false
   ): Promise<PackageRelease[]> {
+    // When Cloudflare Edge Functions are active (`edgeApiAvailable`), `/api/packages/:author/:name/releases`
+    // already fetches and merges live Git tags server-side without browser CORS or forge rate-limit issues.
+    if (this.edgeApiAvailable) return [];
     const activePkg = this._activePackage();
     const effectivePkg =
       activePkg && activePkg.id?.toLowerCase() === pkg.id?.toLowerCase() ? activePkg : pkg;
@@ -5253,6 +5252,11 @@ export class PackageService {
 
     let provider: 'bitbucket' | 'github' | 'gitlab' | 'codeberg' = 'codeberg';
     let tagsUrl = '';
+    if (host.includes('git.minetest.land') && this.edgeApiAvailable) {
+      // MeseHub (`git.minetest.land`) enforces Anubis anti-bot PoW without browser CORS headers;
+      // `/api/packages/:author/:name/releases` fetches MeseHub tags server-side via `fetchWithAnubisSupport`.
+      return [];
+    }
     if (host.includes('bitbucket.org')) {
       provider = 'bitbucket';
       const bbOwner = owner.toLowerCase().split('/').map(encodeURIComponent).join('/');
@@ -6265,38 +6269,41 @@ export class PackageService {
   getAuthorPackages(username: string): LuantiPackage[] {
     const clean = (username || '').trim().toLowerCase();
     if (!clean) return [];
-    const baseClean = clean.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
     const currentUser = this.authService.currentUser();
     const isSelf =
       currentUser &&
       (currentUser.username.toLowerCase() === clean ||
-        (currentUser.identities || []).some(i => (i.username || '').toLowerCase() === clean));
-    const linkedHandles = new Set<string>([clean, baseClean]);
+        (currentUser.identities || []).some(i => Boolean(i.verified) && (i.username || '').toLowerCase() === clean));
+    const linkedHandles = new Set<string>([clean]);
     if (isSelf && currentUser) {
       linkedHandles.add(currentUser.username.toLowerCase());
       for (const id of currentUser.identities || []) {
-        if (id.username) {
-          const h = id.username.toLowerCase();
-          linkedHandles.add(h);
-          linkedHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, ''));
+        if (id.verified && id.username) {
+          linkedHandles.add(id.username.toLowerCase());
         }
       }
     }
     const profileIdentities = this._activeAuthorProfile()?.identities || [];
     if (this._activeAuthorUsername()?.toLowerCase() === clean) {
       for (const id of profileIdentities) {
-        if (id.username) {
-          const h = id.username.toLowerCase();
-          linkedHandles.add(h);
-          linkedHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, ''));
+        if (id.verified !== false && id.username) {
+          linkedHandles.add(id.username.toLowerCase());
         }
       }
     }
 
     return this._packages().filter(pkg => {
+      if (
+        isSelf &&
+        currentUser?.id &&
+        pkg.author_id &&
+        !String(pkg.author_id).startsWith('ext_') &&
+        String(pkg.author_id) === String(currentUser.id)
+      ) {
+        return true;
+      }
       const pkgAuthor = (pkg.author || '').toLowerCase();
-      const pkgBase = pkgAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      return linkedHandles.has(pkgAuthor) || (pkgBase.length > 0 && linkedHandles.has(pkgBase));
+      return linkedHandles.has(pkgAuthor);
     });
   }
 
@@ -6366,11 +6373,18 @@ export class PackageService {
 
     this._isLoadingAuthorProfile.set(true);
     try {
+      const isLocalhost =
+        typeof window !== 'undefined' &&
+        (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
       const [edgeAuthorRes, cdbUser] = await Promise.all([
         fetch(`/api/authors/${encodeURIComponent(clean)}`, {
           headers: { Accept: 'application/json' }
         }).catch(() => null),
-        this.fetchUpstreamWithMirrorFallback(`/users/${encodeURIComponent(canonicalCdbAuthor)}/`)
+        // In production (`!isLocalhost`), `/api/authors/:username` already fetches ContentDB `/users/:username/`
+        // server-side at the Cloudflare Edge without triggering browser cross-origin CORS errors.
+        isLocalhost
+          ? this.fetchUpstreamWithMirrorFallback(`/users/${encodeURIComponent(canonicalCdbAuthor)}/`)
+          : Promise.resolve(null)
       ]);
 
       let apiAuthor: any = null;
@@ -6603,6 +6617,7 @@ export class PackageService {
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
     this._activeVideoTheater.set(null);
+    this._activeBlogArticle.set(null);
     this._isLoadingAuthorProfile.set(false);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
@@ -6802,15 +6817,8 @@ export class PackageService {
     comment: string;
   }): Promise<{ success: boolean; review?: CommunityReview; message?: string }> {
     const user = this.authService.currentUser();
-    if (user && pkg) {
-      const handles = new Set<string>([
-        (user.username || '').toLowerCase(),
-        ...(user.identities || []).map(i => (i.username || '').toLowerCase())
-      ].filter(Boolean));
-      const pkgAuthor = (pkg.author || (pkg as any).author_name || '').toLowerCase();
-      if (pkgAuthor && handles.has(pkgAuthor)) {
-        return { success: false, message: 'Authors cannot rate or review their own packages.' };
-      }
+    if (pkg && this.authService.isPackageAuthor(pkg)) {
+      return { success: false, message: 'Authors cannot rate or review their own packages.' };
     }
 
     const cacheKey = pkg.id.toLowerCase();
@@ -7503,8 +7511,14 @@ export class PackageService {
           return data;
         }
       }
+      if (this.edgeApiAvailable) {
+        return null;
+      }
     } catch {
-      // Fall back to direct ContentDB stats if authorized
+      if (this.edgeApiAvailable) {
+        return null;
+      }
+      // Fall back to direct ContentDB stats in local dev if authorized
     }
 
     // Fallback for local dev (`ng serve`) when caller is authorized author/admin
@@ -7557,8 +7571,14 @@ export class PackageService {
           return data;
         }
       }
+      if (this.edgeApiAvailable) {
+        return null;
+      }
     } catch {
-      // Fall back to direct ContentDB user stats if authorized
+      if (this.edgeApiAvailable) {
+        return null;
+      }
+      // Fall back to direct ContentDB user stats in local dev if authorized
     }
 
     const { prevStartDate, endDate } = this.buildUtcDateRange(days);

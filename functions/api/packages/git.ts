@@ -539,9 +539,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       customConf?: string;
       customLua?: string;
       tags?: string[];
+      requestAdminClaim?: boolean;
     };
 
-    const { repoUrl, warrantiesAccepted, dryRun, auditToken, customConf, customLua, tags: userSubmittedTags } = body;
+    const { repoUrl, warrantiesAccepted, dryRun, auditToken, customConf, customLua, tags: userSubmittedTags, requestAdminClaim } = body;
 
     if (!repoUrl) {
       return Response.json({ error: 'Git repository HTTPS URL is required.' }, { status: 400 });
@@ -1097,6 +1098,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
+    const pendingAdminClaim = !ownershipVerified && Boolean(resolvedUserId && (provider === 'bitbucket' || requestAdminClaim));
+
     if (ownershipVerified) {
       diagnostics.push({
         code: 'REPO_OWNERSHIP_VERIFIED',
@@ -1104,6 +1107,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         file: `${provider}:${owner}/${repo}`,
         title: `Repository Ownership Verified (${verifiedProviderUsername || owner})`,
         message: `Verified that your ${provider} account owns or maintains ${owner}/${repo}.`
+      });
+    } else if (pendingAdminClaim) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_PENDING_ADMIN',
+        severity: 'warning',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Ownership Claim Queued for Moderator Approval (${provider})`,
+        message: `Your ownership claim for '${owner}/${repo}' will be reviewed and approved by a moderator before author privileges are granted.`
       });
     } else if (!dryRun) {
       diagnostics.push({
@@ -1299,6 +1310,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const packagePayload = {
       id: packageId,
       author: canonicalAuthor,
+      author_id: ownershipVerified && resolvedUserId ? resolvedUserId : undefined,
       name: technicalName,
       title: matchedContentDbPkg?.title || title,
       type: packageType,
@@ -1421,8 +1433,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }, { status: 400 });
     }
 
-    // Enforce verified repository ownership on actual publish (dryRun: false)
-    if (!ownershipVerified) {
+    // Enforce verified repository ownership on actual publish (dryRun: false), unless queued for Admin/Moderator claim approval
+    if (!ownershipVerified && !pendingAdminClaim) {
       return Response.json({
         success: false,
         canPublish: false,
@@ -1449,7 +1461,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)
     if (context.env.DB) {
       await ensureExtendedPackageColumns(context.env.DB);
-      const authorId = resolvedUserId || existingD1Pkg?.author_id || `ext_${canonicalAuthor}`;
+      const authorId = ownershipVerified && resolvedUserId
+        ? resolvedUserId
+        : (existingD1Pkg?.author_id || `ext_${canonicalAuthor}`);
 
       await context.env.DB.prepare(`
         INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
@@ -1596,31 +1610,62 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         }
       }
 
-      await context.env.DB.prepare(
-        `DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`
-      ).bind(packageId).run();
+      const releaseBatchStmts: any[] = [
+        context.env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(packageId)
+      ];
 
       if (discoveredReleases.length > 0) {
         for (const rel of discoveredReleases.slice(0, 10)) {
-          await context.env.DB.prepare(`
-            INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
-          `).bind(
-            packageId,
-            rel.version,
-            rel.tag_name,
-            rel.commit_sha || '',
-            rel.download_url,
-            rawMinVersion,
-            rel.changelog || null,
-            rel.released_at || ''
-          ).run();
+          releaseBatchStmts.push(
+            context.env.DB.prepare(`
+              INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, changelog, released_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+            `).bind(
+              packageId,
+              rel.version,
+              rel.tag_name,
+              rel.commit_sha || '',
+              rel.download_url,
+              rawMinVersion,
+              rel.changelog || null,
+              rel.released_at || ''
+            )
+          );
         }
       } else {
-        await context.env.DB.prepare(`
-          INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version)
-          VALUES (?, 'latest', ?, 'HEAD', ?, ?)
-        `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion).run();
+        releaseBatchStmts.push(
+          context.env.DB.prepare(`
+            INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version)
+            VALUES (?, 'latest', ?, 'HEAD', ?, ?)
+          `).bind(packageId, branch, downloadArchiveUrl, rawMinVersion)
+        );
+      }
+
+      if (typeof context.env.DB.batch === 'function') {
+        await context.env.DB.batch(releaseBatchStmts);
+      } else {
+        for (const stmt of releaseBatchStmts) {
+          await stmt.run();
+        }
+      }
+
+      if (pendingAdminClaim && resolvedUserId) {
+        await ensureModerationColumns(context.env.DB);
+        const claimTag = `[CLAIM_PACKAGE:${packageId}:${resolvedUserId}]`;
+        const claimDetails =
+          `${claimTag} Package ownership claim submitted via Git Pre-Flight Audit (${repoUrl.trim()}). ` +
+          `Click Resolve to approve and assign verified author ownership of '${packageId}' to user ${resolvedUserId}, or Dismiss to reject.`;
+        const existingClaim = await context.env.DB.prepare(`
+          SELECT id FROM moderation_reports
+          WHERE LOWER(package_id) = LOWER(?) AND reporter_user_id = ? AND status = 'open' AND details LIKE ?
+          LIMIT 1
+        `).bind(packageId, resolvedUserId, `%[CLAIM_PACKAGE:%`).first().catch(() => null);
+        if (!existingClaim?.id) {
+          await context.env.DB.prepare(`
+            INSERT INTO moderation_reports (package_id, reporter_user_id, reason, details, status)
+            VALUES (?, ?, 'other', ?, 'open')
+          `).bind(packageId, resolvedUserId, claimDetails.slice(0, 1000)).run();
+        }
       }
 
       if (safetyEval.holdForAdminReview) {

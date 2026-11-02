@@ -519,6 +519,34 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     reportRow.id
   ).run();
 
+  // If an admin resolves a [CLAIM_PACKAGE:<packageId>:<claimantUserId>] report,
+  // grant verified author ownership of that package to the claimant!
+  let packageClaimApproved = false;
+  const claimMatch = String(reportRow.details || '').match(/\[CLAIM_PACKAGE:([^:\]]+):([^:\]]+)\]/i);
+  if (isAdmin && nextStatus === 'resolved' && claimMatch && claimMatch[1] && claimMatch[2]) {
+    const claimedPkgId = claimMatch[1].trim();
+    const claimantUserId = claimMatch[2].trim();
+    const claimRes = await env.DB.prepare(`
+      UPDATE packages
+      SET author_id = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE LOWER(id) = LOWER(?)
+    `).bind(claimantUserId, claimedPkgId).run().catch(() => null);
+    if (Number(claimRes?.meta?.changes || 0) > 0) {
+      packageClaimApproved = true;
+      const [pkgAuthor, pkgName] = claimedPkgId.split('/');
+      await invalidateEdgeCacheKeys([
+        '/__api_packages_v2',
+        '/__api_packages_v2?boot=1',
+        '/__api_boot_catalog_bundle_v4',
+        '/__api_boot_catalog_bundle_v5',
+        ...(pkgAuthor && pkgName
+          ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
+          : [])
+      ]);
+    }
+  }
+
   // If an admin dismisses an Automated Content Safety Hold report (false positive),
   // automatically approve and publish the held package (`status = 'active'`)!
   let packageApprovedAndPublished = false;
@@ -551,11 +579,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     return Response.json({
       success: true,
       status: nextStatus,
-      packageApproved: packageApprovedAndPublished,
+      packageApproved: packageApprovedAndPublished || packageClaimApproved,
       resolution_note: formattedNote.slice(0, 2000),
-      message: packageApprovedAndPublished
-        ? `Report #${reportRow.id} dismissed and package '${reportRow.package_id}' approved for the public catalog.`
-        : `Report #${reportRow.id} marked as ${nextStatus}.`
+      message: packageClaimApproved
+        ? `Report #${reportRow.id} resolved and package ownership granted to claimant.`
+        : packageApprovedAndPublished
+          ? `Report #${reportRow.id} dismissed and package '${reportRow.package_id}' approved for the public catalog.`
+          : `Report #${reportRow.id} marked as ${nextStatus}.`
     });
   } catch (err: any) {
     return Response.json(

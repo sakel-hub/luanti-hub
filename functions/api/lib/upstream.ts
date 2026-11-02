@@ -417,85 +417,6 @@ export function computeGenuineStarRating(
   return Math.round(combined * 10) / 10;
 }
 
-/**
- * Synchronizes an author's upstream ContentDB packages into Cloudflare D1 (`packages` table)
- * without polluting scores or licenses with hardcoded defaults.
- */
-export async function syncAuthorContentDbPackages(
-  db: any,
-  userId: string,
-  username: string
-): Promise<any[]> {
-  try {
-    await ensureExtendedPackageColumns(db);
-    const cdbRes = await fetchWithFailover(`/packages/?author=${encodeURIComponent(username)}&fmt=vcs`);
-    if (!cdbRes.ok) return [];
-    const cdbPackages = await cdbRes.json() as any[];
-    if (!Array.isArray(cdbPackages)) return [];
-
-    const authorPkgs = cdbPackages.filter(
-      (p: any) => (p.author || '').toLowerCase() === username.toLowerCase()
-    );
-
-    for (const p of authorPkgs.slice(0, 60)) {
-      const pkgId = `${p.author}/${p.name}`;
-      const pkgType = p.type === 'game' || p.type === 'txp' || p.type === 'modpack' ? p.type : 'mod';
-      const genuineScore = computeGenuineStarRating(null, p.reviews);
-      const license = typeof p.license === 'string' ? p.license : '';
-      const mediaLicense = typeof p.media_license === 'string' ? p.media_license : license;
-      const tagsJson = Array.isArray(p.tags) ? JSON.stringify(p.tags) : null;
-      const cdbDownloads = typeof p.downloads === 'number' ? p.downloads : 0;
-
-      await db.prepare(`
-        INSERT INTO packages (
-          id, author_id, author_name, name, title, type, short_desc,
-          repo_url, provider, thumbnail_url, score, downloads_count, contentdb_downloads, luantihub_downloads,
-          license, media_license, tags, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, 0, ?, ?, ?, 'active')
-        ON CONFLICT(id) DO UPDATE SET
-          author_id = excluded.author_id,
-          title = excluded.title,
-          short_desc = excluded.short_desc,
-          repo_url = COALESCE(NULLIF(excluded.repo_url, ''), packages.repo_url),
-          thumbnail_url = CASE
-            WHEN packages.thumbnail_url IS NOT NULL
-              AND packages.thumbnail_url != ''
-              AND packages.thumbnail_url != 'logo.svg'
-              AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
-              AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-            THEN packages.thumbnail_url
-            ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
-          END,
-          contentdb_downloads = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads),
-          downloads_count = MAX(COALESCE(packages.contentdb_downloads, 0), excluded.contentdb_downloads) + COALESCE(packages.luantihub_downloads, 0),
-          license = COALESCE(NULLIF(excluded.license, ''), packages.license),
-          media_license = COALESCE(NULLIF(excluded.media_license, ''), packages.media_license),
-          tags = COALESCE(excluded.tags, packages.tags)
-      `).bind(
-        pkgId,
-        userId,
-        p.author,
-        p.name,
-        p.title || p.name,
-        pkgType,
-        p.short_description || p.short_desc || '',
-        p.repo || p.repo_url || '',
-        p.thumbnail || '',
-        genuineScore,
-        cdbDownloads,
-        cdbDownloads,
-        license,
-        mediaLicense,
-        tagsJson
-      ).run();
-    }
-
-    return authorPkgs;
-  } catch {
-    return [];
-  }
-}
-
 export interface DiscoveredGitRelease {
   id: number | string;
   version: string;
@@ -4082,18 +4003,23 @@ export async function fetchGitReleaseNotesBetweenRefs(
   return payload;
 }
 
-import { parseLuantiBlogFeed, LuantiBlogPost } from '../../../src/app/core/models/package.model';
-export { parseLuantiBlogFeed };
+import {
+  parseLuantiBlogFeed,
+  enrichLuantiBlogPostFromArticleHtml,
+  LuantiBlogPost
+} from '../../../src/app/core/models/package.model';
+export { parseLuantiBlogFeed, enrichLuantiBlogPostFromArticleHtml };
 export type DiscoveredLuantiBlogPost = LuantiBlogPost;
 
 /**
  * Fetches the latest blog post from `https://blog.luanti.org/feed.rss` (with fallback to `feed.json`),
- * cached in isolate memory + Cloudflare Edge Cache for 30 minutes (1800s).
+ * enriches it with the rendered article HTML (`_layouts/post.html` including `Cover image by ...` credits),
+ * and caches it in isolate memory + Cloudflare Edge Cache for 30 minutes (1800s).
  */
 export async function fetchLatestLuantiBlogPost(): Promise<DiscoveredLuantiBlogPost | null> {
-  const cacheKey = 'https://cache.luantihub.internal/__luanti_blog_latest_v1';
+  const cacheKey = 'https://cache.luantihub.internal/__luanti_blog_latest_v4';
   const cached = await readEdgeCacheJson<DiscoveredLuantiBlogPost>(cacheKey);
-  if (cached && cached.title && cached.url) {
+  if (cached && cached.title && cached.url && cached.content_html) {
     return cached;
   }
 
@@ -4116,8 +4042,28 @@ export async function fetchLatestLuantiBlogPost(): Promise<DiscoveredLuantiBlogP
       clearTimeout(timer);
       if (!res.ok) continue;
       const text = await res.text();
-      const post = parseLuantiBlogFeed(text);
+      let post = parseLuantiBlogFeed(text);
       if (post) {
+        if (post.url && post.url.startsWith('https://blog.luanti.org/')) {
+          const pageCtrl = new AbortController();
+          const pageTimer = setTimeout(() => pageCtrl.abort(), 3500);
+          try {
+            const pageRes = await fetch(post.url, {
+              signal: pageCtrl.signal,
+              headers: {
+                'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
+                Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8'
+              }
+            });
+            clearTimeout(pageTimer);
+            if (pageRes && pageRes.ok) {
+              const pageHtml = await pageRes.text();
+              post = enrichLuantiBlogPostFromArticleHtml(post, pageHtml);
+            }
+          } catch {
+            clearTimeout(pageTimer);
+          }
+        }
         await writeEdgeCacheJson(cacheKey, post, 1800);
         return post;
       }
