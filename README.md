@@ -241,8 +241,10 @@ npm run build
 | **Database** | [Cloudflare D1](https://developers.cloudflare.com/d1/) | Distributed serverless SQLite at the edge |
 | **Authentication** | OAuth 2.0 & Web Crypto | HMAC-SHA256 sessions, HTTP-only cookies (`lh_session`), CSRF tokens |
 | **Markdown Rendering** | [Marked](https://marked.js.org/) | GitHub-Flavored Markdown (GFM) with live sanitization |
-| **PWA & Caching** | Angular Service Worker | `@angular/service-worker`, offline manifests, signal caching |
+| **PWA & Caching** | Angular Service Worker & Edge API | `@angular/service-worker`, offline outbox, isolate LRU + Edge `caches.default` |
 | **Testing** | [Vitest](https://vitest.dev) | High-speed unit testing for client and edge functions |
+
+> 📖 **Deep Dive Documentation:** For an in-depth breakdown of all front-end and back-end API flows, caching tiers, TTLs, and invalidation rules with a full Mermaid architecture diagram, see [`docs/api-and-cache-architecture.md`](docs/api-and-cache-architecture.md).
 
 ---
 

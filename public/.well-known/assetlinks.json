@@ -1,0 +1,10 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "ca.sakeldevinc.luantihub",
+    "sha256_cert_fingerprints": [
+      "62:E0:18:93:5C:DB:3C:4D:DB:4B:91:82:F2:A4:F4:91:38:B4:AE:C6:C1:8A:B6:8B:3E:FB:C0:06:64:3D:A6:94"
+    ]
+  }
+}]
