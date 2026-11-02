@@ -52,16 +52,16 @@ import {
         <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-4 flex-wrap">
           <div class="flex items-center gap-3">
             <div
-              [class]="timeframe === 'today' ? 'bg-amber-500/20 border-amber-500/30 text-amber-400' : 'bg-rose-500/20 border-rose-500/30 text-rose-400'"
-              class="w-8 h-8 rounded-lg border backdrop-blur-md flex items-center justify-center">
+              [class]="timeframe === 'today' ? 'glass-badge-amber text-amber-400' : 'glass-badge-rose text-rose-400'"
+              class="w-8 h-8 rounded-lg flex items-center justify-center">
               <svg lucideTrophy class="w-4 h-4"></svg>
             </div>
             <div>
               <h2 class="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-2.5">
                 <span>{{ 'carousel.top10Title' | translate }}</span>
                 <span
-                  [class]="timeframe === 'today' ? 'text-amber-300 bg-amber-500/20 border-amber-400/30' : 'text-rose-300 bg-rose-500/20 border-rose-400/30'"
-                  class="text-xs font-semibold border backdrop-blur-md px-2.5 py-0.5 rounded-full">
+                  [class]="timeframe === 'today' ? 'glass-badge-amber text-amber-300' : 'glass-badge-rose text-rose-300'"
+                  class="text-xs font-semibold px-2.5 py-0.5 rounded-full">
                   {{ timeframe === 'today' ? ('carousel.top10Today' | translate) : ('carousel.top10Week' | translate) }}
                 </span>
                 <button

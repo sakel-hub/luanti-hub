@@ -15,7 +15,9 @@ import {
   isGitRepositoryAssetUrl,
   mergeScreenshotsPreferringGit,
   isGitProviderId,
-  detectGitProviderFromUrl
+  detectGitProviderFromUrl,
+  getLastKnownActivePromotions,
+  setLastKnownActivePromotions
 } from '../lib/upstream';
 
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
@@ -316,7 +318,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -331,29 +333,35 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))
     ) {
       let edgeBody = cachedCatalog;
-      if (isBootBundle && Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0) {
+      if (isBootBundle) {
         const nowMs = Date.now();
-        edgeBody = {
-          ...cachedCatalog,
-          promotions: cachedCatalog.promotions.filter((r: any) => {
-            if (!r || !r.expires_at) return false;
-            const expMs = Date.parse(String(r.expires_at));
-            if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-            if (r.starts_at) {
-              const startMs = Date.parse(String(r.starts_at));
-              if (Number.isFinite(startMs) && startMs > nowMs) return false;
-            }
-            return true;
-          })
-        };
+        const rawPromos =
+          Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0
+            ? cachedCatalog.promotions
+            : getLastKnownActivePromotions(nowMs);
+        if (Array.isArray(rawPromos)) {
+          edgeBody = {
+            ...cachedCatalog,
+            promotions: rawPromos.filter((r: any) => {
+              if (!r || !r.expires_at) return false;
+              const expMs = Date.parse(String(r.expires_at));
+              if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+              if (r.starts_at) {
+                const startMs = Date.parse(String(r.starts_at));
+                if (Number.isFinite(startMs) && startMs > nowMs) return false;
+              }
+              return true;
+            })
+          };
+        }
       }
       return new Response(JSON.stringify(edgeBody), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': isBootBundle
-            ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
-            : 'public, max-age=60, s-maxage=180, stale-while-revalidate=600',
+            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
+            : 'public, max-age=120, s-maxage=900, stale-while-revalidate=1800',
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
       });
@@ -384,7 +392,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let lhDownloadsMapPromise = Promise.resolve<Map<string, number>>(new Map());
   let favoritesMapPromise = Promise.resolve<Map<string, number>>(new Map());
   let velocityPromise = Promise.resolve<Map<string, PackageVelocityMetrics>>(new Map());
-  let promotionsPromise = Promise.resolve<any[]>([]);
+  let promotionsPromise = Promise.resolve<any[] | undefined>(undefined);
   let recentReviewsPromise = Promise.resolve<any[]>([]);
 
   if (env.DB) {
@@ -437,20 +445,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       })
       .catch(() => new Map<string, number>());
 
-    // All-time Luanti Hub downloads per package from `package_daily_downloads`
-    lhDownloadsMapPromise = env.DB.prepare(
-      `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_lh FROM package_daily_downloads GROUP BY LOWER(package_id)`
-    ).all()
-      .then((res: any) => {
-        const map = new Map<string, number>();
-        for (const r of (res.results || [])) {
-          if (r?.pkg_id && Number(r.total_lh) > 0) {
-            map.set(String(r.pkg_id).toLowerCase(), Number(r.total_lh));
-          }
-        }
-        return map;
-      })
-      .catch(() => new Map<string, number>());
+    // Avoid scanning all historical package_daily_downloads rows on every catalog build;
+    // packages.luantihub_downloads already tracks all-time LuantiHub downloads, and velocityPromise covers the 7-day window.
+    lhDownloadsMapPromise = Promise.resolve(new Map<string, number>());
 
     // Community Favorites count per package from `user_favorites`
     favoritesMapPromise = env.DB.prepare(
@@ -537,12 +534,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         })
         .catch(() => new Map<string, PackageVelocityMetrics>());
 
-      promotionsPromise = env.DB.prepare(
-        `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 10`
-      ).all()
-        .then((res: any) => {
+      promotionsPromise = (async () => {
+        const filterValidPromos = (rows: any[]) => {
           const nowMs = Date.now();
-          return (res?.results || []).filter((r: any) => {
+          return rows.filter((r: any) => {
             if (!r || !r.title || !r.banner_url || !r.expires_at) return false;
             const expMs = Date.parse(String(r.expires_at));
             if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
@@ -552,8 +547,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             }
             return true;
           });
-        })
-        .catch(() => []);
+        };
+
+        if (!noCache) {
+          const cachedPromos = await readEdgeCacheJson<any[]>('/__active_promotions_v1');
+          if (Array.isArray(cachedPromos)) {
+            const validCached = filterValidPromos(cachedPromos);
+            setLastKnownActivePromotions(validCached);
+            return validCached;
+          }
+        }
+
+        try {
+          const res = await env.DB.prepare(
+            `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 10`
+          ).all();
+          const validRows = filterValidPromos(res?.results || []);
+          setLastKnownActivePromotions(validRows);
+          await writeEdgeCacheJson('/__active_promotions_v1', validRows, 21600);
+          return validRows;
+        } catch {
+          const fallback = getLastKnownActivePromotions();
+          return Array.isArray(fallback) ? fallback : undefined;
+        }
+      })();
 
       recentReviewsPromise = env.DB.prepare(`
         SELECT
@@ -840,8 +857,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const d1StarAvg = d1Ratings.get(key);
     const cdbDl = Number(item.downloads || 0);
-    const lhDl = lhDownloadsMap.get(key) || 0;
     const vel = velocity.get(key);
+    const lhDl = lhDownloadsMap.get(key) || vel?.weekDl || 0;
     const favCnt = favoritesMap.get(key);
     merged.push({
       ...item,
@@ -1094,13 +1111,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       tags,
       top10Week,
       top10Today,
-      promotions: activePromotions,
+      ...(Array.isArray(activePromotions) ? { promotions: activePromotions } : {}),
       latestBlogPost: latestBlogPost || null,
       recentReviews: Array.isArray(recentReviews) ? recentReviews : []
     };
 
-    if (!noCache && !q && types.length === 0 && !author) {
-      await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 120);
+    if (!noCache && !q && types.length === 0 && !author && Array.isArray(activePromotions)) {
+      await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 1800);
     }
 
     // Piggyback lightweight rotating Git release check (3 pure-Git packages per 5m window) via waitUntil
@@ -1244,7 +1261,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   if (!isBootBundle && !noCache && catalogEdgeCacheKey) {
-    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 180);
+    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 900);
   }
 
   return new Response(JSON.stringify(responsePayload), {
@@ -1253,8 +1270,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': !noCache
         ? (isBootBundle
-            ? 'public, max-age=60, s-maxage=120, stale-while-revalidate=300'
-            : 'public, max-age=60, s-maxage=180, stale-while-revalidate=600')
+            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
+            : 'public, max-age=120, s-maxage=900, stale-while-revalidate=1800')
         : 'no-cache, no-store, must-revalidate',
       'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
     }

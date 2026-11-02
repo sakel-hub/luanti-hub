@@ -115,8 +115,8 @@ import {
                       <div class="flex items-center gap-2 flex-wrap">
                         <span
                           [class]="promo.id.startsWith('blog:')
-                            ? 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-sky-500/20 text-sky-300 border border-sky-400/40 shadow-[0_0_16px_rgba(56,189,248,0.25)] backdrop-blur-md'
-                            : 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-400/40 shadow-[0_0_16px_rgba(245,158,11,0.25)] backdrop-blur-md'">
+                            ? 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider glass-badge-sky shadow-[0_0_16px_rgba(56,189,248,0.25)]'
+                            : 'px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider glass-badge-amber shadow-[0_0_16px_rgba(245,158,11,0.25)]'">
                           {{ promo.badge_text || ('hero.promoted' | translate) }}
                         </span>
                       </div>
@@ -271,7 +271,7 @@ import {
           </div>
 
           <!-- Slide Indicators / Frosted Pill Dock -->
-          <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-950/50 backdrop-blur-md border border-white/10 shadow-lg">
+          <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full glass-pill">
             @for (item of showcase(); track item.id; let idx = $index) {
               <button
                 type="button"

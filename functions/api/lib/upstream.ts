@@ -260,7 +260,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   const expandedUrls = new Set<string>([
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -284,30 +286,58 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   for (const url of expandedUrls) {
     isolateJsonCache.delete(url);
   }
-  for (const k of Array.from(isolateJsonCache.keys())) {
-    if (
-      k.startsWith('https://cache.luantihub.internal/__catalog_edge_v2_') ||
-      k.startsWith('https://cache.luantihub.internal/__api_updates_v2_') ||
-      k.startsWith('https://cache.luantihub.internal/__for_client_v2/')
-    ) {
-      isolateJsonCache.delete(k);
+    for (const k of Array.from(isolateJsonCache.keys())) {
+      if (
+        k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
+        k.startsWith('https://cache.luantihub.internal/__api_updates_v2_') ||
+        k.startsWith('https://cache.luantihub.internal/__for_client_v2/')
+      ) {
+        isolateJsonCache.delete(k);
+      }
     }
+
+    const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+    if (!edgeCache) return;
+
+    await Promise.all(
+      Array.from(expandedUrls).map(async (url) => {
+        try {
+          const req = new Request(url, { method: 'GET' });
+          await edgeCache.delete(req);
+        } catch {
+          // Ignore individual delete error
+        }
+      })
+    );
   }
 
-  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
-  if (!edgeCache) return;
+  let lastKnownActivePromotions: any[] | null = null;
 
-  await Promise.all(
-    Array.from(expandedUrls).map(async (url) => {
-      try {
-        const req = new Request(url, { method: 'GET' });
-        await edgeCache.delete(req);
-      } catch {
-        // Ignore individual delete error
+  /**
+   * Returns the last known active Hero Carousel promotions in this isolate (filtered by current time),
+   * or `null` if promotions have not yet been loaded in this isolate.
+   */
+  export function getLastKnownActivePromotions(nowMs = Date.now()): any[] | null {
+    if (!canUseIsolateCache() || !Array.isArray(lastKnownActivePromotions)) return null;
+    return lastKnownActivePromotions.filter((r: any) => {
+      if (!r || !r.title || !r.banner_url || !r.expires_at) return false;
+      const expMs = Date.parse(String(r.expires_at));
+      if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+      if (r.starts_at) {
+        const startMs = Date.parse(String(r.starts_at));
+        if (Number.isFinite(startMs) && startMs > nowMs) return false;
       }
-    })
-  );
-}
+      return true;
+    });
+  }
+
+  /**
+   * Updates the isolate-level fallback list of active Hero Carousel promotions.
+   */
+  export function setLastKnownActivePromotions(rows: any[] | null): void {
+    if (!canUseIsolateCache()) return;
+    lastKnownActivePromotions = Array.isArray(rows) ? [...rows] : null;
+  }
 
 /**
  * Safely parses a JSON array column or comma-separated string into string[]
@@ -548,6 +578,23 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
         PRIMARY KEY (user_id, package_id)
       )
     `).run().catch(() => {});
+
+    // Ensure expression indexes on LOWER(...) exist so case-insensitive lookups & joins use B-tree indexes instead of full table scans
+    const indexStatements = [
+      `CREATE INDEX IF NOT EXISTS idx_packages_lower_id ON packages(LOWER(id))`,
+      `CREATE INDEX IF NOT EXISTS idx_packages_lower_author_name ON packages(LOWER(author_name), LOWER(name))`,
+      `CREATE INDEX IF NOT EXISTS idx_packages_status_updated ON packages(status, updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_packages_status_dl ON packages(status, downloads_count DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_reviews_lower_pkg ON reviews(LOWER(package_id))`,
+      `CREATE INDEX IF NOT EXISTS idx_releases_lower_pkg ON releases(LOWER(package_id))`,
+      `CREATE INDEX IF NOT EXISTS idx_daily_dl_lower_pkg_date ON package_daily_downloads(LOWER(package_id), download_date)`,
+      `CREATE INDEX IF NOT EXISTS idx_favorites_lower_pkg ON user_favorites(LOWER(package_id))`,
+      `CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))`,
+      `CREATE INDEX IF NOT EXISTS idx_identities_lower_prov_user ON user_identities(LOWER(provider_username))`
+    ];
+    for (const stmt of indexStatements) {
+      await db.prepare(stmt).run().catch(() => {});
+    }
 
     if (existing.size > 0) {
       extendedColumnsEnsured = true;

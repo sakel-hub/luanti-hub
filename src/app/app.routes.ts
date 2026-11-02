@@ -64,6 +64,10 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'blog',
+    component: CatalogComponent
+  },
+  {
     path: '**',
     redirectTo: ''
   }

@@ -36,6 +36,8 @@ import {
 } from '../../functions/api/lib/upstream';
 import {
   createSessionToken,
+  verifySessionToken,
+  verifySessionTokenClaims,
   createAuditProofToken,
   verifyAuditProofToken,
   createOAuthStateToken,
@@ -6112,21 +6114,35 @@ supported_games = minetest_game, voxelibre
     expect(blogSlide._promo?.secondary_cta_url).toBeUndefined();
 
     // Clicking "Read Article" on the Hero Billboard opens the in-app Blog Article Dialog instead of navigating externally
+    // and pushes `/blog` onto history so browser Back / touch swipe-back closes the dialog without exiting the app
     const heroFixture = TestBed.createComponent(HeroBillboardComponent);
     heroFixture.detectChanges();
     const heroComp = heroFixture.componentInstance;
     heroComp.currentIndex.set(0);
+    const navSpy = vi.spyOn(pkgService as any, 'navigatePreservingScroll');
     heroComp.onPromoCtaClick(blogSlide._promo!.cta_url, new MouseEvent('click'));
     expect(pkgService.activeBlogArticle()?.title).toBe('Luanti 5.17.0 – Released!');
     expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+    expect(navSpy).toHaveBeenCalledWith(['/blog']);
+
     // Updating blog post with a payload that lacks a cover image must preserve the real hero cover image
     pkgService.setLatestBlogPost({
       ...parsedBlog!,
       image_url: '/banners/luanti-5-18-0.png'
     });
     expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
+
+    // Simulating browser Back / touch swipe-left from `/blog` to `/` closes the Blog Article Dialog
+    (pkgService as any).syncStateFromUrl('/');
+    expect(pkgService.activeBlogArticle()).toBeNull();
+
+    // Direct `/blog` URL sync re-opens the Blog Article Dialog and `closeBlogArticleModal()` navigates back to `/`
+    (pkgService as any).syncStateFromUrl('/blog');
+    expect(pkgService.activeBlogArticle()?.title).toBe('Luanti 5.17.0 – Released!');
     pkgService.closeBlogArticleModal();
     expect(pkgService.activeBlogArticle()).toBeNull();
+    expect(navSpy).toHaveBeenLastCalledWith(['/']);
+    navSpy.mockRestore();
 
     // 2. Verify Hero Billboard auto-slide timer resets from 0 when manually switching slides even while hovered (isPaused() === true)
     const twoSlides = [
@@ -6194,5 +6210,64 @@ supported_games = minetest_game, voxelibre
       document.documentElement.style.removeProperty('--wco-titlebar-height');
       document.documentElement.style.removeProperty('--wco-right-inset');
     }
+  });
+
+  it('should preserve active non-expired Hero promotional slides across background catalog refreshes and verify self-contained session token claims', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const futureIso = new Date(Date.now() + 3600_000).toISOString();
+
+    pkgService.setPromotions([
+      {
+        id: 'promo_keep_active',
+        title: 'Luanti 5.18.0 Released!',
+        short_desc: 'Official release promotion',
+        banner_url: '/banners/luanti-5-18-0.png',
+        cta_label: 'Download',
+        cta_url: 'https://www.luanti.org',
+        badge_text: 'PROMOTED',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 100
+      }
+    ]);
+    expect(pkgService.activePromotions()[0]?.id).toBe('promo_keep_active');
+
+    // Simulate a background catalog refresh where D1 quota error caused promotions to be omitted or empty
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          author: 'Wuzzy',
+          name: 'mineclone2',
+          title: 'VoxeLibre',
+          type: 'game',
+          short_desc: 'Survival sandbox game',
+          downloads: 500000
+        }
+      ],
+      promotions: []
+    });
+
+    expect(pkgService.activePromotions()[0]?.id).toBe('promo_keep_active');
+    expect(pkgService.heroShowcasePackages().some(p => p.id === 'promo:promo_keep_active')).toBe(true);
+
+    // Verify self-contained session token claims round-trip
+    const token = await createSessionToken('usr_sakel', 'test-secret', {
+      username: 'sakel',
+      displayName: 'SaKeL',
+      avatarUrl: 'https://github.com/sakel.png',
+      provider: 'github',
+      role: 'admin',
+      verified: true
+    });
+    expect(await verifySessionToken(token, 'test-secret')).toBe('usr_sakel');
+    const claims = await verifySessionTokenClaims(token, 'test-secret');
+    expect(claims?.userId).toBe('usr_sakel');
+    expect(claims?.username).toBe('sakel');
+    expect(claims?.displayName).toBe('SaKeL');
+    expect(claims?.provider).toBe('github');
+    expect(claims?.role).toBe('admin');
+    expect(claims?.verified).toBe(true);
+
+    pkgService.setPromotions([]);
   });
 });

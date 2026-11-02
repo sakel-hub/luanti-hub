@@ -5,7 +5,9 @@ import {
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
   isGitRepositoryAssetUrl,
-  mergeScreenshotsPreferringGit
+  mergeScreenshotsPreferringGit,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
 } from '../lib/upstream';
 
 interface Env {
@@ -24,14 +26,34 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydratedMap: Record<string, any> = {};
 
-  if (env.DB) {
-    await ensureExtendedPackageColumns(env.DB);
-  }
-
   // Resolve requested package IDs in batch (D1 lookup + server-side upstream edge cache fallback)
   const rawIds = Array.isArray(body.ids)
     ? Array.from(new Set(body.ids.map(id => String(id || '').trim()).filter(id => id.includes('/')))).slice(0, 32)
     : [];
+
+  const hydrateCacheKey =
+    rawIds.length > 0
+      ? `/__api_hydrate_v2_${encodeURIComponent(
+          rawIds
+            .map(id => id.toLowerCase())
+            .sort()
+            .join(',')
+        )}`
+      : null;
+
+  if (hydrateCacheKey) {
+    const cachedHydration = await readEdgeCacheJson<Record<string, any>>(hydrateCacheKey);
+    if (cachedHydration && typeof cachedHydration === 'object') {
+      return Response.json({
+        success: true,
+        hydrated: cachedHydration
+      });
+    }
+  }
+
+  if (env.DB) {
+    await ensureExtendedPackageColumns(env.DB);
+  }
 
   if (rawIds.length > 0) {
     const missingIds = new Set<string>(rawIds.map(id => id.toLowerCase()));
@@ -383,6 +405,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         }
       }
     }
+  }
+
+  if (hydrateCacheKey && Object.keys(hydratedMap).length > 0) {
+    await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 3600);
   }
 
   return Response.json({

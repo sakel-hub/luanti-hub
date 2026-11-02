@@ -1,13 +1,15 @@
 import {
   createSessionToken,
   verifySessionToken,
+  SessionTokenClaims,
   parseOAuthStateToken,
   buildSessionCookie,
   buildClearOAuthStateCookies,
   parseCookies,
   checkIsAdmin,
   mergeSecondaryUserIntoPrimary,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  invalidateCachedAuthMePayload
 } from '../lib/session';
 import { fetchWithAnubisSupport } from '../../lib/upstream';
 
@@ -37,6 +39,7 @@ const USER_AGENT = 'LuantiHub/1.0 (+https://luantihub.org)';
 // Deduplicate concurrent/retried OAuth callback requests within the same Worker isolate
 const inFlightOAuthCodes = new Map<string, Promise<string>>();
 const completedOAuthCodes = new Map<string, { userId: string; expiresAt: number }>();
+const verifiedOAuthClaimsByUserId = new Map<string, Partial<SessionTokenClaims>>();
 
 function cleanEnvValue(val?: string): string {
   return (val || '').trim().replace(/^["']|["']$/g, '').trim();
@@ -271,7 +274,8 @@ async function buildSuccessRedirectResponse(
   provider = 'github',
   isPopup = false
 ): Promise<Response> {
-  const sessionToken = await createSessionToken(userId, sessionSecret);
+  const claims = verifiedOAuthClaimsByUserId.get(userId);
+  const sessionToken = await createSessionToken(userId, sessionSecret, claims);
   const headers = new Headers();
   const redirectTarget = `${returnOrigin}/?auth_success=1`;
   headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -581,164 +585,171 @@ export async function onRequestGet(context: {
     const role = isAdmin ? 'admin' : 'user';
 
     if (context.env.DB) {
-      // Verify whether existingSessionUserId actually resolves to a live row in `users`
-      let activeSessionUser: any = null;
-      if (existingSessionUserId) {
-        activeSessionUser = await reconcileAndMergeUserAccount(context.env.DB, existingSessionUserId);
-      }
-
-      // Fetch all existing identity rows matching either canonical provider_user_id or provider_username
-      const matchingIdentitiesRes = await context.env.DB.prepare(`
-        SELECT id, user_id, provider_user_id, provider_username, verified
-        FROM user_identities
-        WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
-        ORDER BY verified DESC, id ASC
-      `).bind(provider, providerUserId, providerUsername).all();
-      const matchingIdentities = (matchingIdentitiesRes.results || []) as Array<{
-        id: number;
-        user_id: string;
-        provider_user_id: string;
-        provider_username: string;
-        verified: number;
-      }>;
-
-      // Determine whether this OAuth login should link to activeSessionUser (connecting a new forge)
-      // or switch accounts (when activeSessionUser already has a DIFFERENT account on this same provider)
-      let shouldLinkToActiveSession = Boolean(activeSessionUser?.id);
-      if (activeSessionUser?.id) {
-        const existingSameProviderIdentity = await context.env.DB.prepare(`
-          SELECT provider_user_id, provider_username
-          FROM user_identities
-          WHERE user_id = ? AND provider = ?
-          LIMIT 1
-        `).bind(activeSessionUser.id, provider).first() as {
-          provider_user_id?: string;
-          provider_username?: string;
-        } | null;
-
-        if (
-          existingSameProviderIdentity &&
-          String(existingSameProviderIdentity.provider_user_id || '') !== providerUserId &&
-          String(existingSameProviderIdentity.provider_username || '').toLowerCase() !== providerUsername.toLowerCase()
-        ) {
-          shouldLinkToActiveSession = false;
+      try {
+        // Verify whether existingSessionUserId actually resolves to a live row in `users`
+        let activeSessionUser: any = null;
+        if (existingSessionUserId) {
+          activeSessionUser = await reconcileAndMergeUserAccount(context.env.DB, existingSessionUserId);
         }
-      }
 
-      if (shouldLinkToActiveSession && activeSessionUser?.id) {
-        userId = String(activeSessionUser.id);
-      } else {
-        // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
-        for (const ident of matchingIdentities) {
-          const u = await context.env.DB.prepare(
-            `SELECT id, username FROM users WHERE id = ?`
-          ).bind(ident.user_id).first() as { id: string; username: string } | null;
-          if (u) {
-            userId = u.id;
-            if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
-              break;
+        // Fetch all existing identity rows matching either canonical provider_user_id or provider_username
+        const matchingIdentitiesRes = await context.env.DB.prepare(`
+          SELECT id, user_id, provider_user_id, provider_username, verified
+          FROM user_identities
+          WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+          ORDER BY verified DESC, id ASC
+        `).bind(provider, providerUserId, providerUsername).all();
+        const matchingIdentities = (matchingIdentitiesRes.results || []) as Array<{
+          id: number;
+          user_id: string;
+          provider_user_id: string;
+          provider_username: string;
+          verified: number;
+        }>;
+
+        // Determine whether this OAuth login should link to activeSessionUser (connecting a new forge)
+        // or switch accounts (when activeSessionUser already has a DIFFERENT account on this same provider)
+        let shouldLinkToActiveSession = Boolean(activeSessionUser?.id);
+        if (activeSessionUser?.id) {
+          const existingSameProviderIdentity = await context.env.DB.prepare(`
+            SELECT provider_user_id, provider_username
+            FROM user_identities
+            WHERE user_id = ? AND provider = ?
+            LIMIT 1
+          `).bind(activeSessionUser.id, provider).first() as {
+            provider_user_id?: string;
+            provider_username?: string;
+          } | null;
+
+          if (
+            existingSameProviderIdentity &&
+            String(existingSameProviderIdentity.provider_user_id || '') !== providerUserId &&
+            String(existingSameProviderIdentity.provider_username || '').toLowerCase() !== providerUsername.toLowerCase()
+          ) {
+            shouldLinkToActiveSession = false;
+          }
+        }
+
+        if (shouldLinkToActiveSession && activeSessionUser?.id) {
+          userId = String(activeSessionUser.id);
+        } else {
+          // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
+          for (const ident of matchingIdentities) {
+            const u = await context.env.DB.prepare(
+              `SELECT id, username FROM users WHERE id = ?`
+            ).bind(ident.user_id).first() as { id: string; username: string } | null;
+            if (u) {
+              userId = u.id;
+              if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
+                break;
+              }
+            }
+          }
+
+          // If no matching identity points to a live user row, check if a user with this username already exists
+          if (!userId) {
+            const existingUserByUsername = await context.env.DB.prepare(
+              `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
+            ).bind(providerUsername).first() as { id: string } | null;
+
+            const conflictingSameProvider = existingUserByUsername
+              ? await context.env.DB.prepare(
+                  `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
+                ).bind(existingUserByUsername.id, provider, providerUsername).first()
+              : null;
+
+            if (existingUserByUsername && !conflictingSameProvider) {
+              userId = existingUserByUsername.id;
+            } else {
+              const candidateUsername = existingUserByUsername
+                ? `${providerUsername}_${provider.slice(0, 2)}`
+                : providerUsername;
+
+              // Reuse orphaned identity's user_id if present so existing packages/favorites/downloads stay linked
+              userId = matchingIdentities.length > 0 && matchingIdentities[0].user_id
+                ? String(matchingIdentities[0].user_id)
+                : crypto.randomUUID();
+
+              await context.env.DB.prepare(`
+                INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
+                VALUES (?, ?, ?, ?, ?)
+              `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
             }
           }
         }
 
-        // If no matching identity points to a live user row, check if a user with this username already exists
-        if (!userId) {
-          const existingUserByUsername = await context.env.DB.prepare(
-            `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
-          ).bind(providerUsername).first() as { id: string } | null;
+        // Merge any secondary or orphaned user_ids referenced by matchingIdentities into the resolved primary userId
+        if (userId) {
+          const mergedSecondaryIds = new Set<string>();
+          for (const ident of matchingIdentities) {
+            if (ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
+              mergedSecondaryIds.add(ident.user_id);
+              await mergeSecondaryUserIntoPrimary(context.env.DB, userId, ident.user_id);
+            }
+          }
 
-          const conflictingSameProvider = existingUserByUsername
-            ? await context.env.DB.prepare(
-                `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
-              ).bind(existingUserByUsername.id, provider, providerUsername).first()
-            : null;
+          // Clean up duplicate identity rows for this specific (provider, provider_user_id / provider_username)
+          // while preserving any OTHER accounts on the same provider linked to this userId!
+          const currentIdentitiesRes = await context.env.DB.prepare(`
+            SELECT id FROM user_identities
+            WHERE provider = ?
+              AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
+            ORDER BY verified DESC, id ASC
+          `).bind(provider, providerUserId, providerUsername).all();
+          const currentIds = (currentIdentitiesRes.results || []) as Array<{ id: number }>;
 
-          if (existingUserByUsername && !conflictingSameProvider) {
-            userId = existingUserByUsername.id;
-          } else {
-            const candidateUsername = existingUserByUsername
-              ? `${providerUsername}_${provider.slice(0, 2)}`
-              : providerUsername;
-
-            // Reuse orphaned identity's user_id if present so existing packages/favorites/downloads stay linked
-            userId = matchingIdentities.length > 0 && matchingIdentities[0].user_id
-              ? String(matchingIdentities[0].user_id)
-              : crypto.randomUUID();
-
+          if (currentIds.length > 0) {
+            const keepId = currentIds[0].id;
+            for (const extra of currentIds.slice(1)) {
+              await context.env.DB.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(extra.id).run();
+            }
             await context.env.DB.prepare(`
-              INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
-              VALUES (?, ?, ?, ?, ?)
-            `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
+              UPDATE user_identities
+              SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = 1
+              WHERE id = ?
+            `).bind(userId, providerUserId, providerUsername, profileUrl, avatarUrl, keepId).run();
+          } else {
+            await context.env.DB.prepare(`
+              INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
+              VALUES (?, ?, ?, ?, ?, ?, 1)
+              ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                provider_username = excluded.provider_username,
+                profile_url = excluded.profile_url,
+                avatar_url = excluded.avatar_url,
+                verified = 1
+            `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+          }
+
+          // Reconcile & merge any duplicate suffixed accounts
+          const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId, true);
+          if (reconciledUser?.id) {
+            userId = String(reconciledUser.id);
+          }
+
+          if (isAdmin && userId) {
+            await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
           }
         }
-      }
 
-      // Merge any secondary or orphaned user_ids referenced by matchingIdentities into the resolved primary userId
-      if (userId) {
-        const mergedSecondaryIds = new Set<string>();
-        for (const ident of matchingIdentities) {
-          if (ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
-            mergedSecondaryIds.add(ident.user_id);
-            await mergeSecondaryUserIntoPrimary(context.env.DB, userId, ident.user_id);
-          }
-        }
-
-        // Clean up duplicate identity rows for this specific (provider, provider_user_id / provider_username)
-        // while preserving any OTHER accounts on the same provider linked to this userId!
-        const currentIdentitiesRes = await context.env.DB.prepare(`
-          SELECT id FROM user_identities
-          WHERE provider = ?
-            AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
-          ORDER BY verified DESC, id ASC
-        `).bind(provider, providerUserId, providerUsername).all();
-        const currentIds = (currentIdentitiesRes.results || []) as Array<{ id: number }>;
-
-        if (currentIds.length > 0) {
-          const keepId = currentIds[0].id;
-          for (const extra of currentIds.slice(1)) {
-            await context.env.DB.prepare(`DELETE FROM user_identities WHERE id = ?`).bind(extra.id).run();
-          }
+        // 3. Link unclaimed packages on the exact same Git forge provider and username
+        if (provider !== 'contentdb' && userId) {
           await context.env.DB.prepare(`
-            UPDATE user_identities
-            SET user_id = ?, provider_user_id = ?, provider_username = ?, profile_url = ?, avatar_url = ?, verified = 1
-            WHERE id = ?
-          `).bind(userId, providerUserId, providerUsername, profileUrl, avatarUrl, keepId).run();
-        } else {
-          await context.env.DB.prepare(`
-            INSERT INTO user_identities (user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(provider, provider_user_id) DO UPDATE SET
-              user_id = excluded.user_id,
-              provider_username = excluded.provider_username,
-              profile_url = excluded.profile_url,
-              avatar_url = excluded.avatar_url,
-              verified = 1
-          `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
+            UPDATE packages SET author_id = ?
+            WHERE (author_id IS NULL OR author_id LIKE 'ext_%')
+              AND LOWER(provider) = LOWER(?)
+              AND LOWER(author_name) = LOWER(?)
+          `).bind(
+            userId,
+            provider,
+            providerUsername
+          ).run();
         }
-
-        // Reconcile & merge any duplicate suffixed accounts
-        const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId);
-        if (reconciledUser?.id) {
-          userId = String(reconciledUser.id);
+      } catch (dbErr) {
+        console.error('[OAuth Callback] D1 error after verified OAuth profile, falling back to signed session claims:', dbErr);
+        if (!userId) {
+          userId = existingSessionUserId || `usr_${providerUsername.toLowerCase()}`;
         }
-
-        if (isAdmin && userId) {
-          await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
-        }
-      }
-
-      // 3. Link unclaimed packages on the exact same Git forge provider and username
-      if (provider !== 'contentdb' && userId) {
-        await context.env.DB.prepare(`
-          UPDATE packages SET author_id = ?
-          WHERE (author_id IS NULL OR author_id LIKE 'ext_%')
-            AND LOWER(provider) = LOWER(?)
-            AND LOWER(author_name) = LOWER(?)
-        `).bind(
-          userId,
-          provider,
-          providerUsername
-        ).run();
       }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
@@ -746,8 +757,19 @@ export async function onRequestGet(context: {
     }
 
     if (!userId) {
-      throw new Error('User creation failed');
+      userId = existingSessionUserId || `usr_${providerUsername.toLowerCase()}`;
     }
+
+    invalidateCachedAuthMePayload(userId);
+    verifiedOAuthClaimsByUserId.set(userId, {
+      userId,
+      username: providerUsername,
+      displayName: displayName || providerUsername,
+      avatarUrl: avatarUrl || `https://github.com/${providerUsername}.png`,
+      provider,
+      role,
+      verified: true
+    });
 
     return userId;
   };

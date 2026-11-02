@@ -7,7 +7,9 @@ import {
 import {
   ensureExtendedPackageColumns,
   invalidateEdgeCacheKeys,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  setLastKnownActivePromotions,
+  writeEdgeCacheJson
 } from '../lib/upstream';
 
 interface Env {
@@ -239,21 +241,25 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       username
     ).run();
 
-    await invalidateEdgeCacheKeys([
-      '/__api_boot_catalog_bundle_v3',
-      '/__api_packages_v2?boot=1'
-    ]);
-
     const res = await env.DB.prepare(
       `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 50`
     ).all();
     const allRows = Array.isArray(res?.results) ? res.results : [];
+    const activePromotions = filterActivePromotions(allRows);
+    setLastKnownActivePromotions(activePromotions);
+    await writeEdgeCacheJson('/__active_promotions_v1', activePromotions, 21600);
+    await invalidateEdgeCacheKeys([
+      '/__api_boot_catalog_bundle_v3',
+      '/__api_boot_catalog_bundle_v8',
+      '/__api_boot_catalog_bundle_v9',
+      '/__api_packages_v2?boot=1'
+    ]);
 
     return Response.json({
       success: true,
       promotion: allRows.find((r: any) => r.id === id) || null,
       promotions: allRows,
-      activePromotions: filterActivePromotions(allRows)
+      activePromotions
     });
   } catch (err: any) {
     return Response.json(
@@ -288,20 +294,24 @@ export async function onRequestDelete(context: { request: Request; env: Env }) {
 
     await env.DB.prepare(`DELETE FROM hero_promotions WHERE id = ?`).bind(id).run();
 
-    await invalidateEdgeCacheKeys([
-      '/__api_boot_catalog_bundle_v3',
-      '/__api_packages_v2?boot=1'
-    ]);
-
     const res = await env.DB.prepare(
       `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 50`
     ).all();
     const allRows = Array.isArray(res?.results) ? res.results : [];
+    const activePromotions = filterActivePromotions(allRows);
+    setLastKnownActivePromotions(activePromotions);
+    await writeEdgeCacheJson('/__active_promotions_v1', activePromotions, 21600);
+    await invalidateEdgeCacheKeys([
+      '/__api_boot_catalog_bundle_v3',
+      '/__api_boot_catalog_bundle_v8',
+      '/__api_boot_catalog_bundle_v9',
+      '/__api_packages_v2?boot=1'
+    ]);
 
     return Response.json({
       success: true,
       promotions: allRows,
-      activePromotions: filterActivePromotions(allRows)
+      activePromotions
     });
   } catch (err: any) {
     return Response.json(

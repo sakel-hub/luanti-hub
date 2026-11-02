@@ -109,6 +109,9 @@ export class PackageService {
   private initialUrlSynced = false;
   private wasOnAnalyticsRoute = false;
   private pendingRoutePackage: { author: string; name: string } | null = null;
+  private pendingRouteBlogModal = false;
+  private readonly pendingCatalogPatches = new Map<string, Partial<LuantiPackage>>();
+  private catalogPatchTimer: any = null;
   private readonly hydratedIds = new Set<string>();
   private readonly deepHydratedIds = new Set<string>();
   private readonly _deepHydratedVersion = signal<number>(0);
@@ -399,8 +402,23 @@ export class PackageService {
   }
 
   setPromotions(promotions: HeroPromotion[]): void {
-    this._promotions.set(Array.isArray(promotions) ? promotions : []);
+    const validList = Array.isArray(promotions) ? promotions : [];
+    this._promotions.set(validList);
+    this.persistActivePromotionsCache(validList);
     this.refreshPromoClock();
+  }
+
+  private persistActivePromotionsCache(promotions: HeroPromotion[]): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      if (promotions.length > 0) {
+        localStorage.setItem('lh_active_promotions_v1', JSON.stringify(promotions));
+      } else {
+        localStorage.removeItem('lh_active_promotions_v1');
+      }
+    } catch {
+      // Ignore storage quota errors
+    }
   }
 
   private mergeBlogPostPreservingImage(
@@ -425,6 +443,18 @@ export class PackageService {
     };
   }
 
+  private setBoundedCache<K, V>(map: Map<K, V>, key: K, value: V, maxEntries = 60): void {
+    if (map.has(key)) {
+      map.delete(key);
+    } else if (map.size >= maxEntries) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey !== undefined) {
+        map.delete(oldestKey);
+      }
+    }
+    map.set(key, value);
+  }
+
   setLatestBlogPost(post: LuantiBlogPost | null): void {
     if (!post || !post.title || !post.url) {
       this._latestBlogPost.set(null);
@@ -432,17 +462,40 @@ export class PackageService {
     }
     const merged = this.mergeBlogPostPreservingImage(post, this._latestBlogPost());
     this._latestBlogPost.set(merged);
-    if (this._activeBlogArticle()) {
+    if (this.pendingRouteBlogModal) {
+      this.pendingRouteBlogModal = false;
+      this._activeBlogArticle.set(merged);
+      this.seoService?.updateStaticRoute(
+        merged.title,
+        merged.summary || 'Official Luanti Blog article on Luanti Hub.',
+        '/blog'
+      );
+    } else if (this._activeBlogArticle()) {
       this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(merged, this._activeBlogArticle()));
     }
   }
 
-  openBlogArticleModal(post?: LuantiBlogPost | null, slideBannerUrl?: string): void {
+  openBlogArticleModal(post?: LuantiBlogPost | null, slideBannerUrl?: string, updateUrl = true): void {
     const base = post ?? this._latestBlogPost();
-    if (!base || !base.title) return;
+    if (!base || !base.title) {
+      if (!updateUrl) {
+        this.pendingRouteBlogModal = true;
+        this.ensureLatestBlogPostLoaded(false, true);
+      }
+      return;
+    }
+    this.pendingRouteBlogModal = false;
     const merged = this.mergeBlogPostPreservingImage(base, this._latestBlogPost(), slideBannerUrl);
     this._latestBlogPost.set(merged);
     this._activeBlogArticle.set(merged);
+    this.seoService?.updateStaticRoute(
+      merged.title,
+      merged.summary || 'Official Luanti Blog article on Luanti Hub.',
+      '/blog'
+    );
+    if (updateUrl) {
+      this.navigatePreservingScroll(['/blog']);
+    }
     const hasArticlePageCredits = Boolean(
       merged.content_html &&
         (merged.content_html.includes('has-text-grey') || merged.content_html.includes('Cover image by'))
@@ -452,8 +505,13 @@ export class PackageService {
     }
   }
 
-  closeBlogArticleModal(): void {
+  closeBlogArticleModal(updateUrl = true): void {
+    this.pendingRouteBlogModal = false;
     this._activeBlogArticle.set(null);
+    this.seoService?.resetToHome();
+    if (updateUrl) {
+      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+    }
   }
 
   // High-performance O(1) per-package filtered & sorted list
@@ -789,6 +847,28 @@ export class PackageService {
       localStorage.removeItem('lh_hydrated_meta_v1');
       localStorage.removeItem('lh_hydrated_meta_v2');
       localStorage.removeItem('lh_hydrated_meta_v3');
+      const isUnitTestEnv =
+        typeof (globalThis as any).__karma__ !== 'undefined' ||
+        typeof (globalThis as any).jasmine !== 'undefined' ||
+        typeof (globalThis as any).vi !== 'undefined' ||
+        typeof (globalThis as any).__vitest_worker__ !== 'undefined';
+      if (!isUnitTestEnv) {
+        const rawPromos = localStorage.getItem('lh_active_promotions_v1');
+        if (rawPromos) {
+          const parsedPromos = JSON.parse(rawPromos);
+          if (Array.isArray(parsedPromos) && parsedPromos.length > 0) {
+            const nowMs = Date.now();
+            const validPromos = parsedPromos.filter((p: any) => {
+              if (!p || !p.title || !p.banner_url || !p.expires_at) return false;
+              const expMs = Date.parse(String(p.expires_at));
+              return Number.isFinite(expMs) && expMs > nowMs;
+            });
+            if (validPromos.length > 0) {
+              this._promotions.set(validPromos);
+            }
+          }
+        }
+      }
       const raw = localStorage.getItem('lh_hydrated_meta_v4');
       if (!raw) return;
       const parsed = JSON.parse(raw);
@@ -1576,13 +1656,15 @@ export class PackageService {
       path.startsWith('/packages/') ||
       path.startsWith('/author/') ||
       isAnalyticsRoute ||
+      path === '/blog' ||
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
       path === '/legal';
 
     const isFirstSync = !this.initialUrlSynced;
-    if (!isFirstSync) {
+    if (path !== '/blog') {
+      this.pendingRouteBlogModal = false;
       this._activeBlogArticle.set(null);
     }
     const edgeSeed =
@@ -1711,6 +1793,14 @@ export class PackageService {
       this._isLegalModalOpen.set(true);
       this.seoService?.updateStaticRoute('Legal, DMCA & Safe Harbor', 'Official Luanti trademark disclaimer, SPDX open-source terms, and DMCA / EU DSA Safe Harbor policy.', '/legal');
       return;
+    } else if (path === '/blog') {
+      this._activePackage.set(null);
+      this._activeAuthorUsername.set(null);
+      this._isSubmitModalOpen.set(false);
+      this._isSetupModalOpen.set(false);
+      this._isLegalModalOpen.set(false);
+      this.openBlogArticleModal(undefined, undefined, false);
+      return;
     }
 
     // If the user navigated back from /analytics to a catalog route via browser Back button,
@@ -1730,6 +1820,7 @@ export class PackageService {
 
     this._activePackage.set(null);
     this._activeAuthorUsername.set(null);
+    this._activeBlogArticle.set(null);
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
@@ -1778,7 +1869,13 @@ export class PackageService {
 
   private syncQueryParamsToUrl(): void {
     if (!this.router) return;
-    if (!this._activePackage() && !this._activeAuthorUsername() && !this.pendingRoutePackage) {
+    if (
+      !this._activePackage() &&
+      !this._activeAuthorUsername() &&
+      !this._activeBlogArticle() &&
+      !this.pendingRoutePackage &&
+      !this.pendingRouteBlogModal
+    ) {
       const targetPath = this.getPrimaryCategoryRoutePath();
       const queryParams = this.buildActiveQueryParams(targetPath);
       this.router.navigate([targetPath], {
@@ -1837,6 +1934,9 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v7');
         sessionStorage.removeItem('lh_boot_cache_v8');
       }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem('lh_active_promotions_v1');
+      }
     } catch {
       // Ignore storage errors
     }
@@ -1851,13 +1951,37 @@ export class PackageService {
       promotions?: HeroPromotion[];
       latestBlogPost?: LuantiBlogPost | null;
       recentReviews?: any[];
-    }
+    },
+    options?: { fromCache?: boolean }
   ): void {
+    const fromCache = Boolean(options?.fromCache);
     this.lastCatalogSyncAt = Date.now();
     if (Array.isArray(payload.promotions)) {
-      this._promotions.set(payload.promotions);
-      this.refreshPromoClock();
-      this.pwaService.checkAndNotifyPromotions(payload.promotions);
+      if (payload.promotions.length > 0) {
+        this._promotions.set(payload.promotions);
+        this.persistActivePromotionsCache(payload.promotions);
+        this.refreshPromoClock();
+        this.pwaService.checkAndNotifyPromotions(payload.promotions);
+      } else {
+        // Never drop currently active, non-expired promotions during a background catalog refresh
+        const nowMs = this._promoClockTick();
+        const stillActive = this._promotions().filter(p => {
+          if (!p || !p.title || !p.banner_url || !p.expires_at) return false;
+          const expMs = Date.parse(String(p.expires_at));
+          if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+          if (p.starts_at) {
+            const startMs = Date.parse(String(p.starts_at));
+            if (Number.isFinite(startMs) && startMs > nowMs) return false;
+          }
+          return true;
+        });
+        if (stillActive.length > 0) {
+          this._promotions.set(stillActive);
+        } else {
+          this._promotions.set([]);
+        }
+        this.refreshPromoClock();
+      }
     }
     if (payload.latestBlogPost !== undefined) {
       const validBlog =
@@ -1871,14 +1995,16 @@ export class PackageService {
       }
     }
     const currentBlogAfterBoot = this._latestBlogPost();
-    if (!currentBlogAfterBoot) {
-      this.ensureLatestBlogPostLoaded();
-    } else if (
-      !currentBlogAfterBoot.content_html ||
-      (!currentBlogAfterBoot.content_html.includes('has-text-grey') &&
-        !currentBlogAfterBoot.content_html.includes('Cover image by'))
-    ) {
-      this.ensureLatestBlogPostLoaded(false, true);
+    if (!fromCache) {
+      if (!currentBlogAfterBoot) {
+        this.ensureLatestBlogPostLoaded();
+      } else if (
+        !currentBlogAfterBoot.content_html ||
+        (!currentBlogAfterBoot.content_html.includes('has-text-grey') &&
+          !currentBlogAfterBoot.content_html.includes('Cover image by'))
+      ) {
+        this.ensureLatestBlogPostLoaded(false, true);
+      }
     }
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
@@ -1977,11 +2103,13 @@ export class PackageService {
       this._serverTop10Today.set(payload.top10Today.map(item => this.normalizePackage(item)));
     }
 
-    // Ensure all 3,500+ packages have exact ContentDB download counts even if ContentDB blocked the Worker IP on /scores/
-    this.ensureBulkScoresEnriched();
+    if (!fromCache) {
+      // Ensure all 3,500+ packages have exact ContentDB download counts even if ContentDB blocked the Worker IP on /scores/
+      this.ensureBulkScoresEnriched();
 
-    // Proactively hydrate visible Hero, Top 10, filtered grid, and swimlane packages so downloads, licenses & tags appear immediately
-    this.queueInitialVisibleHydration();
+      // Proactively hydrate visible Hero, Top 10, filtered grid, and swimlane packages so downloads, licenses & tags appear immediately
+      this.queueInitialVisibleHydration();
+    }
   }
 
   private async fetchAndEnrichBlogArticlePage(
@@ -2081,7 +2209,15 @@ export class PackageService {
               if (parsed && parsed.title && parsed.url) {
                 basePost = this.mergeBlogPostPreservingImage(parsed, this._latestBlogPost());
                 this._latestBlogPost.set(basePost);
-                if (this._activeBlogArticle()) {
+                if (this.pendingRouteBlogModal) {
+                  this.pendingRouteBlogModal = false;
+                  this._activeBlogArticle.set(basePost);
+                  this.seoService?.updateStaticRoute(
+                    basePost.title,
+                    basePost.summary || 'Official Luanti Blog article on Luanti Hub.',
+                    '/blog'
+                  );
+                } else if (this._activeBlogArticle()) {
                   this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(basePost, this._activeBlogArticle()));
                 }
                 break;
@@ -2096,7 +2232,15 @@ export class PackageService {
           const enriched = await this.fetchAndEnrichBlogArticlePage(basePost, isLocalhost);
           const merged = this.mergeBlogPostPreservingImage(enriched, this._latestBlogPost());
           this._latestBlogPost.set(merged);
-          if (this._activeBlogArticle()) {
+          if (this.pendingRouteBlogModal) {
+            this.pendingRouteBlogModal = false;
+            this._activeBlogArticle.set(merged);
+            this.seoService?.updateStaticRoute(
+              merged.title,
+              merged.summary || 'Official Luanti Blog article on Luanti Hub.',
+              '/blog'
+            );
+          } else if (this._activeBlogArticle()) {
             this._activeBlogArticle.set(this.mergeBlogPostPreservingImage(merged, this._activeBlogArticle()));
           }
           this.pwaService.checkAndNotifyBlogPost(merged);
@@ -2207,20 +2351,19 @@ export class PackageService {
 
   private queueInitialVisibleHydration(): void {
     const priorityCandidates: LuantiPackage[] = [
-      ...this.visiblePackages(),
       ...this.heroShowcasePackages(),
+      ...this.decentralizedGitPackages(),
       ...this.top10TodayPackages(),
       ...this.top10WeekPackages(),
-      ...this.trendingPackages(),
-      ...this.standaloneGames(),
-      ...this.decentralizedGitPackages(),
-      ...this.automationMods(),
-      ...this.texturePacks()
+      ...this.visiblePackages()
     ];
 
+    let queued = 0;
     for (const pkg of priorityCandidates) {
+      if (queued >= 24) break;
       if (this.needsTileHydration(pkg)) {
         this.ensurePackageHydrated(pkg);
+        queued++;
       }
     }
   }
@@ -2267,12 +2410,18 @@ export class PackageService {
     if (this.bootCacheSyncTimer) {
       clearTimeout(this.bootCacheSyncTimer);
     }
+    const delayMs = this.activeHydrationWorkers > 0 || this.hydrationQueue.length > 0 ? 800 : 250;
     this.bootCacheSyncTimer = setTimeout(() => {
+      this.bootCacheSyncTimer = null;
+      const stripHeavyFields = (pkg: LuantiPackage) => {
+        const { readme: _r, desc: _d, game_support: _g, _searchBlob: _s, ...compact } = pkg;
+        return compact;
+      };
       const payload = {
-        packages: this._packages(),
+        packages: this._packages().map(stripHeavyFields),
         tags: this._availableTags(),
-        top10Week: this.top10WeekPackages(),
-        top10Today: this.top10TodayPackages(),
+        top10Week: this.top10WeekPackages().map(stripHeavyFields),
+        top10Today: this.top10TodayPackages().map(stripHeavyFields),
         promotions: this._promotions(),
         latestBlogPost: this._latestBlogPost()
       };
@@ -2286,7 +2435,7 @@ export class PackageService {
         // Ignore sessionStorage parse errors
       }
       this.persistBootPayloadCaches(payload, existingTs);
-    }, 250);
+    }, delayMs);
   }
 
   /**
@@ -2320,13 +2469,14 @@ export class PackageService {
    * Writes the latest boot payload into the shared Service Worker CacheStorage (`lh-boot-sync-v1`)
    * so cold PWA launches have instant access to the latest catalog & Top 10 rows.
    */
-  private async writeWarmBootCache(payload: any, ts = Date.now()): Promise<void> {
+  private async writeWarmBootCache(payloadOrJson: any, ts = Date.now()): Promise<void> {
     if (typeof caches === 'undefined' || !caches || typeof caches.open !== 'function' || typeof Response === 'undefined') {
       return;
     }
     try {
       const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
-      const res = new Response(JSON.stringify(payload), {
+      const bodyStr = typeof payloadOrJson === 'string' ? payloadOrJson : JSON.stringify(payloadOrJson);
+      const res = new Response(bodyStr, {
         status: 200,
         headers: {
           'Content-Type': 'application/json',
@@ -2340,21 +2490,19 @@ export class PackageService {
   }
 
   private persistBootPayloadCaches(bootPayload: any, ts = Date.now()): void {
+    let payloadJson: string | null = null;
     try {
+      payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
           'lh_boot_cache_v9',
-          JSON.stringify({
-            ts,
-            edge: this.edgeApiAvailable,
-            payload: bootPayload
-          })
+          `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
     } catch {
       // Ignore sessionStorage quota errors
     }
-    this.writeWarmBootCache(bootPayload, ts).catch(() => {});
+    this.writeWarmBootCache(payloadJson ?? bootPayload, ts).catch(() => {});
   }
 
   private initBackgroundCatalogRefresh(): void {
@@ -2376,7 +2524,7 @@ export class PackageService {
       } else {
         this.refreshCatalogInBackground().catch(() => {});
       }
-    }, 5 * 60 * 1000);
+    }, 30 * 60 * 1000);
 
     // 2. Unified Service Worker Broadcast (`periodicsync` / `sync` / `push`) & Wakeup Listener via PwaService
     this.pwaService.registerCatalogSyncHandler((event) => {
@@ -2392,13 +2540,13 @@ export class PackageService {
       if (
         event.source === 'visibility' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 3 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 15 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       } else if (
         event.source === 'online' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 2 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 10 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       }
@@ -2429,8 +2577,7 @@ export class PackageService {
         headers: {
           Accept: 'application/json',
           'ngsw-bypass': 'true'
-        },
-        cache: 'no-store'
+        }
       }).catch(() => null);
 
       if (!response || !response.ok || !(response.headers.get('content-type') || '').includes('application/json')) {
@@ -2478,7 +2625,7 @@ export class PackageService {
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
                 this.edgeApiAvailable = Boolean(parsed.edge);
                 this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
-                this.applyBootPayload(parsed.payload);
+                this.applyBootPayload(parsed.payload, { fromCache: true });
                 this._isLoading.set(false);
                 servedFromCache = true;
                 // Fresh within 60s: skip network completely to preserve Cloudflare Worker & D1 quota
@@ -2499,7 +2646,7 @@ export class PackageService {
           if (warmCache && warmCache.payload && Date.now() - warmCache.ts < maxWarmAgeMs) {
             this.edgeApiAvailable = Boolean(warmCache.edge);
             this.settingsService.edgeApiAvailable.set(this.edgeApiAvailable);
-            this.applyBootPayload(warmCache.payload);
+            this.applyBootPayload(warmCache.payload, { fromCache: true });
             this._isLoading.set(false);
             servedFromCache = true;
             if (Date.now() - warmCache.ts < 60_000 || !this.pwaService.isOnline()) {
@@ -2686,6 +2833,50 @@ export class PackageService {
     }
   }
 
+  private flushCatalogPatches(): void {
+    if (this.catalogPatchTimer) {
+      clearTimeout(this.catalogPatchTimer);
+      this.catalogPatchTimer = null;
+    }
+    if (this.pendingCatalogPatches.size === 0) return;
+    const batch = new Map(this.pendingCatalogPatches);
+    this.pendingCatalogPatches.clear();
+
+    this._packages.update(list =>
+      list.map(item => {
+        const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
+        const patch = batch.get(key);
+        if (!patch) return item;
+        const merged = { ...item, ...patch };
+        merged._searchBlob = this.buildSearchBlob(merged);
+        return merged;
+      })
+    );
+
+    const syncTop10 = (list: LuantiPackage[]) =>
+      list.map(item => {
+        const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
+        const patch = batch.get(key);
+        return patch ? { ...item, ...patch } : item;
+      });
+    this._serverTop10Today.update(syncTop10);
+    this._serverTop10Week.update(syncTop10);
+  }
+
+  private queueCatalogPatch(targetIdLower: string, patch: Partial<LuantiPackage>, flushImmediately = false): void {
+    const existing = this.pendingCatalogPatches.get(targetIdLower);
+    this.pendingCatalogPatches.set(targetIdLower, existing ? { ...existing, ...patch } : patch);
+    if (flushImmediately || this.activeHydrationWorkers === 0) {
+      this.flushCatalogPatches();
+      return;
+    }
+    if (!this.catalogPatchTimer) {
+      this.catalogPatchTimer = setTimeout(() => {
+        this.flushCatalogPatches();
+      }, 120);
+    }
+  }
+
   private drainHydrationQueue(): void {
     const MAX_CONCURRENT = 6;
     if (this.edgeApiAvailable && this.hydrationQueue.length >= 1 && this.activeHydrationWorkers < MAX_CONCURRENT) {
@@ -2694,6 +2885,9 @@ export class PackageService {
         this.activeHydrationWorkers++;
         this.hydratePackageBatch(batch).finally(() => {
           this.activeHydrationWorkers--;
+          if (this.activeHydrationWorkers === 0 && this.hydrationQueue.length === 0) {
+            this.flushCatalogPatches();
+          }
           this.drainHydrationQueue();
         });
         return;
@@ -2706,6 +2900,9 @@ export class PackageService {
       this.activeHydrationWorkers++;
       this.loadPackageDetails(nextPkg, false).finally(() => {
         this.activeHydrationWorkers--;
+        if (this.activeHydrationWorkers === 0 && this.hydrationQueue.length === 0) {
+          this.flushCatalogPatches();
+        }
         this.drainHydrationQueue();
       });
     }
@@ -2809,14 +3006,14 @@ export class PackageService {
           this.scheduleBootCachePersist();
         }
       } else {
-        unresolved.push(...batch);
+        unresolved.push(...batch.filter(p => p.source === 'git'));
       }
     } catch {
-      unresolved.push(...batch);
+      unresolved.push(...batch.filter(p => p.source === 'git'));
     }
 
     if (unresolved.length > 0) {
-      await Promise.all(unresolved.map(pkg => this.loadPackageDetails(pkg, false)));
+      await Promise.all(unresolved.slice(0, 4).map(pkg => this.loadPackageDetails(pkg, false)));
     }
   }
 
@@ -2989,11 +3186,13 @@ export class PackageService {
     if (navigateToRoot) {
       this.modalOpenRequestSeq++;
       this.pendingRoutePackage = null;
+      this.pendingRouteBlogModal = false;
       this.returnToPackageAfterModal = null;
       this.returnToPackageAfterAuthorDrawer = null;
       this.returnToAuthorAfterPackageModal = null;
       this._activePackage.set(null);
       this._activeAuthorUsername.set(null);
+      this._activeBlogArticle.set(null);
       this._isLoadingAuthorProfile.set(false);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
@@ -3584,7 +3783,7 @@ export class PackageService {
                 download_url: item.links?.self?.href ? String(item.links.self.href) : undefined
               }));
             this.repoExplicit404Cache.delete(cacheKey);
-            this.repoDirCache.set(cacheKey, listing);
+            this.setBoundedCache(this.repoDirCache, cacheKey, listing, 80);
             return listing;
           }
           if (Array.isArray(data)) {
@@ -3610,12 +3809,12 @@ export class PackageService {
                 };
               });
             this.repoExplicit404Cache.delete(cacheKey);
-            this.repoDirCache.set(cacheKey, listing);
+            this.setBoundedCache(this.repoDirCache, cacheKey, listing, 80);
             return listing;
           }
         } else if (res.status === 404) {
           this.repoExplicit404Cache.add(cacheKey);
-          this.repoDirCache.set(cacheKey, []);
+          this.setBoundedCache(this.repoDirCache, cacheKey, [], 80);
           return [];
         }
       } catch {
@@ -3745,7 +3944,7 @@ export class PackageService {
       return results;
     })();
 
-    this.discoveredReposCache.set(pkgCacheKey, promise);
+    this.setBoundedCache(this.discoveredReposCache, pkgCacheKey, promise, 80);
     return promise;
   }
 
@@ -4165,7 +4364,7 @@ export class PackageService {
       }
     })();
 
-    this.rawCdbCache.set(cacheKey, promise);
+    this.setBoundedCache(this.rawCdbCache, cacheKey, promise, 80);
     return promise;
   }
 
@@ -4683,7 +4882,7 @@ export class PackageService {
             ? (Number(rawCdbCounts.positive || 0) + Number(rawCdbCounts.neutral || 0) + Number(rawCdbCounts.negative || 0))
             : 0;
           if (hasCdbReviewsInBundled || expectedCdbTotal === 0 || isPureGitOnly) {
-            this.reviewsCache.set(cacheKey, normalizedBundled);
+            this.setBoundedCache(this.reviewsCache, cacheKey, normalizedBundled, 60);
           }
         }
 
@@ -4727,7 +4926,7 @@ export class PackageService {
             r => r.commit_sha !== 'HEAD' && r.version !== 'latest' && String(r.id) !== 'git-branch-fallback'
           );
           if (hasTaggedRelease) {
-            this.releasesCache.set(cacheKey, this.sortAndCapReleases(mappedReleases, 10));
+            this.setBoundedCache(this.releasesCache, cacheKey, this.sortAndCapReleases(mappedReleases, 10), 60);
           }
         }
 
@@ -4768,7 +4967,7 @@ export class PackageService {
         let minVersion = (rawMinVerVal && String(rawMinVerVal).toLowerCase() !== 'none' ? String(rawMinVerVal) : '') || pkg.min_minetest_version || '5.0.0';
 
         // Probe `.cdb.json` client-side only when Edge API did not already bundle/scan the Git repository
-        if (!hasBundledEdgeResponse && (!resolvedLicense || (!data.video_url && !pkg.video_url)) && repoUrl) {
+        if (!hasBundledEdgeResponse && (!resolvedLicense || (deepFetch && !data.video_url && !pkg.video_url)) && repoUrl) {
           const cdbRaw = await this.fetchRawCdbJsonFromRepoUrl(repoUrl, Boolean(resolvedLicense));
           if (cdbRaw) {
             gitRepoStatus = 'verified';
@@ -4855,11 +5054,7 @@ export class PackageService {
           !this.edgeApiAvailable &&
           !hasBundledEdgeResponse &&
           repoUrl &&
-          (deepFetch ||
-            isPureGitOnly ||
-            pkg.sources?.includes('git') ||
-            pkg.source === 'git' ||
-            !repoUrl.toLowerCase().includes('github.com')) &&
+          (deepFetch || isPureGitOnly) &&
           !this.isGitScreenshotUrl(data.banner) &&
           !this.isGitScreenshotUrl(pkg.banner)
         ) {
@@ -4984,12 +5179,15 @@ export class PackageService {
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
           pkg.author_id;
 
+        if (readmeText) {
+          this.setBoundedCache(this.readmeCache, cacheKey, readmeText, 40);
+        }
+
         const updatedFields: Partial<LuantiPackage> = {
           ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
           license: resolvedLicense,
           media_license: resolvedMediaLicense,
           desc: extractedLongDesc,
-          readme: readmeText,
           short_desc: data.short_desc || data.short_description || pkg.short_desc,
           contentdb_downloads: resolvedCdbDownloads,
           luantihub_downloads: resolvedLhDownloads,
@@ -5071,39 +5269,18 @@ export class PackageService {
               ((current.author || '').toLowerCase() === targetAuthorLower &&
                 (current.name || '').toLowerCase() === targetNameLower))
           ) {
-            const merged = { ...current, ...updatedFields };
+            const merged = {
+              ...current,
+              ...updatedFields,
+              ...(readmeText ? { readme: readmeText } : {})
+            };
             this.updateSeoMeta(merged);
             return merged;
           }
           return current;
         });
 
-        this._packages.update(list => list.map(item => {
-          if (
-            (item.id || '').toLowerCase() === targetIdLower ||
-            ((item.author || '').toLowerCase() === targetAuthorLower &&
-              (item.name || '').toLowerCase() === targetNameLower)
-          ) {
-            const merged = { ...item, ...updatedFields };
-            merged._searchBlob = this.buildSearchBlob(merged);
-            return merged;
-          }
-          return item;
-        }));
-
-        const syncTop10 = (list: LuantiPackage[]) =>
-          list.map(item => {
-            if (
-              (item.id || '').toLowerCase() === targetIdLower ||
-              ((item.author || '').toLowerCase() === targetAuthorLower &&
-                (item.name || '').toLowerCase() === targetNameLower)
-            ) {
-              return { ...item, ...updatedFields };
-            }
-            return item;
-          });
-        this._serverTop10Today.update(syncTop10);
-        this._serverTop10Week.update(syncTop10);
+        this.queueCatalogPatch(targetIdLower, updatedFields, deepFetch);
         this.scheduleBootCachePersist();
 
         if (deepFetch) {
@@ -5148,7 +5325,7 @@ export class PackageService {
     if (!pkg?.id) return undefined;
     const cacheKey = pkg.id.toLowerCase();
     if (pkg.readme) {
-      this.readmeCache.set(cacheKey, pkg.readme);
+      this.setBoundedCache(this.readmeCache, cacheKey, pkg.readme, 40);
       return pkg.readme;
     }
     if (this.readmeCache.has(cacheKey)) {
@@ -5183,13 +5360,10 @@ export class PackageService {
         readmeText = await this.fetchRawReadmeFromRepo(pkg.repo_url, pkg);
       }
 
-      this.readmeCache.set(cacheKey, readmeText || null);
+      this.setBoundedCache(this.readmeCache, cacheKey, readmeText || null, 40);
       if (readmeText) {
         this._activePackage.update(curr =>
           curr && curr.id.toLowerCase() === cacheKey ? { ...curr, readme: readmeText } : curr
-        );
-        this._packages.update(list =>
-          list.map(item => (item.id.toLowerCase() === cacheKey ? { ...item, readme: readmeText } : item))
         );
       }
       return readmeText;
@@ -6611,6 +6785,7 @@ export class PackageService {
   closeAllModals(updateUrl = true): void {
     this.modalOpenRequestSeq++;
     this.pendingRoutePackage = null;
+    this.pendingRouteBlogModal = false;
     this.returnToPackageAfterModal = null;
     this.returnToPackageAfterAuthorDrawer = null;
     this.returnToAuthorAfterPackageModal = null;

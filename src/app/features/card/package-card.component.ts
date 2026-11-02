@@ -6,7 +6,7 @@ import {
   signal,
   ElementRef,
   ViewChild,
-  HostListener,
+  NgZone,
   OnChanges,
   OnDestroy
 } from '@angular/core';
@@ -308,6 +308,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly ngZone = inject(NgZone);
 
   readonly isHoverVideoActive = signal<boolean>(false);
   readonly isHoverMuted = signal<boolean>(true);
@@ -317,6 +318,8 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   private hoverIntentTimer: any = null;
   private embedReadyTimer: any = null;
   private isPointerHovering = false;
+  private isMessageListenerAttached = false;
+  private readonly boundWindowMessageHandler = (event: MessageEvent) => this.onWindowMessage(event);
   currentHoverSeconds = 0;
 
   ngOnChanges(): void {
@@ -363,8 +366,24 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       this.embedReadyTimer = null;
     }
     if (this.isHoverVideoActive() && !this.isEmbedVideoReady()) {
-      this.isEmbedVideoReady.set(true);
+      this.ngZone.run(() => {
+        this.isEmbedVideoReady.set(true);
+      });
     }
+  }
+
+  private attachHoverMessageListener(): void {
+    if (this.isMessageListenerAttached || typeof window === 'undefined') return;
+    this.isMessageListenerAttached = true;
+    this.ngZone.runOutsideAngular(() => {
+      window.addEventListener('message', this.boundWindowMessageHandler);
+    });
+  }
+
+  private detachHoverMessageListener(): void {
+    if (!this.isMessageListenerAttached || typeof window === 'undefined') return;
+    this.isMessageListenerAttached = false;
+    window.removeEventListener('message', this.boundWindowMessageHandler);
   }
 
   onDirectVideoTimeUpdate(): void {
@@ -397,7 +416,6 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     }, HOVER_EMBED_FALLBACK_READY_MS);
   }
 
-  @HostListener('window:message', ['$event'])
   onWindowMessage(event: MessageEvent): void {
     if (!this.isHoverVideoActive()) return;
     const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
@@ -486,6 +504,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
         const embed = this.buildHoverEmbedUrl(rawUrl);
         if (!embed) return;
         this.hoverEmbedSafeUrl.set(this.sanitizer.bypassSecurityTrustResourceUrl(embed));
+        this.attachHoverMessageListener();
       } else {
         this.hoverEmbedSafeUrl.set(null);
       }
@@ -499,6 +518,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   private clearHoverVideo(): void {
     this.isPointerHovering = false;
+    this.detachHoverMessageListener();
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
       this.hoverIntentTimer = null;

@@ -126,6 +126,12 @@ const SECTION_HUB_SEO_MAP: Record<
     breadcrumbName: 'Terms & Privacy',
     description:
       'Official Luanti trademark disclaimer, SPDX open-source license enforcement, and DMCA / EU DSA Safe Harbor policy.'
+  },
+  '/blog': {
+    title: 'Official Luanti Blog — Engine News & Updates | Luanti Hub',
+    breadcrumbName: 'Luanti Blog',
+    description:
+      'Read the latest official Luanti (formerly Minetest) engine announcements, security updates, and community news on Luanti Hub.'
   }
 };
 

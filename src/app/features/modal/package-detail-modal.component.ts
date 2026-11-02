@@ -120,8 +120,8 @@ import {
             <!-- Admin-Only Package Moderation Bar (Delist, Restore & Safe Permanent Removal) -->
             @if (authService.isAdmin()) {
               <div
-                [class]="isPackageDelisted() ? 'bg-amber-950/75 border-amber-500/30 text-amber-200' : 'bg-rose-950/75 border-rose-500/30 text-rose-200'"
-                class="px-5 py-2.5 backdrop-blur-md border-b flex flex-col gap-2 text-xs flex-shrink-0">
+                [class]="isPackageDelisted() ? 'bg-amber-950/85 border-amber-500/30 text-amber-200' : 'bg-rose-950/85 border-rose-500/30 text-rose-200'"
+                class="px-5 py-2.5 border-b flex flex-col gap-2 text-xs flex-shrink-0">
                 <div class="flex items-center justify-between gap-3 flex-wrap">
                   <div class="flex items-center gap-2 font-bold">
                     <svg lucideShieldAlert class="w-4 h-4 flex-shrink-0" [class]="isPackageDelisted() ? 'text-amber-400' : 'text-rose-400'"></svg>
@@ -284,7 +284,7 @@ import {
 
           <!-- Inline Package Removal Confirmation Banner (Prevent Accidental Removals) -->
           @if (isConfirmingRemove()) {
-            <div class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/45 border border-rose-500/35 backdrop-blur-md flex items-center justify-between gap-3 flex-wrap text-xs luanti-tab-enter">
+            <div class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/60 border border-rose-500/35 flex items-center justify-between gap-3 flex-wrap text-xs luanti-tab-enter">
               <div class="flex items-center gap-2 text-rose-200 font-semibold">
                 <svg lucideTrash2 class="w-4 h-4 text-rose-400 flex-shrink-0"></svg>
                 <span>
@@ -313,7 +313,7 @@ import {
 
           <!-- Inline Community Report Form -->
           @if (isReportOpen()) {
-            <form (ngSubmit)="onSubmitReport()" class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/40 border border-rose-500/30 backdrop-blur-md space-y-3 text-xs luanti-tab-enter">
+            <form (ngSubmit)="onSubmitReport()" class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/55 border border-rose-500/30 space-y-3 text-xs luanti-tab-enter">
               <div class="flex items-center justify-between">
                 <h3 class="font-bold text-rose-300 flex items-center gap-1.5">
                   <svg lucideFlag class="w-4 h-4 text-rose-400"></svg>
@@ -556,7 +556,7 @@ import {
                         </div>
 
                         <!-- Frosted Pill Indicator Dock (Sliding 9-Dot Window with Tapered Edge Dots for Large Galleries) -->
-                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-950/55 backdrop-blur-md border border-white/10 shadow-lg max-w-[calc(100%-7.5rem)]">
+                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-full glass-pill max-w-[calc(100%-7.5rem)]">
                           @for (dot of visibleMediaDots(); track dot.index) {
                             <button
                               type="button"

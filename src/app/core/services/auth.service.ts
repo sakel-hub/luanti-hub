@@ -302,12 +302,6 @@ export class AuthService {
       typeof (globalThis as any).__vitest_worker__ !== 'undefined';
 
     if (!isUnitTestEnv) {
-      this.pwaService.registerCatalogSyncHandler(() => {
-        if (this.isLoggedIn() && this.pwaService.isOnline()) {
-          this.initAuth(true).catch(() => {});
-        }
-      });
-
       if (this.backgroundAuthDigestTimer) {
         clearInterval(this.backgroundAuthDigestTimer);
       }
@@ -315,7 +309,7 @@ export class AuthService {
         if (this.isLoggedIn() && this.pwaService.isOnline()) {
           this.initAuth(true).catch(() => {});
         }
-      }, 5 * 60 * 1000);
+      }, 30 * 60 * 1000);
     }
   }
 
@@ -548,17 +542,30 @@ export class AuthService {
             this.settingsService.mergeServerDownloads(data.user.downloads);
             await this.settingsService.mergeServerFavorites(data.user.favorites);
             this.processNotificationDigest(data.user);
-            if (this.isAdmin()) {
+            if (this.isAdmin() && !data.transientDbFallback) {
               this.fetchModerationQueue();
             }
             return;
           }
+          // Genuine 200 OK unauthenticated response
+          this._currentUser.set(null);
+          this.settingsService.isAuthenticatedSession.set(false);
+          if (this._isProfileDrawerOpen()) {
+            this._isProfileDrawerOpen.set(false);
+          }
+          return;
+        }
+        // Transient server/database error (e.g. 500/503 D1 quota): preserve existing in-memory session if already logged in
+        if (this._currentUser()) {
+          return;
         }
       }
 
-      this.settingsService.isAuthenticatedSession.set(false);
-      if (this._isProfileDrawerOpen()) {
-        this._isProfileDrawerOpen.set(false);
+      if (!this._currentUser()) {
+        this.settingsService.isAuthenticatedSession.set(false);
+        if (this._isProfileDrawerOpen()) {
+          this._isProfileDrawerOpen.set(false);
+        }
       }
     } catch {
       // Offline / unauthenticated

@@ -14,34 +14,135 @@ async function getKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-export async function createSessionToken(userId: string, secret: string = DEFAULT_SECRET): Promise<string> {
-  const payload = JSON.stringify({ userId, exp: Date.now() + 86400000 * 30 }); // 30 days
+export interface SessionTokenClaims {
+  userId: string;
+  username?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  provider?: string;
+  role?: string;
+  verified?: boolean;
+  exp?: number;
+}
+
+const reconciledUserIdsInIsolate = new Set<string>();
+const isolateUserProfileCache = new Map<string, { exp: number; payload: any }>();
+
+export function getCachedAuthMePayload(userId: string, allowStaleOnError = false): any | null {
+  if (!userId) return null;
+  const entry = isolateUserProfileCache.get(userId);
+  if (!entry) return null;
+  if (!allowStaleOnError && Date.now() > entry.exp) {
+    return null;
+  }
+  return entry.payload;
+}
+
+export function setCachedAuthMePayload(userId: string, payload: any, ttlMs = 300_000): void {
+  if (!userId || !payload) return;
+  if (isolateUserProfileCache.size > 200) {
+    const oldest = isolateUserProfileCache.keys().next().value;
+    if (oldest) isolateUserProfileCache.delete(oldest);
+  }
+  isolateUserProfileCache.set(userId, {
+    exp: Date.now() + ttlMs,
+    payload
+  });
+}
+
+export function invalidateCachedAuthMePayload(userId?: string): void {
+  if (!userId) {
+    isolateUserProfileCache.clear();
+    return;
+  }
+  isolateUserProfileCache.delete(userId);
+}
+
+function encodeUtf8Base64(str: string): string {
+  try {
+    return btoa(unescape(encodeURIComponent(str)));
+  } catch {
+    return btoa(str);
+  }
+}
+
+function decodeUtf8Base64(b64: string): string {
+  const raw = atob(b64);
+  try {
+    return decodeURIComponent(escape(raw));
+  } catch {
+    return raw;
+  }
+}
+
+export async function createSessionToken(
+  userId: string,
+  secret: string = DEFAULT_SECRET,
+  claims?: Partial<SessionTokenClaims>
+): Promise<string> {
+  const payloadObj: Record<string, any> = {
+    userId,
+    exp: Date.now() + 86400000 * 30 // 30 days
+  };
+  if (claims?.username) payloadObj['u'] = String(claims.username).slice(0, 64);
+  if (claims?.displayName) payloadObj['d'] = String(claims.displayName).slice(0, 80);
+  if (claims?.avatarUrl) payloadObj['a'] = String(claims.avatarUrl).slice(0, 250);
+  if (claims?.provider) payloadObj['p'] = String(claims.provider).slice(0, 24);
+  if (claims?.role) payloadObj['r'] = String(claims.role).slice(0, 20);
+  if (typeof claims?.verified === 'boolean') payloadObj['v'] = claims.verified ? 1 : 0;
+
+  const payload = JSON.stringify(payloadObj);
   const enc = new TextEncoder();
   const key = await getKey(secret);
   const signature = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
-  const b64Payload = btoa(payload);
+  const b64Payload = encodeUtf8Base64(payload);
   const b64Sig = btoa(String.fromCharCode(...new Uint8Array(signature)));
   return `${b64Payload}.${b64Sig}`;
 }
 
-export async function verifySessionToken(token: string, secret: string = DEFAULT_SECRET): Promise<string | null> {
+export async function verifySessionTokenClaims(
+  token: string,
+  secret: string = DEFAULT_SECRET
+): Promise<SessionTokenClaims | null> {
   try {
     const [b64Payload, b64Sig] = token.split('.');
     if (!b64Payload || !b64Sig) return null;
 
-    const payload = atob(b64Payload);
+    const payload = decodeUtf8Base64(b64Payload);
     const data = JSON.parse(payload);
+    if (!data?.userId) return null;
     if (data.exp && Date.now() > data.exp) return null;
 
     const key = await getKey(secret);
     const enc = new TextEncoder();
     const sigBytes = Uint8Array.from(atob(b64Sig), c => c.charCodeAt(0));
 
-    const isValid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
-    return isValid ? data.userId : null;
+    let isValid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(payload));
+    if (!isValid) {
+      // Fallback for legacy ASCII-only payloads
+      const rawPayload = atob(b64Payload);
+      isValid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(rawPayload));
+    }
+    if (!isValid) return null;
+
+    return {
+      userId: String(data.userId),
+      username: typeof data.u === 'string' && data.u ? data.u : undefined,
+      displayName: typeof data.d === 'string' && data.d ? data.d : undefined,
+      avatarUrl: typeof data.a === 'string' && data.a ? data.a : undefined,
+      provider: typeof data.p === 'string' && data.p ? data.p : undefined,
+      role: typeof data.r === 'string' && data.r ? data.r : undefined,
+      verified: data.v !== undefined ? Boolean(data.v) : undefined,
+      exp: typeof data.exp === 'number' ? data.exp : undefined
+    };
   } catch {
     return null;
   }
+}
+
+export async function verifySessionToken(token: string, secret: string = DEFAULT_SECRET): Promise<string | null> {
+  const claims = await verifySessionTokenClaims(token, secret);
+  return claims ? claims.userId : null;
 }
 
 export async function createAuditProofToken(repoKey: string, secret: string = DEFAULT_SECRET): Promise<string> {
@@ -436,10 +537,22 @@ export function verifyStrictAuthorPortfolioOwnership(
  * and automatically merges duplicate suffixed accounts (e.g. `username_gi` -> `username`)
  * or orphaned `user_identities` rows whose parent `users` row was deleted.
  */
-export async function reconcileAndMergeUserAccount(db: any, currentUserId: string): Promise<any | null> {
+export async function reconcileAndMergeUserAccount(
+  db: any,
+  currentUserId: string,
+  forceReconcile = false
+): Promise<any | null> {
   if (!db || !currentUserId) return null;
 
   let user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(currentUserId).first();
+
+  if (user && !forceReconcile && reconciledUserIdsInIsolate.has(String(user.id))) {
+    const rawU = String(user.username || '').trim();
+    const baseU = rawU.replace(/_(gi|gl|co|cd|me)$/i, '');
+    if (rawU && rawU.toLowerCase() === baseU.toLowerCase()) {
+      return user;
+    }
+  }
 
   // Self-heal if currentUserId was deleted from `users` while `lh_session` or `user_identities` still references it
   if (!user) {
@@ -544,6 +657,10 @@ export async function reconcileAndMergeUserAccount(db: any, currentUserId: strin
     }
   } catch {
     // Non-fatal if a table is missing in local dev
+  }
+
+  if (user?.id) {
+    reconciledUserIdsInIsolate.add(String(user.id));
   }
 
   return user;

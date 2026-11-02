@@ -191,12 +191,22 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
 -- Indices for rapid querying by Luanti game engine, web search, moderation, and Top 10 rollups
 CREATE INDEX IF NOT EXISTS idx_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_identities_provider ON user_identities(provider, provider_username);
+CREATE INDEX IF NOT EXISTS idx_identities_lower_prov_user ON user_identities(LOWER(provider_username));
+CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username));
 CREATE INDEX IF NOT EXISTS idx_packages_type ON packages(type);
 CREATE INDEX IF NOT EXISTS idx_packages_status ON packages(status);
+CREATE INDEX IF NOT EXISTS idx_packages_status_updated ON packages(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_packages_status_dl ON packages(status, downloads_count DESC);
 CREATE INDEX IF NOT EXISTS idx_packages_author ON packages(author_name);
+CREATE INDEX IF NOT EXISTS idx_packages_lower_id ON packages(LOWER(id));
+CREATE INDEX IF NOT EXISTS idx_packages_lower_author_name ON packages(LOWER(author_name), LOWER(name));
 CREATE INDEX IF NOT EXISTS idx_reviews_pkg ON reviews(package_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_lower_pkg ON reviews(LOWER(package_id));
+CREATE INDEX IF NOT EXISTS idx_releases_lower_pkg ON releases(LOWER(package_id));
 CREATE INDEX IF NOT EXISTS idx_pkg_downloads_date_count ON package_daily_downloads (download_date, downloads_count DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_dl_lower_pkg_date ON package_daily_downloads(LOWER(package_id), download_date);
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_favorites_lower_pkg ON user_favorites(LOWER(package_id));
 CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
