@@ -6677,8 +6677,8 @@ supported_games = minetest_game, voxelibre
       )
     ).toBe(true);
 
-    // 4. Verify centralized ThemeIconComponent & PROMO_ROW_ICON_OPTIONS (no emojis in labels)
-    const { PROMO_ROW_ICON_OPTIONS } = await import('./shared/components/theme-icon.component');
+    // 4. Verify centralized ThemeIconComponent & PROMO_ROW_ICON_OPTIONS (no emojis in labels & exact class binding on SVG)
+    const { PROMO_ROW_ICON_OPTIONS, ThemeIconComponent } = await import('./shared/components/theme-icon.component');
     expect(PROMO_ROW_ICON_OPTIONS.map(o => o.value)).toEqual([
       'trophy',
       'gamepad',
@@ -6690,6 +6690,15 @@ supported_games = minetest_game, voxelibre
     for (const opt of PROMO_ROW_ICON_OPTIONS) {
       expect(opt.label).toMatch(/^[A-Za-z0-9 ]+$/);
     }
+    const iconFixture = TestBed.createComponent(ThemeIconComponent);
+    iconFixture.componentInstance.name = 'trophy';
+    iconFixture.componentInstance.sizeClass = 'w-4 h-4';
+    iconFixture.detectChanges();
+    const renderedSvg = iconFixture.nativeElement.querySelector('svg') as SVGElement;
+    expect(renderedSvg).toBeTruthy();
+    expect(renderedSvg.getAttribute('class')).toContain('w-4');
+    expect(renderedSvg.getAttribute('class')).toContain('h-4');
+    expect(renderedSvg.getAttribute('class')).toContain('text-amber-400');
 
     pkgService.setPromotions([]);
   });

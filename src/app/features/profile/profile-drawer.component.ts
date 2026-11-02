@@ -1300,85 +1300,83 @@ import {
                       </span>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                      <div class="sm:col-span-2">
+                    <div>
+                      <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                        Row Heading Title <span class="text-[10px] font-normal text-slate-400">(supports i18n:carousel.promoGameJamTitle|year=2026)</span>
+                      </label>
+                      <input
+                        type="text"
+                        [ngModel]="promoRowTitle()"
+                        (ngModelChange)="promoRowTitle.set($event)"
+                        name="promoRowTitle"
+                        placeholder="Luanti Game Jam 2026 Submissions"
+                        class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div class="relative" data-testid="promo-row-icon-picker">
                         <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                          Row Heading Title <span class="text-[10px] font-normal text-slate-400">(supports i18n:carousel.promoGameJamTitle|year=2026)</span>
+                          Row Icon
                         </label>
-                        <input
-                          type="text"
-                          [ngModel]="promoRowTitle()"
-                          (ngModelChange)="promoRowTitle.set($event)"
-                          name="promoRowTitle"
-                          placeholder="Luanti Game Jam 2026 Submissions"
-                          class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
-                        />
+                        <button
+                          type="button"
+                          (click)="togglePromoIconMenu($event)"
+                          aria-label="Promotional Row Icon"
+                          [attr.aria-expanded]="isPromoIconMenuOpen()"
+                          class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white focus:outline-none flex items-center justify-between gap-2 cursor-pointer">
+                          <span class="inline-flex items-center gap-2 min-w-0">
+                            <app-theme-icon [name]="promoRowIcon()" sizeClass="w-4 h-4"></app-theme-icon>
+                            <span class="font-medium whitespace-nowrap">{{ selectedPromoIconLabel() }}</span>
+                          </span>
+                          <svg
+                            lucideChevronDown
+                            class="w-3.5 h-3.5 text-slate-400 flex-shrink-0 transition-transform duration-150"
+                            [class.rotate-180]="isPromoIconMenuOpen()"></svg>
+                        </button>
+
+                        @if (isPromoIconMenuOpen()) {
+                          <div
+                            role="listbox"
+                            aria-label="Select Promotional Row Icon"
+                            (click)="$event.stopPropagation()"
+                            class="absolute left-0 right-0 min-w-[11rem] mt-1.5 rounded-xl glass-dropdown p-1.5 z-50 space-y-0.5 shadow-2xl border border-white/15">
+                            @for (opt of promoRowIconOptions; track opt.value) {
+                              <button
+                                type="button"
+                                role="option"
+                                [attr.aria-selected]="promoRowIcon() === opt.value"
+                                (click)="selectPromoRowIcon(opt.value)"
+                                [class]="promoRowIcon() === opt.value ? 'bg-amber-500/20 text-white border-amber-400/40 font-bold' : 'text-slate-200 hover:bg-white/10 border-transparent font-medium'"
+                                class="w-full px-3 py-2 rounded-lg border text-xs flex items-center justify-between gap-2.5 transition cursor-pointer">
+                                <span class="inline-flex items-center gap-2.5">
+                                  <app-theme-icon [name]="opt.value" sizeClass="w-4 h-4"></app-theme-icon>
+                                  <span class="whitespace-nowrap">{{ opt.label }}</span>
+                                </span>
+                                @if (promoRowIcon() === opt.value) {
+                                  <svg lucideCheck class="w-3.5 h-3.5 text-amber-400 flex-shrink-0"></svg>
+                                }
+                              </button>
+                            }
+                          </div>
+                        }
                       </div>
 
-                      <div class="grid grid-cols-2 gap-2">
-                        <div class="relative" data-testid="promo-row-icon-picker">
-                          <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                            Row Icon
-                          </label>
-                          <button
-                            type="button"
-                            (click)="togglePromoIconMenu($event)"
-                            aria-label="Promotional Row Icon"
-                            [attr.aria-expanded]="isPromoIconMenuOpen()"
-                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none flex items-center justify-between gap-1.5 cursor-pointer">
-                            <span class="inline-flex items-center gap-1.5 truncate">
-                              <app-theme-icon [name]="promoRowIcon()" sizeClass="w-3.5 h-3.5"></app-theme-icon>
-                              <span class="truncate">{{ selectedPromoIconLabel() }}</span>
-                            </span>
-                            <svg
-                              lucideChevronDown
-                              class="w-3.5 h-3.5 text-slate-400 flex-shrink-0 transition-transform duration-150"
-                              [class.rotate-180]="isPromoIconMenuOpen()"></svg>
-                          </button>
-
-                          @if (isPromoIconMenuOpen()) {
-                            <div
-                              role="listbox"
-                              aria-label="Select Promotional Row Icon"
-                              (click)="$event.stopPropagation()"
-                              class="absolute left-0 right-0 mt-1.5 rounded-xl glass-dropdown p-1.5 z-50 space-y-0.5 shadow-2xl border border-white/15">
-                              @for (opt of promoRowIconOptions; track opt.value) {
-                                <button
-                                  type="button"
-                                  role="option"
-                                  [attr.aria-selected]="promoRowIcon() === opt.value"
-                                  (click)="selectPromoRowIcon(opt.value)"
-                                  [class]="promoRowIcon() === opt.value ? 'bg-amber-500/20 text-white border-amber-400/40 font-bold' : 'text-slate-200 hover:bg-white/10 border-transparent font-medium'"
-                                  class="w-full px-2.5 py-1.5 rounded-lg border text-xs flex items-center justify-between gap-2 transition cursor-pointer">
-                                  <span class="inline-flex items-center gap-2 truncate">
-                                    <app-theme-icon [name]="opt.value" sizeClass="w-3.5 h-3.5"></app-theme-icon>
-                                    <span class="truncate">{{ opt.label }}</span>
-                                  </span>
-                                  @if (promoRowIcon() === opt.value) {
-                                    <svg lucideCheck class="w-3.5 h-3.5 text-amber-400 flex-shrink-0"></svg>
-                                  }
-                                </button>
-                              }
-                            </div>
-                          }
-                        </div>
-
-                        <div>
-                          <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                            Sort Order
-                          </label>
-                          <select
-                            [ngModel]="promoRowSortBy()"
-                            (ngModelChange)="promoRowSortBy.set($event)"
-                            name="promoRowSortBy"
-                            aria-label="Promotional Row Sort Order"
-                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none">
-                            <option value="newest" class="bg-slate-900">Newest First</option>
-                            <option value="downloads" class="bg-slate-900">Most Downloads</option>
-                            <option value="rating" class="bg-slate-900">Highest Rated</option>
-                            <option value="trending" class="bg-slate-900">Trending</option>
-                          </select>
-                        </div>
+                      <div>
+                        <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                          Sort Order
+                        </label>
+                        <select
+                          [ngModel]="promoRowSortBy()"
+                          (ngModelChange)="promoRowSortBy.set($event)"
+                          name="promoRowSortBy"
+                          aria-label="Promotional Row Sort Order"
+                          class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white focus:outline-none">
+                          <option value="newest" class="bg-slate-900">Newest First</option>
+                          <option value="downloads" class="bg-slate-900">Most Downloads</option>
+                          <option value="rating" class="bg-slate-900">Highest Rated</option>
+                          <option value="trending" class="bg-slate-900">Trending</option>
+                        </select>
                       </div>
                     </div>
 

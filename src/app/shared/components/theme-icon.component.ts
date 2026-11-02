@@ -1,5 +1,4 @@
 import { Component, Input, ChangeDetectionStrategy } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import {
   LucideTrophy,
   LucideGamepad2,
@@ -76,7 +75,6 @@ export const THEME_ICON_COLORS: Readonly<Record<ThemeIconName, string>> = {
   selector: 'app-theme-icon',
   standalone: true,
   imports: [
-    CommonModule,
     LucideTrophy,
     LucideGamepad2,
     LucideSparkles,
@@ -101,52 +99,52 @@ export const THEME_ICON_COLORS: Readonly<Record<ThemeIconName, string>> = {
   template: `
     @switch (name) {
       @case ('trophy') {
-        <svg lucideTrophy [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideTrophy [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('gamepad') {
-        <svg lucideGamepad2 [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideGamepad2 [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('sparkles') {
-        <svg lucideSparkles [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideSparkles [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('flame') {
-        <svg lucideFlame [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideFlame [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('star') {
-        <svg lucideStar [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideStar [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('rocket') {
-        <svg lucideRocket [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideRocket [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('git') {
-        <svg lucideGitBranch [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideGitBranch [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('zap') {
-        <svg lucideZap [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideZap [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('cpu') {
-        <svg lucideCpu [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideCpu [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('palette') {
-        <svg lucidePalette [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucidePalette [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('tag') {
-        <svg lucideTag [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideTag [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('pin') {
-        <svg lucidePin [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucidePin [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('globe') {
-        <svg lucideGlobe [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideGlobe [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('lightbulb') {
-        <svg lucideLightbulb [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideLightbulb [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('thumbs-up') {
-        <svg lucideThumbsUp [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideThumbsUp [class]="resolvedClasses" aria-hidden="true"></svg>
       }
       @case ('thumbs-down') {
-        <svg lucideThumbsDown [ngClass]="resolvedClasses" aria-hidden="true"></svg>
+        <svg lucideThumbsDown [class]="resolvedClasses" aria-hidden="true"></svg>
       }
     }
   `
