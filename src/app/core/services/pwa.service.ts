@@ -919,7 +919,8 @@ export class PwaService {
           }
         }, 5000);
 
-        // Periodic wakeup check: delegates to the Service Worker when minimized/unfocused so update notifications fire immediately in the background
+        // Periodic wakeup check (15-min cadence aligned with Cloudflare Edge Cache TTL):
+        // delegates to the Service Worker when minimized/unfocused so update notifications fire in the background without exhausting D1 quota
         setInterval(() => {
           if (!this.isOnline()) return;
           const isHiddenOrUnfocused =
@@ -931,23 +932,29 @@ export class PwaService {
           } else {
             this.checkForUpdate(false);
           }
-        }, 5 * 60 * 1000);
+        }, 15 * 60 * 1000);
       }
     }
 
     // 3. Event-driven background sync & visibility/focus handoff (W3C / Edge / PWABuilder best practices)
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      let lastHandoffAt = 0;
-      const handoffToServiceWorker = (force = false) => {
+      const SW_HANDOFF_COOLDOWN_MS = 15 * 60 * 1000;
+      let lastStateSyncAt = 0;
+      let lastSwCatalogCheckAt = 0;
+      let lastVisibilityCheckAt = Date.now();
+
+      const handoffToServiceWorker = (forceStateSync = false) => {
         const now = Date.now();
-        if (!force && now - lastHandoffAt < 5000) return;
-        lastHandoffAt = now;
+        if (!forceStateSync && now - lastStateSyncAt < 3000) return;
+        lastStateSyncAt = now;
         this.syncNotificationStateToIndexedDb()
           .catch(() => {})
           .finally(() => {
-            this.requestCatalogBackgroundSync().catch(() => {});
             this.registerPeriodicCatalogSync().catch(() => {});
-            this.triggerSwBackgroundCatalogCheck();
+            if (now - lastSwCatalogCheckAt >= SW_HANDOFF_COOLDOWN_MS) {
+              lastSwCatalogCheckAt = now;
+              this.triggerSwBackgroundCatalogCheck();
+            }
           });
       };
 
@@ -959,8 +966,12 @@ export class PwaService {
           this.reconcileNotifStateFromIndexedDb()
             .catch(() => {})
             .finally(() => {
-              this.checkForUpdate(false);
-              this.notifyCatalogSyncListeners({ source: 'visibility', ts: Date.now() });
+              const now = Date.now();
+              if (now - lastVisibilityCheckAt >= SW_HANDOFF_COOLDOWN_MS) {
+                lastVisibilityCheckAt = now;
+                this.checkForUpdate(false);
+                this.notifyCatalogSyncListeners({ source: 'visibility', ts: now });
+              }
             });
         }
       });

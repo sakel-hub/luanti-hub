@@ -5765,8 +5765,8 @@ supported_games = minetest_game, voxelibre
         cdbShot1
       ]);
 
-      // Verify that an 'official' ContentDB package with repo_url & video_url already set (e.g. SaKeL/everness from D1)
-      // still triggers needsTileHydration until its Git screenshot.png has been checked
+      // Verify that a dual-source ('official' + 'git') package with repo_url & video_url already set (e.g. SaKeL/everness from D1)
+      // still triggers needsTileHydration until its Git screenshot.png has been checked, whereas a pure ContentDB package does not
       const pkgService = TestBed.inject(PackageService);
       (pkgService as any).hydratedIds.delete('sakel/everness');
       (pkgService as any).hydratedMetaCache.delete('sakel/everness');
@@ -5776,9 +5776,9 @@ supported_games = minetest_game, voxelibre
         name: 'everness',
         title: 'Everness',
         type: 'mod',
-        provider: 'contentdb',
-        source: 'official',
-        sources: ['official'],
+        provider: 'bitbucket',
+        source: 'git',
+        sources: ['official', 'git'],
         license: 'LGPL-3.0-only',
         downloads: 45000,
         contentdb_downloads: 45000,
@@ -5790,6 +5790,26 @@ supported_games = minetest_game, voxelibre
       });
       expect((pkgService as any).hydratedIds.has('sakel/everness')).toBe(false);
       expect((pkgService as any).needsTileHydration(normalizedPreHydrated)).toBe(true);
+
+      const pureCdbNormalized = (pkgService as any).normalizePackage({
+        id: 'Wuzzy/mineclone2',
+        author: 'Wuzzy',
+        name: 'mineclone2',
+        title: 'VoxeLibre',
+        type: 'game',
+        provider: 'contentdb',
+        source: 'official',
+        sources: ['official'],
+        license: 'GPL-3.0-only',
+        downloads: 500000,
+        contentdb_downloads: 500000,
+        tags: ['survival', 'sandbox'],
+        repo_url: 'https://git.minetest.land/MineClone2/MineClone2',
+        thumbnail: cdbThumb,
+        banner: cdbShot1
+      });
+      expect((pkgService as any).hydratedIds.has('wuzzy/mineclone2')).toBe(true);
+      expect((pkgService as any).needsTileHydration(pureCdbNormalized)).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
     }

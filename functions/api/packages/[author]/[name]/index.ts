@@ -657,7 +657,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         liteGitScan?.screenshots,
         parseJsonArray(d1Pkg.screenshots)
       );
-      if ((!d1Pkg.video_url && liteVideo.video_url) || (!hasStoredGitShotLite && liteGitShot)) {
+      if (
+        d1Pkg.provider !== 'contentdb' &&
+        ((!d1Pkg.video_url && liteVideo.video_url) || (!hasStoredGitShotLite && liteGitShot))
+      ) {
         context.env.DB.prepare(`
           UPDATE packages
           SET video_url = COALESCE(video_url, ?),
@@ -858,9 +861,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           const fastThumb = fastGitShot || d1Pkg.thumbnail_url || fastCdbDetail?.thumbnail || undefined;
           const fastBanner = fastGitShot || fastMergedScreenshots[0] || d1Pkg.banner_url || fastThumb || undefined;
           if (
-            (!d1Pkg.video_url && fastVideo.video_url) ||
-            (!hasStoredGitShotFast && fastGitShot) ||
-            fastMergedScreenshots.length > d1Screenshots.length
+            d1Pkg.provider !== 'contentdb' &&
+            ((!d1Pkg.video_url && fastVideo.video_url) || (!hasStoredGitShotFast && fastGitShot))
           ) {
             context.env.DB.prepare(`
               UPDATE packages
@@ -890,6 +892,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           if (
             context.env.DB &&
             d1Pkg.id &&
+            d1Pkg.provider !== 'contentdb' &&
             fastGitReleases.length > 0 &&
             fastBundledReleases.length > d1Releases.length
           ) {
@@ -1809,134 +1812,49 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       }
     }));
 
-  // Persist synced ContentDB downloads, license, tags, screenshots & extended metadata back to D1 (upsert for official ContentDB packages)
-  if (context.env.DB) {
-    const cdbAuthor = String(upstreamData.author || author).trim();
-    const cdbName = String(upstreamData.name || name).trim();
-    const cdbTitle = String(upstreamData.title || d1Pkg?.title || cdbName).trim();
-    const cdbType = ['mod', 'game', 'txp', 'modpack'].includes(String(upstreamData.type || d1Pkg?.type || 'mod'))
-      ? String(upstreamData.type || d1Pkg?.type || 'mod')
-      : 'mod';
-    const cdbThumb = resolvedThumb;
-    const cdbBanner = resolvedBanner;
-    const targetRowId = d1Pkg?.id || canonicalId;
+  // Only backfill D1 if this package already exists as a native/Git row in D1 (never mirror upstream ContentDB packages into D1 on GET reads)
+  if (context.env.DB && d1Pkg && d1Pkg.provider !== 'contentdb' && !isLite) {
+    const targetRowId = d1Pkg.id;
+    const needsMetaBackfill =
+      (!d1Pkg.license && resolvedLicense) ||
+      (!d1Pkg.video_url && videoUrl) ||
+      ((!d1Pkg.banner_url || d1Pkg.banner_url === 'logo.svg') && resolvedBanner && resolvedBanner !== 'logo.svg') ||
+      (!d1Pkg.long_desc && extractedLongDesc);
 
-    context.env.DB.prepare(`
-      INSERT INTO packages (
-        id, author_name, name, title, type, short_desc, long_desc, repo_url, provider,
-        thumbnail_url, banner_url, license, media_license, tags, dependencies, optional_dependencies,
-        min_minetest_version, max_minetest_version, status, downloads_count, contentdb_downloads, luantihub_downloads,
-        download_size, file_size, donate_url, translation_url, forum_url, issue_tracker,
-        video_url, video_thumbnail_url, dev_state, provides, content_warnings, ai_disclosures,
-        maintainers, screenshots, game_support, review_thread_counts
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, 'contentdb',
-        ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, 'active', ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?
-      )
-      ON CONFLICT(id) DO UPDATE SET
-        short_desc = COALESCE(excluded.short_desc, packages.short_desc),
-        long_desc = COALESCE(excluded.long_desc, packages.long_desc),
-        thumbnail_url = CASE
-          WHEN excluded.thumbnail_url IS NOT NULL
-            AND excluded.thumbnail_url != ''
-            AND excluded.thumbnail_url != 'logo.svg'
-            AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
-            AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-          THEN excluded.thumbnail_url
-          WHEN packages.thumbnail_url IS NOT NULL
-            AND packages.thumbnail_url != ''
-            AND packages.thumbnail_url != 'logo.svg'
-            AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
-            AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-          THEN packages.thumbnail_url
-          ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
-        END,
-        banner_url = CASE
-          WHEN excluded.banner_url IS NOT NULL
-            AND excluded.banner_url != ''
-            AND excluded.banner_url != 'logo.svg'
-            AND excluded.banner_url NOT LIKE '%content.luanti.org%'
-            AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
-          THEN excluded.banner_url
-          WHEN packages.banner_url IS NOT NULL
-            AND packages.banner_url != ''
-            AND packages.banner_url != 'logo.svg'
-            AND packages.banner_url NOT LIKE '%content.luanti.org%'
-            AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
-          THEN packages.banner_url
-          ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
-        END,
-        contentdb_downloads = excluded.contentdb_downloads,
-        luantihub_downloads = excluded.luantihub_downloads,
-        downloads_count = excluded.downloads_count,
-        license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-        media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-        tags = COALESCE(excluded.tags, packages.tags),
-        dependencies = COALESCE(excluded.dependencies, packages.dependencies),
-        optional_dependencies = COALESCE(excluded.optional_dependencies, packages.optional_dependencies),
-        min_minetest_version = COALESCE(excluded.min_minetest_version, packages.min_minetest_version),
-        max_minetest_version = COALESCE(excluded.max_minetest_version, packages.max_minetest_version),
-        download_size = COALESCE(excluded.download_size, packages.download_size),
-        file_size = COALESCE(excluded.file_size, packages.file_size),
-        donate_url = COALESCE(excluded.donate_url, packages.donate_url),
-        issue_tracker = COALESCE(excluded.issue_tracker, packages.issue_tracker),
-        translation_url = COALESCE(excluded.translation_url, packages.translation_url),
-        forum_url = COALESCE(excluded.forum_url, packages.forum_url),
-        video_url = COALESCE(excluded.video_url, packages.video_url),
-        video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
-        dev_state = COALESCE(excluded.dev_state, packages.dev_state),
-        provides = COALESCE(excluded.provides, packages.provides),
-        content_warnings = COALESCE(excluded.content_warnings, packages.content_warnings),
-        ai_disclosures = COALESCE(excluded.ai_disclosures, packages.ai_disclosures),
-        maintainers = COALESCE(excluded.maintainers, packages.maintainers),
-        screenshots = COALESCE(excluded.screenshots, packages.screenshots),
-        game_support = COALESCE(excluded.game_support, packages.game_support),
-        review_thread_counts = COALESCE(excluded.review_thread_counts, packages.review_thread_counts)
-    `).bind(
-      targetRowId,
-      cdbAuthor,
-      cdbName,
-      cdbTitle,
-      cdbType,
-      shortDesc || null,
-      extractedLongDesc || null,
-      repoUrl || '',
-      cdbThumb,
-      cdbBanner || null,
-      resolvedLicense || '',
-      resolvedMediaLicense || resolvedLicense || '',
-      combinedTagsList.length > 0 ? JSON.stringify(combinedTagsList) : null,
-      resolvedHardDeps.length > 0 ? JSON.stringify(resolvedHardDeps) : null,
-      resolvedSoftDeps.length > 0 ? JSON.stringify(resolvedSoftDeps) : null,
-      minVersion || '5.0.0',
-      maxVersion || null,
-      totalDownloads,
-      contentdbDownloads,
-      luantihubDownloads,
-      downloadSizeBytes > 0 ? downloadSizeBytes : null,
-      resolvedHeadSize || null,
-      donateUrl || null,
-      translationUrl || null,
-      forumUrl || null,
-      issueTrackerUrl || null,
-      videoUrl || null,
-      videoThumbnailUrl || null,
-      devState || null,
-      providesList.length > 0 ? JSON.stringify(providesList) : null,
-      contentWarnings.length > 0 ? JSON.stringify(contentWarnings) : null,
-      aiDisclosures.length > 0 ? JSON.stringify(aiDisclosures) : null,
-      maintainersList.length > 0 ? JSON.stringify(maintainersList) : null,
-      !isLite && screenshots.length > 0 ? JSON.stringify(screenshots) : null,
-      gameSupport.length > 0 ? JSON.stringify(gameSupport) : null,
-      reviewThreadCounts ? JSON.stringify(reviewThreadCounts) : null
-    ).run().catch(() => {});
+    if (needsMetaBackfill) {
+      context.env.DB.prepare(`
+        UPDATE packages
+        SET short_desc = COALESCE(short_desc, ?),
+            long_desc = COALESCE(long_desc, ?),
+            thumbnail_url = CASE
+              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+              ELSE thumbnail_url
+            END,
+            banner_url = CASE
+              WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' THEN COALESCE(?, banner_url)
+              ELSE banner_url
+            END,
+            license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
+            media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
+            video_url = COALESCE(video_url, ?),
+            video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+            screenshots = COALESCE(screenshots, ?)
+        WHERE id = ?
+      `).bind(
+        shortDesc || null,
+        extractedLongDesc || null,
+        resolvedThumb || null,
+        resolvedBanner || null,
+        resolvedLicense || null,
+        resolvedMediaLicense || resolvedLicense || null,
+        videoUrl || null,
+        videoThumbnailUrl || null,
+        screenshots.length > 0 ? JSON.stringify(screenshots) : null,
+        targetRowId
+      ).run().catch(() => {});
+    }
 
-    // Also persist ContentDB releases to D1 when D1 has no releases yet so subsequent D1-first reads include releases
-    if (!isLite && d1Releases.length === 0 && bundledReleases.length > 0) {
+    if (d1Releases.length === 0 && bundledReleases.length > 0) {
       (async () => {
         try {
           const releaseStmts = bundledReleases.slice(0, MAX_PACKAGE_RELEASES).map(rel =>

@@ -640,19 +640,66 @@
     return notifiedTags;
   }
 
+  const MIN_BG_CATALOG_SYNC_INTERVAL_MS = 15 * 60 * 1000;
+  let lastSwBootFetchAt = 0;
+
   /**
    * Fetches the bundled LuantiHub boot payload (`/api/packages/?boot=1` containing
    * Home Page catalog tiles, Tags, Top 10 Today, Top 10 Week, and Hero Promotions),
    * caches it in CacheStorage (`lh-boot-sync-v1`), and broadcasts it to any open client windows.
    */
-  async function fetchAndCacheBootCatalogInSw() {
+  async function fetchAndCacheBootCatalogInSw(forceNetwork = false) {
     try {
+      const now = Date.now();
+      let cachedBootPayload = null;
+      let cachedSyncedAt = lastSwBootFetchAt;
+
+      if (typeof caches !== 'undefined') {
+        try {
+          const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
+          const prevRes = await cache.match(BOOT_SYNC_CACHE_URL);
+          if (prevRes) {
+            const headerTs = Number(prevRes.headers.get('X-LuantiHub-Synced-At') || 0);
+            if (Number.isFinite(headerTs) && headerTs > cachedSyncedAt) {
+              cachedSyncedAt = headerTs;
+            }
+            if (!forceNetwork && cachedSyncedAt > 0 && now - cachedSyncedAt < MIN_BG_CATALOG_SYNC_INTERVAL_MS) {
+              const prevText = await prevRes.text();
+              if (prevText) {
+                const parsedPrev = JSON.parse(prevText);
+                cachedBootPayload = Array.isArray(parsedPrev) ? { packages: parsedPrev } : parsedPrev;
+              }
+            }
+          }
+        } catch {
+          // Ignore cache inspection errors
+        }
+      }
+
+      if (!forceNetwork && cachedSyncedAt > 0 && now - cachedSyncedAt < MIN_BG_CATALOG_SYNC_INTERVAL_MS) {
+        let hasFocusedClient = false;
+        try {
+          if (self.clients && typeof self.clients.matchAll === 'function') {
+            const clientList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+            hasFocusedClient =
+              Array.isArray(clientList) &&
+              clientList.some((c) => c && c.focused === true && c.visibilityState === 'visible');
+          }
+        } catch {
+          hasFocusedClient = false;
+        }
+        if (!hasFocusedClient) {
+          // Still evaluate app updates (`/ngsw.json` static CDN) and any pending state in cachedBootPayload
+          await evaluateBackgroundNotificationsInSw(cachedBootPayload || {});
+        }
+        return;
+      }
+
       const response = await fetch('/api/packages/?boot=1&ngsw-bypass=true', {
         headers: {
           Accept: 'application/json',
           'ngsw-bypass': 'true'
-        },
-        cache: 'no-store'
+        }
       });
 
       if (!response || !response.ok) {
@@ -674,6 +721,7 @@
       if (!isValidPayload) return;
 
       const syncedAt = Date.now();
+      lastSwBootFetchAt = syncedAt;
       if (typeof caches !== 'undefined') {
         const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
         const cachedResponse = new Response(rawText, {

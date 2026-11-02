@@ -1248,11 +1248,7 @@ export class PackageService {
 
     const hasFullDownloads = hasOfficial ? contentdbDownloads > 0 : downloads > 0;
     const hasRichTags = pkg.tags.some(t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase()));
-    const gitShotAlreadyChecked = Boolean((cachedMeta as any)?.git_shot_checked);
-    const needsGitScreenshotCheck =
-      (hasGit || Boolean(pkg.repo_url)) &&
-      !this.isGitScreenshotUrl(pkg.banner) &&
-      !gitShotAlreadyChecked;
+    const needsGitScreenshotCheck = this.needsGitScreenshotHydration(pkg, cachedMeta);
     if (hasFullDownloads && Boolean(pkg.license) && (hasRichTags || !hasOfficial) && !needsGitScreenshotCheck) {
       this.hydratedIds.add(pkg.id.toLowerCase());
     }
@@ -2332,24 +2328,30 @@ export class PackageService {
     })();
   }
 
+  private needsGitScreenshotHydration(pkg: LuantiPackage | null | undefined, cachedMeta?: any): boolean {
+    if (!pkg) return false;
+    const isGit = Boolean(pkg.sources?.includes('git') || pkg.source === 'git');
+    if (!isGit) return false;
+    const resolvedMeta = cachedMeta ?? this.hydratedMetaCache.get(pkg.id.toLowerCase());
+    if (Boolean(resolvedMeta?.git_shot_checked)) return false;
+    return !pkg.banner || pkg.banner === 'logo.svg' || !this.isGitScreenshotUrl(pkg.banner);
+  }
+
   private needsTileHydration(pkg: LuantiPackage | null | undefined): boolean {
     if (!pkg || pkg._promo || String(pkg.id || '').startsWith('promo:') || !pkg.author || !pkg.name) return false;
+    if (this.hydratedIds.has(pkg.id.toLowerCase())) return false;
     const isOfficial = pkg.sources?.includes('official') || pkg.source === 'official';
-    const isGit = pkg.sources?.includes('git') || pkg.source === 'git';
     const hasDownloads = isOfficial ? (pkg.contentdb_downloads || 0) > 0 : (pkg.downloads || 0) > 0;
-    const hasRichTags = (pkg.tags || []).some(
-      t => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
-    );
     const cachedMeta = this.hydratedMetaCache.get(pkg.id.toLowerCase()) as any;
-    const needsGitScreenshot =
-      (isGit || Boolean(pkg.repo_url)) &&
-      !this.isGitScreenshotUrl(pkg.banner) &&
-      !cachedMeta?.git_shot_checked &&
-      !this.hydratedIds.has(pkg.id.toLowerCase());
-    return !pkg.license || !hasDownloads || (isOfficial && !hasRichTags) || needsGitScreenshot;
+    const needsGitScreenshot = this.needsGitScreenshotHydration(pkg, cachedMeta);
+    const missingBanner = !pkg.banner || pkg.banner === 'logo.svg';
+    return !hasDownloads || missingBanner || needsGitScreenshot;
   }
 
   private queueInitialVisibleHydration(): void {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return;
+    }
     const priorityCandidates: LuantiPackage[] = [
       ...this.heroShowcasePackages(),
       ...this.decentralizedGitPackages(),
@@ -2360,7 +2362,7 @@ export class PackageService {
 
     let queued = 0;
     for (const pkg of priorityCandidates) {
-      if (queued >= 24) break;
+      if (queued >= 12) break;
       if (this.needsTileHydration(pkg)) {
         this.ensurePackageHydrated(pkg);
         queued++;
@@ -2518,10 +2520,7 @@ export class PackageService {
         typeof document !== 'undefined' &&
         (document.visibilityState === 'hidden' ||
           (typeof document.hasFocus === 'function' && !document.hasFocus()));
-      if (isHiddenOrUnfocused) {
-        // Window is minimized or in background: let the Service Worker run unthrottled update & catalog checks
-        this.pwaService.triggerSwBackgroundCatalogCheck();
-      } else {
+      if (!isHiddenOrUnfocused) {
         this.refreshCatalogInBackground().catch(() => {});
       }
     }, 30 * 60 * 1000);
@@ -2531,7 +2530,11 @@ export class PackageService {
       if (event.source === 'sw-broadcast' && event.payload) {
         const bootPayload = this.extractBootPayload(event.payload);
         if (bootPayload) {
-          this.applyBootPayload(bootPayload);
+          const isHiddenOrUnfocused =
+            typeof document !== 'undefined' &&
+            (document.visibilityState === 'hidden' ||
+              (typeof document.hasFocus === 'function' && !document.hasFocus()));
+          this.applyBootPayload(bootPayload, { fromCache: isHiddenOrUnfocused });
           this.persistBootPayloadCaches(bootPayload, event.ts || Date.now());
         }
         return;
@@ -2540,13 +2543,13 @@ export class PackageService {
       if (
         event.source === 'visibility' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 15 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 30 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       } else if (
         event.source === 'online' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 10 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 15 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       }

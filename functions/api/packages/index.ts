@@ -907,13 +907,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
-    // Pre-hydrate licenses, tags, Git screenshots & ContentDB downloads on the server for top carousel & Git Community packages (cached 1h at Cloudflare Edge + saved to D1)
+    // Pre-hydrate licenses, tags, Git screenshots & ContentDB downloads on the server for top carousel & Git Community packages (cached in Cloudflare Edge Cache)
+    const d1ById = new Map<string, any>();
+    for (const row of d1List) {
+      if (row?.id) {
+        d1ById.set(String(row.id).toLowerCase(), row);
+      }
+    }
+
     const carouselPool: any[] = [];
     const pushPool = (items: any[]) => {
       for (const it of items) {
         const needsGitScreenshotScan =
-          (it?.sources?.includes('git') || Boolean(it?.repo_url)) &&
-          !isGitRepositoryAssetUrl(it?.banner);
+          Boolean(it?.sources?.includes('git')) &&
+          (!it?.banner || it?.banner === 'logo.svg' || !isGitRepositoryAssetUrl(it?.banner));
         if (
           it &&
           it.author &&
@@ -931,13 +938,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     pushPool(merged.filter(p => p.sources?.includes('git')));
     pushPool(top10Today);
     pushPool(top10Week);
-    pushPool(byDownloadsDesc.filter(p => p.type === 'game').slice(0, 24));
-    pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 24));
-    pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 24));
+    pushPool(byDownloadsDesc.filter(p => p.type === 'game').slice(0, 12));
+    pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 12));
+    pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 12));
 
-    const batchToHydrate = carouselPool.slice(0, 32);
+    const batchToHydrate = carouselPool.slice(0, 12);
     if (batchToHydrate.length > 0) {
-      let bootRepoScanBudget = 10;
+      let bootRepoScanBudget = 6;
       const bootHydrateStmts: any[] = [];
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
@@ -970,7 +977,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             pkg.repo_url = candidateRepo;
           }
           let rawVideoUrl = detail?.video_url || pkg.video_url;
-          const needsGitAssetCheck = !isGitRepositoryAssetUrl(pkg.banner);
+          const isGitPkg = Boolean(pkg.sources?.includes('git'));
+          const needsGitAssetCheck =
+            isGitPkg && (!pkg.banner || pkg.banner === 'logo.svg' || !isGitRepositoryAssetUrl(pkg.banner));
           if ((!rawVideoUrl || needsGitAssetCheck) && candidateRepo && bootRepoScanBudget > 0) {
             bootRepoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(
@@ -1010,88 +1019,40 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (resolvedVideo.video_thumbnail_url && !pkg.video_thumbnail_url) {
             pkg.video_thumbnail_url = resolvedVideo.video_thumbnail_url;
           }
-          if (env.DB && (resolvedLic || Number(pkg.contentdb_downloads || 0) > 0 || isGitRepositoryAssetUrl(pkg.banner))) {
-            bootHydrateStmts.push(
-              env.DB.prepare(`
-                INSERT INTO packages (
-                  id, author_name, name, title, type, short_desc, repo_url, provider,
-                  thumbnail_url, banner_url, screenshots, license, media_license, tags, status,
-                  downloads_count, contentdb_downloads, luantihub_downloads, video_url, video_thumbnail_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  thumbnail_url = CASE
-                    WHEN excluded.thumbnail_url IS NOT NULL
-                      AND excluded.thumbnail_url != ''
-                      AND excluded.thumbnail_url != 'logo.svg'
-                      AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
-                      AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-                    THEN excluded.thumbnail_url
-                    WHEN packages.thumbnail_url IS NOT NULL
-                      AND packages.thumbnail_url != ''
-                      AND packages.thumbnail_url != 'logo.svg'
-                      AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
-                      AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-                    THEN packages.thumbnail_url
-                    ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
-                  END,
-                  banner_url = CASE
-                    WHEN excluded.banner_url IS NOT NULL
-                      AND excluded.banner_url != ''
-                      AND excluded.banner_url != 'logo.svg'
-                      AND excluded.banner_url NOT LIKE '%content.luanti.org%'
-                      AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
-                    THEN excluded.banner_url
-                    WHEN packages.banner_url IS NOT NULL
-                      AND packages.banner_url != ''
-                      AND packages.banner_url != 'logo.svg'
-                      AND packages.banner_url NOT LIKE '%content.luanti.org%'
-                      AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
-                    THEN packages.banner_url
-                    ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
-                  END,
-                  screenshots = COALESCE(excluded.screenshots, packages.screenshots),
-                  license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-                  media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-                  tags = COALESCE(excluded.tags, packages.tags),
-                  contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-                  downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
-                  video_url = COALESCE(excluded.video_url, packages.video_url),
-                  video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url)
-              `).bind(
-                pkg.id,
-                pkg.author,
-                pkg.name,
-                pkg.title || pkg.name,
-                ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod',
-                pkg.short_desc || pkg.short_description || null,
-                pkg.repo_url || detail?.repo || '',
-                pkg.thumbnail || null,
-                pkg.banner || null,
-                Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
-                resolvedLic,
-                resolvedMediaLic,
-                pkg.tags?.length > 0 ? JSON.stringify(pkg.tags) : null,
-                Number(pkg.downloads || 0),
-                Number(pkg.contentdb_downloads || 0),
-                Number(pkg.luantihub_downloads || 0),
-                pkg.video_url || null,
-                pkg.video_thumbnail_url || null
-              ),
-              // Also keep any existing D1 Git row with the same technical name & type in sync if its author_name differed from ContentDB
-              env.DB.prepare(`
-                UPDATE packages
-                SET contentdb_downloads = MAX(contentdb_downloads, ?),
-                    downloads_count = MAX(downloads_count, ? + COALESCE(luantihub_downloads, 0)),
-                    license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END
-                WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?)
-              `).bind(
-                Number(pkg.contentdb_downloads || 0),
-                Number(pkg.contentdb_downloads || 0),
-                resolvedLic,
-                pkg.name,
-                ['mod', 'game', 'txp', 'modpack'].includes(pkg.type) ? pkg.type : 'mod'
-              )
-            );
+
+          // Only backfill D1 if this package already exists in D1 as a native/Git row AND a previously missing field was discovered
+          const existingD1 = d1ById.get(String(pkg.id || '').toLowerCase());
+          if (env.DB && existingD1 && existingD1.provider !== 'contentdb') {
+            const newLic = !existingD1.license && resolvedLic ? resolvedLic : null;
+            const newVid = !existingD1.video_url && pkg.video_url ? pkg.video_url : null;
+            const newShot =
+              (!existingD1.banner_url ||
+                existingD1.banner_url === 'logo.svg' ||
+                (!isGitRepositoryAssetUrl(existingD1.banner_url) && isGitRepositoryAssetUrl(pkg.banner))) &&
+              pkg.banner &&
+              pkg.banner !== 'logo.svg'
+                ? pkg.banner
+                : null;
+            if (newLic || newVid || newShot) {
+              bootHydrateStmts.push(
+                env.DB.prepare(`
+                  UPDATE packages
+                  SET thumbnail_url = COALESCE(?, thumbnail_url),
+                      banner_url = COALESCE(?, banner_url),
+                      license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
+                      video_url = COALESCE(video_url, ?),
+                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                  WHERE id = ?
+                `).bind(
+                  newShot,
+                  newShot,
+                  newLic,
+                  newVid,
+                  pkg.video_thumbnail_url || null,
+                  existingD1.id
+                )
+              );
+            }
           }
         })
       );
@@ -1118,92 +1079,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     if (!noCache && !q && types.length === 0 && !author && Array.isArray(activePromotions)) {
       await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 1800);
-    }
-
-    // Piggyback lightweight rotating Git release check (3 pure-Git packages per 5m window) via waitUntil
-    const waitUntilFn = (context as any)?.waitUntil;
-    if (env.DB && typeof waitUntilFn === 'function') {
-      const pureGitRows = d1List.filter((r: any) => r?.repo_url && r?.provider && r.provider !== 'contentdb');
-      if (pureGitRows.length > 0) {
-        const slot = Math.floor(Date.now() / 300_000) % Math.max(1, Math.ceil(pureGitRows.length / 3));
-        const sliceToCheck = pureGitRows.slice(slot * 3, slot * 3 + 3);
-        waitUntilFn.call(
-          context,
-          Promise.all(
-            sliceToCheck.map(async (row: any) => {
-              try {
-                const discovered = await fetchGitRepoReleasesAndTags(
-                  row.repo_url,
-                  row.author_name,
-                  row.name,
-                  row.min_minetest_version || '5.0.0'
-                );
-                if (discovered.length > 0) {
-                  const newestRel = discovered[0];
-                  await syncDebouncedGitVersionStamp(
-                    env.DB,
-                    row,
-                    newestRel?.commit_sha || newestRel?.tag_name,
-                    true
-                  );
-                  const newestRelTime = Date.parse(String(newestRel?.released_at || '')) || 0;
-                  const prevPkgTime = Date.parse(String(row.updated_at || '')) || 0;
-                  const relTimeAdvanced = newestRelTime > 0 && newestRelTime > prevPkgTime;
-                  const needsSizeHeal = !row.download_size || Number(row.download_size) > 5 * 1024 * 1024;
-                  if (relTimeAdvanced || needsSizeHeal) {
-                    const sizeEst = await fetchAccurateGitZipSize(
-                      row.repo_url,
-                      row.author_name,
-                      row.name,
-                      {
-                        tag: newestRel?.tag_name && newestRel.tag_name !== 'HEAD' ? newestRel.tag_name : undefined
-                      }
-                    );
-                    if (relTimeAdvanced) {
-                      const nextIso = new Date(newestRelTime).toISOString();
-                      await env.DB.prepare(
-                        `UPDATE packages
-                         SET updated_at = CASE WHEN ? > COALESCE(updated_at, '') THEN ? ELSE updated_at END,
-                             download_size = COALESCE(?, download_size),
-                             file_size = COALESCE(?, file_size)
-                         WHERE id = ?`
-                      ).bind(
-                        nextIso,
-                        nextIso,
-                        sizeEst?.downloadSize || null,
-                        sizeEst?.fileSize || null,
-                        row.id
-                      ).run();
-                    } else if (sizeEst?.downloadSize || sizeEst?.fileSize) {
-                      await env.DB.prepare(
-                        `UPDATE packages
-                         SET download_size = COALESCE(?, download_size),
-                             file_size = COALESCE(?, file_size)
-                         WHERE id = ?`
-                      ).bind(
-                        sizeEst?.downloadSize || null,
-                        sizeEst?.fileSize || null,
-                        row.id
-                      ).run();
-                    }
-                  }
-                } else {
-                  const smartRefs = await fetchGitSmartHttpRefs(
-                    row.repo_url,
-                    row.author_name,
-                    row.name
-                  );
-                  if (smartRefs?.headSha) {
-                    await syncDebouncedGitVersionStamp(env.DB, row, smartRefs.headSha, false);
-                  }
-                }
-              } catch {
-                // Non-blocking background check
-              }
-            })
-          )
-        );
-      }
     }
   } else {
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)

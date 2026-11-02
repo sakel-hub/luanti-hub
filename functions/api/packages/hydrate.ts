@@ -57,19 +57,21 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   if (rawIds.length > 0) {
     const missingIds = new Set<string>(rawIds.map(id => id.toLowerCase()));
+    const d1ById = new Map<string, any>();
 
     if (env.DB) {
       try {
-        const placeholders = rawIds.map(() => '?').join(', ');
-        const lowerParams = rawIds.map(id => id.toLowerCase());
+        const exactAndLowerIds = Array.from(new Set([...rawIds, ...rawIds.map(id => id.toLowerCase())]));
+        const placeholders = exactAndLowerIds.map(() => '?').join(', ');
         const d1Res = await env.DB.prepare(
-          `SELECT * FROM packages WHERE LOWER(id) IN (${placeholders}) AND status = 'active'`
-        ).bind(...lowerParams).all();
+          `SELECT * FROM packages WHERE id IN (${placeholders}) AND status = 'active'`
+        ).bind(...exactAndLowerIds).all();
 
         const d1RepoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
           if (!row?.id) continue;
           const lowerKey = String(row.id).toLowerCase();
+          d1ById.set(lowerKey, row);
           const parsedTags = parseJsonArray(row.tags);
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
@@ -106,7 +108,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           if (row.license && (cdbDl > 0 || row.provider !== 'contentdb') && hasRealTags) {
             missingIds.delete(lowerKey);
-            if ((!row.video_url || !gitShotD1) && row.repo_url && d1RepoScanRows.length < 12) {
+            if (
+              row.provider !== 'contentdb' &&
+              (!row.video_url || !gitShotD1) &&
+              row.repo_url &&
+              d1RepoScanRows.length < 6
+            ) {
               d1RepoScanRows.push(row);
             }
           }
@@ -121,24 +128,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               const name = String(row.name || String(row.id).split('/')[1] || '');
               if (!author || !name) return;
               const existingRowShots = parseJsonArray(row.screenshots);
-              const needsUpstreamScreenshots =
-                row.provider === 'contentdb' &&
-                !existingRowShots.some((s: string) => !isGitRepositoryAssetUrl(s));
-              const [gitScan, upstreamDetail] = await Promise.all([
-                scanGitRepoMetadataCached(
-                  author,
-                  name,
-                  row.type || 'mod',
-                  row.repo_url,
-                  21600
-                ).catch(() => null),
-                needsUpstreamScreenshots
-                  ? fetchUpstreamJsonCached<any>(
-                      `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
-                      3600
-                    ).catch(() => null)
-                  : Promise.resolve(null)
-              ]);
+              const gitScan = await scanGitRepoMetadataCached(
+                author,
+                name,
+                row.type || 'mod',
+                row.repo_url,
+                21600
+              ).catch(() => null);
               const resolvedVid = extractEmbeddedVideo(
                 gitScan?.cdbMeta?.video_url,
                 row.video_thumbnail_url,
@@ -149,8 +145,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               const mergedRowShots = mergeScreenshotsPreferringGit(
                 [scannedGitShot, ...scannedCdbShots],
                 hydratedMap[lowerKey]?.screenshots,
-                existingRowShots,
-                upstreamDetail?.screenshots
+                existingRowShots
               );
               const primaryGitShot = scannedGitShot || (isGitRepositoryAssetUrl(mergedRowShots[0]) ? mergedRowShots[0] : undefined);
 
@@ -168,7 +163,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 }
               }
 
-              if (resolvedVid.video_url || primaryGitShot || mergedRowShots.length > 0) {
+              const hadGitShotD1 =
+                isGitRepositoryAssetUrl(row.banner_url) || isGitRepositoryAssetUrl(row.thumbnail_url);
+              const newlyDiscoveredVid = !row.video_url && Boolean(resolvedVid.video_url);
+              const newlyDiscoveredShot = !hadGitShotD1 && Boolean(primaryGitShot);
+              if (newlyDiscoveredVid || newlyDiscoveredShot) {
                 repoUpdateStmts.push(
                   env.DB.prepare(`
                     UPDATE packages
@@ -218,13 +217,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const toFetchUpstream = rawIds.filter(id => missingIds.has(id.toLowerCase())).slice(0, 24);
     if (toFetchUpstream.length > 0) {
       const persistStatements: any[] = [];
-      let repoScanBudget = 12; // Cap server-side Git repo scans per batch (6h Edge-cached) to preserve Worker subrequest quota
+      let repoScanBudget = 6; // Cap server-side Git repo scans per batch (6h Edge-cached) to preserve Worker subrequest quota
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
           if (!author || !name) return;
           const lowerKey = rawId.toLowerCase();
           const existing = hydratedMap[lowerKey] || {};
+          const existingD1Row = d1ById.get(lowerKey);
           const detail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
             3600
@@ -250,11 +250,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
           // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png)
-          // Cached for 6h at Cloudflare Edge.
+          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages or packages missing metadata.
           let gitScanShot: string | undefined;
           let gitScanCdbShots: string[] = [];
-          const hasExistingGitShot = isGitRepositoryAssetUrl(existing.banner) || isGitRepositoryAssetUrl(existing.thumbnail);
-          if ((!detail || !lic || !videoUrl || !hasExistingGitShot) && repoUrl && repoScanBudget > 0) {
+          const isNativeGitPkg = Boolean(existingD1Row && existingD1Row.provider !== 'contentdb');
+          const hasExistingBanner = Boolean(existing.banner && existing.banner !== 'logo.svg');
+          if ((!detail || !lic || (isNativeGitPkg && !hasExistingBanner)) && repoUrl && repoScanBudget > 0) {
             repoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
             if (gitScan && gitScan.gitRepoStatus === 'verified') {
@@ -317,77 +318,37 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
           };
 
-              if (env.DB && (lic || cdbDl > 0 || videoUrl || detailTags.length > 0 || primaryGitShot)) {
-                persistStatements.push(
-                  env.DB.prepare(`
-                    INSERT INTO packages (
-                      id, author_name, name, title, type, short_desc, repo_url, provider,
-                      thumbnail_url, banner_url, screenshots, license, media_license, min_minetest_version,
-                      tags, status, downloads_count, contentdb_downloads, video_url, video_thumbnail_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'contentdb', ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                      thumbnail_url = CASE
-                        WHEN excluded.thumbnail_url IS NOT NULL
-                          AND excluded.thumbnail_url != ''
-                          AND excluded.thumbnail_url != 'logo.svg'
-                          AND excluded.thumbnail_url NOT LIKE '%content.luanti.org%'
-                          AND excluded.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-                        THEN excluded.thumbnail_url
-                        WHEN packages.thumbnail_url IS NOT NULL
-                          AND packages.thumbnail_url != ''
-                          AND packages.thumbnail_url != 'logo.svg'
-                          AND packages.thumbnail_url NOT LIKE '%content.luanti.org%'
-                          AND packages.thumbnail_url NOT LIKE '%contentdb.milcho.org%'
-                        THEN packages.thumbnail_url
-                        ELSE COALESCE(NULLIF(excluded.thumbnail_url, ''), packages.thumbnail_url)
-                      END,
-                      banner_url = CASE
-                        WHEN excluded.banner_url IS NOT NULL
-                          AND excluded.banner_url != ''
-                          AND excluded.banner_url != 'logo.svg'
-                          AND excluded.banner_url NOT LIKE '%content.luanti.org%'
-                          AND excluded.banner_url NOT LIKE '%contentdb.milcho.org%'
-                        THEN excluded.banner_url
-                        WHEN packages.banner_url IS NOT NULL
-                          AND packages.banner_url != ''
-                          AND packages.banner_url != 'logo.svg'
-                          AND packages.banner_url NOT LIKE '%content.luanti.org%'
-                          AND packages.banner_url NOT LIKE '%contentdb.milcho.org%'
-                        THEN packages.banner_url
-                        ELSE COALESCE(NULLIF(excluded.banner_url, ''), packages.banner_url)
-                      END,
-                      screenshots = COALESCE(excluded.screenshots, packages.screenshots),
-                      license = CASE WHEN excluded.license != '' THEN excluded.license ELSE packages.license END,
-                      media_license = CASE WHEN excluded.media_license != '' THEN excluded.media_license ELSE packages.media_license END,
-                      min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
-                      tags = COALESCE(excluded.tags, packages.tags),
-                      contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
-                      downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
-                      video_url = COALESCE(excluded.video_url, packages.video_url),
-                      video_thumbnail_url = COALESCE(excluded.video_thumbnail_url, packages.video_thumbnail_url),
-                      repo_url = CASE WHEN COALESCE(packages.repo_url, '') = '' THEN excluded.repo_url ELSE packages.repo_url END
-                  `).bind(
-                    canonicalId,
-                    String(detail?.author || author).trim(),
-                    String(detail?.name || name).trim(),
-                    String(title).trim(),
-                    pkgType,
-                    shortDesc ? String(shortDesc).slice(0, 500) : null,
-                    repoUrl,
-                    resolvedHydrateThumb,
-                    resolvedHydrateBanner,
-                    mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
-                    lic,
-                    mediaLic,
-                    minVer,
-                    detailTags.length > 0 ? JSON.stringify(detailTags) : null,
-                    totalDl,
-                    cdbDl,
-                    videoUrl || null,
-                    videoThumbUrl || null
-                  )
-                );
-              }
+          // Only backfill D1 if this package already exists in D1 as a native/Git row AND a missing field was discovered
+          if (env.DB && existingD1Row && existingD1Row.provider !== 'contentdb') {
+            const newLic = !existingD1Row.license && lic ? lic : null;
+            const newVid = !existingD1Row.video_url && videoUrl ? videoUrl : null;
+            const newShot =
+              (!existingD1Row.banner_url || existingD1Row.banner_url === 'logo.svg') && primaryGitShot
+                ? primaryGitShot
+                : null;
+            if (newLic || newVid || newShot) {
+              persistStatements.push(
+                env.DB.prepare(`
+                  UPDATE packages
+                  SET thumbnail_url = COALESCE(?, thumbnail_url),
+                      banner_url = COALESCE(?, banner_url),
+                      license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
+                      media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
+                      video_url = COALESCE(video_url, ?),
+                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                  WHERE id = ?
+                `).bind(
+                  newShot,
+                  newShot,
+                  newLic,
+                  mediaLic || null,
+                  newVid,
+                  videoThumbUrl || null,
+                  existingD1Row.id
+                )
+              );
+            }
+          }
         })
       );
 

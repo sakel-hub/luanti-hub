@@ -323,7 +323,12 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   currentHoverSeconds = 0;
 
   ngOnChanges(): void {
-    if (this.package && (!this.package.license || !this.package.downloads)) {
+    if (
+      this.package &&
+      ((!this.package.downloads && !this.package.contentdb_downloads) ||
+        !this.package.banner ||
+        this.package.banner === 'logo.svg')
+    ) {
       this.packageService.ensurePackageHydrated(this.package);
     }
     if (this.package?.video_url && this.isDesktopHoverViewport()) {
@@ -456,37 +461,25 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   onCardMouseEnter(): void {
     if (!this.isDesktopHoverViewport()) return;
     this.isPointerHovering = true;
-    this.packageService.ensurePackageHydrated(this.package, true);
 
-    // Zero-delay T=0ms pre-warming (preconnect, video thumbnail, and direct MP4/WebM preload)
+    // Pre-warm existing video preview URL if already present on the package object (zero D1/API cost)
     if (this.package?.video_url) {
       this.packageService.warmUpVideoPreview(this.package.video_url, this.package.video_thumbnail_url, true);
     }
-
-    // Start package detail hydration immediately at T=0ms in parallel with hover-intent timer
-    const needsHoverHydration =
-      Boolean(this.package) &&
-      (!this.package.video_url ||
-        (Boolean(this.package.repo_url) && !this.packageService.isGitScreenshotUrl(this.package.banner)));
-    const preloadDetailsPromise = needsHoverHydration
-      ? this.packageService.loadPackageDetails(this.package, false)
-      : null;
 
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
     }
     this.hoverIntentTimer = setTimeout(async () => {
       this.hoverIntentTimer = null;
-      if (!this.isPointerHovering) return;
+      if (!this.isPointerHovering || !this.package) return;
+
+      this.packageService.ensurePackageHydrated(this.package, true);
 
       let rawUrl = this.package?.video_url;
       let rawThumbUrl = this.package?.video_thumbnail_url;
-      if (!rawUrl && this.package) {
-        if (preloadDetailsPromise) {
-          await preloadDetailsPromise;
-        } else {
-          await this.packageService.loadPackageDetails(this.package, false);
-        }
+      if (!rawUrl) {
+        await this.packageService.loadPackageDetails(this.package, false);
         if (!this.isPointerHovering) return;
         const hydrated = this.packageService.packages().find(
           p => p.id.toLowerCase() === this.package.id.toLowerCase()
