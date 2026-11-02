@@ -26,7 +26,10 @@ import {
   LucideCpu,
   LucidePalette,
   LucideGitBranch,
-  LucideInfo
+  LucideInfo,
+  LucideStar,
+  LucideExternalLink,
+  LucidePlus
 } from '@lucide/angular';
 
 @Component({
@@ -47,16 +50,36 @@ import {
     LucideCpu,
     LucidePalette,
     LucideGitBranch,
-    LucideInfo
+    LucideInfo,
+    LucideStar,
+    LucideExternalLink,
+    LucidePlus
   ],
   template: `
-    @if (packages.length > 0) {
+    @if (packages.length > 0 || showWhenEmpty) {
       <section class="py-2 sm:py-3 space-y-2.5 select-none overflow-hidden max-w-full">
 
         <!-- Section Header -->
-        <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-2">
-          <div class="flex items-center gap-2">
-            @if (icon === 'flame') {
+        <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-2 flex-wrap">
+          <div class="flex items-center gap-2 flex-wrap">
+            @if (icon === 'trophy') {
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-amber-400 flex-shrink-0">
+                <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+                <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+                <path d="M4 22h16" />
+                <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
+                <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+                <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+              </svg>
+            } @else if (icon === 'sparkles') {
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-amber-400 flex-shrink-0">
+                <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+              </svg>
+            } @else if (icon === 'star') {
+              <svg lucideStar class="w-5 h-5 text-amber-400 flex-shrink-0"></svg>
+            } @else if (icon === 'rocket') {
+              <svg lucideZap class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
+            } @else if (icon === 'flame') {
               <svg lucideFlame class="w-5 h-5 text-amber-500 flex-shrink-0"></svg>
             } @else if (icon === 'git') {
               <svg lucideGitBranch class="w-5 h-5 text-amber-400 flex-shrink-0"></svg>
@@ -69,7 +92,12 @@ import {
             } @else if (icon === 'palette') {
               <svg lucidePalette class="w-5 h-5 text-purple-400 flex-shrink-0"></svg>
             }
-            <h2 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
+            <h2 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
+              @if (promoBadge) {
+                <span class="px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-amber-300 text-[10px] font-black uppercase tracking-wider">
+                  {{ promoBadge }}
+                </span>
+              }
               <span>{{ title }}</span>
               <span class="text-xs font-medium text-slate-500">({{ packages.length }})</span>
               @if (infoTooltip) {
@@ -87,14 +115,33 @@ import {
             </h2>
           </div>
 
-          <div class="flex items-center gap-2">
-            <button
-              type="button"
-              (click)="viewAll.emit()"
-              class="text-xs font-semibold text-sky-400 hover:text-sky-300 transition px-2.5 py-1 rounded-lg hover:bg-white/5 flex items-center gap-1 cursor-pointer">
-              <span>{{ 'carousel.viewAll' | translate }}</span>
-              <svg lucideArrowRight class="w-3.5 h-3.5"></svg>
-            </button>
+          <div class="flex items-center gap-2 flex-wrap">
+            @if (promoSecondaryCtaLabel && promoSecondaryCtaUrl) {
+              <button
+                type="button"
+                (click)="promoCtaClicked.emit(promoSecondaryCtaUrl)"
+                class="text-xs font-semibold text-slate-300 hover:text-white transition px-2.5 py-1 rounded-lg glass-btn flex items-center gap-1 cursor-pointer">
+                <span>{{ promoSecondaryCtaLabel }}</span>
+              </button>
+            }
+            @if (promoCtaLabel && promoCtaUrl) {
+              <button
+                type="button"
+                (click)="promoCtaClicked.emit(promoCtaUrl)"
+                class="text-xs font-bold text-amber-300 hover:text-white transition px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 flex items-center gap-1 cursor-pointer">
+                <span>{{ promoCtaLabel }}</span>
+                <svg lucideExternalLink class="w-3 h-3"></svg>
+              </button>
+            }
+            @if (packages.length > 0) {
+              <button
+                type="button"
+                (click)="viewAll.emit()"
+                class="text-xs font-semibold text-sky-400 hover:text-sky-300 transition px-2.5 py-1 rounded-lg hover:bg-white/5 flex items-center gap-1 cursor-pointer">
+                <span>{{ 'carousel.viewAll' | translate }}</span>
+                <svg lucideArrowRight class="w-3.5 h-3.5"></svg>
+              </button>
+            }
 
             @if (isScrollable()) {
               <div class="hidden sm:flex items-center gap-1.5">
@@ -123,20 +170,54 @@ import {
           </div>
         </div>
 
-        <!-- Scrollable Track with Equal Height Stretch & Hover Breathing Room -->
-        <div
-          #carouselTrack
-          (scroll)="onTrackScroll()"
-          tabindex="0"
-          role="region"
-          [attr.aria-label]="title + ' carousel'"
-          class="flex items-stretch gap-4 sm:gap-5 overflow-x-auto px-6 sm:px-10 lg:px-14 py-8 -my-6 no-scrollbar scroll-smooth">
-          @for (pkg of packages; track pkg.id; let first = $first; let last = $last) {
-            <div class="flex-shrink-0 flex self-stretch">
-              <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last" class="flex-shrink-0 w-60 sm:w-68 block"></app-package-card>
+        @if (packages.length > 0) {
+          <!-- Scrollable Track with Equal Height Stretch & Hover Breathing Room -->
+          <div
+            #carouselTrack
+            (scroll)="onTrackScroll()"
+            tabindex="0"
+            role="region"
+            [attr.aria-label]="title + ' carousel'"
+            class="flex items-stretch gap-4 sm:gap-5 overflow-x-auto px-6 sm:px-10 lg:px-14 py-8 -my-6 no-scrollbar scroll-smooth">
+            @for (pkg of packages; track pkg.id; let first = $first; let last = $last) {
+              <div class="flex-shrink-0 flex self-stretch">
+                <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last" class="flex-shrink-0 w-60 sm:w-68 block"></app-package-card>
+              </div>
+            }
+          </div>
+        } @else if (showWhenEmpty) {
+          <!-- Promotional Empty-State Callout (e.g. Game Jam Kickoff before 1st submission) -->
+          <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 pt-1">
+            <div class="p-5 sm:p-6 rounded-2xl glass-panel border-amber-400/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div class="space-y-1 max-w-2xl">
+                <h3 class="text-sm sm:text-base font-bold text-white">
+                  {{ emptyStateTitle || ('carousel.promoEmptyTitle' | translate) }}
+                </h3>
+                <p class="text-xs text-slate-300 leading-relaxed">
+                  {{ emptyStateDesc || ('carousel.promoEmptyDesc' | translate) }}
+                </p>
+              </div>
+              <div class="flex items-center gap-2.5 flex-wrap flex-shrink-0">
+                @if (promoCtaUrl) {
+                  <button
+                    type="button"
+                    (click)="promoCtaClicked.emit(promoCtaUrl)"
+                    class="px-4 py-2.5 rounded-xl glass-btn-amber text-white font-bold text-xs flex items-center gap-2 whitespace-nowrap transition cursor-pointer">
+                    <span>{{ promoCtaLabel || ('hero.learnMore' | translate) }}</span>
+                    <svg lucideArrowRight class="w-3.5 h-3.5"></svg>
+                  </button>
+                }
+                <button
+                  type="button"
+                  (click)="promoCtaClicked.emit('/submit')"
+                  class="px-4 py-2.5 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center gap-2 whitespace-nowrap transition cursor-pointer">
+                  <svg lucidePlus class="w-4 h-4 text-amber-400"></svg>
+                  <span>{{ 'header.submitRepo' | translate }}</span>
+                </button>
+              </div>
             </div>
-          }
-        </div>
+          </div>
+        }
 
       </section>
     }
@@ -144,10 +225,19 @@ import {
 })
 export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDestroy {
   @Input({ required: true }) title!: string;
-  @Input() icon?: 'flame' | 'git' | 'zap' | 'gamepad' | 'cpu' | 'palette';
+  @Input() icon?: 'flame' | 'git' | 'zap' | 'gamepad' | 'cpu' | 'palette' | 'trophy' | 'sparkles' | 'star' | 'rocket';
   @Input() infoTooltip?: string;
+  @Input() promoBadge?: string;
+  @Input() promoCtaLabel?: string;
+  @Input() promoCtaUrl?: string;
+  @Input() promoSecondaryCtaLabel?: string;
+  @Input() promoSecondaryCtaUrl?: string;
+  @Input() showWhenEmpty = false;
+  @Input() emptyStateTitle?: string;
+  @Input() emptyStateDesc?: string;
   @Input({ required: true }) packages: LuantiPackage[] = [];
   @Output() viewAll = new EventEmitter<void>();
+  @Output() promoCtaClicked = new EventEmitter<string>();
 
   @ViewChild('carouselTrack') trackRef!: ElementRef<HTMLDivElement>;
 

@@ -154,23 +154,85 @@ CREATE TABLE IF NOT EXISTS user_views (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- 10. Hero Banner Promotions & Scheduled Community Highlights
+-- 10. Hero Banner Promotions & Scheduled Community Highlights (+ Promotional Package Row #1)
 CREATE TABLE IF NOT EXISTS promotions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     short_desc TEXT NOT NULL,
-    banner_url TEXT NOT NULL,
+    banner_url TEXT NOT NULL DEFAULT '/promo.png',
     badge_text TEXT,
-    cta_label TEXT NOT NULL,
-    cta_url TEXT NOT NULL,
+    cta_label TEXT NOT NULL DEFAULT 'Learn More',
+    cta_url TEXT NOT NULL DEFAULT '/',
     secondary_cta_label TEXT,
     secondary_cta_url TEXT,
     starts_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL,
     priority INTEGER DEFAULT 100,
+    show_in_hero INTEGER DEFAULT 1,      -- 1 = show slide in Hero Banner, 0 = package row only
+    row_enabled INTEGER DEFAULT 0,       -- 1 = render as Swimlane Row #1 below Hero Banner
+    row_title TEXT,                      -- Custom row title or i18n template key
+    row_subtitle TEXT,                   -- Tooltip / subtitle description or i18n template key
+    row_icon TEXT DEFAULT 'trophy',      -- 'trophy' | 'sparkles' | 'flame' | 'gamepad' | 'star' | 'rocket'
+    row_filter_tags TEXT,                -- JSON array of tag names (e.g. '["jam_game_2026","gamejam"]')
+    row_filter_type TEXT DEFAULT 'all',  -- 'all' | 'game' | 'mod' | 'txp'
+    row_filter_source TEXT DEFAULT 'all',-- 'all' | 'official' | 'git'
+    row_filter_author TEXT,              -- Optional author handle filter
+    row_filter_query TEXT,               -- Optional keyword search filter
+    row_pinned_packages TEXT,            -- JSON array of pinned "author/name" package IDs
+    row_sort_by TEXT DEFAULT 'newest',   -- 'newest' | 'downloads' | 'rating' | 'trending'
+    row_show_empty_cta INTEGER DEFAULT 1,-- 1 = render row with CTA even when 0 packages match yet
+    translations TEXT,                   -- JSON object: Record<LocaleCode, { title?, short_desc?, badge_text?, cta_label?, secondary_cta_label?, row_title?, row_subtitle? }>
     created_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 10b. Runtime Hero Promotions Table (Mirrors promotions with identical schema)
+CREATE TABLE IF NOT EXISTS hero_promotions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    short_desc TEXT NOT NULL,
+    banner_url TEXT NOT NULL DEFAULT '/promo.png',
+    cta_label TEXT NOT NULL DEFAULT 'Learn More',
+    cta_url TEXT NOT NULL DEFAULT '/',
+    secondary_cta_label TEXT,
+    secondary_cta_url TEXT,
+    badge_text TEXT NOT NULL DEFAULT 'PROMOTED',
+    starts_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 100,
+    show_in_hero INTEGER NOT NULL DEFAULT 1,
+    row_enabled INTEGER NOT NULL DEFAULT 0,
+    row_title TEXT,
+    row_subtitle TEXT,
+    row_icon TEXT DEFAULT 'trophy',
+    row_filter_tags TEXT,
+    row_filter_type TEXT DEFAULT 'all',
+    row_filter_source TEXT DEFAULT 'all',
+    row_filter_author TEXT,
+    row_filter_query TEXT,
+    row_pinned_packages TEXT,
+    row_sort_by TEXT DEFAULT 'newest',
+    row_show_empty_cta INTEGER NOT NULL DEFAULT 1,
+    translations TEXT,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 12. Unified Catalog Tags (Mirrors ContentDB /api/tags/ + LuantiHub custom tags)
+CREATE TABLE IF NOT EXISTS tags (
+    name TEXT PRIMARY KEY,               -- Canonical lowercase tag ID (e.g. "jam_game_2026", "singleplayer")
+    title TEXT NOT NULL,                 -- Display title (e.g. "Game Jam 2026", "Singleplayer")
+    source TEXT DEFAULT 'contentdb',     -- 'contentdb' | 'luantihub' | 'custom'
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 13. Promotional / Synced Tag-to-Package Membership Mirror (ContentDB-agnostic offline persistence)
+CREATE TABLE IF NOT EXISTS promo_tag_packages (
+    tag_name TEXT NOT NULL,
+    package_id TEXT NOT NULL,            -- Canonical "author/name"
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tag_name, package_id)
 );
 
 -- 11. Moderation & Abuse Reports Queue (Supports Instant Kill Switch, Author Communication & Auto-Healing)
@@ -210,5 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_favorites_lower_pkg ON user_favorites(LOWER(packa
 CREATE INDEX IF NOT EXISTS idx_user_downloads_user ON user_downloads(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_hero_promotions_window ON hero_promotions(expires_at, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name));
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);

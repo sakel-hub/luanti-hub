@@ -75,7 +75,15 @@ export const de: TranslationDictionary = {
     infoGit: 'Community-Pakete direkt aus den GitHub-, Codeberg- und GitLab-Repositories der Entwickler, priorisiert nach aktuellen Updates, Spieler-Downloads, Bewertungen und Ihrem persönlichen Geschmack.',
     infoAutomation: 'Technik-, Maschinen-, Logistik- und Schaltungs-Mods für Automatisierung, priorisiert nach Themenrelevanz, aktuellen Spieler-Downloads, Community-Bewertungen und Updates.',
     infoTop10Week: 'Die 10 beliebtesten Pakete der letzten 7 Tage – sortiert nach wöchentlichen Downloads, Installationsbeliebtheit, Community-Favoriten und Bewertungen (max. 2 Pakete pro Entwickler für mehr Vielfalt).',
-    infoTextures: 'Textur-Pakete und visuelle Überarbeitungen für Ihre Welten, priorisiert nach aktuellen Spieler-Downloads, Community-Bewertungen und Updates.'
+    infoTextures: 'Textur-Pakete und visuelle Überarbeitungen für Ihre Welten, priorisiert nach aktuellen Spieler-Downloads, Community-Bewertungen und Updates.',
+    promoGameJamTitle: 'Luanti Game Jam {year} Einreichungen',
+    promoGameJamSubtitle: 'Aktuelle Einreichungen live synchronisiert aus ContentDB und Community-Git-Repositories für den jährlichen Luanti Game Jam {year}.',
+    promoTagShowcaseTitle: 'Empfohlene Auswahl: {tag}',
+    promoTagShowcaseSubtitle: 'Kuratierte Community-Pakete mit dem Tag #{tag}, synchronisiert mit ContentDB und Git-Repositories.',
+    promoCuratedTitle: 'Community-Spotlight & Empfehlungen',
+    promoCuratedSubtitle: 'Handverlesene Pakete und Community-Highlights auf LuantiHub.',
+    promoEmptyTitle: 'Einreichungen Starten Bald',
+    promoEmptyDesc: 'Neue Pakete für dieses Event erscheinen hier automatisch, sobald sie auf ContentDB oder LuantiHub veröffentlicht werden.'
   },
   catalog: {
     resultsFor: 'Ergebnisse für „{query}“',

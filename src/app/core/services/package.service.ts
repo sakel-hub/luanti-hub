@@ -16,6 +16,10 @@ import {
   AuthorPackageBreakdownItem,
   ReleaseNotesPayload,
   HeroPromotion,
+  PromotionLocaleOverride,
+  PromotionalPackageRow,
+  PromoRowIcon,
+  PromoRowSortOption,
   LuantiBlogPost,
   parseLuantiBlogFeed,
   enrichLuantiBlogPostFromArticleHtml
@@ -24,6 +28,7 @@ import { SettingsService } from './settings.service';
 import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
 import { AuthService, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
+import { TranslationService } from '../i18n/translation.service';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
@@ -33,31 +38,62 @@ import {
 const PAGE_SIZE = 32;
 const CAROUSEL_CAP = 24;
 
-const DEFAULT_CONTENTDB_TAGS: ContentDbTag[] = [
+export const DEFAULT_CONTENTDB_TAGS: ContentDbTag[] = [
   { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
   { name: 'building', title: 'Building' },
+  { name: 'chat', title: 'Chat / Commands' },
   { name: 'combat', title: 'Combat' },
   { name: 'Crafting', title: 'Crafting' },
+  { name: 'creative', title: 'Creative' },
+  { name: 'custom', title: 'Custom' },
   { name: 'decorative', title: 'Decorative' },
+  { name: 'education', title: 'Education' },
   { name: 'environment', title: 'Environment' },
+  { name: 'gamejam', title: 'Game Jam' },
   { name: 'gui', title: 'GUI' },
   { name: 'hud', title: 'HUD' },
   { name: 'inventory', title: 'Inventory' },
+  { name: 'jam_combat_2022', title: 'Combat Jam 2022' },
+  { name: 'jam_game_2021', title: 'Game Jam 2021' },
+  { name: 'jam_game_2022', title: 'Game Jam 2022' },
+  { name: 'jam_game_2023', title: 'Game Jam 2023' },
+  { name: 'jam_game_2024', title: 'Game Jam 2024' },
+  { name: 'jam_game_2025', title: 'Game Jam 2025' },
+  { name: 'jam_game_2026', title: 'Game Jam 2026' },
+  { name: 'library', title: 'Library / API' },
   { name: 'magic', title: 'Magic' },
   { name: 'mapgen', title: 'Mapgen' },
+  { name: 'minigame', title: 'Minigame' },
   { name: 'mobs', title: 'Mobs / Animals / NPCs' },
   { name: 'multiplayer', title: 'Multiplayer' },
   { name: 'plants_and_farming', title: 'Plants & Farming' },
   { name: 'player_effects', title: 'Player Effects' },
+  { name: 'puzzle', title: 'Puzzle' },
   { name: 'pve', title: 'PvE' },
   { name: 'pvp', title: 'PvP' },
+  { name: 'sandbox_game', title: 'Sandbox Game' },
+  { name: 'singleplayer', title: 'Singleplayer' },
+  { name: 'sound_music', title: 'Sound / Music' },
   { name: 'storage', title: 'Storage' },
   { name: 'survival', title: 'Survival' },
   { name: 'technology', title: 'Technology' },
   { name: 'tools', title: 'Tools / Weapons' },
   { name: 'transport', title: 'Transport' },
+  { name: 'voxel', title: 'Voxel' },
   { name: 'world_maintenance', title: 'World Maintenance' }
 ];
+
+export function formatTagDisplayTitle(tagName: string): string {
+  const clean = String(tagName || '').trim();
+  if (!clean) return '';
+  const known = DEFAULT_CONTENTDB_TAGS.find(t => t.name.toLowerCase() === clean.toLowerCase());
+  if (known) return known.title;
+  const jamMatch = clean.match(/^jam_game_(\d{4})$/i);
+  if (jamMatch) return `Game Jam ${jamMatch[1]}`;
+  return clean
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 @Injectable({
   providedIn: 'root'
@@ -70,6 +106,7 @@ export class PackageService {
   private readonly settingsService = inject(SettingsService);
   private readonly pwaService = inject(PwaService);
   private readonly authService = inject(AuthService);
+  private readonly i18n = inject(TranslationService);
 
   private readonly _packages = signal<LuantiPackage[]>([]);
   private readonly _searchInput = signal<string>('');
@@ -168,18 +205,221 @@ export class PackageService {
   readonly activePromotions = computed<HeroPromotion[]>(() => {
     const nowMs = this._promoClockTick();
     return this._promotions()
-      .filter(promo => {
-        if (!promo || !promo.title || !promo.banner_url || !promo.expires_at) return false;
-        const expMs = Date.parse(String(promo.expires_at));
-        if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-        if (promo.starts_at) {
-          const startMs = Date.parse(String(promo.starts_at));
-          if (Number.isFinite(startMs) && startMs > nowMs) return false;
-        }
-        return true;
-      })
+      .filter(promo => this.isValidActivePromotion(promo, nowMs))
       .sort((a, b) => (Number(b.priority ?? 100) - Number(a.priority ?? 100)));
   });
+
+  readonly activeHeroPromotions = computed<HeroPromotion[]>(() => {
+    // Depend on currentLocale so Hero slide titles/descriptions/badges re-evaluate on language switch
+    this.i18n.currentLocale();
+    return this.activePromotions()
+      .filter(promo => {
+        const showInHero =
+          promo.show_in_hero !== false &&
+          promo.show_in_hero !== 0 &&
+          (promo.show_in_hero as any) !== '0';
+        return showInHero && Boolean(promo.title && promo.banner_url);
+      })
+      .map(promo => this.localizeHeroPromotion(promo));
+  });
+
+  readonly activePromotionalRows = computed<PromotionalPackageRow[]>(() => {
+    this.i18n.currentLocale();
+    const activePromos = this.activePromotions();
+    const rowPromos = activePromos.filter(promo =>
+      Boolean(
+        promo.row_enabled === true ||
+          promo.row_enabled === 1 ||
+          (promo.row_enabled as any) === '1'
+      )
+    );
+    if (rowPromos.length === 0) return [];
+
+    const allPkgs = this._packages();
+    const pkgByLowerId = new Map<string, LuantiPackage>();
+    for (const p of allPkgs) {
+      if (p.status === 'delisted' || p.status === 'flagged') continue;
+      pkgByLowerId.set(p.id.toLowerCase(), p);
+      pkgByLowerId.set(`${p.author}/${p.name}`.toLowerCase(), p);
+    }
+
+    const rows: PromotionalPackageRow[] = [];
+
+    for (const promo of rowPromos) {
+      const filterTags = this.parseStringList(promo.row_filter_tags);
+      const combinedPackages = this.getMatchingPackagesForPromotionRow(promo, allPkgs, pkgByLowerId).slice(
+        0,
+        CAROUSEL_CAP
+      );
+      const showEmptyCta =
+        promo.row_show_empty_cta !== false &&
+        promo.row_show_empty_cta !== 0 &&
+        (promo.row_show_empty_cta as any) !== '0';
+
+      if (combinedPackages.length === 0 && !showEmptyCta) {
+        continue;
+      }
+
+      const localizedTitle = this.resolveLocalizedPromoField(
+        promo,
+        'row_title',
+        promo.row_title || promo.title || this.buildDefaultPromoRowTitle(promo, filterTags)
+      );
+      const localizedSubtitle = this.resolveLocalizedPromoField(
+        promo,
+        'row_subtitle',
+        promo.row_subtitle || promo.short_desc || this.buildDefaultPromoRowSubtitle(promo, filterTags)
+      );
+      const localizedBadge = this.resolveLocalizedPromoField(
+        promo,
+        'badge_text',
+        promo.badge_text || this.i18n.t('hero.promoted')
+      );
+      const localizedCta = this.resolveLocalizedPromoField(
+        promo,
+        'cta_label',
+        promo.cta_label || this.i18n.t('hero.learnMore')
+      );
+      const localizedSecondaryCta = promo.secondary_cta_label
+        ? this.resolveLocalizedPromoField(promo, 'secondary_cta_label', promo.secondary_cta_label)
+        : null;
+
+      const iconCandidate = String(promo.row_icon || 'trophy') as PromoRowIcon;
+      const validIcon: PromoRowIcon = ['trophy', 'sparkles', 'flame', 'gamepad', 'star', 'rocket'].includes(iconCandidate)
+        ? iconCandidate
+        : 'trophy';
+
+      const defaultCtaUrl = filterTags[0] ? `/?tag=${encodeURIComponent(filterTags[0])}` : '/submit';
+
+      rows.push({
+        promotion: promo,
+        title: localizedTitle,
+        subtitle: localizedSubtitle,
+        badgeText: localizedBadge,
+        icon: validIcon,
+        packages: combinedPackages,
+        filterTags,
+        ctaLabel: localizedCta,
+        ctaUrl: promo.cta_url || defaultCtaUrl,
+        secondaryCtaLabel: localizedSecondaryCta,
+        secondaryCtaUrl: promo.secondary_cta_url || null,
+        showEmptyCta
+      });
+    }
+
+    return rows;
+  });
+
+  /**
+   * Evaluates and sorts all catalog packages matching a Promotional Package Row #1 configuration.
+   * Shared by both `activePromotionalRows` and the Admin live match counter so counts are always identical.
+   */
+  getMatchingPackagesForPromotionRow(
+    promo: Partial<HeroPromotion>,
+    catalogInput?: LuantiPackage[],
+    pkgByLowerIdInput?: Map<string, LuantiPackage>
+  ): LuantiPackage[] {
+    const allPkgs = catalogInput ?? this._packages();
+    const filterTags = this.parseStringList(promo.row_filter_tags);
+    const pinnedIds = this.parseStringList(promo.row_pinned_packages);
+    const filterType = String(promo.row_filter_type || 'all').toLowerCase();
+    const filterSource = String(promo.row_filter_source || 'all').toLowerCase();
+    const filterAuthor = String(promo.row_filter_author || '').trim().toLowerCase();
+    const filterQuery = String(promo.row_filter_query || '').trim().toLowerCase();
+    const sortBy: PromoRowSortOption =
+      promo.row_sort_by === 'downloads' ||
+      promo.row_sort_by === 'rating' ||
+      promo.row_sort_by === 'trending'
+        ? promo.row_sort_by
+        : 'newest';
+
+    let pkgByLowerId = pkgByLowerIdInput;
+    if (!pkgByLowerId) {
+      pkgByLowerId = new Map<string, LuantiPackage>();
+      for (const p of allPkgs) {
+        if (p.status === 'delisted' || p.status === 'flagged') continue;
+        pkgByLowerId.set(p.id.toLowerCase(), p);
+        pkgByLowerId.set(`${p.author}/${p.name}`.toLowerCase(), p);
+      }
+    }
+
+    const pinnedPackages: LuantiPackage[] = [];
+    const seenIds = new Set<string>();
+    for (const pid of pinnedIds) {
+      const match = pkgByLowerId.get(pid.toLowerCase());
+      if (match && !seenIds.has(match.id.toLowerCase())) {
+        seenIds.add(match.id.toLowerCase());
+        pinnedPackages.push(match);
+      }
+    }
+
+    const hasDynamicFilter =
+      filterTags.length > 0 ||
+      Boolean(filterAuthor) ||
+      Boolean(filterQuery) ||
+      filterType !== 'all' ||
+      filterSource !== 'all';
+
+    let dynamicMatches: LuantiPackage[] = [];
+    if (hasDynamicFilter) {
+      const lowerFilterTags = filterTags.map(t => t.toLowerCase());
+      const queryTerms = filterQuery ? filterQuery.split(/\s+/).filter(Boolean) : [];
+
+      dynamicMatches = allPkgs.filter(pkg => {
+        if (pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+        if (seenIds.has(pkg.id.toLowerCase())) return false;
+
+        if (filterType !== 'all' && pkg.type !== filterType) return false;
+        if (
+          filterSource !== 'all' &&
+          pkg.source !== filterSource &&
+          !pkg.sources?.includes(filterSource as PackageSource)
+        ) {
+          return false;
+        }
+        if (filterAuthor && pkg.author.toLowerCase() !== filterAuthor) {
+          return false;
+        }
+        if (lowerFilterTags.length > 0) {
+          const pkgLowerTags = (pkg.tags || []).map(t => t.toLowerCase());
+          const matchesTag = lowerFilterTags.some(ft => {
+            const kw = ft.replace(/_/g, ' ');
+            return pkgLowerTags.includes(ft) || pkgLowerTags.includes(kw);
+          });
+          if (!matchesTag) return false;
+        }
+        if (queryTerms.length > 0) {
+          const blob = pkg._searchBlob || `${pkg.title} ${pkg.name} ${pkg.author} ${pkg.short_desc}`.toLowerCase();
+          for (const term of queryTerms) {
+            if (!blob.includes(term)) return false;
+          }
+        }
+        return true;
+      });
+
+      if (sortBy === 'trending') {
+        dynamicMatches = this.sortByRelevanceDesc(dynamicMatches, allPkgs.length);
+      } else {
+        dynamicMatches.sort((a, b) => {
+          if (sortBy === 'downloads') {
+            return (b.downloads || 0) - (a.downloads || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0);
+          }
+          if (sortBy === 'rating') {
+            return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
+          }
+          const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
+          const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+          if (timeB !== timeA) return timeB - timeA;
+          const relA = Number(a.release_id || 0) || 0;
+          const relB = Number(b.release_id || 0) || 0;
+          if (relB !== relA) return relB - relA;
+          return (b.downloads || 0) - (a.downloads || 0);
+        });
+      }
+    }
+
+    return [...pinnedPackages, ...dynamicMatches];
+  }
 
   // True whenever any search or filter is active (switches Home view to Filtered Grid)
   readonly hasActiveFilters = computed<boolean>(() => {
@@ -194,7 +434,7 @@ export class PackageService {
 
   // Curated Multi-Item Hero Showcase (Category-Diverse, High-Quality & Fresh, with Active Promotions & Latest Luanti Blog Article pinned first)
   readonly heroShowcasePackages = computed<LuantiPackage[]>(() => {
-    const promoSlides = this.activePromotions().map(promo => this.toPromotionSlidePackage(promo));
+    const promoSlides = this.activeHeroPromotions().map(promo => this.toPromotionSlidePackage(promo));
     const blogPost = this._latestBlogPost();
     const blogSlides = blogPost && blogPost.title && blogPost.url
       ? [this.toBlogSlidePackage(blogPost)]
@@ -377,6 +617,368 @@ export class PackageService {
     return this.toPromotionSlidePackage(syntheticPromo);
   }
 
+  private readonly syncedPromoTagsInSession = new Set<string>();
+
+  private isValidActivePromotion(promo: HeroPromotion | null | undefined, nowMs = Date.now()): boolean {
+    if (!promo || !promo.expires_at) return false;
+    const showInHero =
+      promo.show_in_hero !== false &&
+      promo.show_in_hero !== 0 &&
+      (promo.show_in_hero as any) !== '0';
+    const rowEnabled = Boolean(
+      promo.row_enabled === true ||
+        promo.row_enabled === 1 ||
+        (promo.row_enabled as any) === '1'
+    );
+    if (!showInHero && !rowEnabled) return false;
+    if (showInHero && (!promo.title || !promo.banner_url)) return false;
+    if (!showInHero && rowEnabled && !promo.title && !promo.row_title) return false;
+
+    const expMs = Date.parse(String(promo.expires_at));
+    if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+    if (promo.starts_at) {
+      const startMs = Date.parse(String(promo.starts_at));
+      if (Number.isFinite(startMs) && startMs > nowMs) return false;
+    }
+    return true;
+  }
+
+  parseStringList(val: any): string[] {
+    if (Array.isArray(val)) return val.map(v => String(v || '').trim()).filter(Boolean);
+    if (typeof val === 'string' && val.trim()) {
+      const trimmed = val.trim();
+      if (trimmed.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) return parsed.map(v => String(v || '').trim()).filter(Boolean);
+        } catch {
+          // fallback below
+        }
+      }
+      return trimmed.split(',').map(v => v.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  parsePromotionTranslations(
+    raw: Record<string, PromotionLocaleOverride> | string | null | undefined
+  ): Record<string, PromotionLocaleOverride> {
+    if (!raw) return {};
+    if (typeof raw === 'string' && raw.trim()) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, PromotionLocaleOverride>;
+        }
+      } catch {
+        return {};
+      }
+      return {};
+    }
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      return raw as Record<string, PromotionLocaleOverride>;
+    }
+    return {};
+  }
+
+  private evaluateI18nTemplateString(rawVal: string): string {
+    const trimmed = String(rawVal || '').trim();
+    if (!trimmed.startsWith('i18n:')) return trimmed;
+    const withoutPrefix = trimmed.slice(5);
+    const parts = withoutPrefix.split('|');
+    const key = parts[0].trim();
+    const params: Record<string, string> = {};
+    for (let i = 1; i < parts.length; i++) {
+      const eq = parts[i].indexOf('=');
+      if (eq !== -1) {
+        params[parts[i].slice(0, eq).trim()] = parts[i].slice(eq + 1).trim();
+      }
+    }
+    return this.i18n.t(key, params);
+  }
+
+  private buildDefaultPromoRowTitle(promo: HeroPromotion, filterTags: string[]): string {
+    const jamTag = filterTags.find(t => /^jam_game_(\d{4})$/i.test(t) || t.toLowerCase() === 'gamejam');
+    if (jamTag) {
+      const yearMatch = jamTag.match(/(\d{4})/) || String(promo.title || '').match(/(20\d{2})/);
+      const year = yearMatch ? yearMatch[1] : new Date().getFullYear().toString();
+      return this.i18n.t('carousel.promoGameJamTitle', { year });
+    }
+    if (filterTags.length > 0) {
+      const tagTitle = this.getTagDisplayTitle(filterTags[0]);
+      return this.i18n.t('carousel.promoTagShowcaseTitle', { tag: tagTitle });
+    }
+    return this.i18n.t('carousel.promoCuratedTitle');
+  }
+
+  private buildDefaultPromoRowSubtitle(promo: HeroPromotion, filterTags: string[]): string {
+    const jamTag = filterTags.find(t => /^jam_game_(\d{4})$/i.test(t) || t.toLowerCase() === 'gamejam');
+    if (jamTag) {
+      const yearMatch = jamTag.match(/(\d{4})/) || String(promo.title || '').match(/(20\d{2})/);
+      const year = yearMatch ? yearMatch[1] : new Date().getFullYear().toString();
+      return this.i18n.t('carousel.promoGameJamSubtitle', { year });
+    }
+    if (filterTags.length > 0) {
+      return this.i18n.t('carousel.promoTagShowcaseSubtitle', { tag: filterTags[0] });
+    }
+    return this.i18n.t('carousel.promoCuratedSubtitle');
+  }
+
+  resolveLocalizedPromoField(
+    promo: HeroPromotion,
+    field: keyof PromotionLocaleOverride,
+    fallback: string
+  ): string {
+    const locale = this.i18n.currentLocale();
+    const translations = this.parsePromotionTranslations(promo.translations);
+    const localeEntry = translations[locale];
+    if (localeEntry && typeof localeEntry[field] === 'string' && localeEntry[field]!.trim()) {
+      return this.evaluateI18nTemplateString(localeEntry[field]!.trim());
+    }
+
+    const rawBase = String((promo as any)?.[field] || fallback || '').trim();
+    if (rawBase.startsWith('i18n:')) {
+      return this.evaluateI18nTemplateString(rawBase);
+    }
+
+    // Automatic built-in dictionary localization when admin used English preset defaults and user switches to SK/DE/FR/ES/RU
+    if (locale !== 'en') {
+      const filterTags = this.parseStringList(promo.row_filter_tags);
+      if (field === 'row_title') {
+        const jamMatch = rawBase.match(/^Luanti Game Jam (\d{4}) Submissions$/i);
+        if (jamMatch) {
+          return this.i18n.t('carousel.promoGameJamTitle', { year: jamMatch[1] });
+        }
+        const showcaseMatch = rawBase.match(/^Featured Showcase:\s*(.+)$/i);
+        if (showcaseMatch) {
+          return this.i18n.t('carousel.promoTagShowcaseTitle', { tag: showcaseMatch[1].trim() });
+        }
+        if (/^Community Spotlight & Featured Picks$/i.test(rawBase)) {
+          return this.i18n.t('carousel.promoCuratedTitle');
+        }
+      } else if (field === 'row_subtitle') {
+        const jamSubMatch = rawBase.match(/Luanti Game Jam (\d{4})/i);
+        if (jamSubMatch && /synced from ContentDB/i.test(rawBase)) {
+          return this.i18n.t('carousel.promoGameJamSubtitle', { year: jamSubMatch[1] });
+        }
+        if (filterTags.length > 0 && /tagged with #/i.test(rawBase)) {
+          return this.i18n.t('carousel.promoTagShowcaseSubtitle', { tag: filterTags[0] });
+        }
+      } else if (field === 'badge_text' && rawBase.toUpperCase() === 'PROMOTED') {
+        return this.i18n.t('hero.promoted');
+      } else if (field === 'cta_label' && /^Learn More$/i.test(rawBase)) {
+        return this.i18n.t('hero.learnMore');
+      }
+    }
+
+    const enEntry = translations['en'];
+    if (enEntry && typeof enEntry[field] === 'string' && enEntry[field]!.trim()) {
+      return this.evaluateI18nTemplateString(enEntry[field]!.trim());
+    }
+
+    return rawBase || fallback;
+  }
+
+  private localizeHeroPromotion(promo: HeroPromotion): HeroPromotion {
+    const filterTags = this.parseStringList(promo.row_filter_tags);
+    const localizedRowTitle = promo.row_title
+      ? this.resolveLocalizedPromoField(promo, 'row_title', promo.row_title)
+      : '';
+    const localizedRowSubtitle = promo.row_subtitle
+      ? this.resolveLocalizedPromoField(promo, 'row_subtitle', promo.row_subtitle)
+      : '';
+    const defaultCtaUrl = filterTags[0] ? `/?tag=${encodeURIComponent(filterTags[0])}` : '/';
+    return {
+      ...promo,
+      title: this.resolveLocalizedPromoField(promo, 'title', promo.title || localizedRowTitle),
+      short_desc: this.resolveLocalizedPromoField(promo, 'short_desc', promo.short_desc || localizedRowSubtitle),
+      badge_text: this.resolveLocalizedPromoField(promo, 'badge_text', promo.badge_text || 'PROMOTED'),
+      cta_label: this.resolveLocalizedPromoField(promo, 'cta_label', promo.cta_label || 'Learn More'),
+      cta_url: promo.cta_url || defaultCtaUrl,
+      secondary_cta_label: promo.secondary_cta_label
+        ? this.resolveLocalizedPromoField(promo, 'secondary_cta_label', promo.secondary_cta_label)
+        : promo.secondary_cta_label,
+      row_title: localizedRowTitle || promo.row_title,
+      row_subtitle: localizedRowSubtitle || promo.row_subtitle
+    };
+  }
+
+  getTagDisplayTitle(tagName: string): string {
+    const clean = String(tagName || '').trim();
+    if (!clean) return '';
+    const match = this._availableTags().find(t => t.name.toLowerCase() === clean.toLowerCase());
+    return match ? match.title : formatTagDisplayTitle(clean);
+  }
+
+  registerCustomTag(tagName: string, customTitle?: string): ContentDbTag | null {
+    const clean = String(tagName || '')
+      .trim()
+      .replace(/^#+/, '')
+      .replace(/[^a-zA-Z0-9_/-]/g, '');
+    if (!clean) return null;
+    const title = (customTitle || '').trim() || this.getTagDisplayTitle(clean);
+    const entry: ContentDbTag = { name: clean, title };
+    this.ensureTagsRegisteredInAvailableTags([clean], { [clean.toLowerCase()]: title });
+    return entry;
+  }
+
+  ensureTagsRegisteredInAvailableTags(
+    tagNames: string[],
+    customTitles?: Record<string, string>
+  ): void {
+    if (!Array.isArray(tagNames) || tagNames.length === 0) return;
+    const systemSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const current = this._availableTags();
+    const existingLower = new Set(current.map(t => t.name.toLowerCase()));
+    const additions: ContentDbTag[] = [];
+
+    for (const raw of tagNames) {
+      const clean = String(raw || '').trim();
+      if (!clean) continue;
+      const lower = clean.toLowerCase();
+      if (systemSet.has(lower) || existingLower.has(lower)) continue;
+      existingLower.add(lower);
+      additions.push({
+        name: clean,
+        title: customTitles?.[lower] || formatTagDisplayTitle(clean)
+      });
+    }
+
+    if (additions.length > 0) {
+      this._availableTags.set(
+        [...current, ...additions].sort((a, b) =>
+          a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+        )
+      );
+    }
+  }
+
+  explorePromotionalRow(row: PromotionalPackageRow): void {
+    const promo = row.promotion;
+    this._showFavoritesOnly.set(false);
+    const filterType = String(promo.row_filter_type || 'all').toLowerCase();
+    const filterSource = String(promo.row_filter_source || 'all').toLowerCase();
+    const filterTags = row.filterTags;
+    const filterQuery = String(promo.row_filter_query || promo.row_filter_author || '').trim();
+
+    this._selectedType.set(
+      ['all', 'game', 'mod', 'txp'].includes(filterType) ? filterType : 'all'
+    );
+    this._selectedSource.set(
+      ['all', 'official', 'git'].includes(filterSource) ? filterSource : 'all'
+    );
+    if (filterTags.length > 0) {
+      this.ensureTagsRegisteredInAvailableTags(filterTags);
+      this._selectedTag.set(filterTags[0]);
+    } else {
+      this._selectedTag.set('all');
+    }
+    if (filterQuery) {
+      this._searchInput.set(filterQuery);
+      this._searchQuery.set(filterQuery);
+    } else {
+      this._searchInput.set('');
+      this._searchQuery.set('');
+    }
+    if (promo.row_sort_by === 'newest') {
+      this._sortBy.set('updated');
+    } else if (promo.row_sort_by === 'rating') {
+      this._sortBy.set('score');
+    } else {
+      this._sortBy.set('downloads');
+    }
+    this._visibleCount.set(PAGE_SIZE);
+    this.syncQueryParamsToUrl();
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  private syncClientPromotionRowTags(activePromos: HeroPromotion[]): void {
+    const rowPromos = activePromos.filter(p =>
+      Boolean(p.row_enabled === true || p.row_enabled === 1 || (p.row_enabled as any) === '1')
+    );
+    if (rowPromos.length === 0) return;
+
+    const allRowTags = Array.from(
+      new Set(
+        rowPromos
+          .flatMap(p => this.parseStringList(p.row_filter_tags))
+          .map(t => t.trim())
+          .filter(Boolean)
+      )
+    );
+    if (allRowTags.length === 0) return;
+
+    this.ensureTagsRegisteredInAvailableTags(allRowTags);
+
+    const isUnitTestEnv =
+      typeof (globalThis as any).describe === 'function' &&
+      typeof (globalThis as any).it === 'function';
+    if (isUnitTestEnv || typeof fetch !== 'function') return;
+
+    const currentPkgs = this._packages();
+    if (currentPkgs.length === 0) return;
+
+    for (const tag of allRowTags.slice(0, 3)) {
+      const lowerTag = tag.toLowerCase();
+      if (this.syncedPromoTagsInSession.has(lowerTag)) continue;
+      // Check if catalog already has packages stamped with this tag from the Edge Worker
+      const alreadyStampedCount = currentPkgs.filter(p =>
+        (p.tags || []).some(t => t.toLowerCase() === lowerTag)
+      ).length;
+      if (alreadyStampedCount > 0) {
+        this.syncedPromoTagsInSession.add(lowerTag);
+        continue;
+      }
+
+      this.syncedPromoTagsInSession.add(lowerTag);
+      (async () => {
+        try {
+          const list = await this.fetchUpstreamWithMirrorFallback(
+            `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
+          );
+          if (!Array.isArray(list) || list.length === 0) return;
+
+          const matchedLowerIds = new Set<string>();
+          const newRawItems: any[] = [];
+          const existingLowerIds = new Set(this._packages().map(p => p.id.toLowerCase()));
+
+          for (const item of list) {
+            if (!item?.author || !item?.name) continue;
+            const lowerId = `${item.author}/${item.name}`.toLowerCase();
+            matchedLowerIds.add(lowerId);
+            if (!existingLowerIds.has(lowerId)) {
+              newRawItems.push({
+                ...item,
+                tags: Array.from(new Set([...(Array.isArray(item.tags) ? item.tags : []), tag]))
+              });
+            }
+          }
+
+          this._packages.update(pkgs => {
+            const updated = pkgs.map(pkg => {
+              if (!matchedLowerIds.has(pkg.id.toLowerCase())) return pkg;
+              if ((pkg.tags || []).some(t => t.toLowerCase() === lowerTag)) return pkg;
+              const nextTags = [...(pkg.tags || []), tag];
+              return {
+                ...pkg,
+                tags: nextTags,
+                _searchBlob: this.buildSearchBlob({ ...pkg, tags: nextTags })
+              };
+            });
+            const normalizedNew = newRawItems.map(it => this.normalizePackage(it));
+            return normalizedNew.length > 0
+              ? this.deduplicateCatalog([...normalizedNew, ...updated])
+              : updated;
+          });
+        } catch {
+          // Non-fatal fallback
+        }
+      })();
+    }
+  }
+
   private toPromotionSlidePackage(promo: HeroPromotion): LuantiPackage {
     return {
       id: `promo:${promo.id}`,
@@ -406,6 +1008,7 @@ export class PackageService {
     this._promotions.set(validList);
     this.persistActivePromotionsCache(validList);
     this.refreshPromoClock();
+    this.syncClientPromotionRowTags(this.activePromotions());
   }
 
   private persistActivePromotionsCache(promotions: HeroPromotion[]): void {
@@ -839,6 +1442,15 @@ export class PackageService {
       if (visible.length === 0) return;
       this.prioritizePackagesForHydration(visible);
     });
+
+    // Ensure tags configured on active Promotional Package Rows are mirrored into availableTags and synced with ContentDB
+    effect(() => {
+      const promos = this.activePromotions();
+      const pkgsCount = this._packages().length;
+      if (promos.length > 0 && pkgsCount >= 0) {
+        this.syncClientPromotionRowTags(promos);
+      }
+    });
   }
 
   private loadHydratedMetaCache(): void {
@@ -858,11 +1470,7 @@ export class PackageService {
           const parsedPromos = JSON.parse(rawPromos);
           if (Array.isArray(parsedPromos) && parsedPromos.length > 0) {
             const nowMs = Date.now();
-            const validPromos = parsedPromos.filter((p: any) => {
-              if (!p || !p.title || !p.banner_url || !p.expires_at) return false;
-              const expMs = Date.parse(String(p.expires_at));
-              return Number.isFinite(expMs) && expMs > nowMs;
-            });
+            const validPromos = parsedPromos.filter((p: any) => this.isValidActivePromotion(p, nowMs));
             if (validPromos.length > 0) {
               this._promotions.set(validPromos);
             }
@@ -1910,6 +2518,11 @@ export class PackageService {
             .filter(t => Boolean(t.name && t.title));
           if (parsed.length > 0) {
             this._availableTags.set(parsed);
+            for (const promo of this.activePromotions()) {
+              if (Array.isArray(promo.row_filter_tags) && promo.row_filter_tags.length > 0) {
+                this.ensureTagsRegisteredInAvailableTags(promo.row_filter_tags);
+              }
+            }
           }
         }
       }
@@ -1957,20 +2570,11 @@ export class PackageService {
         this._promotions.set(payload.promotions);
         this.persistActivePromotionsCache(payload.promotions);
         this.refreshPromoClock();
-        this.pwaService.checkAndNotifyPromotions(payload.promotions);
+        this.pwaService.checkAndNotifyPromotions(payload.promotions.map(p => this.localizeHeroPromotion(p)));
       } else {
         // Never drop currently active, non-expired promotions during a background catalog refresh
         const nowMs = this._promoClockTick();
-        const stillActive = this._promotions().filter(p => {
-          if (!p || !p.title || !p.banner_url || !p.expires_at) return false;
-          const expMs = Date.parse(String(p.expires_at));
-          if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-          if (p.starts_at) {
-            const startMs = Date.parse(String(p.starts_at));
-            if (Number.isFinite(startMs) && startMs > nowMs) return false;
-          }
-          return true;
-        });
+        const stillActive = this._promotions().filter(p => this.isValidActivePromotion(p, nowMs));
         if (stillActive.length > 0) {
           this._promotions.set(stillActive);
         } else {
@@ -2091,6 +2695,7 @@ export class PackageService {
         this._availableTags.set(parsedTags);
       }
     }
+    this.syncClientPromotionRowTags(this.activePromotions());
 
     if (Array.isArray(payload.top10Week) && payload.top10Week.length > 0) {
       this._serverTop10Week.set(payload.top10Week.map(item => this.normalizePackage(item)));
@@ -2352,8 +2957,10 @@ export class PackageService {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
       return;
     }
+    const promoRowPkgs = this.activePromotionalRows().flatMap(row => row.packages);
     const priorityCandidates: LuantiPackage[] = [
       ...this.heroShowcasePackages(),
+      ...promoRowPkgs,
       ...this.decentralizedGitPackages(),
       ...this.top10TodayPackages(),
       ...this.top10WeekPackages(),
@@ -7806,11 +8413,15 @@ export class PackageService {
         const allPromos: HeroPromotion[] = Array.isArray(data?.promotions) ? data.promotions : [];
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
+        if (Array.isArray(draft.row_filter_tags) && draft.row_filter_tags.length > 0) {
+          this.ensureTagsRegisteredInAvailableTags(draft.row_filter_tags);
+        }
         this.refreshPromoClock();
+        this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();
         if (data?.promotion) {
-          this.pwaService.checkAndNotifyPromotions([data.promotion]);
+          this.pwaService.checkAndNotifyPromotions([this.localizeHeroPromotion(data.promotion)]);
         }
         return { success: true, promotion: data?.promotion };
       }
@@ -7846,6 +8457,7 @@ export class PackageService {
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         this.refreshPromoClock();
+        this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();
         return { success: true };

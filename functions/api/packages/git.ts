@@ -26,7 +26,8 @@ import {
   sanitizePublicErrorMessage,
   fetchWithAnubisSupport,
   isGitRepositoryAssetUrl,
-  mergeScreenshotsPreferringGit
+  mergeScreenshotsPreferringGit,
+  upsertCustomAppTags
 } from '../lib/upstream';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
@@ -1608,6 +1609,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         } else {
           throw upsertErr;
         }
+      }
+
+      if (mergedTags.length > 0) {
+        await upsertCustomAppTags(context.env.DB, mergedTags, 'custom');
       }
 
       const releaseBatchStmts: any[] = [

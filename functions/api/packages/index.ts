@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CONTENTDB_TAGS,
   fetchUpstreamJsonCached,
   fetchGitRepoReleasesAndTags,
   fetchGitSmartHttpRefs,
@@ -10,6 +11,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   ensureExtendedPackageColumns,
+  ensurePromotionAndTagTables,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
   isGitRepositoryAssetUrl,
@@ -17,8 +19,11 @@ import {
   isGitProviderId,
   detectGitProviderFromUrl,
   getLastKnownActivePromotions,
-  setLastKnownActivePromotions
+  setLastKnownActivePromotions,
+  getUnifiedCatalogTags,
+  isValidActivePromotionRow
 } from '../lib/upstream';
+import { normalizePromotionRow } from '../promotions/index';
 
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
 
@@ -29,31 +34,278 @@ interface Env {
 
 let lastCatalogNoCacheAt = 0;
 
-const DEFAULT_CONTENTDB_TAGS = [
-  { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
-  { name: 'building', title: 'Building' },
-  { name: 'combat', title: 'Combat' },
-  { name: 'Crafting', title: 'Crafting' },
-  { name: 'decorative', title: 'Decorative' },
-  { name: 'environment', title: 'Environment' },
-  { name: 'gui', title: 'GUI' },
-  { name: 'hud', title: 'HUD' },
-  { name: 'inventory', title: 'Inventory' },
-  { name: 'magic', title: 'Magic' },
-  { name: 'mapgen', title: 'Mapgen' },
-  { name: 'mobs', title: 'Mobs / Animals / NPCs' },
-  { name: 'multiplayer', title: 'Multiplayer' },
-  { name: 'plants_and_farming', title: 'Plants and Farming' },
-  { name: 'player_effects', title: 'Player Effects' },
-  { name: 'pve', title: 'PvE' },
-  { name: 'pvp', title: 'PvP' },
-  { name: 'storage', title: 'Storage' },
-  { name: 'survival', title: 'Survival' },
-  { name: 'technology', title: 'Technology' },
-  { name: 'tools', title: 'Tools / Weapons' },
-  { name: 'transport', title: 'Transport' },
-  { name: 'world_maintenance', title: 'World Maintenance' }
-];
+interface PromoRowDelta {
+  tagMap: Record<string, string[]>;
+  items: any[];
+}
+
+/**
+ * Syncs packages matching active Promotional Package Row #1 rules from ContentDB (`GET /api/packages/?tag=<tag>&fmt=vcs`)
+ * with a 5-minute (300s) Edge Cache TTL and persists tag-to-package memberships in D1 (`promo_tag_packages`)
+ * so LuantiHub remains ContentDB-agnostic even if ContentDB is offline.
+ */
+export async function syncActivePromotionRowPackages(
+  activePromos: any[] | undefined | null,
+  db?: any,
+  noCache = false
+): Promise<PromoRowDelta | null> {
+  if (!Array.isArray(activePromos) || activePromos.length === 0) return null;
+
+  const rowPromos = activePromos
+    .map((p) => normalizePromotionRow(p))
+    .filter((p) => p && p.row_enabled);
+  if (rowPromos.length === 0) return null;
+
+  const uniqueTags = Array.from(
+    new Set(
+      rowPromos
+        .flatMap((p) => parseJsonArray(p.row_filter_tags))
+        .map((t) => String(t || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 4);
+
+  const uniqueAuthors = Array.from(
+    new Set(
+      rowPromos
+        .filter((p) => parseJsonArray(p.row_filter_tags).length === 0 && p.row_filter_author)
+        .map((p) => String(p.row_filter_author || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 2);
+
+  if (uniqueTags.length === 0 && uniqueAuthors.length === 0) return null;
+
+  const cacheSignature = `tags=${uniqueTags.map((t) => t.toLowerCase()).sort().join(',')}|authors=${uniqueAuthors.map((a) => a.toLowerCase()).sort().join(',')}`;
+  const syncCacheKey = `/__promo_row_sync_v1_${encodeURIComponent(cacheSignature)}`;
+
+  if (!noCache) {
+    const cachedDelta = await readEdgeCacheJson<PromoRowDelta>(syncCacheKey);
+    if (cachedDelta && cachedDelta.tagMap && Array.isArray(cachedDelta.items)) {
+      return cachedDelta;
+    }
+  }
+
+  const tagMap: Record<string, string[]> = {};
+  const discoveredByKey = new Map<string, any>();
+  const addTagStamp = (lowerPkgId: string, tag: string) => {
+    if (!lowerPkgId || !tag) return;
+    const list = tagMap[lowerPkgId] || [];
+    if (!list.some((existing) => existing.toLowerCase() === tag.toLowerCase())) {
+      list.push(tag);
+      tagMap[lowerPkgId] = list;
+    }
+  };
+
+  // 1. Read persisted tag-to-package memberships from D1 `promo_tag_packages` first (offline & custom tag support)
+  const existingD1Pairs = new Set<string>();
+  if (db && uniqueTags.length > 0) {
+    try {
+      const lowerTags = uniqueTags.map((t) => t.toLowerCase());
+      const placeholders = lowerTags.map(() => '?').join(', ');
+      const d1RowsRes = await db
+        .prepare(`SELECT tag_name, package_id FROM promo_tag_packages WHERE LOWER(tag_name) IN (${placeholders}) LIMIT 500`)
+        .bind(...lowerTags)
+        .all()
+        .catch(() => null);
+      if (Array.isArray(d1RowsRes?.results)) {
+        for (const r of d1RowsRes.results) {
+          if (r?.package_id && r?.tag_name) {
+            const lowerPkgId = String(r.package_id).toLowerCase();
+            const rawTagName = String(r.tag_name);
+            existingD1Pairs.add(`${rawTagName.toLowerCase()}::${lowerPkgId}`);
+            addTagStamp(lowerPkgId, rawTagName);
+          }
+        }
+      }
+    } catch {
+      // Ignore if table not yet initialized
+    }
+  }
+
+  // 2. Query ContentDB `/api/packages/?tag=<tag>&fmt=vcs` (300s Edge Cache per tag) and persist new associations to D1
+  const d1UpsertPairs: Array<{ tag: string; pkgId: string }> = [];
+  const queuedUpsertKeys = new Set<string>();
+
+  await Promise.all([
+    ...uniqueTags.map(async (tag) => {
+      const list = await fetchUpstreamJsonCached<any[]>(
+        `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`,
+        300
+      ).catch(() => null);
+      if (!Array.isArray(list)) return;
+      const lowerTag = tag.toLowerCase();
+      for (const item of list) {
+        if (!item?.author || !item?.name) continue;
+        const canonicalId = `${item.author}/${item.name}`;
+        const lowerId = canonicalId.toLowerCase();
+        addTagStamp(lowerId, tag);
+        const pairKey = `${lowerTag}::${lowerId}`;
+        if (!existingD1Pairs.has(pairKey) && !queuedUpsertKeys.has(pairKey)) {
+          queuedUpsertKeys.add(pairKey);
+          d1UpsertPairs.push({ tag, pkgId: canonicalId });
+        }
+        if (!discoveredByKey.has(lowerId)) {
+          discoveredByKey.set(lowerId, item);
+        }
+      }
+    }),
+    ...uniqueAuthors.map(async (authorName) => {
+      const list = await fetchUpstreamJsonCached<any[]>(
+        `/packages/?author=${encodeURIComponent(authorName)}&fmt=vcs`,
+        300
+      ).catch(() => null);
+      if (!Array.isArray(list)) return;
+      for (const item of list) {
+        if (!item?.author || !item?.name) continue;
+        const lowerId = `${item.author}/${item.name}`.toLowerCase();
+        if (!discoveredByKey.has(lowerId)) {
+          discoveredByKey.set(lowerId, item);
+        }
+      }
+    })
+  ]);
+
+  if (db && d1UpsertPairs.length > 0) {
+    const runTagPkgUpsert = async () => {
+      const stmts = d1UpsertPairs.slice(0, 120).map((pair) =>
+        db
+          .prepare(`
+            INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+          `)
+          .bind(pair.tag, pair.pkgId)
+      );
+      if (typeof db.batch === 'function') {
+        await db.batch(stmts);
+      } else {
+        for (const s of stmts) {
+          await s.run();
+        }
+      }
+    };
+
+    try {
+      await runTagPkgUpsert();
+    } catch (err: any) {
+      if (/no such table|no such column/i.test(String(err?.message || ''))) {
+        await ensurePromotionAndTagTables(db, true);
+        await runTagPkgUpsert().catch(() => {});
+      }
+    }
+  }
+
+  const delta: PromoRowDelta = {
+    tagMap,
+    items: Array.from(discoveredByKey.values())
+  };
+
+  await writeEdgeCacheJson(syncCacheKey, delta, 300);
+  return delta;
+}
+
+/**
+ * Overlays synced promotional tag stamps and any brand-new ContentDB submissions onto the catalog array.
+ */
+export function overlayPromotionRowDeltaOnCatalog(
+  packagesList: any[],
+  delta: PromoRowDelta | null,
+  blockedIds?: Set<string>
+): any[] {
+  if (!Array.isArray(packagesList) || !delta) return packagesList;
+  const tagMapEntries = Object.entries(delta.tagMap || {});
+  const items = Array.isArray(delta.items) ? delta.items : [];
+  if (tagMapEntries.length === 0 && items.length === 0) return packagesList;
+
+  let result: any[] | null = null;
+  const indexByLowerId = new Map<string, number>();
+  for (let i = 0; i < packagesList.length; i++) {
+    const pkg = packagesList[i];
+    const id = String(pkg?.id || (pkg?.author && pkg?.name ? `${pkg.author}/${pkg.name}` : '')).toLowerCase();
+    if (id) indexByLowerId.set(id, i);
+  }
+
+  // 1. Stamp promotional tags onto existing catalog items (cloning lazily only if a tag is missing)
+  for (const [lowerId, tagsToAdd] of tagMapEntries) {
+    const idx = indexByLowerId.get(lowerId);
+    if (idx === undefined || !Array.isArray(tagsToAdd) || tagsToAdd.length === 0) continue;
+    const existingPkg = (result || packagesList)[idx];
+    const existingTags: string[] = Array.isArray(existingPkg.tags) ? existingPkg.tags : [];
+    let currentTags: string[] | null = null;
+    for (const t of tagsToAdd) {
+      if (t && !existingTags.some((ct) => String(ct).toLowerCase() === t.toLowerCase())) {
+        if (!currentTags) currentTags = [...existingTags];
+        if (!currentTags.some((ct) => String(ct).toLowerCase() === t.toLowerCase())) {
+          currentTags.push(t);
+        }
+      }
+    }
+    if (currentTags) {
+      if (!result) result = [...packagesList];
+      result[idx] = {
+        ...existingPkg,
+        tags: currentTags
+      };
+    }
+  }
+
+  // 2. Inject brand-new ContentDB submissions that arrived after the 30-min catalog bundle was built
+  const baseList = result || packagesList;
+  const appendedNew: any[] = [];
+  for (const item of items) {
+    if (!item?.author || !item?.name) continue;
+    const canonicalId = `${item.author}/${item.name}`;
+    const lowerId = canonicalId.toLowerCase();
+    if (blockedIds?.has(lowerId) || indexByLowerId.has(lowerId)) continue;
+
+    const itemTags = Array.from(
+      new Set([
+        ...(Array.isArray(item.tags)
+          ? item.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || '')).filter(Boolean)
+          : []),
+        ...(delta.tagMap[lowerId] || []),
+        item.type || 'mod'
+      ])
+    ).filter(Boolean);
+
+    const shortDesc = item.short_desc || item.short_description || '';
+    const thumb = item.thumbnail && String(item.thumbnail).startsWith('http') ? String(item.thumbnail) : null;
+    const banner = thumb && thumb.includes('thumbnail.png') ? thumb.replace('thumbnail.png', 'shot-0.png') : thumb;
+    const relEpochMs = Number(item.release) > 100000000 ? Number(item.release) * 1000 : Date.now();
+    const isoDate = new Date(relEpochMs).toISOString();
+
+    const newCatalogItem = {
+      ...item,
+      id: canonicalId,
+      author: item.author,
+      name: item.name,
+      title: item.title || item.name,
+      type: item.type === 'modpack' ? 'mod' : (item.type || 'mod'),
+      short_desc: shortDesc,
+      short_description: shortDesc,
+      release: Number(item.release) || 1,
+      thumbnail: thumb,
+      banner,
+      tags: itemTags,
+      downloads: Number(item.downloads || 0),
+      contentdb_downloads: Number(item.downloads || 0),
+      luantihub_downloads: 0,
+      score: computeCatalogStarRating(item),
+      contentdb_score: Number(item.score || 0),
+      min_minetest_version: item.min_minetest_version || '5.0.0',
+      created_at: item.created_at || isoDate,
+      updated_at: item.updated_at || isoDate,
+      provider: 'contentdb',
+      source: 'official',
+      sources: ['official']
+    };
+    indexByLowerId.set(lowerId, baseList.length + appendedNew.length);
+    appendedNew.push(newCatalogItem);
+  }
+
+  return appendedNew.length > 0 ? [...appendedNew, ...baseList] : baseList;
+}
 
 function computeCatalogStarRating(item: any, d1StarAvg?: number): number {
   if (d1StarAvg !== undefined && d1StarAvg >= 1 && d1StarAvg <= 5) {
@@ -335,23 +587,26 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       let edgeBody = cachedCatalog;
       if (isBootBundle) {
         const nowMs = Date.now();
+        const cachedActivePromos = await readEdgeCacheJson<any[]>('/__active_promotions_v1');
         const rawPromos =
-          Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0
-            ? cachedCatalog.promotions
-            : getLastKnownActivePromotions(nowMs);
+          Array.isArray(cachedActivePromos)
+            ? cachedActivePromos
+            : Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0
+              ? cachedCatalog.promotions
+              : getLastKnownActivePromotions(nowMs);
         if (Array.isArray(rawPromos)) {
+          const validEdgePromos = rawPromos
+            .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+            .map((r: any) => normalizePromotionRow(r));
+          const promoDelta = await syncActivePromotionRowPackages(validEdgePromos, env.DB, false);
+          const overlaidPackages =
+            promoDelta && Array.isArray(cachedCatalog.packages)
+              ? overlayPromotionRowDeltaOnCatalog(cachedCatalog.packages, promoDelta)
+              : cachedCatalog.packages;
           edgeBody = {
             ...cachedCatalog,
-            promotions: rawPromos.filter((r: any) => {
-              if (!r || !r.expires_at) return false;
-              const expMs = Date.parse(String(r.expires_at));
-              if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-              if (r.starts_at) {
-                const startMs = Date.parse(String(r.starts_at));
-                if (Number.isFinite(startMs) && startMs > nowMs) return false;
-              }
-              return true;
-            })
+            packages: overlaidPackages,
+            promotions: validEdgePromos
           };
         }
       }
@@ -378,8 +633,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     .catch(() => []);
 
   const tagsPromise = isBootBundle
-    ? fetchUpstreamJsonCached<any[]>('/tags/', 3600).catch(() => null)
-    : Promise.resolve<any[] | null>(null);
+    ? getUnifiedCatalogTags(env.DB).catch(() => DEFAULT_CONTENTDB_TAGS)
+    : Promise.resolve<Array<{ name: string; title: string }> | null>(null);
 
   const blogPostPromise = isBootBundle
     ? fetchLatestLuantiBlogPost().catch(() => null)
@@ -551,16 +806,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       promotionsPromise = (async () => {
         const filterValidPromos = (rows: any[]) => {
           const nowMs = Date.now();
-          return rows.filter((r: any) => {
-            if (!r || !r.title || !r.banner_url || !r.expires_at) return false;
-            const expMs = Date.parse(String(r.expires_at));
-            if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-            if (r.starts_at) {
-              const startMs = Date.parse(String(r.starts_at));
-              if (Number.isFinite(startMs) && startMs > nowMs) return false;
-            }
-            return true;
-          });
+          return rows
+            .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+            .map((r: any) => normalizePromotionRow(r));
         };
 
         if (!noCache) {
@@ -574,7 +822,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
         try {
           const res = await env.DB.prepare(
-            `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 10`
+            `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 20`
           ).all();
           const validRows = filterValidPromos(res?.results || []);
           setLastKnownActivePromotions(validRows);
@@ -908,17 +1156,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
   let responsePayload: any = merged;
   if (isBootBundle) {
-    let tags = DEFAULT_CONTENTDB_TAGS;
-    if (Array.isArray(rawTags) && rawTags.length > 0) {
-      const normalizedTags = rawTags
-        .map((t: any) => ({
-          name: String(t.name || t.id || '').trim(),
-          title: String(t.title || t.name || '').trim()
-        }))
-        .filter((t) => Boolean(t.name && t.title));
-      if (normalizedTags.length > 0) {
-        tags = normalizedTags;
-      }
+    const tags = Array.isArray(rawTags) && rawTags.length > 0 ? rawTags : DEFAULT_CONTENTDB_TAGS;
+    const promoDelta = await syncActivePromotionRowPackages(activePromotions, env.DB, noCache).catch(() => null);
+    const mergedWithPromoOverlay = promoDelta
+      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds)
+      : merged;
+    if (mergedWithPromoOverlay !== merged) {
+      merged.length = 0;
+      merged.push(...mergedWithPromoOverlay);
     }
 
     // Pre-hydrate licenses, tags, Git screenshots & ContentDB downloads on the server for top carousel & Git Community packages (cached in Cloudflare Edge Cache)
@@ -949,6 +1194,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     };
     const byDownloadsDesc = [...merged].sort((a, b) => (Number(b.downloads) || 0) - (Number(a.downloads) || 0));
+    if (promoDelta && Object.keys(promoDelta.tagMap || {}).length > 0) {
+      const promoPkgKeys = new Set(Object.keys(promoDelta.tagMap));
+      pushPool(merged.filter(p => promoPkgKeys.has(String(p.id || '').toLowerCase())).slice(0, 8));
+    }
     pushPool(merged.filter(p => p.sources?.includes('git')));
     pushPool(top10Today);
     pushPool(top10Week);

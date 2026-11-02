@@ -8,6 +8,19 @@ export interface ContentDbTag {
   title: string;
 }
 
+export type PromoRowIcon = 'trophy' | 'sparkles' | 'flame' | 'gamepad' | 'star' | 'rocket';
+export type PromoRowSortOption = 'newest' | 'downloads' | 'rating' | 'trending';
+
+export interface PromotionLocaleOverride {
+  title?: string;
+  short_desc?: string;
+  badge_text?: string;
+  cta_label?: string;
+  secondary_cta_label?: string;
+  row_title?: string;
+  row_subtitle?: string;
+}
+
 export interface HeroPromotion {
   id: string;
   title: string;
@@ -21,8 +34,37 @@ export interface HeroPromotion {
   starts_at: string; // ISO-8601 UTC timestamp
   expires_at: string; // ISO-8601 UTC timestamp
   priority?: number;
+  show_in_hero?: boolean | number; // Defaults to true; when false, only renders as Promotional Package Row #1
+  row_enabled?: boolean | number; // When true, renders as Swimlane Row #1 below Hero Banner
+  row_title?: string | null;
+  row_subtitle?: string | null;
+  row_icon?: PromoRowIcon | null;
+  row_filter_tags?: string[] | string | null;
+  row_filter_type?: 'all' | 'game' | 'mod' | 'txp' | null;
+  row_filter_source?: 'all' | 'official' | 'git' | null;
+  row_filter_author?: string | null;
+  row_filter_query?: string | null;
+  row_pinned_packages?: string[] | string | null;
+  row_sort_by?: PromoRowSortOption | null;
+  row_show_empty_cta?: boolean | number;
+  translations?: Record<string, PromotionLocaleOverride> | string | null;
   created_by?: string | null;
   created_at?: string;
+}
+
+export interface PromotionalPackageRow {
+  promotion: HeroPromotion;
+  title: string;
+  subtitle: string;
+  badgeText: string;
+  icon: PromoRowIcon;
+  packages: LuantiPackage[];
+  filterTags: string[];
+  ctaLabel: string;
+  ctaUrl: string;
+  secondaryCtaLabel?: string | null;
+  secondaryCtaUrl?: string | null;
+  showEmptyCta: boolean;
 }
 
 export interface LuantiBlogPost {

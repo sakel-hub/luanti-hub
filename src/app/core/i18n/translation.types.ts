@@ -91,6 +91,14 @@ export interface TranslationDictionary {
     infoAutomation: string;
     infoTop10Week: string;
     infoTextures: string;
+    promoGameJamTitle: string;
+    promoGameJamSubtitle: string;
+    promoTagShowcaseTitle: string;
+    promoTagShowcaseSubtitle: string;
+    promoCuratedTitle: string;
+    promoCuratedSubtitle: string;
+    promoEmptyTitle: string;
+    promoEmptyDesc: string;
   };
   catalog: {
     resultsFor: string;

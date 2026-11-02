@@ -75,7 +75,15 @@ export const sk: TranslationDictionary = {
     infoGit: 'Komunitné balíčky publikované priamo z GitHub, Codeberg a GitLab repozitárov tvorcov, zoradené podľa nedávnych aktualizácií, stiahnutí hráčmi, hodnotení a vašich preferencií.',
     infoAutomation: 'Technické, strojové, logistické a obvodové módy pre automatizáciu, zoradené podľa zhody so zameraním kategórie, nedávnych stiahnutí, hodnotení komunity a aktualizácií.',
     infoTop10Week: '10 najpopulárnejších balíčkov za posledných 7 dní – zoradených podľa týždenných stiahnutí, záujmu návštevníkov o stiahnutie, obľúbených položiek a hodnotení (najviac 2 balíčky od jedného autora).',
-    infoTextures: 'Balíčky textúr a vizuálnych vylepšení na úpravu vzhľadu vašich svetov, zoradené podľa nedávnych stiahnutí hráčmi, hodnotení komunity a aktualizácií.'
+    infoTextures: 'Balíčky textúr a vizuálnych vylepšení na úpravu vzhľadu vašich svetov, zoradené podľa nedávnych stiahnutí hráčmi, hodnotení komunity a aktualizácií.',
+    promoGameJamTitle: 'Príspevky Luanti Game Jam {year}',
+    promoGameJamSubtitle: 'Živé súťažné balíčky synchronizované z ContentDB a komunitných Git repozitárov pre výročný Luanti Game Jam {year}.',
+    promoTagShowcaseTitle: 'Odporúčaný Výber: {tag}',
+    promoTagShowcaseSubtitle: 'Vybrané komunitné balíčky so značkou #{tag}, synchronizované s ContentDB a Git repozitármi.',
+    promoCuratedTitle: 'Komunitný Výber & Odporúčané Balíčky',
+    promoCuratedSubtitle: 'Starostlivo vybrané balíčky a komunitné novinky na LuantiHub.',
+    promoEmptyTitle: 'Príspevky Už Čoskoro',
+    promoEmptyDesc: 'Nové balíčky pre toto podujatie sa tu zobrazia automaticky hneď po ich zverejnení na ContentDB alebo LuantiHub.'
   },
   catalog: {
     resultsFor: 'Výsledky pre "{query}"',

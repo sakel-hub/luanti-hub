@@ -5,7 +5,18 @@ import { AuthService } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
-import { GitProvider, HeroPromotion, LuantiPackage, ModerationReport } from '../../core/models/package.model';
+import {
+  GitProvider,
+  HeroPromotion,
+  LuantiPackage,
+  ModerationReport,
+  PackageSource,
+  PackageType,
+  PromotionLocaleOverride,
+  PromoRowIcon,
+  PromoRowSortOption
+} from '../../core/models/package.model';
+import { LocaleId } from '../../core/i18n/translation.types';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
@@ -25,6 +36,8 @@ import {
   LucideMessageSquare,
   LucideChevronLeft,
   LucideChevronRight,
+  LucideChevronDown,
+  LucideChevronUp,
   LucideTrendingUp,
   LucideStar
 } from '@lucide/angular';
@@ -54,6 +67,8 @@ import {
     LucideMessageSquare,
     LucideChevronLeft,
     LucideChevronRight,
+    LucideChevronDown,
+    LucideChevronUp,
     LucideTrendingUp,
     LucideStar
   ],
@@ -1015,20 +1030,20 @@ import {
             </div>
           }
 
-          <!-- TAB 5: ADMIN HERO CAROUSEL PROMOTIONS (PINNED SLIDE #1 + DATE/TIME PICKERS) -->
+          <!-- TAB 5: ADMIN HERO CAROUSEL & PROMOTIONAL PACKAGE ROW #1 CONFIGURATION -->
           @if (activeTab() === 'promotions' && authService.isAdmin()) {
             <div class="space-y-4 flex-1 text-xs luanti-tab-enter">
               <!-- Create / Edit Promotion Form -->
-              <form (ngSubmit)="onSubmitPromotion()" class="p-4 rounded-2xl glass-panel border-amber-500/25 space-y-3">
+              <form (ngSubmit)="onSubmitPromotion()" class="p-4 rounded-2xl glass-panel border-amber-500/25 space-y-3.5">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
                   <div class="flex items-center gap-2">
                     <svg lucideStar class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
                     <div>
                       <h3 class="text-xs font-extrabold uppercase tracking-wider text-amber-300">
-                        {{ promoEditingId() ? 'Edit Promotional Slide' : 'Create Promotional Slide (Pinned Slide #1)' }}
+                        {{ promoEditingId() ? 'Edit Promotional Campaign' : 'Create Promotional Campaign (Hero Slide & Package Row #1)' }}
                       </h3>
                       <p class="text-[11px] text-slate-400">
-                        Pinned at Slide #1 in addition to the 6 daily showcase packages. Automatically hides once expired.
+                        Configure multiple Hero Carousel slides (by priority) and/or a ContentDB-synced Package Row in 1st place below the Hero Banner.
                       </p>
                     </div>
                   </div>
@@ -1042,10 +1057,85 @@ import {
                   }
                 </div>
 
+                <!-- 1-Click Campaign Quick-Fill Presets -->
+                <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10 flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                    Quick-Fill Presets:
+                  </span>
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      (click)="applyPromoPreset('gamejam2026')"
+                      class="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 text-amber-200 font-bold text-[10px] transition cursor-pointer">
+                      🏆 Luanti Game Jam 2026
+                    </button>
+                    <button
+                      type="button"
+                      (click)="applyPromoPreset('tagshowcase')"
+                      class="px-2.5 py-1 rounded-lg glass-btn text-sky-300 hover:text-white font-bold text-[10px] transition cursor-pointer">
+                      🏷️ Tag Showcase Row
+                    </button>
+                    <button
+                      type="button"
+                      (click)="applyPromoPreset('curated')"
+                      class="px-2.5 py-1 rounded-lg glass-btn text-emerald-300 hover:text-white font-bold text-[10px] transition cursor-pointer">
+                      ✨ Curated Spotlight Row
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Placement Toggles: Hero Slide vs Package Row #1 (or Both) + Priority -->
+                <div class="p-3 rounded-xl bg-slate-950/50 border border-white/10 space-y-2.5">
+                  <div class="flex flex-wrap items-center justify-between gap-3">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        [ngModel]="promoShowInHero()"
+                        (ngModelChange)="promoShowInHero.set($event)"
+                        name="promoShowInHero"
+                        class="w-4 h-4 rounded accent-amber-400 cursor-pointer"
+                      />
+                      <span class="text-[11px] font-bold text-white">
+                        Show in Hero Banner Carousel
+                      </span>
+                    </label>
+
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        [ngModel]="promoRowEnabled()"
+                        (ngModelChange)="promoRowEnabled.set($event)"
+                        name="promoRowEnabled"
+                        class="w-4 h-4 rounded accent-sky-400 cursor-pointer"
+                      />
+                      <span class="text-[11px] font-bold text-sky-300">
+                        Pin Promotional Package Row in 1st Place (Below Hero Banner)
+                      </span>
+                    </label>
+                  </div>
+
+                  <div class="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-white/10">
+                    <span class="text-[10px] text-slate-400">
+                      Multiple Hero slides and Promotional Rows can run simultaneously, ordered by Priority (higher = earlier).
+                    </span>
+                    <div class="flex items-center gap-1.5">
+                      <label class="text-[10px] font-bold text-slate-300">Priority:</label>
+                      <input
+                        type="number"
+                        [(ngModel)]="promoPriority"
+                        name="promoPriority"
+                        min="1"
+                        max="1000"
+                        class="w-16 glass-input rounded-lg px-2 py-1 text-[11px] text-white font-mono text-center focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   <div class="sm:col-span-2">
                     <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                      Title *
+                      Title {{ promoShowInHero() ? '*' : '(optional if Row Title is set)' }}
                     </label>
                     <input
                       type="text"
@@ -1064,36 +1154,38 @@ import {
                       type="text"
                       [(ngModel)]="promoBadgeText"
                       name="promoBadgeText"
-                      placeholder="PROMOTED"
+                      placeholder="PROMOTED or GAME JAM 2026"
                       class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                    Short Description *
-                  </label>
-                  <textarea
-                    [(ngModel)]="promoShortDesc"
-                    name="promoShortDesc"
-                    rows="2"
-                    placeholder="Concise description shown on the Hero Carousel banner..."
-                    class="w-full glass-input rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none"></textarea>
-                </div>
+                @if (promoShowInHero()) {
+                  <div>
+                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                      Short Description *
+                    </label>
+                    <textarea
+                      [(ngModel)]="promoShortDesc"
+                      name="promoShortDesc"
+                      rows="2"
+                      placeholder="Concise description shown on the Hero Carousel banner..."
+                      class="w-full glass-input rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none"></textarea>
+                  </div>
 
-                <div>
-                  <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                    Banner Image URL * <span class="text-[10px] font-normal text-slate-400">(supports relative /promo.png or external https://...)</span>
-                  </label>
-                  <input
-                    type="text"
-                    [(ngModel)]="promoBannerUrl"
-                    name="promoBannerUrl"
-                    placeholder="/promo.png or https://example.com/banner.webp"
-                    class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
-                  />
-                </div>
+                  <div>
+                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                      Banner Image URL * <span class="text-[10px] font-normal text-slate-400">(supports relative /promo.png or external https://...)</span>
+                    </label>
+                    <input
+                      type="text"
+                      [(ngModel)]="promoBannerUrl"
+                      name="promoBannerUrl"
+                      placeholder="/promo.png or https://example.com/banner.webp"
+                      class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                    />
+                  </div>
+                }
 
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div>
@@ -1111,7 +1203,7 @@ import {
 
                   <div>
                     <label class="block text-[11px] font-semibold text-slate-300 mb-1">
-                      Primary CTA URL * <span class="text-[10px] font-normal text-slate-400">(/submit, /?tag=game, https://...)</span>
+                      Primary CTA URL {{ promoShowInHero() ? '*' : '(optional)' }} <span class="text-[10px] font-normal text-slate-400">(/submit, /?tag=gamejam, https://...)</span>
                     </label>
                     <input
                       type="text"
@@ -1149,6 +1241,404 @@ import {
                       class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                     />
                   </div>
+                </div>
+
+                <!-- PROMOTIONAL PACKAGE ROW #1 CONFIGURATION PANEL -->
+                @if (promoRowEnabled()) {
+                  <div class="p-3.5 rounded-2xl bg-sky-950/25 border border-sky-400/30 space-y-3">
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                      <div class="flex items-center gap-2">
+                        <svg lucideLayers class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
+                        <div>
+                          <h4 class="text-[11px] font-extrabold uppercase tracking-wider text-sky-300">
+                            Promotional Package Row #1 (Below Hero Banner)
+                          </h4>
+                          <p class="text-[10px] text-slate-400">
+                            Synced with ContentDB every 5 minutes (Edge-cached + D1 fallback) and unified with custom LuantiHub tags.
+                          </p>
+                        </div>
+                      </div>
+                      <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold text-[10px]">
+                        Matching packages right now: {{ previewPromoRowMatchCount() }}
+                      </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div class="sm:col-span-2">
+                        <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                          Row Heading Title <span class="text-[10px] font-normal text-slate-400">(supports i18n:carousel.promoGameJamTitle|year=2026)</span>
+                        </label>
+                        <input
+                          type="text"
+                          [ngModel]="promoRowTitle()"
+                          (ngModelChange)="promoRowTitle.set($event)"
+                          name="promoRowTitle"
+                          placeholder="Luanti Game Jam 2026 Submissions"
+                          class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
+                        />
+                      </div>
+
+                      <div class="grid grid-cols-2 gap-2">
+                        <div>
+                          <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                            Row Icon
+                          </label>
+                          <select
+                            [ngModel]="promoRowIcon()"
+                            (ngModelChange)="promoRowIcon.set($event)"
+                            name="promoRowIcon"
+                            aria-label="Promotional Row Icon"
+                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none">
+                            <option value="trophy" class="bg-slate-900">🏆 Trophy</option>
+                            <option value="gamepad" class="bg-slate-900">🎮 Gamepad</option>
+                            <option value="sparkles" class="bg-slate-900">✨ Sparkles</option>
+                            <option value="flame" class="bg-slate-900">🔥 Flame</option>
+                            <option value="star" class="bg-slate-900">⭐ Star</option>
+                            <option value="rocket" class="bg-slate-900">🚀 Rocket</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                            Sort Order
+                          </label>
+                          <select
+                            [ngModel]="promoRowSortBy()"
+                            (ngModelChange)="promoRowSortBy.set($event)"
+                            name="promoRowSortBy"
+                            aria-label="Promotional Row Sort Order"
+                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none">
+                            <option value="newest" class="bg-slate-900">Newest First</option>
+                            <option value="downloads" class="bg-slate-900">Most Downloads</option>
+                            <option value="rating" class="bg-slate-900">Highest Rated</option>
+                            <option value="trending" class="bg-slate-900">Trending</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label class="block text-[11px] font-semibold text-slate-300 mb-1">
+                        Row Info Tooltip / Subtitle <span class="text-[10px] font-normal text-slate-400">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        [ngModel]="promoRowSubtitle()"
+                        (ngModelChange)="promoRowSubtitle.set($event)"
+                        name="promoRowSubtitle"
+                        placeholder="Live submissions tagged for the annual Luanti Game Jam..."
+                        class="w-full glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <!-- Unified Tag Filter Picker (ContentDB + Custom App Tags) -->
+                    <div class="space-y-2">
+                      <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <label class="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+                          <svg lucideTag class="w-3.5 h-3.5 text-sky-400"></svg>
+                          <span>Filter by Tag(s) (OR match — e.g. <code>jam_game_2026</code>, <code>gamejam</code>)</span>
+                        </label>
+                        <div class="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            [(ngModel)]="promoCustomTagInput"
+                            name="promoCustomTagInput"
+                            (keydown.enter)="$event.preventDefault(); addPromoCustomTag()"
+                            placeholder="Add custom/ContentDB tag..."
+                            class="glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none font-mono"
+                          />
+                          <button
+                            type="button"
+                            (click)="addPromoCustomTag()"
+                            class="px-2.5 py-1 rounded-lg glass-btn-sky text-white font-bold text-[10px] cursor-pointer">
+                            + Add Tag
+                          </button>
+                        </div>
+                      </div>
+
+                      @if (promoRowFilterTags().length > 0) {
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                          @for (tag of promoRowFilterTags(); track tag) {
+                            <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-sky-500/25 border border-sky-400/50 text-sky-200 text-[11px] font-mono">
+                              <span>#{{ tag }}</span>
+                              <button
+                                type="button"
+                                (click)="togglePromoRowTag(tag)"
+                                class="text-sky-300 hover:text-white cursor-pointer"
+                                [attr.aria-label]="'Remove tag ' + tag">
+                                <svg lucideX class="w-3 h-3"></svg>
+                              </button>
+                            </span>
+                          }
+                        </div>
+                      }
+
+                      <div class="max-h-28 overflow-y-auto p-2 rounded-xl bg-slate-950/60 border border-white/10 flex items-center gap-1.5 flex-wrap">
+                        @for (t of packageService.availableTags(); track t.name) {
+                          <button
+                            type="button"
+                            (click)="togglePromoRowTag(t.name)"
+                            [class]="promoRowFilterTags().includes(t.name.toLowerCase()) ? 'bg-sky-500/30 text-sky-200 border-sky-400/50 font-bold' : 'glass-pill text-slate-400 hover:text-white'"
+                            class="px-2 py-0.5 rounded-full border text-[10px] transition cursor-pointer">
+                            #{{ t.title }} <span class="opacity-60 font-mono">({{ t.name }})</span>
+                          </button>
+                        }
+                      </div>
+                    </div>
+
+                    <!-- Additional Optional Filters: Package Type, Source, Author, Keyword -->
+                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                      <div>
+                        <label class="block text-[10px] font-semibold text-slate-400 mb-1">Category Filter</label>
+                        <select
+                          [ngModel]="promoRowFilterType()"
+                          (ngModelChange)="promoRowFilterType.set($event)"
+                          name="promoRowFilterType"
+                          class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                          <option value="all" class="bg-slate-900">All Categories</option>
+                          <option value="game" class="bg-slate-900">Games Only</option>
+                          <option value="mod" class="bg-slate-900">Mods Only</option>
+                          <option value="txp" class="bg-slate-900">Texture Packs Only</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label class="block text-[10px] font-semibold text-slate-400 mb-1">Source Filter</label>
+                        <select
+                          [ngModel]="promoRowFilterSource()"
+                          (ngModelChange)="promoRowFilterSource.set($event)"
+                          name="promoRowFilterSource"
+                          class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                          <option value="all" class="bg-slate-900">All Sources (ContentDB + Git)</option>
+                          <option value="official" class="bg-slate-900">Official ContentDB Only</option>
+                          <option value="git" class="bg-slate-900">Community Git Only</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label class="block text-[10px] font-semibold text-slate-400 mb-1">Author Username</label>
+                        <input
+                          type="text"
+                          [ngModel]="promoRowFilterAuthor()"
+                          (ngModelChange)="promoRowFilterAuthor.set($event)"
+                          name="promoRowFilterAuthor"
+                          placeholder="e.g. rubenwardy"
+                          class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label class="block text-[10px] font-semibold text-slate-400 mb-1">Keyword Match</label>
+                        <input
+                          type="text"
+                          [ngModel]="promoRowFilterQuery()"
+                          (ngModelChange)="promoRowFilterQuery.set($event)"
+                          name="promoRowFilterQuery"
+                          placeholder="e.g. jam 2026"
+                          class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <!-- Pinned / Hand-Picked Package IDs (author/name) -->
+                    <div class="space-y-1.5">
+                      <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <label class="text-[10px] font-semibold text-slate-300">
+                          Pinned Packages (Hand-picked <code>author/name</code> always shown first in the row)
+                        </label>
+                        <div class="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            [(ngModel)]="promoPinnedPkgInput"
+                            name="promoPinnedPkgInput"
+                            (keydown.enter)="$event.preventDefault(); addPromoPinnedPackage()"
+                            placeholder="author/name"
+                            class="glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none font-mono"
+                          />
+                          <button
+                            type="button"
+                            (click)="addPromoPinnedPackage()"
+                            class="px-2.5 py-1 rounded-lg glass-btn text-sky-300 hover:text-white font-bold text-[10px] cursor-pointer">
+                            + Pin Package
+                          </button>
+                        </div>
+                      </div>
+
+                      @if (promoRowPinnedPackages().length > 0) {
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                          @for (pkgId of promoRowPinnedPackages(); track pkgId) {
+                            <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[10px] font-mono">
+                              <span>📌 {{ pkgId }}</span>
+                              <button
+                                type="button"
+                                (click)="removePromoPinnedPackage(pkgId)"
+                                class="text-amber-300 hover:text-white cursor-pointer"
+                                [attr.aria-label]="'Unpin ' + pkgId">
+                                <svg lucideX class="w-3 h-3"></svg>
+                              </button>
+                            </span>
+                          }
+                        </div>
+                      }
+                    </div>
+
+                    <label class="flex items-center gap-2 cursor-pointer select-none pt-1">
+                      <input
+                        type="checkbox"
+                        [ngModel]="promoRowShowEmptyCta()"
+                        (ngModelChange)="promoRowShowEmptyCta.set($event)"
+                        name="promoRowShowEmptyCta"
+                        class="w-3.5 h-3.5 rounded accent-amber-400 cursor-pointer"
+                      />
+                      <span class="text-[11px] text-slate-300">
+                        Show Empty-State Call-to-Action Card when 0 packages match (e.g. during Game Jam kickoff before first submission)
+                      </span>
+                    </label>
+                  </div>
+                }
+
+                <!-- MULTI-LANGUAGE TRANSLATIONS SECTION (EN, SK, DE, FR, ES, RU) -->
+                <div class="rounded-2xl bg-slate-950/60 border border-white/10 overflow-hidden">
+                  <button
+                    type="button"
+                    (click)="showPromoTranslations.update(v => !v)"
+                    class="w-full px-3.5 py-2.5 flex items-center justify-between text-left hover:bg-white/5 transition cursor-pointer">
+                    <div class="flex items-center gap-2">
+                      <svg lucideGlobe class="w-4 h-4 text-sky-400"></svg>
+                      <span class="text-[11px] font-bold text-slate-200">
+                        🌐 Multi-Language Translations (EN · SK · DE · FR · ES · RU)
+                      </span>
+                      @if (configuredTranslationCount() > 0) {
+                        <span class="glass-badge glass-badge-sky font-mono text-[9px] px-1.5 py-0">
+                          {{ configuredTranslationCount() }} locale(s)
+                        </span>
+                      }
+                    </div>
+                    @if (showPromoTranslations()) {
+                      <svg lucideChevronUp class="w-4 h-4 text-slate-400"></svg>
+                    } @else {
+                      <svg lucideChevronDown class="w-4 h-4 text-slate-400"></svg>
+                    }
+                  </button>
+
+                  @if (showPromoTranslations()) {
+                    <div class="p-3.5 border-t border-white/10 space-y-2.5">
+                      <p class="text-[10px] text-slate-400">
+                         Campaign Presets automatically translate into all 6 languages via <code>i18n:</code> keys. Optionally provide custom per-language overrides below:
+                      </p>
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        @for (loc of supportedPromoLocales; track loc.id) {
+                          <button
+                            type="button"
+                            (click)="activeTranslationLocale.set(loc.id)"
+                            [class]="activeTranslationLocale() === loc.id ? 'bg-sky-500/30 text-sky-200 border-sky-400/50 font-black' : 'glass-btn text-slate-400 hover:text-white'"
+                            class="px-2.5 py-1 rounded-lg border text-[10px] uppercase transition cursor-pointer">
+                            {{ loc.label }}
+                          </button>
+                        }
+                      </div>
+
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Hero Title Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'title')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'title', $event)"
+                            [name]="'tr_title_' + activeTranslationLocale()"
+                            placeholder="Leave blank to use default / i18n template"
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Badge Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'badge_text')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'badge_text', $event)"
+                            [name]="'tr_badge_' + activeTranslationLocale()"
+                            placeholder="e.g. GAME JAM 2026"
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Row #1 Title Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'row_title')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'row_title', $event)"
+                            [name]="'tr_row_title_' + activeTranslationLocale()"
+                            placeholder="Localized Row #1 heading..."
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Row #1 Subtitle Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'row_subtitle')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'row_subtitle', $event)"
+                            [name]="'tr_row_sub_' + activeTranslationLocale()"
+                            placeholder="Localized Row #1 tooltip/subtitle..."
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div class="sm:col-span-2">
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Hero Short Description Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'short_desc')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'short_desc', $event)"
+                            [name]="'tr_desc_' + activeTranslationLocale()"
+                            placeholder="Localized Hero description..."
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Primary CTA Label Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'cta_label')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'cta_label', $event)"
+                            [name]="'tr_cta_' + activeTranslationLocale()"
+                            placeholder="Localized primary button text..."
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label class="block text-[10px] font-semibold text-slate-400 mb-1">
+                            [{{ activeTranslationLocale() | uppercase }}] Secondary CTA Label Override
+                          </label>
+                          <input
+                            type="text"
+                            [ngModel]="getPromoLocaleField(activeTranslationLocale(), 'secondary_cta_label')"
+                            (ngModelChange)="setPromoLocaleField(activeTranslationLocale(), 'secondary_cta_label', $event)"
+                            [name]="'tr_cta2_' + activeTranslationLocale()"
+                            placeholder="Localized secondary button text..."
+                            class="w-full glass-input rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  }
                 </div>
 
                 <!-- Date & Time UI Pickers + Quick Presets -->
@@ -1192,7 +1682,7 @@ import {
 
                   <button
                     type="submit"
-                    [disabled]="isSavingPromo() || !promoTitle.trim() || !promoShortDesc.trim() || !promoBannerUrl.trim() || !promoCtaUrl.trim() || !promoExpiresAtLocal"
+                    [disabled]="isSavingPromo() || !isPromoFormValid()"
                     class="px-4 py-2 rounded-xl glass-btn-amber disabled:opacity-50 text-white font-black text-xs transition cursor-pointer">
                     {{ isSavingPromo() ? 'Saving...' : (promoEditingId() ? 'Update Promotion' : 'Publish Promotion') }}
                   </button>
@@ -1222,7 +1712,7 @@ import {
 
                 @if (packageService.adminPromotions().length === 0) {
                   <div class="p-6 rounded-2xl glass-panel text-center text-slate-400">
-                    No promotional slides configured yet.
+                    No promotional campaigns configured yet.
                   </div>
                 } @else {
                   <div class="space-y-2.5">
@@ -1231,18 +1721,28 @@ import {
                         <div class="flex items-start justify-between gap-3">
                           <div class="flex items-center gap-3 min-w-0 flex-1">
                             <img
-                              [src]="promo.banner_url"
-                              [alt]="promo.title"
+                              [src]="promo.banner_url || 'logo.svg'"
+                              [alt]="promo.title || promo.row_title || 'Promotion'"
                               loading="lazy"
                               decoding="async"
                               class="w-16 h-10 rounded-xl object-cover bg-slate-900 border border-white/15 flex-shrink-0"
                             />
                             <div class="min-w-0 flex-1">
                               <div class="flex items-center gap-1.5 flex-wrap">
-                                <h4 class="font-bold text-white truncate">{{ promo.title }}</h4>
+                                <h4 class="font-bold text-white truncate">{{ promo.title || promo.row_title }}</h4>
                                 <span class="glass-badge glass-badge-amber font-black uppercase text-[9px] px-1.5 py-0">
                                   {{ promo.badge_text || 'PROMOTED' }}
                                 </span>
+                                @if (promo.show_in_hero !== false) {
+                                  <span class="glass-badge glass-badge-sky font-bold uppercase text-[9px] px-1.5 py-0">
+                                    HERO SLIDE (P{{ promo.priority || 100 }})
+                                  </span>
+                                }
+                                @if (promo.row_enabled) {
+                                  <span class="glass-badge glass-badge-emerald font-bold uppercase text-[9px] px-1.5 py-0">
+                                    ROW #1 ({{ getPromotionRowMatchCount(promo) }} pkgs)
+                                  </span>
+                                }
                                 @if (getPromotionStatus(promo) === 'active') {
                                   <span class="glass-badge glass-badge-emerald font-black uppercase text-[9px] px-1.5 py-0">
                                     ACTIVE
@@ -1257,7 +1757,18 @@ import {
                                   </span>
                                 }
                               </div>
-                              <p class="text-[11px] text-slate-300 line-clamp-1 mt-0.5">{{ promo.short_desc }}</p>
+                              <p class="text-[11px] text-slate-300 line-clamp-1 mt-0.5">
+                                {{ promo.short_desc || promo.row_subtitle || promo.row_title }}
+                              </p>
+                              @if (promo.row_enabled && promo.row_filter_tags && promo.row_filter_tags.length > 0) {
+                                <div class="flex items-center gap-1 flex-wrap mt-1">
+                                  @for (tag of promo.row_filter_tags; track tag) {
+                                    <span class="px-1.5 py-0 rounded bg-sky-500/15 border border-sky-400/30 text-sky-300 text-[9px] font-mono">
+                                      #{{ tag }}
+                                    </span>
+                                  }
+                                </div>
+                              }
                             </div>
                           </div>
 
@@ -1280,7 +1791,7 @@ import {
 
                         <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10 text-[10px] text-slate-400 font-mono">
                           <span class="truncate max-w-full">
-                            CTA: <strong class="text-slate-200">{{ promo.cta_label }}</strong> → {{ promo.cta_url }}
+                            CTA: <strong class="text-slate-200">{{ promo.cta_label }}</strong> → {{ promo.cta_url || '—' }}
                           </span>
                           <span>
                             {{ promo.starts_at | date:'short' }} → {{ promo.expires_at | date:'short' }}
@@ -1318,7 +1829,7 @@ export class ProfileDrawerComponent implements OnInit {
 
   readonly activeTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions'>('packages');
 
-  // Admin Promotional Slide Form State
+  // Admin Promotional Slide & Package Row #1 Form State
   readonly promoEditingId = signal<string | null>(null);
   promoTitle = '';
   promoShortDesc = '';
@@ -1330,6 +1841,61 @@ export class ProfileDrawerComponent implements OnInit {
   promoSecondaryCtaUrl = '';
   promoStartsAtLocal = '';
   promoExpiresAtLocal = '';
+  promoPriority = 100;
+  readonly promoShowInHero = signal(true);
+  readonly promoRowEnabled = signal(false);
+  readonly promoRowTitle = signal('');
+  readonly promoRowSubtitle = signal('');
+  readonly promoRowIcon = signal<PromoRowIcon>('trophy');
+  readonly promoRowFilterTags = signal<string[]>([]);
+  readonly promoRowFilterType = signal<'all' | 'game' | 'mod' | 'txp'>('all');
+  readonly promoRowFilterSource = signal<'all' | 'official' | 'git'>('all');
+  readonly promoRowFilterAuthor = signal('');
+  readonly promoRowFilterQuery = signal('');
+  readonly promoRowPinnedPackages = signal<string[]>([]);
+  readonly promoRowSortBy = signal<PromoRowSortOption>('newest');
+  readonly promoRowShowEmptyCta = signal(false);
+  promoCustomTagInput = '';
+  promoPinnedPkgInput = '';
+
+  readonly showPromoTranslations = signal(false);
+  readonly activeTranslationLocale = signal<LocaleId>('en');
+  readonly promoTranslations = signal<Partial<Record<LocaleId, PromotionLocaleOverride>>>({});
+  readonly supportedPromoLocales: { id: LocaleId; label: string }[] = [
+    { id: 'en', label: 'EN' },
+    { id: 'sk', label: 'SK' },
+    { id: 'de', label: 'DE' },
+    { id: 'fr', label: 'FR' },
+    { id: 'es', label: 'ES' },
+    { id: 'ru', label: 'RU' }
+  ];
+
+  readonly configuredTranslationCount = computed(() => {
+    const map = this.promoTranslations();
+    let count = 0;
+    for (const loc of Object.keys(map) as LocaleId[]) {
+      const ov = map[loc];
+      if (ov && Object.values(ov).some(v => typeof v === 'string' && v.trim().length > 0)) {
+        count++;
+      }
+    }
+    return count;
+  });
+
+  readonly previewPromoRowMatchCount = computed<number>(() => {
+    if (!this.promoRowEnabled()) return 0;
+    const draftPromo: Partial<HeroPromotion> = {
+      row_enabled: true,
+      row_filter_tags: this.promoRowFilterTags(),
+      row_filter_type: this.promoRowFilterType(),
+      row_filter_source: this.promoRowFilterSource(),
+      row_filter_author: this.promoRowFilterAuthor(),
+      row_filter_query: this.promoRowFilterQuery(),
+      row_pinned_packages: this.promoRowPinnedPackages()
+    };
+    return this.getPromotionRowMatchCount(draftPromo);
+  });
+
   readonly isSavingPromo = signal(false);
   readonly deletingPromoId = signal<string | null>(null);
   readonly promoFeedback = signal<string | null>(null);
@@ -1547,10 +2113,165 @@ export class ProfileDrawerComponent implements OnInit {
     this.promoCtaUrl = '';
     this.promoSecondaryCtaLabel = '';
     this.promoSecondaryCtaUrl = '';
+    this.promoPriority = 100;
+    this.promoShowInHero.set(true);
+    this.promoRowEnabled.set(false);
+    this.promoRowTitle.set('');
+    this.promoRowSubtitle.set('');
+    this.promoRowIcon.set('trophy');
+    this.promoRowFilterTags.set([]);
+    this.promoRowFilterType.set('all');
+    this.promoRowFilterSource.set('all');
+    this.promoRowFilterAuthor.set('');
+    this.promoRowFilterQuery.set('');
+    this.promoRowPinnedPackages.set([]);
+    this.promoRowSortBy.set('newest');
+    this.promoRowShowEmptyCta.set(false);
+    this.promoCustomTagInput = '';
+    this.promoPinnedPkgInput = '';
+    this.promoTranslations.set({});
+    this.showPromoTranslations.set(false);
     const now = new Date();
     const plus7d = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     this.promoStartsAtLocal = this.toLocalDatetimeInput(now);
     this.promoExpiresAtLocal = this.toLocalDatetimeInput(plus7d);
+  }
+
+  applyPromoPreset(preset: 'gamejam2026' | 'tagshowcase' | 'curated'): void {
+    if (preset === 'gamejam2026') {
+      this.promoShowInHero.set(true);
+      this.promoRowEnabled.set(true);
+      this.promoPriority = 200;
+      this.promoTitle = 'Luanti Game Jam 2026';
+      this.promoBadgeText = 'GAME JAM 2026';
+      this.promoShortDesc = 'Play and rate brand-new voxel games submitted for the annual Luanti Game Jam 2026! Synced live with ContentDB and community Git repositories.';
+      if (!this.promoBannerUrl) {
+        this.promoBannerUrl = '/promo.png';
+      }
+      this.promoCtaLabel = 'Explore Submissions';
+      this.promoCtaUrl = '/?tag=jam_game_2026';
+      this.promoSecondaryCtaLabel = 'Submit Package';
+      this.promoSecondaryCtaUrl = '/submit';
+      this.promoRowTitle.set('i18n:carousel.promoGameJamTitle|year=2026');
+      this.promoRowSubtitle.set('i18n:carousel.promoGameJamSubtitle|year=2026');
+      this.promoRowIcon.set('trophy');
+      this.promoRowFilterTags.set(['jam_game_2026', 'gamejam']);
+      this.promoRowFilterType.set('all');
+      this.promoRowFilterSource.set('all');
+      this.promoRowSortBy.set('newest');
+      this.promoRowShowEmptyCta.set(true);
+      this.packageService.registerCustomTag('jam_game_2026', 'Game Jam 2026');
+      this.packageService.registerCustomTag('gamejam', 'Game Jam');
+      this.setPromoPresetDays(30);
+    } else if (preset === 'tagshowcase') {
+      this.promoShowInHero.set(false);
+      this.promoRowEnabled.set(true);
+      this.promoPriority = 150;
+      if (!this.promoTitle) {
+        this.promoTitle = 'Featured Tag Showcase';
+      }
+      this.promoBadgeText = 'FEATURED TAG';
+      this.promoRowTitle.set('i18n:carousel.promoTagShowcaseTitle|tag=Magic & Enchanting');
+      this.promoRowSubtitle.set('i18n:carousel.promoTagShowcaseSubtitle');
+      this.promoRowIcon.set('sparkles');
+      this.promoRowFilterTags.set(['magic']);
+      this.promoRowSortBy.set('trending');
+      this.promoRowShowEmptyCta.set(false);
+    } else if (preset === 'curated') {
+      this.promoShowInHero.set(false);
+      this.promoRowEnabled.set(true);
+      this.promoPriority = 150;
+      if (!this.promoTitle) {
+        this.promoTitle = 'Community Spotlight';
+      }
+      this.promoBadgeText = 'SPOTLIGHT';
+      this.promoRowTitle.set('i18n:carousel.promoCuratedTitle');
+      this.promoRowSubtitle.set('i18n:carousel.promoCuratedSubtitle');
+      this.promoRowIcon.set('star');
+      this.promoRowSortBy.set('rating');
+      this.promoRowShowEmptyCta.set(false);
+    }
+  }
+
+  togglePromoRowTag(tagName: string): void {
+    const clean = String(tagName || '').trim().toLowerCase();
+    if (!clean) return;
+    this.promoRowFilterTags.update(curr => {
+      if (curr.includes(clean)) {
+        return curr.filter(t => t !== clean);
+      }
+      return [...curr, clean];
+    });
+  }
+
+  addPromoCustomTag(): void {
+    const raw = (this.promoCustomTagInput || '').trim().toLowerCase().replace(/^#+/, '').replace(/\s+/g, '_');
+    if (!raw) return;
+    this.packageService.registerCustomTag(raw);
+    if (!this.promoRowFilterTags().includes(raw)) {
+      this.promoRowFilterTags.update(curr => [...curr, raw]);
+    }
+    this.promoCustomTagInput = '';
+  }
+
+  addPromoPinnedPackage(): void {
+    const raw = (this.promoPinnedPkgInput || '').trim();
+    if (!raw || !raw.includes('/')) return;
+    const exists = this.promoRowPinnedPackages().some(p => p.toLowerCase() === raw.toLowerCase());
+    if (!exists) {
+      this.promoRowPinnedPackages.update(curr => [...curr, raw]);
+    }
+    this.promoPinnedPkgInput = '';
+  }
+
+  removePromoPinnedPackage(pkgId: string): void {
+    this.promoRowPinnedPackages.update(curr => curr.filter(p => p !== pkgId));
+  }
+
+  getPromoLocaleField(locale: LocaleId, field: keyof PromotionLocaleOverride): string {
+    return this.promoTranslations()[locale]?.[field] || '';
+  }
+
+  setPromoLocaleField(locale: LocaleId, field: keyof PromotionLocaleOverride, value: string): void {
+    this.promoTranslations.update(curr => {
+      const prevLocale = curr[locale] || {};
+      return {
+        ...curr,
+        [locale]: {
+          ...prevLocale,
+          [field]: value
+        }
+      };
+    });
+  }
+
+  isPromoFormValid(): boolean {
+    if (!this.promoExpiresAtLocal) return false;
+    const showHero = this.promoShowInHero();
+    const showRow = this.promoRowEnabled();
+    if (!showHero && !showRow) return false;
+    const hasTitle = Boolean(this.promoTitle.trim() || this.promoRowTitle().trim());
+    if (!hasTitle) return false;
+    if (showHero) {
+      if (!this.promoShortDesc.trim() || !this.promoBannerUrl.trim() || !this.promoCtaUrl.trim()) {
+        return false;
+      }
+    }
+    if (showRow) {
+      const hasRowCriteria =
+        this.promoRowFilterTags().length > 0 ||
+        this.promoRowPinnedPackages().length > 0 ||
+        (this.promoRowFilterType() && this.promoRowFilterType() !== 'all') ||
+        (this.promoRowFilterSource() && this.promoRowFilterSource() !== 'all') ||
+        Boolean(this.promoRowFilterAuthor().trim()) ||
+        Boolean(this.promoRowFilterQuery().trim());
+      if (!hasRowCriteria) return false;
+    }
+    return true;
+  }
+
+  getPromotionRowMatchCount(promo: Partial<HeroPromotion>): number {
+    return this.packageService.getMatchingPackagesForPromotionRow(promo).length;
   }
 
   setPromoPresetDays(days: number): void {
@@ -1566,14 +2287,30 @@ export class ProfileDrawerComponent implements OnInit {
   onEditPromotion(promo: HeroPromotion): void {
     if (!this.authService.isAdmin()) return;
     this.promoEditingId.set(promo.id);
-    this.promoTitle = promo.title;
-    this.promoShortDesc = promo.short_desc;
-    this.promoBannerUrl = promo.banner_url;
+    this.promoTitle = promo.title || '';
+    this.promoShortDesc = promo.short_desc || '';
+    this.promoBannerUrl = promo.banner_url || '';
     this.promoBadgeText = promo.badge_text || 'PROMOTED';
     this.promoCtaLabel = promo.cta_label || 'Learn More';
-    this.promoCtaUrl = promo.cta_url;
+    this.promoCtaUrl = promo.cta_url || '';
     this.promoSecondaryCtaLabel = promo.secondary_cta_label || '';
     this.promoSecondaryCtaUrl = promo.secondary_cta_url || '';
+    this.promoPriority = typeof promo.priority === 'number' ? promo.priority : 100;
+    this.promoShowInHero.set(promo.show_in_hero !== false);
+    this.promoRowEnabled.set(Boolean(promo.row_enabled));
+    this.promoRowTitle.set(promo.row_title || '');
+    this.promoRowSubtitle.set(promo.row_subtitle || '');
+    this.promoRowIcon.set(promo.row_icon || 'trophy');
+    this.promoRowFilterTags.set(Array.isArray(promo.row_filter_tags) ? [...promo.row_filter_tags] : []);
+    this.promoRowFilterType.set((promo.row_filter_type as any) || 'all');
+    this.promoRowFilterSource.set((promo.row_filter_source as any) || 'all');
+    this.promoRowFilterAuthor.set(promo.row_filter_author || '');
+    this.promoRowFilterQuery.set(promo.row_filter_query || '');
+    this.promoRowPinnedPackages.set(Array.isArray(promo.row_pinned_packages) ? [...promo.row_pinned_packages] : []);
+    this.promoRowSortBy.set(promo.row_sort_by || 'newest');
+    this.promoRowShowEmptyCta.set(Boolean(promo.row_show_empty_cta));
+    const parsedTr = this.packageService.parsePromotionTranslations(promo.translations);
+    this.promoTranslations.set(parsedTr ? { ...parsedTr } : {});
     const startsDate = new Date(promo.starts_at);
     const expiresDate = new Date(promo.expires_at);
     this.promoStartsAtLocal = Number.isFinite(startsDate.getTime())
@@ -1612,9 +2349,10 @@ export class ProfileDrawerComponent implements OnInit {
 
     this.isSavingPromo.set(true);
     this.promoFeedback.set(null);
+    const effectiveTitle = this.promoTitle.trim() || this.promoRowTitle().trim();
     const res = await this.packageService.savePromotion({
       id: this.promoEditingId() || undefined,
-      title: this.promoTitle.trim(),
+      title: effectiveTitle,
       short_desc: this.promoShortDesc.trim(),
       banner_url: this.promoBannerUrl.trim(),
       badge_text: this.promoBadgeText.trim() || 'PROMOTED',
@@ -1624,13 +2362,29 @@ export class ProfileDrawerComponent implements OnInit {
       secondary_cta_url: this.promoSecondaryCtaUrl.trim() || null,
       starts_at: startsAtIso,
       expires_at: expiresAtIso,
-      priority: 100
+      priority: Number(this.promoPriority) || 100,
+      show_in_hero: this.promoShowInHero(),
+      row_enabled: this.promoRowEnabled(),
+      row_title: this.promoRowTitle().trim(),
+      row_subtitle: this.promoRowSubtitle().trim(),
+      row_icon: this.promoRowIcon(),
+      row_filter_tags: this.promoRowFilterTags(),
+      row_filter_type: this.promoRowFilterType(),
+      row_filter_source: this.promoRowFilterSource(),
+      row_filter_author: this.promoRowFilterAuthor().trim(),
+      row_filter_query: this.promoRowFilterQuery().trim(),
+      row_pinned_packages: this.promoRowPinnedPackages(),
+      row_sort_by: this.promoRowSortBy(),
+      row_show_empty_cta: this.promoRowShowEmptyCta(),
+      translations: this.promoTranslations()
     });
     this.isSavingPromo.set(false);
 
     if (res.success) {
       this.promoFeedbackIsError.set(false);
-      this.promoFeedback.set(this.promoEditingId() ? 'Promotion updated!' : 'Promotion published at Slide #1!');
+      this.promoFeedback.set(
+        this.promoEditingId() ? 'Promotion updated!' : 'Promotional campaign published!'
+      );
       this.resetPromotionForm();
     } else {
       this.promoFeedbackIsError.set(true);

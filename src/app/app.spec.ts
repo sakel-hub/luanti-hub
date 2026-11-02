@@ -33,8 +33,15 @@ import {
   parseGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
   parseLuantiBlogFeed,
-  ensureExtendedPackageColumns
+  ensureExtendedPackageColumns,
+  DEFAULT_CONTENTDB_TAGS,
+  getUnifiedCatalogTags,
+  upsertCustomAppTags
 } from '../../functions/api/lib/upstream';
+import {
+  syncActivePromotionRowPackages,
+  overlayPromotionRowDeltaOnCatalog
+} from '../../functions/api/packages/index';
 import {
   createSessionToken,
   verifySessionToken,
@@ -6353,6 +6360,312 @@ supported_games = minetest_game, voxelibre
       metaEl.remove();
       pwaService.updateAvailable.set(false);
     }
+
+    pkgService.setPromotions([]);
+  });
+
+  it('should support multiple Hero promotional slides, Promotional Package Row #1 (Game Jam 2026 & Tag Showcases), multi-language localization, and ContentDB-agnostic tag sync', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const i18n = TestBed.inject(TranslationService);
+    const futureIso = new Date(Date.now() + 7 * 24 * 3600_000).toISOString();
+
+    // 1. Seed catalog packages including a new ContentDB Game Jam 2026 submission and an existing package
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          id: 'Wuzzy/mineclone2',
+          author: 'Wuzzy',
+          name: 'mineclone2',
+          title: 'VoxeLibre',
+          type: 'game',
+          short_desc: 'Survival sandbox game',
+          downloads: 500000,
+          score: 4.9,
+          tags: ['survival', 'sandbox']
+        },
+        {
+          id: 'jammer/voxel_quest_2026',
+          author: 'jammer',
+          name: 'voxel_quest_2026',
+          title: 'Voxel Quest 2026',
+          type: 'game',
+          short_desc: 'Submission for the annual Luanti Game Jam 2026',
+          downloads: 120,
+          score: 4.8,
+          created_at: new Date().toISOString(),
+          tags: ['jam_game_2026', 'gamejam', 'singleplayer']
+        },
+        {
+          id: 'jammer2/sky_islands_2026',
+          author: 'jammer2',
+          name: 'sky_islands_2026',
+          title: 'Sky Islands 2026',
+          type: 'game',
+          short_desc: 'Floating islands adventure for Game Jam 2026',
+          downloads: 45,
+          score: 4.7,
+          created_at: new Date(Date.now() + 5000).toISOString(),
+          tags: ['jam_game_2026']
+        }
+      ]
+    });
+
+    // 2. Configure 3 simultaneous promotions:
+    // - Promo A (priority 200): Game Jam 2026 (Both Hero Slide #1 AND Promotional Package Row #1)
+    // - Promo B (priority 150): Server Spotlight (Hero Slide #2 only, show_in_hero: true, row_enabled: false)
+    // - Promo C (priority 120): Row-only Curated Showcase (show_in_hero: false, row_enabled: true)
+    pkgService.setPromotions([
+      {
+        id: 'promo_server_spotlight',
+        title: 'Community Server Spotlight',
+        short_desc: 'Explore multiplayer servers running Luanti 5.17+',
+        banner_url: '/promo.png',
+        cta_label: 'Browse Servers',
+        cta_url: '/?tag=multiplayer',
+        badge_text: 'SPOTLIGHT',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 150,
+        show_in_hero: true,
+        row_enabled: false
+      },
+      {
+        id: 'promo_gamejam_2026',
+        title: 'Luanti Game Jam 2026',
+        short_desc: 'Play and rate brand-new voxel games submitted for the annual Luanti Game Jam 2026!',
+        banner_url: '/promo.png',
+        cta_label: 'Explore Submissions',
+        cta_url: '/?tag=jam_game_2026',
+        secondary_cta_label: 'Submit Package',
+        secondary_cta_url: '/submit',
+        badge_text: 'GAME JAM 2026',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 200,
+        show_in_hero: true,
+        row_enabled: true,
+        row_title: 'i18n:carousel.promoGameJamTitle|year=2026',
+        row_subtitle: 'i18n:carousel.promoGameJamSubtitle|year=2026',
+        row_icon: 'trophy',
+        row_filter_tags: ['jam_game_2026', 'gamejam'],
+        row_pinned_packages: ['Wuzzy/mineclone2'],
+        row_sort_by: 'newest',
+        row_show_empty_cta: true,
+        translations: {
+          sk: {
+            title: 'Luanti Game Jam 2026 — Súťaž',
+            badge_text: 'SÚŤAŽ 2026'
+          }
+        }
+      },
+      {
+        id: 'promo_row_only',
+        title: 'Row-Only Tag Showcase',
+        short_desc: '',
+        banner_url: '',
+        cta_label: 'View All',
+        cta_url: '/?tag=survival',
+        badge_text: 'FEATURED TAG',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 120,
+        show_in_hero: false,
+        row_enabled: true,
+        row_title: 'i18n:carousel.promoTagShowcaseTitle|tag=Survival',
+        row_subtitle: 'i18n:carousel.promoTagShowcaseSubtitle',
+        row_icon: 'sparkles',
+        row_filter_tags: ['survival'],
+        row_sort_by: 'downloads'
+      }
+    ]);
+
+    // Verify Hero Promotions only include `show_in_hero !== false` ordered by priority DESC (200 then 150)
+    const heroPromos = pkgService.activeHeroPromotions();
+    expect(heroPromos.map(p => p.id)).toEqual(['promo_gamejam_2026', 'promo_server_spotlight']);
+    const heroShowcaseIds = pkgService.heroShowcasePackages().map(p => p.id);
+    expect(heroShowcaseIds[0]).toBe('promo:promo_gamejam_2026');
+    expect(heroShowcaseIds[1]).toBe('promo:promo_server_spotlight');
+    expect(heroShowcaseIds.includes('promo:promo_row_only')).toBe(false);
+
+    // Verify Promotional Package Rows include both `promo_gamejam_2026` (priority 200) and `promo_row_only` (priority 120)
+    const promoRows = pkgService.activePromotionalRows();
+    expect(promoRows.map(r => r.promotion.id)).toEqual(['promo_gamejam_2026', 'promo_row_only']);
+
+    // Verify Game Jam 2026 row has pinned package first, followed by newest matching tagged submissions
+    const jamRow = promoRows[0];
+    expect(jamRow.title).toBe('Luanti Game Jam 2026 Submissions');
+    expect(jamRow.packages.map(p => p.id)).toEqual([
+      'Wuzzy/mineclone2',
+      'jammer2/sky_islands_2026',
+      'jammer/voxel_quest_2026'
+    ]);
+
+    // Verify Multi-Language Localization (Tier 1 i18n template + Tier 2 Slovak admin override)
+    i18n.setLocale('sk');
+    const jamRowSk = pkgService.activePromotionalRows()[0];
+    expect(jamRowSk.title).toBe('Príspevky Luanti Game Jam 2026');
+    expect(jamRowSk.badgeText).toBe('SÚŤAŽ 2026');
+    expect(pkgService.heroShowcasePackages()[0].title).toBe('Luanti Game Jam 2026 — Súťaž');
+    i18n.setLocale('en');
+
+    // Verify ContentDB-agnostic Unified Tag Mirror & Promotional Row Delta Overlay on Catalog
+    expect(DEFAULT_CONTENTDB_TAGS.some(t => t.name === 'jam_game_2026')).toBe(true);
+    expect(DEFAULT_CONTENTDB_TAGS.some(t => t.name === 'gamejam')).toBe(true);
+    expect(DEFAULT_CONTENTDB_TAGS.some(t => t.name === 'crafting')).toBe(true);
+
+    // Verify DRY matching helper returns identical count to rendered row
+    expect(pkgService.getMatchingPackagesForPromotionRow(jamRow.promotion).map(p => p.id)).toEqual(
+      jamRow.packages.map(p => p.id)
+    );
+
+    // Verify ensurePromotionAndTagTables is a 0-query no-op unless force === true (Cloudflare D1 quota guard)
+    const { ensurePromotionAndTagTables } = await import('../../functions/api/lib/upstream');
+    let d1QueryCount = 0;
+    const quotaGuardDb = {
+      prepare() {
+        d1QueryCount++;
+        return {
+          async run() { return {}; },
+          async all() { return { results: [] }; }
+        };
+      }
+    };
+    await ensurePromotionAndTagTables(quotaGuardDb, false);
+    expect(d1QueryCount).toBe(0);
+
+    const baseCatalog = [
+      {
+        author: 'Wuzzy',
+        name: 'mineclone2',
+        title: 'VoxeLibre',
+        type: 'game',
+        short_desc: 'Survival sandbox game',
+        tags: ['survival']
+      }
+    ];
+    const syncedDelta = {
+      tagMap: {
+        'wuzzy/mineclone2': ['jam_game_2026'],
+        'newauthor/brand_new_jam_entry': ['jam_game_2026']
+      },
+      items: [
+        {
+          author: 'newauthor',
+          name: 'brand_new_jam_entry',
+          title: 'Brand New Jam Entry',
+          type: 'game',
+          short_desc: 'Submitted 2 minutes ago on ContentDB!'
+        }
+      ]
+    };
+    const mergedCatalog = overlayPromotionRowDeltaOnCatalog(baseCatalog, syncedDelta);
+    expect(mergedCatalog.length).toBe(2);
+    const existingUpdated = mergedCatalog.find((p: any) => p.name === 'mineclone2');
+    expect(existingUpdated?.tags).toContain('jam_game_2026');
+    const newlyInjected = mergedCatalog.find((p: any) => p.name === 'brand_new_jam_entry');
+    expect(newlyInjected?.tags).toContain('jam_game_2026');
+
+    // Verify zero-allocation fast path when delta is already applied (HIT-EDGE optimization)
+    const reOverlaid = overlayPromotionRowDeltaOnCatalog(mergedCatalog, syncedDelta);
+    expect(reOverlaid).toBe(mergedCatalog);
+
+    // Verify Admin & Promotion API access controls reject anonymous, non-admin, and suffix-spoofed actors
+    const {
+      onRequestGet: promoGet,
+      onRequestPost: promoPost,
+      onRequestDelete: promoDelete
+    } = await import('../../functions/api/promotions/index');
+    const { checkIsAdmin, createSessionToken } = await import('../../functions/api/auth/lib/session');
+
+    // 1. Anonymous requests to GET/POST/DELETE /api/promotions must return 403 Forbidden
+    const anonGetRes = await promoGet({
+      request: new Request('https://luantihub.org/api/promotions?admin=1', { method: 'GET' }),
+      env: { DB: quotaGuardDb, SESSION_SECRET: 'test-secret', ADMIN_USERS: 'sakel' }
+    });
+    expect(anonGetRes.status).toBe(403);
+
+    const anonPostRes = await promoPost({
+      request: new Request('https://luantihub.org/api/promotions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Malicious Promo', expires_at: futureIso })
+      }),
+      env: { DB: quotaGuardDb, SESSION_SECRET: 'test-secret', ADMIN_USERS: 'sakel' }
+    });
+    expect(anonPostRes.status).toBe(403);
+
+    const anonDelRes = await promoDelete({
+      request: new Request('https://luantihub.org/api/promotions?id=promo_gamejam_2026', { method: 'DELETE' }),
+      env: { DB: quotaGuardDb, SESSION_SECRET: 'test-secret', ADMIN_USERS: 'sakel' }
+    });
+    expect(anonDelRes.status).toBe(403);
+
+    // 2. Authenticated non-admin user must also receive 403 Forbidden on /api/promotions
+    const nonAdminToken = await createSessionToken('usr_regular', 'test-secret', {
+      username: 'regular_user',
+      role: 'user',
+      verified: true
+    });
+    const nonAdminDb = {
+      prepare(sql: string) {
+        return {
+          bind() {
+            return {
+              async first() {
+                if (sql.includes('FROM users')) {
+                  return { id: 'usr_regular', username: 'regular_user', role: 'user' };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM user_identities')) {
+                  return {
+                    results: [{ provider: 'github', username: 'regular_user', verified: 1 }]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() { return {}; }
+            };
+          }
+        };
+      }
+    };
+    const nonAdminPostRes = await promoPost({
+      request: new Request('https://luantihub.org/api/promotions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `lh_session=${nonAdminToken}`
+        },
+        body: JSON.stringify({ title: 'Unauthorized Promo', expires_at: futureIso })
+      }),
+      env: { DB: nonAdminDb, SESSION_SECRET: 'test-secret', ADMIN_USERS: 'sakel' }
+    });
+    expect(nonAdminPostRes.status).toBe(403);
+
+    // 3. checkIsAdmin must reject unverified identities and reject suffix-spoofed handles (e.g. `sakel_gi` when ADMIN_USERS="sakel")
+    expect(
+      checkIsAdmin(
+        { username: 'sakel', role: 'admin' },
+        [{ provider: 'github', username: 'sakel', verified: false }],
+        'sakel'
+      )
+    ).toBe(false);
+    expect(
+      checkIsAdmin(
+        { username: 'sakel_gi', role: 'user' },
+        [{ provider: 'gitlab', username: 'sakel_gi', verified: true }],
+        'sakel'
+      )
+    ).toBe(false);
+    expect(
+      checkIsAdmin(
+        { username: 'sakel', role: 'admin' },
+        [{ provider: 'github', username: 'sakel', verified: true }],
+        'sakel'
+      )
+    ).toBe(true);
 
     pkgService.setPromotions([]);
   });

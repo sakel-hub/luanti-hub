@@ -1,5 +1,10 @@
 // Admin & Author Moderation Queue, Communication, Pagination & 404 Live Re-Check Endpoint
-import { verifySessionToken, parseCookies, checkIsAdmin } from '../auth/lib/session';
+import {
+  verifySessionToken,
+  parseCookies,
+  checkIsAdmin,
+  verifyStrictPackageAuthorOwnership
+} from '../auth/lib/session';
 import {
   ensureModerationColumns,
   ensureExtendedPackageColumns,
@@ -396,14 +401,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   }
 
   const pkgOwnerPrefix = String(reportRow.package_id || '').split('/')[0]?.toLowerCase() || '';
-  const verifiedHandles = identities
-    .filter((i: any) => Boolean(i.verified))
-    .map((i: any) => String(i.username || '').toLowerCase());
-  const isPackageAuthor = Boolean(
-    pkgOwnerPrefix && (
-      String(currentUser?.username || '').toLowerCase() === pkgOwnerPrefix ||
-      verifiedHandles.includes(pkgOwnerPrefix)
-    )
+  const pkgRow = reportRow.package_id
+    ? await env.DB.prepare(
+        `SELECT id, author_id, author_name, provider, repo_url FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+      )
+        .bind(String(reportRow.package_id))
+        .first()
+        .catch(() => null)
+    : null;
+  const isPackageAuthor = verifyStrictPackageAuthorOwnership(
+    currentUser || (userId ? { id: userId } : null),
+    identities,
+    pkgRow || (pkgOwnerPrefix ? { author_name: pkgOwnerPrefix } : null),
+    pkgOwnerPrefix
   );
   const isReporter = Boolean(reportRow.reporter_user_id && String(reportRow.reporter_user_id) === String(userId));
 

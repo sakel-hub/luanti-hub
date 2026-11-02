@@ -75,7 +75,15 @@ export const en: TranslationDictionary = {
     infoGit: 'Community packages published directly from creators’ GitHub, Codeberg, and GitLab repositories, prioritized by recent updates, player downloads, community ratings, and your personal taste.',
     infoAutomation: 'Engineering, machinery, logistics, and circuit mods built for technical gameplay, prioritized by category relevance, recent player downloads, community ratings, and recent updates.',
     infoTop10Week: 'The 10 most popular packages over the past 7 days—ranked by weekly player downloads, visitor-to-download popularity, community favorites, and ratings (up to 2 packages per creator for variety).',
-    infoTextures: 'Visual overhaul and texture packs to customize the look and feel of your worlds, prioritized by recent player downloads, community ratings, and visual updates.'
+    infoTextures: 'Visual overhaul and texture packs to customize the look and feel of your worlds, prioritized by recent player downloads, community ratings, and visual updates.',
+    promoGameJamTitle: 'Luanti Game Jam {year} Submissions',
+    promoGameJamSubtitle: 'Live submissions synced from ContentDB and Git community repositories for the annual Luanti Game Jam {year}.',
+    promoTagShowcaseTitle: 'Featured Showcase: {tag}',
+    promoTagShowcaseSubtitle: 'Curated community packages tagged with #{tag}, synced with ContentDB and Git repositories.',
+    promoCuratedTitle: 'Community Spotlight & Featured Picks',
+    promoCuratedSubtitle: 'Hand-picked packages and community highlights curated by LuantiHub.',
+    promoEmptyTitle: 'Submissions Opening Soon',
+    promoEmptyDesc: 'New packages matching this event will appear here automatically as soon as they are published on ContentDB or LuantiHub.'
   },
   catalog: {
     resultsFor: 'Results for "{query}"',

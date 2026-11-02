@@ -295,7 +295,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       if (
         k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
         k.startsWith('https://cache.luantihub.internal/__api_updates_v2_') ||
-        k.startsWith('https://cache.luantihub.internal/__for_client_v2/')
+        k.startsWith('https://cache.luantihub.internal/__for_client_v2/') ||
+        k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v1_') ||
+        k.startsWith('https://cache.luantihub.internal/__unified_tags_v1')
       ) {
         isolateJsonCache.delete(k);
       }
@@ -319,30 +321,97 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   let lastKnownActivePromotions: any[] | null = null;
 
   /**
-   * Returns the last known active Hero Carousel promotions in this isolate (filtered by current time),
+   * Validates whether a promotion row is currently active and has either Hero slide display or Promotional Package Row #1 enabled.
+   */
+  export function isValidActivePromotionRow(r: any, nowMs = Date.now()): boolean {
+    if (!r || !r.expires_at) return false;
+    const showInHero = r.show_in_hero !== false && r.show_in_hero !== 0 && r.show_in_hero !== '0';
+    const rowEnabled = Boolean(r.row_enabled === true || r.row_enabled === 1 || r.row_enabled === '1');
+    if (!showInHero && !rowEnabled) return false;
+    if (showInHero && (!r.title || !r.banner_url)) return false;
+    if (!showInHero && rowEnabled && !r.title && !r.row_title) return false;
+    const expMs = Date.parse(String(r.expires_at));
+    if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
+    if (r.starts_at) {
+      const startMs = Date.parse(String(r.starts_at));
+      if (Number.isFinite(startMs) && startMs > nowMs) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Returns the last known active Hero Carousel & Promotional Row promotions in this isolate (filtered by current time),
    * or `null` if promotions have not yet been loaded in this isolate.
    */
   export function getLastKnownActivePromotions(nowMs = Date.now()): any[] | null {
     if (!canUseIsolateCache() || !Array.isArray(lastKnownActivePromotions)) return null;
-    return lastKnownActivePromotions.filter((r: any) => {
-      if (!r || !r.title || !r.banner_url || !r.expires_at) return false;
-      const expMs = Date.parse(String(r.expires_at));
-      if (!Number.isFinite(expMs) || expMs <= nowMs) return false;
-      if (r.starts_at) {
-        const startMs = Date.parse(String(r.starts_at));
-        if (Number.isFinite(startMs) && startMs > nowMs) return false;
-      }
-      return true;
-    });
+    return lastKnownActivePromotions.filter((r: any) => isValidActivePromotionRow(r, nowMs));
   }
 
   /**
-   * Updates the isolate-level fallback list of active Hero Carousel promotions.
+   * Updates the isolate-level fallback list of active Hero Carousel & Promotional Row promotions.
    */
   export function setLastKnownActivePromotions(rows: any[] | null): void {
     if (!canUseIsolateCache()) return;
     lastKnownActivePromotions = Array.isArray(rows) ? [...rows] : null;
   }
+
+export const DEFAULT_CONTENTDB_TAGS: Array<{ name: string; title: string }> = [
+  { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
+  { name: 'building', title: 'Building' },
+  { name: 'chat', title: 'Chat / Commands' },
+  { name: 'combat', title: 'Combat' },
+  { name: 'crafting', title: 'Crafting' },
+  { name: 'creative', title: 'Creative' },
+  { name: 'custom', title: 'Custom' },
+  { name: 'decorative', title: 'Decorative' },
+  { name: 'education', title: 'Education' },
+  { name: 'environment', title: 'Environment' },
+  { name: 'gamejam', title: 'Game Jam' },
+  { name: 'gui', title: 'GUI' },
+  { name: 'hud', title: 'HUD' },
+  { name: 'inventory', title: 'Inventory' },
+  { name: 'jam_combat_2022', title: 'Combat Jam 2022' },
+  { name: 'jam_game_2021', title: 'Game Jam 2021' },
+  { name: 'jam_game_2022', title: 'Game Jam 2022' },
+  { name: 'jam_game_2023', title: 'Game Jam 2023' },
+  { name: 'jam_game_2024', title: 'Game Jam 2024' },
+  { name: 'jam_game_2025', title: 'Game Jam 2025' },
+  { name: 'jam_game_2026', title: 'Game Jam 2026' },
+  { name: 'library', title: 'Library / API' },
+  { name: 'magic', title: 'Magic' },
+  { name: 'mapgen', title: 'Mapgen' },
+  { name: 'minigame', title: 'Minigame' },
+  { name: 'mobs', title: 'Mobs / Animals / NPCs' },
+  { name: 'multiplayer', title: 'Multiplayer' },
+  { name: 'plants_and_farming', title: 'Plants and Farming' },
+  { name: 'player_effects', title: 'Player Effects' },
+  { name: 'puzzle', title: 'Puzzle' },
+  { name: 'pve', title: 'PvE' },
+  { name: 'pvp', title: 'PvP' },
+  { name: 'sandbox_game', title: 'Sandbox Game' },
+  { name: 'singleplayer', title: 'Singleplayer' },
+  { name: 'sound_music', title: 'Sound / Music' },
+  { name: 'storage', title: 'Storage' },
+  { name: 'survival', title: 'Survival' },
+  { name: 'technology', title: 'Technology' },
+  { name: 'tools', title: 'Tools / Weapons' },
+  { name: 'transport', title: 'Transport' },
+  { name: 'voxel', title: 'Voxel' },
+  { name: 'world_maintenance', title: 'World Maintenance' }
+];
+
+export function formatTagTitle(tagName: string): string {
+  const clean = String(tagName || '').trim();
+  if (!clean) return '';
+  const known = DEFAULT_CONTENTDB_TAGS.find(t => t.name.toLowerCase() === clean.toLowerCase());
+  if (known) return known.title;
+  const jamMatch = clean.match(/^jam_game_(\d{4})$/i);
+  if (jamMatch) return `Game Jam ${jamMatch[1]}`;
+  return clean
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 /**
  * Safely parses a JSON array column or comma-separated string into string[]
@@ -558,25 +627,8 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
       }
     }
 
-    // Ensure hero_promotions table exists for temporary time-bounded Hero Carousel promotional slides
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS hero_promotions (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        short_desc TEXT NOT NULL,
-        banner_url TEXT NOT NULL,
-        cta_label TEXT NOT NULL DEFAULT 'Learn More',
-        cta_url TEXT NOT NULL,
-        secondary_cta_label TEXT,
-        secondary_cta_url TEXT,
-        badge_text TEXT NOT NULL DEFAULT 'PROMOTED',
-        starts_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        priority INTEGER NOT NULL DEFAULT 100,
-        created_by TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `).run().catch(() => {});
+    // Ensure hero_promotions, tags, and promo_tag_packages tables & columns exist
+    await ensurePromotionAndTagTables(db, true);
 
     // Ensure user_views table exists for cross-device view & conversion personalization
     await db.prepare(`
@@ -616,6 +668,255 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
   } catch {
     // Ignore schema inspection errors; will retry on next forced request
   }
+}
+
+let promotionAndTagTablesEnsured = false;
+
+/**
+ * Ensures `hero_promotions`, `tags`, and `promo_tag_packages` tables and all Promotional Package Row
+ * & multi-language columns exist in D1.
+ *
+ * Production D1 already has these tables and columns migrated. To avoid running 5 DDL/PRAGMA queries
+ * on every cold Worker isolate, this helper is a zero-query no-op unless `force === true` (invoked
+ * automatically when recovering from a missing-table/column error).
+ */
+export async function ensurePromotionAndTagTables(db: any, force = false): Promise<void> {
+  if (!db || !force || promotionAndTagTablesEnsured) return;
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS hero_promotions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        short_desc TEXT NOT NULL,
+        banner_url TEXT NOT NULL DEFAULT '/promo.png',
+        cta_label TEXT NOT NULL DEFAULT 'Learn More',
+        cta_url TEXT NOT NULL DEFAULT '/',
+        secondary_cta_label TEXT,
+        secondary_cta_url TEXT,
+        badge_text TEXT NOT NULL DEFAULT 'PROMOTED',
+        starts_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 100,
+        show_in_hero INTEGER NOT NULL DEFAULT 1,
+        row_enabled INTEGER NOT NULL DEFAULT 0,
+        row_title TEXT,
+        row_subtitle TEXT,
+        row_icon TEXT DEFAULT 'trophy',
+        row_filter_tags TEXT,
+        row_filter_type TEXT DEFAULT 'all',
+        row_filter_source TEXT DEFAULT 'all',
+        row_filter_author TEXT,
+        row_filter_query TEXT,
+        row_pinned_packages TEXT,
+        row_sort_by TEXT DEFAULT 'newest',
+        row_show_empty_cta INTEGER NOT NULL DEFAULT 1,
+        translations TEXT,
+        created_by TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run().catch(() => {});
+
+    const promoCols: Array<[string, string]> = [
+      ['show_in_hero', 'INTEGER NOT NULL DEFAULT 1'],
+      ['row_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+      ['row_title', 'TEXT'],
+      ['row_subtitle', 'TEXT'],
+      ['row_icon', "TEXT DEFAULT 'trophy'"],
+      ['row_filter_tags', 'TEXT'],
+      ['row_filter_type', "TEXT DEFAULT 'all'"],
+      ['row_filter_source', "TEXT DEFAULT 'all'"],
+      ['row_filter_author', 'TEXT'],
+      ['row_filter_query', 'TEXT'],
+      ['row_pinned_packages', 'TEXT'],
+      ['row_sort_by', "TEXT DEFAULT 'newest'"],
+      ['row_show_empty_cta', 'INTEGER NOT NULL DEFAULT 1'],
+      ['translations', 'TEXT']
+    ];
+    const promoInfo = await db.prepare(`PRAGMA table_info(hero_promotions)`).all().catch(() => ({ results: [] }));
+    const existingPromo = new Set<string>(
+      (promoInfo?.results || []).map((r: any) => String(r?.name || '').toLowerCase())
+    );
+    for (const [colName, colDef] of promoCols) {
+      if (!existingPromo.has(colName)) {
+        await db.prepare(`ALTER TABLE hero_promotions ADD COLUMN ${colName} ${colDef}`).run().catch(() => {});
+      }
+    }
+
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS tags (
+        name TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        source TEXT DEFAULT 'contentdb',
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run().catch(() => {});
+
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS promo_tag_packages (
+        tag_name TEXT NOT NULL,
+        package_id TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tag_name, package_id)
+      )
+    `).run().catch(() => {});
+
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name))`).run().catch(() => {});
+
+    promotionAndTagTablesEnsured = true;
+  } catch {
+    // Non-fatal schema initialization
+  }
+}
+
+/**
+ * Registers custom or synced tags in D1 `tags` table so LuantiHub remains ContentDB-agnostic.
+ */
+export async function upsertCustomAppTags(
+  db: any,
+  tagItems: Array<string | { name: string; title?: string }>,
+  source: 'contentdb' | 'luantihub' | 'custom' = 'custom'
+): Promise<void> {
+  if (!db || !Array.isArray(tagItems) || tagItems.length === 0) return;
+  const systemTags = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+  const entries: Array<{ name: string; title: string }> = [];
+  const seen = new Set<string>();
+
+  for (const item of tagItems) {
+    const rawName = typeof item === 'string' ? item : item?.name;
+    const cleanName = String(rawName || '').trim();
+    if (!cleanName) continue;
+    const lower = cleanName.toLowerCase();
+    if (systemTags.has(lower) || seen.has(lower)) continue;
+    seen.add(lower);
+    const title = (typeof item === 'object' && item?.title ? String(item.title).trim() : '') || formatTagTitle(cleanName);
+    if (title) {
+      entries.push({ name: cleanName, title });
+    }
+  }
+
+  if (entries.length === 0) return;
+
+  const runBatch = async () => {
+    const stmts = entries.map((e) =>
+      db.prepare(`
+        INSERT INTO tags (name, title, source, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(name) DO UPDATE SET
+          title = CASE WHEN tags.source = 'custom' AND excluded.source = 'contentdb' THEN tags.title ELSE excluded.title END,
+          updated_at = CURRENT_TIMESTAMP
+      `).bind(e.name, e.title, source)
+    );
+    if (typeof db.batch === 'function') {
+      await db.batch(stmts);
+    } else {
+      for (const s of stmts) {
+        await s.run();
+      }
+    }
+  };
+
+  try {
+    try {
+      await runBatch();
+    } catch (err: any) {
+      if (/no such table|no such column|has no column/i.test(String(err?.message || ''))) {
+        await ensurePromotionAndTagTables(db, true);
+        await runBatch();
+      } else {
+        throw err;
+      }
+    }
+    await invalidateEdgeCacheKeys(['/__unified_tags_v1']);
+  } catch {
+    // Non-blocking tag persistence
+  }
+}
+
+/**
+ * Merges ContentDB `/api/tags/`, D1 `tags` mirror, and `DEFAULT_CONTENTDB_TAGS` into a single
+ * ContentDB-agnostic tag list. Caches the unified tag list in Edge Cache (`/__unified_tags_v1`)
+ * and mirrors newly discovered ContentDB tags into D1 at most once every 6 hours.
+ */
+export async function getUnifiedCatalogTags(
+  db?: any,
+  upstreamTagsInput?: any[] | null
+): Promise<Array<{ name: string; title: string }>> {
+  const cacheKey = '/__unified_tags_v1';
+  const cached = await readEdgeCacheJson<Array<{ name: string; title: string }>>(cacheKey);
+  if (Array.isArray(cached) && cached.length > 0 && upstreamTagsInput === undefined) {
+    return cached;
+  }
+
+  const tagMap = new Map<string, { name: string; title: string }>();
+  const addTag = (nameRaw: string, titleRaw?: string) => {
+    const name = String(nameRaw || '').trim();
+    if (!name) return;
+    const lower = name.toLowerCase();
+    if (['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack'].includes(lower)) {
+      return;
+    }
+    const title = String(titleRaw || '').trim() || formatTagTitle(name);
+    if (!tagMap.has(lower)) {
+      tagMap.set(lower, { name, title });
+    } else if (titleRaw && String(titleRaw).trim()) {
+      tagMap.set(lower, { name, title: String(titleRaw).trim() });
+    }
+  };
+
+  for (const defTag of DEFAULT_CONTENTDB_TAGS) {
+    addTag(defTag.name, defTag.title);
+  }
+
+  if (Array.isArray(cached) && cached.length > 0) {
+    for (const c of cached) {
+      if (c?.name) addTag(c.name, c.title);
+    }
+  } else if (db) {
+    try {
+      const d1Res = await db.prepare(`SELECT name, title FROM tags ORDER BY name ASC LIMIT 250`).all().catch(() => null);
+      if (Array.isArray(d1Res?.results)) {
+        for (const r of d1Res.results) {
+          if (r?.name) addTag(String(r.name), r.title ? String(r.title) : undefined);
+        }
+      }
+    } catch {
+      // Table may not exist on cold read before migration; ignore
+    }
+  }
+
+  const upstreamTags =
+    upstreamTagsInput !== undefined
+      ? upstreamTagsInput
+      : await fetchUpstreamJsonCached<any[]>('/tags/', 3600).catch(() => null);
+
+  if (Array.isArray(upstreamTags) && upstreamTags.length > 0) {
+    const normalizedUpstream: Array<{ name: string; title: string }> = [];
+    for (const t of upstreamTags) {
+      const n = String(t?.name || t?.id || '').trim();
+      const ti = String(t?.title || t?.name || '').trim();
+      if (n && ti) {
+        addTag(n, ti);
+        normalizedUpstream.push({ name: n, title: ti });
+      }
+    }
+
+    if (db && normalizedUpstream.length > 0) {
+      const mirrorGateKey = '/__d1_tags_mirror_sync_v1';
+      readEdgeCacheJson<boolean>(mirrorGateKey)
+        .then(async (alreadyMirrored) => {
+          if (alreadyMirrored) return;
+          await writeEdgeCacheJson(mirrorGateKey, true, 21600);
+          await upsertCustomAppTags(db, normalizedUpstream, 'contentdb');
+        })
+        .catch(() => {});
+    }
+  }
+
+  const sortedResult = Array.from(tagMap.values()).sort((a, b) =>
+    a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+  );
+  await writeEdgeCacheJson(cacheKey, sortedResult, 3600);
+  return sortedResult;
 }
 
 /**

@@ -31,7 +31,8 @@ import {
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES,
   isGitRepositoryAssetUrl,
-  mergeScreenshotsPreferringGit
+  mergeScreenshotsPreferringGit,
+  upsertCustomAppTags
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -1941,6 +1942,10 @@ export async function onRequestPatch(context: { request: Request; params: { auth
   await context.env.DB.prepare(
     `UPDATE packages SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).bind(JSON.stringify(finalTags), pkgRow.id).run();
+
+  if (cleanedCustomTags.length > 0) {
+    await upsertCustomAppTags(context.env.DB, cleanedCustomTags, 'custom');
+  }
 
   const lowerA = encodeURIComponent(author.toLowerCase());
   const lowerN = encodeURIComponent(name.toLowerCase());

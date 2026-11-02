@@ -75,7 +75,15 @@ export const fr: TranslationDictionary = {
     infoGit: 'Paquets communautaires publiés directement depuis les dépôts GitHub, Codeberg et GitLab des créateurs, classés selon les mises à jour récentes, les téléchargements, les avis et vos préférences.',
     infoAutomation: 'Mods d’ingénierie, de machines, de logistique et de circuits pour l’automatisation, classés selon la pertinence thématique, les téléchargements récents, les avis de la communauté et les mises à jour.',
     infoTop10Week: 'Les 10 paquets les plus populaires des 7 derniers jours — classés selon les téléchargements hebdomadaires, la popularité auprès des visiteurs, les favoris de la communauté et les notes (jusqu’à 2 paquets par créateur).',
-    infoTextures: 'Packs de textures et refontes visuelles pour personnaliser vos mondes, classés selon les téléchargements récents, les évaluations de la communauté et les mises à jour.'
+    infoTextures: 'Packs de textures et refontes visuelles pour personnaliser vos mondes, classés selon les téléchargements récents, les évaluations de la communauté et les mises à jour.',
+    promoGameJamTitle: 'Participations Luanti Game Jam {year}',
+    promoGameJamSubtitle: 'Créations en direct synchronisées depuis ContentDB et les dépôts Git communautaires pour la Luanti Game Jam {year}.',
+    promoTagShowcaseTitle: 'Sélection à la Une : {tag}',
+    promoTagShowcaseSubtitle: 'Paquets communautaires avec le tag #{tag}, synchronisés avec ContentDB et les dépôts Git.',
+    promoCuratedTitle: 'Projecteur Communautaire & Sélection',
+    promoCuratedSubtitle: 'Paquets sélectionnés et temps forts de la communauté sur LuantiHub.',
+    promoEmptyTitle: 'Ouverture des Participations Bientôt',
+    promoEmptyDesc: 'Les nouveaux paquets de cet événement apparaîtront ici automatiquement dès leur publication sur ContentDB ou LuantiHub.'
   },
   catalog: {
     resultsFor: 'Résultats pour « {query} »',

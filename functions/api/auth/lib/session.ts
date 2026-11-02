@@ -409,10 +409,10 @@ export function checkIsAdmin(
 
   if (rawList.length > 0) {
     for (const id of verifiedIdentities) {
-      const handle = (id.username || '').trim().toLowerCase();
-      const baseHandle = handle.replace(/_(gi|gl|co|cd|me)$/i, '');
+      const handle = (id.username || (id as any).provider_username || '').trim().toLowerCase();
+      if (!handle) continue;
       const qualified = `${(id.provider || '').toLowerCase()}:${handle}`;
-      if (rawList.includes(handle) || rawList.includes(baseHandle) || rawList.includes(qualified)) {
+      if (rawList.includes(handle) || rawList.includes(qualified)) {
         return true;
       }
     }

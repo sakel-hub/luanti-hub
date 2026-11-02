@@ -90,23 +90,86 @@ CREATE TABLE IF NOT EXISTS user_views (
 );
 CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewed_at DESC);
 
--- 9. Hero Banner Promotions & Scheduled Community Highlights (Idempotent)
+-- 9. Hero Banner Promotions & Scheduled Community Highlights (+ Promotional Package Row #1) (Idempotent)
 CREATE TABLE IF NOT EXISTS promotions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     short_desc TEXT NOT NULL,
-    banner_url TEXT NOT NULL,
+    banner_url TEXT NOT NULL DEFAULT '/promo.png',
     badge_text TEXT,
-    cta_label TEXT NOT NULL,
-    cta_url TEXT NOT NULL,
+    cta_label TEXT NOT NULL DEFAULT 'Learn More',
+    cta_url TEXT NOT NULL DEFAULT '/',
     secondary_cta_label TEXT,
     secondary_cta_url TEXT,
     starts_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL,
     priority INTEGER DEFAULT 100,
+    show_in_hero INTEGER DEFAULT 1,
+    row_enabled INTEGER DEFAULT 0,
+    row_title TEXT,
+    row_subtitle TEXT,
+    row_icon TEXT DEFAULT 'trophy',
+    row_filter_tags TEXT,
+    row_filter_type TEXT DEFAULT 'all',
+    row_filter_source TEXT DEFAULT 'all',
+    row_filter_author TEXT,
+    row_filter_query TEXT,
+    row_pinned_packages TEXT,
+    row_sort_by TEXT DEFAULT 'newest',
+    row_show_empty_cta INTEGER DEFAULT 1,
+    translations TEXT,
     created_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
+
+-- 10. Runtime hero_promotions table & Unified Tags Mirror (Idempotent)
+CREATE TABLE IF NOT EXISTS hero_promotions (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    short_desc TEXT NOT NULL,
+    banner_url TEXT NOT NULL DEFAULT '/promo.png',
+    cta_label TEXT NOT NULL DEFAULT 'Learn More',
+    cta_url TEXT NOT NULL DEFAULT '/',
+    secondary_cta_label TEXT,
+    secondary_cta_url TEXT,
+    badge_text TEXT NOT NULL DEFAULT 'PROMOTED',
+    starts_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 100,
+    show_in_hero INTEGER NOT NULL DEFAULT 1,
+    row_enabled INTEGER NOT NULL DEFAULT 0,
+    row_title TEXT,
+    row_subtitle TEXT,
+    row_icon TEXT DEFAULT 'trophy',
+    row_filter_tags TEXT,
+    row_filter_type TEXT DEFAULT 'all',
+    row_filter_source TEXT DEFAULT 'all',
+    row_filter_author TEXT,
+    row_filter_query TEXT,
+    row_pinned_packages TEXT,
+    row_sort_by TEXT DEFAULT 'newest',
+    row_show_empty_cta INTEGER NOT NULL DEFAULT 1,
+    translations TEXT,
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_hero_promotions_window ON hero_promotions(expires_at, priority DESC);
+
+CREATE TABLE IF NOT EXISTS tags (
+    name TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    source TEXT DEFAULT 'contentdb',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS promo_tag_packages (
+    tag_name TEXT NOT NULL,
+    package_id TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tag_name, package_id)
+);
+CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name));
+
 

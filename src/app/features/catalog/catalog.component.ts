@@ -1,6 +1,7 @@
 import { Component, ChangeDetectionStrategy, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { HeroBillboardComponent } from '../hero/hero-billboard.component';
 import { PackageCarouselComponent } from '../carousel/package-carousel.component';
 import { PackageCardComponent } from '../card/package-card.component';
@@ -360,6 +361,24 @@ import {
 
       <div class="relative z-10 mt-2 sm:mt-3 space-y-5 sm:space-y-8 pb-16">
 
+        <!-- Promotional Package Row(s) in 1st Place (e.g. Luanti Game Jam 2026 / Tag Showcase / Curated Spotlight) -->
+        @for (promoRow of packageService.activePromotionalRows(); track promoRow.promotion.id) {
+          <app-package-carousel
+            [icon]="promoRow.icon"
+            [title]="promoRow.title"
+            [infoTooltip]="promoRow.subtitle"
+            [promoBadge]="promoRow.badgeText"
+            [promoCtaLabel]="promoRow.ctaLabel"
+            [promoCtaUrl]="promoRow.ctaUrl"
+            [promoSecondaryCtaLabel]="promoRow.secondaryCtaLabel || undefined"
+            [promoSecondaryCtaUrl]="promoRow.secondaryCtaUrl || undefined"
+            [showWhenEmpty]="promoRow.showEmptyCta"
+            [packages]="promoRow.packages"
+            (viewAll)="packageService.explorePromotionalRow(promoRow)"
+            (promoCtaClicked)="onPromoRowCtaClick($event)">
+          </app-package-carousel>
+        }
+
         <!-- Swimlane 1: Trending Engine Mods -->
         <app-package-carousel
           icon="flame"
@@ -547,6 +566,7 @@ import {
 })
 export class CatalogComponent {
   readonly packageService = inject(PackageService);
+  private readonly router = inject(Router, { optional: true });
   readonly isTagsExpanded = signal(false);
 
   private readonly PRIMARY_TAG_LIMIT = 8;
@@ -575,6 +595,48 @@ export class CatalogComponent {
 
   onSortChange(sort: SortOption): void {
     this.packageService.setSortBy(sort);
+  }
+
+  onPromoRowCtaClick(url: string): void {
+    const raw = (url || '').trim();
+    if (!raw) return;
+    if (raw === '/submit') {
+      this.packageService.openSubmitModal();
+      return;
+    }
+    if (raw === '/setup') {
+      this.packageService.openSetupModal();
+      return;
+    }
+    if (raw === '/blog' || raw === '/blog/latest') {
+      this.packageService.openBlogArticleModal();
+      return;
+    }
+
+    let targetPath = raw;
+    if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
+      try {
+        const parsed = new URL(raw);
+        if (parsed.origin === window.location.origin) {
+          targetPath = parsed.pathname + parsed.search + parsed.hash;
+        } else {
+          window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+
+    if (!targetPath.startsWith('/')) {
+      targetPath = `/${targetPath}`;
+    }
+
+    if (this.router) {
+      this.router.navigateByUrl(targetPath).catch(() => {});
+    } else if (typeof window !== 'undefined') {
+      window.location.href = targetPath;
+    }
   }
 
   onSeoNavClick(event: MouseEvent, target: 'game' | 'mod' | 'txp' | 'git' | 'setup' | 'submit'): void {
