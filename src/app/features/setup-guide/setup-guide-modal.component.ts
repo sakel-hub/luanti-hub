@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideTerminal,
   LucideX,
@@ -19,6 +20,7 @@ import {
   imports: [
     CommonModule,
     TranslatePipe,
+    ThemeIconComponent,
     LucideTerminal,
     LucideX,
     LucideCopy,
@@ -141,8 +143,9 @@ import {
 
             @if (showConfLocations()) {
               <div class="mt-2 p-3.5 rounded-xl bg-slate-950/85 border border-white/10 space-y-2.5 text-xs text-slate-300">
-                <p class="text-sky-300 font-medium leading-relaxed">
-                  💡 {{ 'setup.confShortcutTip' | translate }}
+                <p class="text-sky-300 font-medium leading-relaxed flex items-start gap-1.5">
+                  <app-theme-icon name="lightbulb" sizeClass="w-3.5 h-3.5 mt-0.5"></app-theme-icon>
+                  <span>{{ 'setup.confShortcutTip' | translate }}</span>
                 </p>
                 <div class="space-y-2">
                   <div>

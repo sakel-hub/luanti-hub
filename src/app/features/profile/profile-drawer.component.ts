@@ -19,6 +19,7 @@ import {
 import { LocaleId } from '../../core/i18n/translation.types';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { PROMO_ROW_ICON_OPTIONS, ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideX,
   LucideCheck,
@@ -51,6 +52,7 @@ import {
     FormsModule,
     CompactNumberPipe,
     TranslatePipe,
+    ThemeIconComponent,
     LucideX,
     LucideCheck,
     LucideGitBranch,
@@ -82,7 +84,7 @@ import {
         class="z-50 flex justify-end luanti-modal-backdrop">
 
         <div
-          (click)="$event.stopPropagation()"
+          (click)="$event.stopPropagation(); isPromoIconMenuOpen.set(false)"
           class="w-full max-w-2xl h-full glass-drawer flex flex-col p-5 sm:p-6 space-y-5 overflow-y-auto luanti-drawer-panel">
 
           <!-- Drawer Header -->
@@ -1033,29 +1035,61 @@ import {
           <!-- TAB 5: ADMIN HERO CAROUSEL & PROMOTIONAL PACKAGE ROW #1 CONFIGURATION -->
           @if (activeTab() === 'promotions' && authService.isAdmin()) {
             <div class="space-y-4 flex-1 text-xs luanti-tab-enter">
-              <!-- Create / Edit Promotion Form -->
-              <form (ngSubmit)="onSubmitPromotion()" class="p-4 rounded-2xl glass-panel border-amber-500/25 space-y-3.5">
-                <div class="flex items-center justify-between gap-2 flex-wrap">
-                  <div class="flex items-center gap-2">
+              <!-- Collapsible Create / Edit Promotion Panel (Collapsed by Default) -->
+              <div class="rounded-2xl glass-panel border-amber-500/25 overflow-hidden">
+                <div
+                  role="button"
+                  tabindex="0"
+                  data-testid="promo-form-toggle"
+                  [attr.aria-expanded]="showPromoForm()"
+                  (click)="showPromoForm.update(v => !v)"
+                  (keydown.enter)="showPromoForm.update(v => !v)"
+                  (keydown.space)="$event.preventDefault(); showPromoForm.update(v => !v)"
+                  class="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-white/5 transition cursor-pointer select-none">
+                  <div class="flex items-center gap-2.5 min-w-0">
                     <svg lucideStar class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
-                    <div>
+                    <div class="min-w-0">
                       <h3 class="text-xs font-extrabold uppercase tracking-wider text-amber-300">
                         {{ promoEditingId() ? 'Edit Promotional Campaign' : 'Create Promotional Campaign (Hero Slide & Package Row #1)' }}
                       </h3>
-                      <p class="text-[11px] text-slate-400">
+                      <p class="text-[11px] text-slate-400 truncate">
                         Configure multiple Hero Carousel slides (by priority) and/or a ContentDB-synced Package Row in 1st place below the Hero Banner.
                       </p>
                     </div>
                   </div>
-                  @if (promoEditingId()) {
-                    <button
-                      type="button"
-                      (click)="resetPromotionForm()"
-                      class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white text-[11px] font-semibold cursor-pointer">
-                      Cancel Edit
-                    </button>
-                  }
+
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    @if (promoEditingId()) {
+                      <button
+                        type="button"
+                        (click)="$event.stopPropagation(); resetPromotionForm()"
+                        class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white text-[11px] font-semibold cursor-pointer">
+                        Cancel Edit
+                      </button>
+                    } @else if (!showPromoForm()) {
+                      <span class="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-400/35 text-amber-200 text-[10px] font-bold inline-flex items-center gap-1">
+                        <svg lucidePlus class="w-3 h-3"></svg>
+                        <span>New Campaign</span>
+                      </span>
+                    }
+                    @if (showPromoForm()) {
+                      <svg lucideChevronUp class="w-4 h-4 text-slate-400 flex-shrink-0"></svg>
+                    } @else {
+                      <svg lucideChevronDown class="w-4 h-4 text-slate-400 flex-shrink-0"></svg>
+                    }
+                  </div>
                 </div>
+
+                @if (promoFeedback() && !showPromoForm()) {
+                  <div class="px-4 pb-3 -mt-1">
+                    <p [class]="promoFeedbackIsError() ? 'text-rose-400' : 'text-emerald-400'" class="text-[11px] font-semibold">
+                      {{ promoFeedback() }}
+                    </p>
+                  </div>
+                }
+
+                @if (showPromoForm()) {
+                  <form (ngSubmit)="onSubmitPromotion()" class="px-4 pb-4 pt-3 border-t border-white/10 space-y-3.5">
 
                 <!-- 1-Click Campaign Quick-Fill Presets -->
                 <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10 flex flex-wrap items-center justify-between gap-2">
@@ -1066,20 +1100,23 @@ import {
                     <button
                       type="button"
                       (click)="applyPromoPreset('gamejam2026')"
-                      class="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 text-amber-200 font-bold text-[10px] transition cursor-pointer">
-                      🏆 Luanti Game Jam 2026
+                      class="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 text-amber-200 font-bold text-[10px] transition cursor-pointer inline-flex items-center gap-1.5">
+                      <app-theme-icon name="trophy" sizeClass="w-3.5 h-3.5"></app-theme-icon>
+                      <span>Luanti Game Jam 2026</span>
                     </button>
                     <button
                       type="button"
                       (click)="applyPromoPreset('tagshowcase')"
-                      class="px-2.5 py-1 rounded-lg glass-btn text-sky-300 hover:text-white font-bold text-[10px] transition cursor-pointer">
-                      🏷️ Tag Showcase Row
+                      class="px-2.5 py-1 rounded-lg glass-btn text-sky-300 hover:text-white font-bold text-[10px] transition cursor-pointer inline-flex items-center gap-1.5">
+                      <app-theme-icon name="tag" sizeClass="w-3.5 h-3.5"></app-theme-icon>
+                      <span>Tag Showcase Row</span>
                     </button>
                     <button
                       type="button"
                       (click)="applyPromoPreset('curated')"
-                      class="px-2.5 py-1 rounded-lg glass-btn text-emerald-300 hover:text-white font-bold text-[10px] transition cursor-pointer">
-                      ✨ Curated Spotlight Row
+                      class="px-2.5 py-1 rounded-lg glass-btn text-emerald-300 hover:text-white font-bold text-[10px] transition cursor-pointer inline-flex items-center gap-1.5">
+                      <app-theme-icon name="sparkles" sizeClass="w-3.5 h-3.5"></app-theme-icon>
+                      <span>Curated Spotlight Row</span>
                     </button>
                   </div>
                 </div>
@@ -1279,23 +1316,51 @@ import {
                       </div>
 
                       <div class="grid grid-cols-2 gap-2">
-                        <div>
+                        <div class="relative" data-testid="promo-row-icon-picker">
                           <label class="block text-[11px] font-semibold text-slate-300 mb-1">
                             Row Icon
                           </label>
-                          <select
-                            [ngModel]="promoRowIcon()"
-                            (ngModelChange)="promoRowIcon.set($event)"
-                            name="promoRowIcon"
+                          <button
+                            type="button"
+                            (click)="togglePromoIconMenu($event)"
                             aria-label="Promotional Row Icon"
-                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none">
-                            <option value="trophy" class="bg-slate-900">🏆 Trophy</option>
-                            <option value="gamepad" class="bg-slate-900">🎮 Gamepad</option>
-                            <option value="sparkles" class="bg-slate-900">✨ Sparkles</option>
-                            <option value="flame" class="bg-slate-900">🔥 Flame</option>
-                            <option value="star" class="bg-slate-900">⭐ Star</option>
-                            <option value="rocket" class="bg-slate-900">🚀 Rocket</option>
-                          </select>
+                            [attr.aria-expanded]="isPromoIconMenuOpen()"
+                            class="w-full glass-input rounded-xl px-2.5 py-2 text-xs text-white focus:outline-none flex items-center justify-between gap-1.5 cursor-pointer">
+                            <span class="inline-flex items-center gap-1.5 truncate">
+                              <app-theme-icon [name]="promoRowIcon()" sizeClass="w-3.5 h-3.5"></app-theme-icon>
+                              <span class="truncate">{{ selectedPromoIconLabel() }}</span>
+                            </span>
+                            <svg
+                              lucideChevronDown
+                              class="w-3.5 h-3.5 text-slate-400 flex-shrink-0 transition-transform duration-150"
+                              [class.rotate-180]="isPromoIconMenuOpen()"></svg>
+                          </button>
+
+                          @if (isPromoIconMenuOpen()) {
+                            <div
+                              role="listbox"
+                              aria-label="Select Promotional Row Icon"
+                              (click)="$event.stopPropagation()"
+                              class="absolute left-0 right-0 mt-1.5 rounded-xl glass-dropdown p-1.5 z-50 space-y-0.5 shadow-2xl border border-white/15">
+                              @for (opt of promoRowIconOptions; track opt.value) {
+                                <button
+                                  type="button"
+                                  role="option"
+                                  [attr.aria-selected]="promoRowIcon() === opt.value"
+                                  (click)="selectPromoRowIcon(opt.value)"
+                                  [class]="promoRowIcon() === opt.value ? 'bg-amber-500/20 text-white border-amber-400/40 font-bold' : 'text-slate-200 hover:bg-white/10 border-transparent font-medium'"
+                                  class="w-full px-2.5 py-1.5 rounded-lg border text-xs flex items-center justify-between gap-2 transition cursor-pointer">
+                                  <span class="inline-flex items-center gap-2 truncate">
+                                    <app-theme-icon [name]="opt.value" sizeClass="w-3.5 h-3.5"></app-theme-icon>
+                                    <span class="truncate">{{ opt.label }}</span>
+                                  </span>
+                                  @if (promoRowIcon() === opt.value) {
+                                    <svg lucideCheck class="w-3.5 h-3.5 text-amber-400 flex-shrink-0"></svg>
+                                  }
+                                </button>
+                              }
+                            </div>
+                          }
                         </div>
 
                         <div>
@@ -1467,8 +1532,9 @@ import {
                       @if (promoRowPinnedPackages().length > 0) {
                         <div class="flex items-center gap-1.5 flex-wrap">
                           @for (pkgId of promoRowPinnedPackages(); track pkgId) {
-                            <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[10px] font-mono">
-                              <span>📌 {{ pkgId }}</span>
+                            <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-amber-200 text-[10px] font-mono">
+                              <app-theme-icon name="pin" sizeClass="w-3 h-3"></app-theme-icon>
+                              <span>{{ pkgId }}</span>
                               <button
                                 type="button"
                                 (click)="removePromoPinnedPackage(pkgId)"
@@ -1506,7 +1572,7 @@ import {
                     <div class="flex items-center gap-2">
                       <svg lucideGlobe class="w-4 h-4 text-sky-400"></svg>
                       <span class="text-[11px] font-bold text-slate-200">
-                        🌐 Multi-Language Translations (EN · SK · DE · FR · ES · RU)
+                        Multi-Language Translations (EN · SK · DE · FR · ES · RU)
                       </span>
                       @if (configuredTranslationCount() > 0) {
                         <span class="glass-badge glass-badge-sky font-mono text-[9px] px-1.5 py-0">
@@ -1688,12 +1754,14 @@ import {
                   </button>
                 </div>
 
-                @if (promoFeedback()) {
-                  <p [class]="promoFeedbackIsError() ? 'text-rose-400' : 'text-emerald-400'" class="text-[11px] font-semibold">
-                    {{ promoFeedback() }}
-                  </p>
+                  @if (promoFeedback()) {
+                    <p [class]="promoFeedbackIsError() ? 'text-rose-400' : 'text-emerald-400'" class="text-[11px] font-semibold">
+                      {{ promoFeedback() }}
+                    </p>
+                  }
+                  </form>
                 }
-              </form>
+              </div>
 
               <!-- Existing Promotions List -->
               <div class="space-y-2.5">
@@ -1739,8 +1807,9 @@ import {
                                   </span>
                                 }
                                 @if (promo.row_enabled) {
-                                  <span class="glass-badge glass-badge-emerald font-bold uppercase text-[9px] px-1.5 py-0">
-                                    ROW #1 ({{ getPromotionRowMatchCount(promo) }} pkgs)
+                                  <span class="glass-badge glass-badge-emerald font-bold uppercase text-[9px] px-1.5 py-0 inline-flex items-center gap-1">
+                                    <app-theme-icon [name]="promo.row_icon || 'trophy'" sizeClass="w-3 h-3"></app-theme-icon>
+                                    <span>ROW #1 ({{ getPromotionRowMatchCount(promo) }} pkgs)</span>
                                   </span>
                                 }
                                 @if (getPromotionStatus(promo) === 'active') {
@@ -1830,6 +1899,7 @@ export class ProfileDrawerComponent implements OnInit {
   readonly activeTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions'>('packages');
 
   // Admin Promotional Slide & Package Row #1 Form State
+  readonly showPromoForm = signal(false);
   readonly promoEditingId = signal<string | null>(null);
   promoTitle = '';
   promoShortDesc = '';
@@ -1847,6 +1917,12 @@ export class ProfileDrawerComponent implements OnInit {
   readonly promoRowTitle = signal('');
   readonly promoRowSubtitle = signal('');
   readonly promoRowIcon = signal<PromoRowIcon>('trophy');
+  readonly promoRowIconOptions = PROMO_ROW_ICON_OPTIONS;
+  readonly isPromoIconMenuOpen = signal(false);
+  readonly selectedPromoIconLabel = computed(() => {
+    const current = this.promoRowIcon();
+    return this.promoRowIconOptions.find(opt => opt.value === current)?.label ?? 'Trophy';
+  });
   readonly promoRowFilterTags = signal<string[]>([]);
   readonly promoRowFilterType = signal<'all' | 'game' | 'mod' | 'txp'>('all');
   readonly promoRowFilterSource = signal<'all' | 'official' | 'git'>('all');
@@ -2105,6 +2181,8 @@ export class ProfileDrawerComponent implements OnInit {
 
   resetPromotionForm(): void {
     this.promoEditingId.set(null);
+    this.showPromoForm.set(false);
+    this.isPromoIconMenuOpen.set(false);
     this.promoTitle = '';
     this.promoShortDesc = '';
     this.promoBannerUrl = '';
@@ -2274,6 +2352,16 @@ export class ProfileDrawerComponent implements OnInit {
     return this.packageService.getMatchingPackagesForPromotionRow(promo).length;
   }
 
+  togglePromoIconMenu(event: Event): void {
+    event.stopPropagation();
+    this.isPromoIconMenuOpen.update(v => !v);
+  }
+
+  selectPromoRowIcon(icon: PromoRowIcon): void {
+    this.promoRowIcon.set(icon);
+    this.isPromoIconMenuOpen.set(false);
+  }
+
   setPromoPresetDays(days: number): void {
     const startBase = this.promoStartsAtLocal ? new Date(this.promoStartsAtLocal) : new Date();
     const baseMs = Number.isFinite(startBase.getTime()) ? startBase.getTime() : Date.now();
@@ -2286,6 +2374,7 @@ export class ProfileDrawerComponent implements OnInit {
 
   onEditPromotion(promo: HeroPromotion): void {
     if (!this.authService.isAdmin()) return;
+    this.showPromoForm.set(true);
     this.promoEditingId.set(promo.id);
     this.promoTitle = promo.title || '';
     this.promoShortDesc = promo.short_desc || '';

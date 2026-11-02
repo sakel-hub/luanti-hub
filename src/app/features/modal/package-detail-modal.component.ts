@@ -30,6 +30,7 @@ import { PackageBadgesComponent } from '../../shared/components/package-badges.c
 import { DownloadAnalyticsChartComponent } from '../../shared/components/download-analytics-chart.component';
 import { PackageCardComponent } from '../card/package-card.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideX,
   LucideShare2,
@@ -56,7 +57,11 @@ import {
   LucideTag,
   LucideTrash2,
   LucideTrendingUp,
-  LucideRefreshCw
+  LucideRefreshCw,
+  LucidePlay,
+  LucideMaximize2,
+  LucideZoomIn,
+  LucideZoomOut
 } from '@lucide/angular';
 
 @Component({
@@ -73,6 +78,7 @@ import {
     DownloadAnalyticsChartComponent,
     PackageCardComponent,
     TranslatePipe,
+    ThemeIconComponent,
     LucideX,
     LucideShare2,
     LucideHeart,
@@ -98,7 +104,11 @@ import {
     LucideTag,
     LucideTrash2,
     LucideTrendingUp,
-    LucideRefreshCw
+    LucideRefreshCw,
+    LucidePlay,
+    LucideMaximize2,
+    LucideZoomIn,
+    LucideZoomOut
   ],
   template: `
     @if (package) {
@@ -475,15 +485,11 @@ import {
                                   />
                                   <div class="absolute inset-0 bg-slate-950/35 group-hover:bg-slate-950/20 transition-colors flex items-center justify-center">
                                     <div class="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl glass-btn text-slate-100 group-hover:text-white flex items-center justify-center shadow-2xl group-hover:scale-105 active:scale-95 transition-all duration-300">
-                                      <svg class="w-6 h-6 sm:w-7 sm:h-7 ml-0.5 text-sky-300 group-hover:text-white fill-current transition-colors" viewBox="0 0 24 24">
-                                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                                      </svg>
+                                      <svg lucidePlay class="w-6 h-6 sm:w-7 sm:h-7 ml-0.5 text-sky-300 group-hover:text-white fill-current transition-colors"></svg>
                                     </div>
                                   </div>
                                   <span class="absolute top-3 left-3 px-3 py-1.5 rounded-xl glass-btn text-[10px] font-bold uppercase tracking-wider text-slate-200 flex items-center gap-1.5 pointer-events-none">
-                                    <svg class="w-3 h-3 text-sky-400 fill-current" viewBox="0 0 24 24">
-                                      <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                                    </svg>
+                                    <svg lucidePlay class="w-3 h-3 text-sky-400 fill-current"></svg>
                                     <span>{{ 'modal.videoPreview' | translate }}</span>
                                   </span>
                                   <button
@@ -492,12 +498,7 @@ import {
                                     [appTooltip]="'card.enlargeVideo' | translate"
                                     [attr.aria-label]="'card.enlargeVideo' | translate"
                                     class="absolute top-3 right-3 p-2 rounded-xl glass-btn text-slate-200 hover:text-white opacity-85 group-hover:opacity-100 transition cursor-pointer z-20">
-                                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                      <polyline points="15 3 21 3 21 9"></polyline>
-                                      <polyline points="9 21 3 21 3 15"></polyline>
-                                      <line x1="21" y1="3" x2="14" y2="10"></line>
-                                      <line x1="3" y1="21" x2="10" y2="14"></line>
-                                    </svg>
+                                    <svg lucideMaximize2 class="w-4 h-4"></svg>
                                   </button>
                                 </div>
                               }
@@ -520,12 +521,7 @@ import {
                                   [appTooltip]="'modal.enlargeImage' | translate"
                                   [attr.aria-label]="'modal.enlargeImage' | translate"
                                   class="absolute top-3 right-3 p-2 rounded-xl glass-btn text-slate-200 hover:text-white opacity-85 group-hover:opacity-100 transition cursor-pointer z-20">
-                                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="15 3 21 3 21 9"></polyline>
-                                    <polyline points="9 21 3 21 3 15"></polyline>
-                                    <line x1="21" y1="3" x2="14" y2="10"></line>
-                                    <line x1="3" y1="21" x2="10" y2="14"></line>
-                                  </svg>
+                                  <svg lucideMaximize2 class="w-4 h-4"></svg>
                                 </button>
                               </div>
                             }
@@ -604,9 +600,7 @@ import {
                             @if (slide.type === 'video') {
                               <div class="absolute inset-0 bg-slate-950/35 flex items-center justify-center">
                                 <div class="w-7 h-7 rounded-lg glass-btn flex items-center justify-center text-slate-100">
-                                  <svg class="w-3.5 h-3.5 ml-0.5 text-sky-300 fill-current" viewBox="0 0 24 24">
-                                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                                  </svg>
+                                  <svg lucidePlay class="w-3.5 h-3.5 ml-0.5 text-sky-300 fill-current"></svg>
                                 </div>
                               </div>
                             }
@@ -847,8 +841,9 @@ import {
 
                     @if (showConfLocations()) {
                       <div class="mt-2 p-3 rounded-xl bg-slate-950/80 border border-white/10 space-y-2 text-[11px] text-slate-300">
-                        <p class="text-sky-300 font-medium leading-relaxed">
-                          💡 {{ 'setup.confShortcutTip' | translate }}
+                        <p class="text-sky-300 font-medium leading-relaxed flex items-start gap-1.5">
+                          <app-theme-icon name="lightbulb" sizeClass="w-3.5 h-3.5 mt-0.5"></app-theme-icon>
+                          <span>{{ 'setup.confShortcutTip' | translate }}</span>
                         </p>
                         <div class="space-y-1.5">
                           <div>
@@ -1532,8 +1527,9 @@ import {
                                 @if (rev.is_positive !== undefined) {
                                   <span
                                     [class]="rev.is_positive ? 'bg-emerald-500/10 text-emerald-300 border-emerald-400/25' : 'bg-rose-500/10 text-rose-300 border-rose-400/25'"
-                                    class="px-1.5 py-0.5 rounded-md border text-[9px] font-semibold">
-                                    {{ rev.is_positive ? '👍 Recommended' : '👎 Not Recommended' }}
+                                    class="px-1.5 py-0.5 rounded-md border text-[9px] font-semibold inline-flex items-center gap-1">
+                                    <app-theme-icon [name]="rev.is_positive ? 'thumbs-up' : 'thumbs-down'" sizeClass="w-2.5 h-2.5" [useThemeColor]="false"></app-theme-icon>
+                                    <span>{{ rev.is_positive ? 'Recommended' : 'Not Recommended' }}</span>
                                   </span>
                                 }
                               } @else {
@@ -2024,14 +2020,11 @@ import {
                 type="button"
                 (click)="toggleLightboxZoom($event)"
                 class="px-3.5 py-2 rounded-xl glass-btn text-slate-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer">
-                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="11" cy="11" r="8"></circle>
-                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                  @if (!isLightboxZoomed()) {
-                    <line x1="11" y1="8" x2="11" y2="14"></line>
-                  }
-                  <line x1="8" y1="11" x2="14" y2="11"></line>
-                </svg>
+                @if (isLightboxZoomed()) {
+                  <svg lucideZoomOut class="w-4 h-4"></svg>
+                } @else {
+                  <svg lucideZoomIn class="w-4 h-4"></svg>
+                }
                 <span>{{ isLightboxZoomed() ? '1x' : '2x' }}</span>
               </button>
 

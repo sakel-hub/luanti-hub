@@ -4790,6 +4790,16 @@ supported_games = minetest_game, voxelibre
 
     const drawerEl = drawerFixture.nativeElement as HTMLElement;
     expect(drawerEl.textContent).toContain('Promotions');
+    // Collapsed by default to save vertical real estate
+    expect(drawerComp.showPromoForm()).toBe(false);
+    expect(drawerEl.querySelectorAll('input[type="datetime-local"]').length).toBe(0);
+
+    // Expanding the Create Promotional Campaign panel reveals the form controls
+    const toggleBtn = drawerEl.querySelector('[data-testid="promo-form-toggle"]') as HTMLElement;
+    expect(toggleBtn).toBeTruthy();
+    toggleBtn.click();
+    drawerFixture.detectChanges();
+    expect(drawerComp.showPromoForm()).toBe(true);
     const datePickers = drawerEl.querySelectorAll('input[type="datetime-local"]');
     expect(datePickers.length).toBe(2);
 
@@ -6666,6 +6676,20 @@ supported_games = minetest_game, voxelibre
         'sakel'
       )
     ).toBe(true);
+
+    // 4. Verify centralized ThemeIconComponent & PROMO_ROW_ICON_OPTIONS (no emojis in labels)
+    const { PROMO_ROW_ICON_OPTIONS } = await import('./shared/components/theme-icon.component');
+    expect(PROMO_ROW_ICON_OPTIONS.map(o => o.value)).toEqual([
+      'trophy',
+      'gamepad',
+      'sparkles',
+      'flame',
+      'star',
+      'rocket'
+    ]);
+    for (const opt of PROMO_ROW_ICON_OPTIONS) {
+      expect(opt.label).toMatch(/^[A-Za-z0-9 ]+$/);
+    }
 
     pkgService.setPromotions([]);
   });

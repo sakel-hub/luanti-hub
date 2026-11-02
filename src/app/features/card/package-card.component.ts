@@ -26,7 +26,9 @@ import {
   LucideChevronDown,
   LucideDownload,
   LucideUser,
-  LucideMaximize2
+  LucideMaximize2,
+  LucideVolume2,
+  LucideVolumeX
 } from '@lucide/angular';
 
 export const HOVER_VIDEO_INTENT_MS = 180;
@@ -49,7 +51,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
     LucideChevronDown,
     LucideDownload,
     LucideUser,
-    LucideMaximize2
+    LucideMaximize2,
+    LucideVolume2,
+    LucideVolumeX
   ],
   template: `
     <div
@@ -139,17 +143,9 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 [attr.aria-label]="(isHoverMuted() ? 'card.unmuteVideo' : 'card.muteVideo') | translate"
                 class="w-7 h-7 rounded-xl glass-btn text-slate-100 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer shadow-lg">
                 @if (isHoverMuted()) {
-                  <svg class="w-3.5 h-3.5 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <line x1="23" y1="9" x2="17" y2="15"></line>
-                    <line x1="17" y1="9" x2="23" y2="15"></line>
-                  </svg>
+                  <svg lucideVolumeX class="w-3.5 h-3.5 text-slate-300"></svg>
                 } @else {
-                  <svg class="w-3.5 h-3.5 text-sky-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-                  </svg>
+                  <svg lucideVolume2 class="w-3.5 h-3.5 text-sky-400"></svg>
                 }
               </button>
             </div>

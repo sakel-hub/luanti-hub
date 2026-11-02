@@ -16,18 +16,12 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { PackageCardComponent } from '../card/package-card.component';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideChevronLeft,
   LucideChevronRight,
   LucideArrowRight,
-  LucideFlame,
-  LucideZap,
-  LucideGamepad2,
-  LucideCpu,
-  LucidePalette,
-  LucideGitBranch,
   LucideInfo,
-  LucideStar,
   LucideExternalLink,
   LucidePlus
 } from '@lucide/angular';
@@ -41,17 +35,11 @@ import {
     PackageCardComponent,
     TooltipDirective,
     TranslatePipe,
+    ThemeIconComponent,
     LucideChevronLeft,
     LucideChevronRight,
     LucideArrowRight,
-    LucideFlame,
-    LucideZap,
-    LucideGamepad2,
-    LucideCpu,
-    LucidePalette,
-    LucideGitBranch,
     LucideInfo,
-    LucideStar,
     LucideExternalLink,
     LucidePlus
   ],
@@ -62,35 +50,8 @@ import {
         <!-- Section Header -->
         <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-2 flex-wrap">
           <div class="flex items-center gap-2 flex-wrap">
-            @if (icon === 'trophy') {
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-amber-400 flex-shrink-0">
-                <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
-                <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
-                <path d="M4 22h16" />
-                <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
-                <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
-                <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
-              </svg>
-            } @else if (icon === 'sparkles') {
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-amber-400 flex-shrink-0">
-                <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
-              </svg>
-            } @else if (icon === 'star') {
-              <svg lucideStar class="w-5 h-5 text-amber-400 flex-shrink-0"></svg>
-            } @else if (icon === 'rocket') {
-              <svg lucideZap class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
-            } @else if (icon === 'flame') {
-              <svg lucideFlame class="w-5 h-5 text-amber-500 flex-shrink-0"></svg>
-            } @else if (icon === 'git') {
-              <svg lucideGitBranch class="w-5 h-5 text-amber-400 flex-shrink-0"></svg>
-            } @else if (icon === 'zap') {
-              <svg lucideZap class="w-5 h-5 text-amber-400 flex-shrink-0"></svg>
-            } @else if (icon === 'gamepad') {
-              <svg lucideGamepad2 class="w-5 h-5 text-emerald-400 flex-shrink-0"></svg>
-            } @else if (icon === 'cpu') {
-              <svg lucideCpu class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
-            } @else if (icon === 'palette') {
-              <svg lucidePalette class="w-5 h-5 text-purple-400 flex-shrink-0"></svg>
+            @if (icon) {
+              <app-theme-icon [name]="icon" sizeClass="w-5 h-5"></app-theme-icon>
             }
             <h2 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
               @if (promoBadge) {
