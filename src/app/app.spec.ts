@@ -7360,6 +7360,61 @@ supported_games = minetest_game, voxelibre
     expect(octetPngProxyRes.status).toBe(200);
     expect(octetPngProxyRes.headers.get('Content-Type')).toBe('image/png');
     fetchSpy.mockRestore();
+
+    // 8. Validate wrangler.toml against Cloudflare Pages supportedPagesConfigFields schema
+    //    (prevents Worker-only fields like [observability] or main from breaking Cloudflare Pages builds)
+    const supportedPagesConfigFields = new Set([
+      'pages_build_output_dir',
+      'name',
+      'compatibility_date',
+      'compatibility_flags',
+      'send_metrics',
+      'no_bundle',
+      'limits',
+      'placement',
+      'vars',
+      'durable_objects',
+      'kv_namespaces',
+      'queues',
+      'r2_buckets',
+      'd1_databases',
+      'vectorize',
+      'hyperdrive',
+      'services',
+      'analytics_engine_datasets',
+      'ai',
+      'version_metadata',
+      'dev',
+      'mtls_certificates',
+      'browser',
+      'upload_source_maps',
+      'env'
+    ]);
+    const nodeFs = (globalThis as any).process?.getBuiltinModule?.('node:fs');
+    if (nodeFs) {
+      const tomlText = String(nodeFs.readFileSync('wrangler.toml', 'utf8'));
+      expect(tomlText).toContain('pages_build_output_dir');
+      expect(tomlText).toContain('upload_source_maps = true');
+      expect(tomlText).not.toContain('[observability]');
+      let inTopLevel = true;
+      for (const rawLine of tomlText.split(/\r?\n/)) {
+        const line = rawLine.replace(/#.*$/, '').trim();
+        if (!line) continue;
+        const sectionMatch = line.match(/^\[+([a-zA-Z0-9_.-]+)\]+$/);
+        if (sectionMatch) {
+          inTopLevel = false;
+          const rootSection = sectionMatch[1].split('.')[0];
+          expect(supportedPagesConfigFields.has(rootSection)).toBe(true);
+          continue;
+        }
+        if (inTopLevel) {
+          const keyMatch = line.match(/^([a-zA-Z0-9_-]+)\s*=/);
+          if (keyMatch) {
+            expect(supportedPagesConfigFields.has(keyMatch[1])).toBe(true);
+          }
+        }
+      }
+    }
   });
 
   it('deduplicates Git raw URL variants, .cdb.json vs ContentDB uploads galleries, and primary thumbnail hashes across backend and frontend', async () => {

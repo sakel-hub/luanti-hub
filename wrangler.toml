@@ -2,6 +2,7 @@ name = "luanti-hub"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = "dist/luanti-hub/browser"
+upload_source_maps = true
 
 # Cloudflare D1 Database Binding
 # After creating your database on Cloudflare, paste your database_id below:
@@ -13,8 +14,3 @@ database_id = "4facd457-15a0-453d-bc77-d3493b9eae04"
 # Cloudflare Workers AI Binding (Free Tier: 10,000 Neurons/day; used on final package publish with static fallback)
 [ai]
 binding = "AI"
-
-# Cloudflare Workers & Pages Observability (persists invocation logs & uncaught exception stack traces in Dashboard)
-[observability]
-enabled = true
-head_sampling_rate = 1
