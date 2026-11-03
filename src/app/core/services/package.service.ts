@@ -34,6 +34,8 @@ import {
   detectGitProviderFromUrl,
   toProxiedGitImageIfNeeded,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   normalizeRepoComparisonKey,
@@ -43,6 +45,8 @@ import {
   parseDownloadSizeBytes as sharedParseDownloadSizeBytes,
   formatByteSize as sharedFormatByteSize,
   computeStarRatingFromData as sharedComputeStarRatingFromData,
+  parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   extractEmbeddedVideo as sharedExtractEmbeddedVideo
 } from '../config/package-utils.config';
 
@@ -165,6 +169,7 @@ export class PackageService {
   private readonly _deepHydratedVersion = signal<number>(0);
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
+  private readonly reviewsVerifiedEmptyKeys = new Set<string>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
   private readonly releasesPromiseCache = new Map<string, Promise<PackageRelease[]>>();
   private readonly releaseNotesCache = new Map<string, ReleaseNotesPayload>();
@@ -1488,11 +1493,13 @@ export class PackageService {
       const hadLegacyMeta = Boolean(
         localStorage.getItem('lh_hydrated_meta_v5') ||
           localStorage.getItem('lh_hydrated_meta_v6') ||
-          localStorage.getItem('lh_hydrated_meta_v7')
+          localStorage.getItem('lh_hydrated_meta_v7') ||
+          localStorage.getItem('lh_hydrated_meta_v8')
       );
       localStorage.removeItem('lh_hydrated_meta_v5');
       localStorage.removeItem('lh_hydrated_meta_v6');
       localStorage.removeItem('lh_hydrated_meta_v7');
+      localStorage.removeItem('lh_hydrated_meta_v8');
       if (hadLegacyMeta) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -1517,7 +1524,7 @@ export class PackageService {
           }
         }
       }
-      const raw = localStorage.getItem('lh_hydrated_meta_v8');
+      const raw = localStorage.getItem('lh_hydrated_meta_v9');
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
@@ -1525,17 +1532,18 @@ export class PackageService {
           if (k && v && typeof v === 'object') {
             const entry = { ...(v as Partial<LuantiPackage>) };
             if (typeof entry.thumbnail === 'string') {
-              const normThumb = toProxiedGitImageIfNeeded(entry.thumbnail);
-              entry.thumbnail = normThumb && normThumb !== 'logo.svg' ? normThumb : undefined;
+              entry.thumbnail = sanitizePackageImageUrl(entry.thumbnail);
             }
             if (typeof entry.banner === 'string') {
-              const normBanner = toProxiedGitImageIfNeeded(entry.banner);
-              entry.banner = normBanner && normBanner !== 'logo.svg' ? normBanner : undefined;
+              entry.banner = sanitizePackageImageUrl(entry.banner);
             }
             if (Array.isArray(entry.screenshots)) {
               entry.screenshots = entry.screenshots
-                .map(s => toProxiedGitImageIfNeeded(s))
-                .filter(s => Boolean(s) && s !== 'logo.svg');
+                .map(s => sanitizePackageImageUrl(s) || '')
+                .filter(Boolean);
+            }
+            if (entry.review_thread_counts) {
+              entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
             }
             this.hydratedMetaCache.set(k.toLowerCase(), entry);
           }
@@ -1558,7 +1566,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v8', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v9', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -1647,30 +1655,27 @@ export class PackageService {
       ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
       : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
 
-    const rawRevCounts =
+    const rawItemRevCounts =
       item.review_thread_counts ||
       (item.reviews && !Array.isArray(item.reviews) && typeof item.reviews === 'object'
         ? item.reviews
-        : cachedMeta?.review_thread_counts);
-    const reviewThreadCounts = rawRevCounts
-      ? {
-          positive: Number(rawRevCounts.positive || 0),
-          neutral: Number(rawRevCounts.neutral || 0),
-          negative: Number(rawRevCounts.negative || 0)
-        }
-      : undefined;
-
+        : undefined);
     const explicitZeroRevCounts = Boolean(
-      reviewThreadCounts &&
-      reviewThreadCounts.positive === 0 &&
-      reviewThreadCounts.neutral === 0 &&
-      reviewThreadCounts.negative === 0 &&
+      rawItemRevCounts &&
+      typeof rawItemRevCounts === 'object' &&
+      Number(rawItemRevCounts.positive || 0) === 0 &&
+      Number(rawItemRevCounts.neutral || 0) === 0 &&
+      Number(rawItemRevCounts.negative || 0) === 0 &&
       !(Number(item?.review_score ?? item?.luantihub_score ?? 0) > 0) &&
+      !(Number(item?.score ?? 0) > 0 && Number(item?.score ?? 0) <= 5) &&
       (!Array.isArray(item?.reviews_list) || item.reviews_list.length === 0)
     );
     if (explicitZeroRevCounts && cachedMeta && cachedMeta.score) {
       cachedMeta.score = 0;
     }
+    const reviewThreadCounts =
+      parseNonZeroReviewThreadCounts(rawItemRevCounts) ||
+      (explicitZeroRevCounts ? undefined : parseNonZeroReviewThreadCounts(cachedMeta?.review_thread_counts));
     const score = explicitZeroRevCounts
       ? 0
       : this.computeStarRatingFromData(
@@ -1688,32 +1693,31 @@ export class PackageService {
       cachedMeta?.banner,
       cachedMeta?.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
-    const gitShotCandidate = rawGitShotCandidate ? this.toProxiedGitImageIfNeeded(rawGitShotCandidate) : undefined;
+    const gitShotCandidate = rawGitShotCandidate ? sanitizePackageImageUrl(rawGitShotCandidate) : undefined;
     const nonGitThumbCandidate = [
       item.thumbnail,
       item.thumbnail_url,
       cachedMeta?.thumbnail
-    ].find(u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u));
+    ]
+      .map(u => sanitizePackageImageUrl(u))
+      .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
     const nonLogoThumbCandidate = [
       nonGitThumbCandidate,
       gitShotCandidate,
-      item.thumbnail,
-      item.thumbnail_url,
-      cachedMeta?.thumbnail
-    ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-    const thumbnail = this.toProxiedGitImageIfNeeded(nonLogoThumbCandidate || 'logo.svg') || 'logo.svg';
+      sanitizePackageImageUrl(item.thumbnail),
+      sanitizePackageImageUrl(item.thumbnail_url),
+      sanitizePackageImageUrl(cachedMeta?.thumbnail)
+    ].find(Boolean);
+    const thumbnail = nonLogoThumbCandidate || 'logo.svg';
     const nonLogoBannerCandidate = [
       gitShotCandidate,
-      item.banner,
-      item.banner_url,
-      cachedMeta?.banner,
-      item.screenshots?.[0]?.url,
-      item.screenshots?.[0]
-    ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-    let banner = this.toProxiedGitImageIfNeeded(nonLogoBannerCandidate);
-    if (!banner && thumbnail && thumbnail.includes('thumbnail.png')) {
-      banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
-    }
+      sanitizePackageImageUrl(item.banner),
+      sanitizePackageImageUrl(item.banner_url),
+      sanitizePackageImageUrl(cachedMeta?.banner),
+      sanitizePackageImageUrl(item.screenshots?.[0]?.url),
+      sanitizePackageImageUrl(item.screenshots?.[0])
+    ].find(Boolean);
+    const banner = nonLogoBannerCandidate;
 
     const rawItemFileSize =
       item.download_size === undefined && String(item.file_size || '').trim() === '2 KB'
@@ -1970,32 +1974,33 @@ export class PackageService {
       secondary.banner,
       primary.thumbnail,
       secondary.thumbnail
-    ].find(u => this.isGitScreenshotUrl(u));
+    ]
+      .map(u => sanitizePackageImageUrl(u))
+      .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
 
-    const nonGitThumb = [primary.thumbnail, secondary.thumbnail].find(
-      u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
-    );
+    const nonGitThumb = [primary.thumbnail, secondary.thumbnail]
+      .map(u => sanitizePackageImageUrl(u))
+      .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
 
     const mergedScreenshots = this.mergePackageScreenshots(
       [preferredGitShot, nonGitThumb],
       primary.screenshots,
       secondary.screenshots
     );
-    const resolvedThumb = this.toProxiedGitImageIfNeeded(
+    const resolvedThumb =
       nonGitThumb ||
       preferredGitShot ||
-      ((primary.thumbnail && primary.thumbnail !== 'logo.svg')
-        ? primary.thumbnail
-        : (secondary.thumbnail && secondary.thumbnail !== 'logo.svg' ? secondary.thumbnail : 'logo.svg'))
-    ) || 'logo.svg';
+      sanitizePackageImageUrl(primary.thumbnail) ||
+      sanitizePackageImageUrl(secondary.thumbnail) ||
+      'logo.svg';
     const nonLogoBannerMerge = [
       preferredGitShot,
-      primary.banner,
+      sanitizePackageImageUrl(primary.banner),
       mergedScreenshots[0],
-      secondary.banner,
-      resolvedThumb
-    ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-    const resolvedBanner = this.toProxiedGitImageIfNeeded(nonLogoBannerMerge || resolvedThumb) || 'logo.svg';
+      sanitizePackageImageUrl(secondary.banner),
+      sanitizePackageImageUrl(resolvedThumb)
+    ].find(Boolean);
+    const resolvedBanner = nonLogoBannerMerge || resolvedThumb || 'logo.svg';
 
     const cdbDl = Math.max(primary.contentdb_downloads || 0, secondary.contentdb_downloads || 0);
     const lhDl = Math.max(primary.luantihub_downloads || 0, secondary.luantihub_downloads || 0);
@@ -2557,6 +2562,8 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v12');
         sessionStorage.removeItem('lh_boot_cache_v13');
         sessionStorage.removeItem('lh_boot_cache_v14');
+        sessionStorage.removeItem('lh_boot_cache_v15');
+        sessionStorage.removeItem('lh_boot_cache_v16');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -3082,7 +3089,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v15');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v16');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -3155,7 +3162,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v15',
+          'lh_boot_cache_v16',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -3300,11 +3307,12 @@ export class PackageService {
             sessionStorage.removeItem('lh_boot_cache_v11');
             sessionStorage.removeItem('lh_boot_cache_v12');
             sessionStorage.removeItem('lh_boot_cache_v13');
-            if (sessionStorage.getItem('lh_boot_cache_v14')) {
+            if (sessionStorage.getItem('lh_boot_cache_v14') || sessionStorage.getItem('lh_boot_cache_v15')) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
+              sessionStorage.removeItem('lh_boot_cache_v15');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v15');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v16');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -3711,13 +3719,13 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
-          const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail].find(u =>
-            this.isGitScreenshotUrl(u)
-          );
-          const preferredGitShot = rawPreferredGitShot ? this.toProxiedGitImageIfNeeded(rawPreferredGitShot) : undefined;
-          const nonGitHydrateThumb = [pkg.thumbnail, h.thumbnail].find(
-            u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
-          );
+          const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail]
+            .map(u => sanitizePackageImageUrl(u))
+            .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
+          const preferredGitShot = rawPreferredGitShot;
+          const nonGitHydrateThumb = [pkg.thumbnail, h.thumbnail]
+            .map(u => sanitizePackageImageUrl(u))
+            .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
           const mergedShots = this.mergePackageScreenshots(
             [preferredGitShot, nonGitHydrateThumb],
             h.screenshots,
@@ -3726,31 +3734,25 @@ export class PackageService {
           const nonLogoHydrateThumb = [
             nonGitHydrateThumb,
             preferredGitShot,
-            pkg.thumbnail,
-            h.thumbnail
-          ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-          const resolvedThumb = this.toProxiedGitImageIfNeeded(nonLogoHydrateThumb);
+            sanitizePackageImageUrl(pkg.thumbnail),
+            sanitizePackageImageUrl(h.thumbnail)
+          ].find(Boolean);
+          const resolvedThumb = nonLogoHydrateThumb;
           const nonLogoHydrateBanner = [
             preferredGitShot,
-            pkg.banner,
-            h.banner,
+            sanitizePackageImageUrl(pkg.banner),
+            sanitizePackageImageUrl(h.banner),
             mergedShots.length > 0 ? mergedShots[0] : undefined,
             nonLogoHydrateThumb
-          ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-          const resolvedBanner = this.toProxiedGitImageIfNeeded(nonLogoHydrateBanner);
+          ].find(Boolean);
+          const resolvedBanner = nonLogoHydrateBanner;
 
-          const rawRevCounts =
-            h.review_thread_counts ||
-            (h.reviews && !Array.isArray(h.reviews) && typeof h.reviews === 'object'
-              ? h.reviews
-              : pkg.review_thread_counts);
-          const resolvedRevCounts = rawRevCounts
-            ? {
-                positive: Number(rawRevCounts.positive || 0),
-                neutral: Number(rawRevCounts.neutral || 0),
-                negative: Number(rawRevCounts.negative || 0)
-              }
-            : undefined;
+          const resolvedRevCounts =
+            parseNonZeroReviewThreadCounts(h.review_thread_counts) ||
+            parseNonZeroReviewThreadCounts(
+              h.reviews && !Array.isArray(h.reviews) && typeof h.reviews === 'object' ? h.reviews : undefined
+            ) ||
+            parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
           const resolvedScore = this.computeStarRatingFromData(
             { ...h, review_thread_counts: resolvedRevCounts },
             pkg.score || 0
@@ -5492,15 +5494,15 @@ export class PackageService {
         );
 
         // Query ContentDB upstream fallback only when Edge API did not resolve (e.g. local ng serve without wrangler)
-        const hasScreenshots = Array.isArray(data?.screenshots) && data.screenshots.length > 0;
         const cdbGalleryCountInEdge = Array.isArray(data?.screenshots)
           ? data.screenshots.filter((s: any) => {
-              const url = typeof s === 'string' ? s : s?.url;
+              const url = sanitizePackageImageUrl(typeof s === 'string' ? s : s?.url);
               return Boolean(url) && !this.isGitScreenshotUrl(url);
             }).length
           : 0;
+        const hasScreenshots = cdbGalleryCountInEdge > 0 || (Array.isArray(data?.screenshots) && data.screenshots.some((s: any) => Boolean(sanitizePackageImageUrl(typeof s === 'string' ? s : s?.url))));
         const hasNonGitThumbInEdge = Boolean(
-          data?.thumbnail && data.thumbnail !== 'logo.svg' && !this.isGitScreenshotUrl(data.thumbnail)
+          sanitizePackageImageUrl(data?.thumbnail) && !this.isGitScreenshotUrl(data.thumbnail)
         );
         const hasDistinctLongDesc = Boolean(
           data?.long_description &&
@@ -5522,7 +5524,7 @@ export class PackageService {
           isDevServerLocalhost &&
           (cdbGalleryCountInEdge < (deepFetch ? 2 : 1) ||
             !hasNonGitThumbInEdge ||
-            (!data?.review_thread_counts && !data?.reviews))
+            (!parseNonZeroReviewThreadCounts(data?.review_thread_counts) && !parseNonZeroReviewThreadCounts(data?.reviews)))
         ) {
           try {
             let localCdbData: any = null;
@@ -5538,7 +5540,7 @@ export class PackageService {
                 const candidate = await devRes.json().catch(() => null);
                 if (candidate && typeof candidate === 'object') {
                   localCdbData = localCdbData ? { ...candidate, ...localCdbData } : candidate;
-                  if (Array.isArray(localCdbData.screenshots) && localCdbData.screenshots.length > 0 && localCdbData.thumbnail) {
+                  if (Array.isArray(localCdbData.screenshots) && localCdbData.screenshots.length > 0 && sanitizePackageImageUrl(localCdbData.thumbnail)) {
                     break;
                   }
                 }
@@ -5546,38 +5548,34 @@ export class PackageService {
             }
             if (localCdbData && typeof localCdbData === 'object') {
               data = data || {};
+              const parsedLocalRevCounts = parseNonZeroReviewThreadCounts(localCdbData.reviews);
               if (
-                localCdbData.reviews &&
-                typeof localCdbData.reviews === 'object' &&
-                !Array.isArray(localCdbData.reviews) &&
-                !data.review_thread_counts &&
-                !data.reviews
+                parsedLocalRevCounts &&
+                !parseNonZeroReviewThreadCounts(data.review_thread_counts) &&
+                !parseNonZeroReviewThreadCounts(data.reviews)
               ) {
-                data.reviews = localCdbData.reviews;
-                data.review_thread_counts = {
-                  positive: Number(localCdbData.reviews.positive || 0),
-                  neutral: Number(localCdbData.reviews.neutral || 0),
-                  negative: Number(localCdbData.reviews.negative || 0)
-                };
+                data.reviews = parsedLocalRevCounts;
+                data.review_thread_counts = parsedLocalRevCounts;
               }
+              const sanitizedLocalThumb = sanitizePackageImageUrl(localCdbData.thumbnail);
               if (
-                localCdbData.thumbnail &&
-                (!data.thumbnail || data.thumbnail === 'logo.svg' || this.isGitScreenshotUrl(data.thumbnail))
+                sanitizedLocalThumb &&
+                (!sanitizePackageImageUrl(data.thumbnail) || this.isGitScreenshotUrl(data.thumbnail))
               ) {
-                data.thumbnail = localCdbData.thumbnail;
+                data.thumbnail = sanitizedLocalThumb;
               }
               if (Array.isArray(localCdbData.screenshots) && localCdbData.screenshots.length > 0) {
                 data.screenshots = this.mergePackageScreenshots(
-                  [data.banner, data.thumbnail, localCdbData.thumbnail],
+                  [data.banner, data.thumbnail, sanitizedLocalThumb],
                   data.screenshots,
                   localCdbData.screenshots
                 );
               }
               if (
-                (!data.banner || data.banner === 'logo.svg') &&
-                (data.screenshots?.[0] || localCdbData.thumbnail)
+                !sanitizePackageImageUrl(data.banner) &&
+                (data.screenshots?.[0] || sanitizedLocalThumb)
               ) {
-                data.banner = data.screenshots?.[0] || localCdbData.thumbnail;
+                data.banner = data.screenshots?.[0] || sanitizedLocalThumb;
               }
             }
           } catch {
@@ -5734,22 +5732,24 @@ export class PackageService {
           pkg.file_size ||
           undefined;
 
+        const normalizedBundledReviews = Array.isArray(data.reviews_list)
+          ? this.normalizeContentDbReviews(data.reviews_list, pkg.id)
+          : undefined;
+
         // Populate in-memory reviews and releases caches directly from bundled response
-        // Only touch reviewsCache during deepFetch (modal open), and never overwrite existing non-empty cached reviews with []
-        if (deepFetch && Array.isArray(data.reviews_list)) {
-          const normalizedBundled = this.normalizeContentDbReviews(data.reviews_list, pkg.id);
+        // Only touch reviewsCache during deepFetch (modal open), and never cache [] for official ContentDB packages
+        // unless verified via /reviews endpoint, so fetchReviews() can still query live reviews if bundled list was empty.
+        if (deepFetch && normalizedBundledReviews) {
           const existingCachedRevs = this.reviewsCache.get(cacheKey);
-          const hasCdbReviewsInBundled = normalizedBundled.some(r => r.source === 'contentdb' && r.author.username !== 'contentdb_user');
-          const rawCdbCounts = data.review_thread_counts || (data.reviews && !Array.isArray(data.reviews) && typeof data.reviews === 'object' ? data.reviews : pkg.review_thread_counts);
-          const expectedCdbTotal = rawCdbCounts
-            ? (Number(rawCdbCounts.positive || 0) + Number(rawCdbCounts.neutral || 0) + Number(rawCdbCounts.negative || 0))
-            : undefined;
-          if (normalizedBundled.length > 0 && (hasCdbReviewsInBundled || isPureGitOnly || expectedCdbTotal === 0)) {
-            this.setBoundedCache(this.reviewsCache, cacheKey, normalizedBundled, 60);
+          const hasCdbReviewsInBundled = normalizedBundledReviews.some(
+            r => r.source === 'contentdb' && r.author.username !== 'contentdb_user'
+          );
+          if (normalizedBundledReviews.length > 0 && (hasCdbReviewsInBundled || isPureGitOnly)) {
+            this.setBoundedCache(this.reviewsCache, cacheKey, normalizedBundledReviews, 60);
           } else if (
-            normalizedBundled.length === 0 &&
+            normalizedBundledReviews.length === 0 &&
             (!existingCachedRevs || existingCachedRevs.length === 0) &&
-            (isPureGitOnly || (rawCdbCounts !== undefined && expectedCdbTotal === 0))
+            isPureGitOnly
           ) {
             this.setBoundedCache(this.reviewsCache, cacheKey, [], 60);
           }
@@ -5955,26 +5955,19 @@ export class PackageService {
           ? Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
           : Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(pkg.downloads || 0));
 
-        const rawRevCounts =
-          data.review_thread_counts ||
-          (data.reviews && !Array.isArray(data.reviews) && typeof data.reviews === 'object'
-            ? data.reviews
-            : undefined);
-        const reviewThreadCounts = rawRevCounts
-          ? {
-              positive: Number(rawRevCounts.positive || 0),
-              neutral: Number(rawRevCounts.neutral || 0),
-              negative: Number(rawRevCounts.negative || 0)
-            }
-          : pkg.review_thread_counts;
+        const reviewThreadCounts =
+          parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
+          parseNonZeroReviewThreadCounts(
+            data.reviews && !Array.isArray(data.reviews) && typeof data.reviews === 'object' ? data.reviews : undefined
+          ) ||
+          deriveReviewThreadCountsFromList(normalizedBundledReviews) ||
+          parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
 
         const resolvedScore = this.computeStarRatingFromData(
           {
             ...data,
             review_thread_counts: reviewThreadCounts,
-            reviews_list: Array.isArray(data.reviews_list)
-              ? this.normalizeContentDbReviews(data.reviews_list, pkg.id)
-              : undefined
+            reviews_list: normalizedBundledReviews
           },
           pkg.score || 0
         );
@@ -5998,44 +5991,45 @@ export class PackageService {
           pkg.thumbnail,
           liveCatalogPkg?.banner,
           liveCatalogPkg?.thumbnail
-        ].find(u => this.isGitScreenshotUrl(u));
-        const preferredGitShot = rawPreferredGitShot ? this.toProxiedGitImageIfNeeded(rawPreferredGitShot) : undefined;
-        const nonGitDetailThumb = [data.thumbnail, pkg.thumbnail, liveCatalogPkg?.thumbnail].find(
-          u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
-        );
+        ]
+          .map(u => sanitizePackageImageUrl(u))
+          .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
+        const preferredGitShot = rawPreferredGitShot;
+        const nonGitDetailThumb = [data.thumbnail, pkg.thumbnail, liveCatalogPkg?.thumbnail]
+          .map(u => sanitizePackageImageUrl(u))
+          .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
         const mergedScreenshotsList = this.mergePackageScreenshots(
           [preferredGitShot, nonGitDetailThumb],
           data.screenshots,
           pkg.screenshots,
           liveCatalogPkg?.screenshots
         );
+        const fallbackExistingShots = (pkg.screenshots || liveCatalogPkg?.screenshots || [])
+          .map(s => sanitizePackageImageUrl(s) || '')
+          .filter(Boolean);
         const screenshots =
           mergedScreenshotsList.length > 0
             ? mergedScreenshotsList
-            : (pkg.screenshots || liveCatalogPkg?.screenshots);
+            : (fallbackExistingShots.length > 0 ? fallbackExistingShots : undefined);
         const resolvedNonGitThumb =
           nonGitDetailThumb || (screenshots || []).find(s => !this.isGitScreenshotUrl(s));
         const nonLogoDetailThumb = [
           resolvedNonGitThumb,
           preferredGitShot,
-          data.thumbnail,
-          pkg.thumbnail,
-          liveCatalogPkg?.thumbnail
-        ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-        const resolvedDetailThumb = this.toProxiedGitImageIfNeeded(
-          nonLogoDetailThumb || data.thumbnail || pkg.thumbnail || liveCatalogPkg?.thumbnail
-        );
+          sanitizePackageImageUrl(data.thumbnail),
+          sanitizePackageImageUrl(pkg.thumbnail),
+          sanitizePackageImageUrl(liveCatalogPkg?.thumbnail)
+        ].find(Boolean);
+        const resolvedDetailThumb = nonLogoDetailThumb || 'logo.svg';
         const nonLogoDetailBanner = [
           preferredGitShot,
           screenshots && screenshots[0],
-          data.banner,
-          pkg.banner,
-          liveCatalogPkg?.banner,
+          sanitizePackageImageUrl(data.banner),
+          sanitizePackageImageUrl(pkg.banner),
+          sanitizePackageImageUrl(liveCatalogPkg?.banner),
           nonLogoDetailThumb
-        ].find(u => typeof u === 'string' && u.trim() && u.trim() !== 'logo.svg');
-        const resolvedDetailBanner = this.toProxiedGitImageIfNeeded(
-          nonLogoDetailBanner || resolvedDetailThumb
-        );
+        ].find(Boolean);
+        const resolvedDetailBanner = nonLogoDetailBanner || resolvedDetailThumb;
 
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
@@ -7772,15 +7766,20 @@ export class PackageService {
     const targetAuthorLower = (pkg.author || '').toLowerCase();
     const targetNameLower = (pkg.name || '').toLowerCase();
     const prevMeta = this.hydratedMetaCache.get(targetIdLower);
-    const fallbackCounts = pkg.review_thread_counts || prevMeta?.review_thread_counts;
+    const derivedCounts = deriveReviewThreadCountsFromList(reviewsList);
+    const fallbackCounts =
+      derivedCounts ||
+      parseNonZeroReviewThreadCounts(pkg.review_thread_counts) ||
+      parseNonZeroReviewThreadCounts(prevMeta?.review_thread_counts);
     const avg = validRatings.length > 0
       ? Number((validRatings.reduce((sum, r) => sum + r, 0) / validRatings.length).toFixed(1))
       : this.computeStarRatingFromData({ review_thread_counts: fallbackCounts }, 0);
 
-    if (prevMeta || avg > 0) {
+    if (prevMeta || avg > 0 || derivedCounts) {
       this.hydratedMetaCache.set(targetIdLower, {
         ...(prevMeta || {}),
         score: avg,
+        ...(derivedCounts ? { review_thread_counts: derivedCounts } : {}),
         rating_checked: true
       } as Partial<LuantiPackage>);
       this.scheduleHydratedMetaPersist();
@@ -7793,7 +7792,11 @@ export class PackageService {
           ((current.author || '').toLowerCase() === targetAuthorLower &&
             (current.name || '').toLowerCase() === targetNameLower))
       ) {
-        const merged = { ...current, score: avg };
+        const merged = {
+          ...current,
+          score: avg,
+          ...(derivedCounts ? { review_thread_counts: derivedCounts } : {})
+        };
         this.updateSeoMeta(merged);
         return merged;
       }
@@ -7805,7 +7808,11 @@ export class PackageService {
         ((item.author || '').toLowerCase() === targetAuthorLower &&
           (item.name || '').toLowerCase() === targetNameLower)
       ) {
-        return { ...item, score: avg };
+        return {
+          ...item,
+          score: avg,
+          ...(derivedCounts ? { review_thread_counts: derivedCounts } : {})
+        };
       }
       return item;
     }));
@@ -7816,7 +7823,11 @@ export class PackageService {
           ((item.author || '').toLowerCase() === targetAuthorLower &&
             (item.name || '').toLowerCase() === targetNameLower)
         ) {
-          return { ...item, score: avg };
+          return {
+            ...item,
+            score: avg,
+            ...(derivedCounts ? { review_thread_counts: derivedCounts } : {})
+          };
         }
         return item;
       });
@@ -7878,15 +7889,6 @@ export class PackageService {
   async fetchReviews(pkg: LuantiPackage, forceRefresh = false): Promise<CommunityReview[]> {
     const cacheKey = pkg.id.toLowerCase();
     const cached = this.reviewsCache.get(cacheKey);
-    const activePkg = this._activePackage();
-    const cachedMeta = this.hydratedMetaCache.get(cacheKey);
-    const revCounts =
-      pkg.review_thread_counts ||
-      (activePkg && activePkg.id?.toLowerCase() === cacheKey ? activePkg.review_thread_counts : undefined) ||
-      cachedMeta?.review_thread_counts;
-    const expectedTotal = revCounts
-      ? Number(revCounts.positive || 0) + Number(revCounts.neutral || 0) + Number(revCounts.negative || 0)
-      : undefined;
     const isOfficialPkg =
       pkg.source === 'official' ||
       pkg.sources?.includes('official') ||
@@ -7897,7 +7899,7 @@ export class PackageService {
     if (
       cached !== undefined &&
       !forceRefresh &&
-      (cached.length > 0 || isPureGitOnly || (revCounts !== undefined && expectedTotal === 0))
+      (cached.length > 0 || isPureGitOnly || this.reviewsVerifiedEmptyKeys.has(cacheKey))
     ) {
       if (cached.length > 0) {
         this.applyReviewAverageToPackage(pkg, cached);
@@ -7914,11 +7916,13 @@ export class PackageService {
 
     try {
       let edgeReviews: CommunityReview[] = [];
+      let edgeRespondedOk = false;
       if (this.edgeApiAvailable) {
         const res = await fetch(`/api/packages/${encAuthor}/${encName}/reviews`, {
           cache: 'no-store'
         }).catch(() => null);
         if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+          edgeRespondedOk = true;
           const data = await res.json().catch(() => null);
           if (Array.isArray(data)) {
             edgeReviews = this.normalizeContentDbReviews(data, pkg.id);
@@ -7982,7 +7986,8 @@ export class PackageService {
         return edgeReviews;
       }
 
-      if (isPureGitOnly || (revCounts !== undefined && expectedTotal === 0)) {
+      if (isPureGitOnly || edgeRespondedOk) {
+        this.reviewsVerifiedEmptyKeys.add(cacheKey);
         this.setBoundedCache(this.reviewsCache, cacheKey, [], 60);
       }
     } catch (err) {
@@ -8016,6 +8021,7 @@ export class PackageService {
           return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to submit review.') };
         }
         this.reviewsCache.delete(cacheKey);
+        this.reviewsVerifiedEmptyKeys.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
         if (data.score !== undefined) {
           const newScore = Number(data.score) || 0;
@@ -8150,6 +8156,7 @@ export class PackageService {
           return { success: false, message: sanitizeUserFacingError(data.error, 'Failed to delete review.') };
         }
         this.reviewsCache.delete(cacheKey);
+        this.reviewsVerifiedEmptyKeys.delete(cacheKey);
         this.deepHydratedIds.delete(cacheKey);
         if (data.score !== undefined) {
           const newScore = Number(data.score) || 0;

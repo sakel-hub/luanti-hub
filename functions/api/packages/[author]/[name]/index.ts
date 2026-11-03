@@ -27,6 +27,8 @@ import {
   parseDownloadSizeBytes,
   formatByteSize,
   extractEngineVersionString,
+  parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   computeStarRatingFromData,
   normalizeGitRepoInputUrl,
   sortAndCapReleases,
@@ -35,6 +37,8 @@ import {
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags
@@ -421,7 +425,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v17/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v18/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -469,6 +473,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       });
     }
 
+    if (d1Pkg) {
+      if (isDeadMirrorScreenshotUrl(d1Pkg.thumbnail_url)) {
+        d1Pkg.thumbnail_url = null;
+      }
+      if (isDeadMirrorScreenshotUrl(d1Pkg.banner_url)) {
+        d1Pkg.banner_url = null;
+      }
+      if (typeof d1Pkg.screenshots === 'string' && d1Pkg.screenshots.includes('/storage/screenshots/')) {
+        const cleanedShots = parseJsonArray(d1Pkg.screenshots).filter(s => !isDeadMirrorScreenshotUrl(s));
+        d1Pkg.screenshots = cleanedShots.length > 0 ? JSON.stringify(cleanedShots) : null;
+      }
+    }
+
     const effectivePkgId = d1Pkg?.id || pkgId;
     const effectivePkgIdLower = String(effectivePkgId).toLowerCase();
 
@@ -482,28 +499,23 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       Number(d1Pkg?.contentdb_downloads || 0) > 0 ||
       (!isOfficialFast && Number(d1Pkg?.downloads_count || 0) > 0);
 
-    let d1ParsedRevCounts: { positive: number; neutral: number; negative: number } | undefined;
-    if (d1Pkg && typeof d1Pkg.review_thread_counts === 'string' && d1Pkg.review_thread_counts.trim()) {
-      try {
-        const obj = JSON.parse(d1Pkg.review_thread_counts);
-        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-          d1ParsedRevCounts = {
-            positive: Number(obj.positive || 0),
-            neutral: Number(obj.neutral || 0),
-            negative: Number(obj.negative || 0)
-          };
-        }
-      } catch {
-        // ignore
-      }
+    const d1ParsedRevCounts = parseNonZeroReviewThreadCounts(d1Pkg?.review_thread_counts);
+    if (d1Pkg && !d1ParsedRevCounts && d1Pkg.review_thread_counts) {
+      d1Pkg.review_thread_counts = null;
     }
-    const hasCdbRevCountsInD1 =
-      Boolean(d1ParsedRevCounts) &&
-      (Number(d1ParsedRevCounts?.positive || 0) +
-        Number(d1ParsedRevCounts?.neutral || 0) +
-        Number(d1ParsedRevCounts?.negative || 0)) > 0;
+    const hasCdbRevCountsInD1 = Boolean(d1ParsedRevCounts);
+    const hasValidD1ThumbOrBanner = Boolean(
+      sanitizePackageImageUrl(d1Pkg?.thumbnail_url) || sanitizePackageImageUrl(d1Pkg?.banner_url)
+    );
 
-    if (isLite && d1Pkg && d1Pkg.license && hasHydratedDownloads) {
+    if (
+      isLite &&
+      d1Pkg &&
+      d1Pkg.license &&
+      hasHydratedDownloads &&
+      hasValidD1ThumbOrBanner &&
+      (!isOfficialFast || hasCdbRevCountsInD1)
+    ) {
       const hasStoredGitShotLite =
         isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
       const [revAvgFast, liteGitScan] = await Promise.all([
@@ -696,10 +708,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             Number(parsedRevCounts?.negative || 0);
           const hasStoredGitShotFast =
             isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
-          const nonGitD1Shots = d1Screenshots.filter((s: string) => !isGitRepositoryAssetUrl(s));
+          const nonGitD1Shots = d1Screenshots.filter(
+            (s: string) => !isGitRepositoryAssetUrl(s) && !isDeadMirrorScreenshotUrl(s)
+          );
           const hasCdbGalleryScreenshots = nonGitD1Shots.length >= 2;
-          const shouldFetchCdbReviewsFast = expectedCdbCount > 0 || (isOfficialFast && !parsedRevCounts);
-          const [cdbRevPayload, fastGitReleases, fastGitScan, fastCdbDetail] = await Promise.all([
+          const shouldFetchCdbReviewsFast = isOfficialFast || expectedCdbCount > 0;
+          const [cdbRevPayload, fastGitReleases, fastGitScan, fastCdbDetail, fastCdbReleases] = await Promise.all([
             shouldFetchCdbReviewsFast
               ? fetchUpstreamJsonCached<any[]>(
                   `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/reviews/`,
@@ -724,29 +738,29 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                   21600
                 ).catch(() => null)
               : Promise.resolve(null),
-            isOfficialFast && (!hasCdbGalleryScreenshots || !parsedRevCounts)
+            isOfficialFast && (!hasCdbGalleryScreenshots || !parsedRevCounts || !hasValidD1ThumbOrBanner)
               ? fetchUpstreamJsonCached<any>(
                   `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/`,
                   600
                 ).catch(() => null)
+              : Promise.resolve(null),
+            isOfficialFast && d1Releases.length <= 1
+              ? fetchUpstreamJsonCached<any[]>(
+                  `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/releases/`,
+                  300
+                ).catch(() => null)
               : Promise.resolve(null)
           ]);
-          if (
-            !parsedRevCounts &&
-            fastCdbDetail?.reviews &&
-            typeof fastCdbDetail.reviews === 'object' &&
-            !Array.isArray(fastCdbDetail.reviews)
-          ) {
-            parsedRevCounts = {
-              positive: Number(fastCdbDetail.reviews.positive || 0),
-              neutral: Number(fastCdbDetail.reviews.neutral || 0),
-              negative: Number(fastCdbDetail.reviews.negative || 0)
-            };
+          const fastBundledReviews = buildNormalizedReviews(d1Reviews, cdbRevPayload, effectivePkgId);
+          if (!parsedRevCounts) {
+            parsedRevCounts =
+              parseNonZeroReviewThreadCounts(fastCdbDetail?.reviews) ||
+              deriveReviewThreadCountsFromList(fastBundledReviews);
           }
           const fastVideo = extractEmbeddedVideo(
-            d1Pkg.video_url || fastGitScan?.cdbMeta?.video_url,
-            d1Pkg.video_thumbnail_url,
-            d1Pkg.long_desc
+            d1Pkg.video_url || fastCdbDetail?.video_url || fastGitScan?.cdbMeta?.video_url,
+            d1Pkg.video_thumbnail_url || fastCdbDetail?.video_thumbnail_url,
+            d1Pkg.long_desc || extractLongDescriptionText(fastCdbDetail?.long_description)
           );
           const fastGitScanVerified = Boolean(fastGitScan && fastGitScan.gitRepoStatus === 'verified');
           const fastGitShotRaw = fastGitScanVerified
@@ -754,67 +768,76 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             : (fastGitScan?.screenshotUrl ||
                (isGitRepositoryAssetUrl(d1Pkg.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
                (isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined));
-          const fastGitShot = fastGitShotRaw ? toProxiedGitImageIfNeeded(fastGitShotRaw) : undefined;
+          const fastGitShot = fastGitShotRaw ? sanitizePackageImageUrl(fastGitShotRaw) : undefined;
           const fastFilteredD1Screenshots = fastGitScanVerified
-            ? d1Screenshots.filter((s: string) => !isGitRepositoryAssetUrl(s))
-            : d1Screenshots;
+            ? d1Screenshots.filter((s: string) => !isGitRepositoryAssetUrl(s) && !isDeadMirrorScreenshotUrl(s))
+            : d1Screenshots.filter((s: string) => !isDeadMirrorScreenshotUrl(s));
           const nonGitFastD1Thumb =
-            d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
-              ? d1Pkg.thumbnail_url
+            d1Pkg.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
+              ? sanitizePackageImageUrl(d1Pkg.thumbnail_url)
               : undefined;
-          const nonLogoFastD1Thumb =
-            d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? d1Pkg.thumbnail_url : undefined;
-          const nonLogoFastD1Banner =
-            d1Pkg.banner_url && d1Pkg.banner_url !== 'logo.svg' ? d1Pkg.banner_url : undefined;
+          const nonLogoFastD1Thumb = sanitizePackageImageUrl(d1Pkg.thumbnail_url);
+          const nonLogoFastD1Banner = sanitizePackageImageUrl(d1Pkg.banner_url);
+          const fastCdbThumb = sanitizePackageImageUrl(fastCdbDetail?.thumbnail);
           const fastMergedScreenshots = mergeScreenshotsPreferringGit(
-            [fastGitShot, fastCdbDetail?.thumbnail, !fastGitScanVerified ? nonLogoFastD1Thumb : nonGitFastD1Thumb],
+            [fastGitShot, fastCdbThumb, !fastGitScanVerified ? nonLogoFastD1Thumb : nonGitFastD1Thumb],
             fastGitScan?.screenshots,
             fastFilteredD1Screenshots,
             fastCdbDetail?.screenshots
           );
           const nonGitFastThumb =
-            fastCdbDetail?.thumbnail ||
+            fastCdbThumb ||
             nonGitFastD1Thumb ||
             fastMergedScreenshots.find(s => !isGitRepositoryAssetUrl(s));
-          const fastThumb = toProxiedGitImageIfNeeded(
+          const fastThumb = sanitizePackageImageUrl(
             nonGitFastThumb || fastGitShot || (!fastGitScanVerified ? nonLogoFastD1Thumb : undefined)
-          ) || undefined;
-          const fastBanner = toProxiedGitImageIfNeeded(
+          );
+          const fastBanner = sanitizePackageImageUrl(
             fastGitShot || fastMergedScreenshots[0] || (!fastGitScanVerified ? nonLogoFastD1Banner : undefined) || fastThumb
-          ) || undefined;
-          const fastBundledReviews = buildNormalizedReviews(d1Reviews, cdbRevPayload, effectivePkgId);
+          );
           const fastScore = computeStarRating(
             { reviews: parsedRevCounts, reviews_list: fastBundledReviews, score: d1Pkg.score },
             d1Pkg.score,
             d1ReviewAvg
           );
-          const newlyDiscoveredRevCountsFast = !d1ParsedRevCounts && parsedRevCounts ? JSON.stringify(parsedRevCounts) : null;
+          const newlyDiscoveredRevCountsFast =
+            !d1ParsedRevCounts && parsedRevCounts ? JSON.stringify(parsedRevCounts) : null;
           const newlyDiscoveredScoreFast =
             !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && fastScore >= 1 && fastScore <= 5
               ? fastScore
               : null;
+          const shouldPersistFastShots =
+            fastMergedScreenshots.length > 0 &&
+            (fastMergedScreenshots.length >= d1Screenshots.length || !d1Pkg.screenshots);
           if (
-            d1Pkg.provider !== 'contentdb' &&
-            ((!d1Pkg.video_url && fastVideo.video_url) ||
-              (!hasStoredGitShotFast && fastGitShot) ||
-              (fastMergedScreenshots.length > 0 && fastMergedScreenshots.length > d1Screenshots.length) ||
-              newlyDiscoveredRevCountsFast ||
-              newlyDiscoveredScoreFast !== null)
+            (!d1Pkg.video_url && fastVideo.video_url) ||
+            (!hasStoredGitShotFast && fastGitShot) ||
+            (!d1Pkg.thumbnail_url && fastThumb) ||
+            (!d1Pkg.banner_url && fastBanner) ||
+            shouldPersistFastShots ||
+            newlyDiscoveredRevCountsFast ||
+            newlyDiscoveredScoreFast !== null
           ) {
             context.env.DB.prepare(`
               UPDATE packages
               SET video_url = COALESCE(video_url, ?),
                   video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
                   thumbnail_url = CASE
-                    WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                    WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
                     ELSE thumbnail_url
                   END,
-                  banner_url = COALESCE(?, banner_url),
+                  banner_url = CASE
+                    WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                    ELSE COALESCE(?, banner_url)
+                  END,
                   screenshots = CASE
                     WHEN ? IS NOT NULL THEN ?
                     ELSE screenshots
                   END,
-                  review_thread_counts = COALESCE(review_thread_counts, ?),
+                  review_thread_counts = CASE
+                    WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+                    ELSE review_thread_counts
+                  END,
                   score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END
               WHERE id = ?
             `).bind(
@@ -822,12 +845,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               fastVideo.video_thumbnail_url || null,
               fastThumb || null,
               fastBanner || null,
-              fastMergedScreenshots.length >= d1Screenshots.length && fastMergedScreenshots.length > 0
-                ? JSON.stringify(fastMergedScreenshots)
-                : null,
-              fastMergedScreenshots.length >= d1Screenshots.length && fastMergedScreenshots.length > 0
-                ? JSON.stringify(fastMergedScreenshots)
-                : null,
+              fastBanner || null,
+              shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
+              shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
               newlyDiscoveredRevCountsFast,
               newlyDiscoveredScoreFast,
               newlyDiscoveredScoreFast,
@@ -838,7 +858,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             d1Pkg.author_name || author,
             d1Pkg.name || name,
             d1Releases,
-            null,
+            fastCdbReleases,
             fastGitReleases
           );
           if (
@@ -894,7 +914,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               // Non-fatal D1 sync error
             }
           }
-          const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
+          const cdbDl = Math.max(
+            Number(d1Pkg.contentdb_downloads || 0),
+            Number(fastCdbDetail?.downloads || 0)
+          );
           const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum);
           const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
           const fastSources: Array<'official' | 'git'> = [];
@@ -907,45 +930,59 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             newestFastReleaseDate &&
             (!d1Pkg.updated_at || new Date(newestFastReleaseDate).getTime() > new Date(d1Pkg.updated_at).getTime())
               ? newestFastReleaseDate
-              : (d1Pkg.updated_at || undefined);
+              : (d1Pkg.updated_at || fastCdbDetail?.updated_at || undefined);
+
+          const fastDetailTags = Array.isArray(fastCdbDetail?.tags)
+            ? fastCdbDetail.tags
+                .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
+                .filter(Boolean)
+            : [];
+          const fastCombinedTags = Array.from(new Set([...d1TagsFast, ...fastDetailTags])).filter(Boolean);
+          const fastLongDesc =
+            d1Pkg.long_desc ||
+            extractLongDescriptionText(fastCdbDetail?.long_description) ||
+            d1Pkg.short_desc ||
+            '';
+          const fastRepoUrl = d1Pkg.repo_url || fastCdbDetail?.repo || fastCdbDetail?.repo_url || undefined;
 
           const fastFullPayload = {
             id: effectivePkgId,
             author: d1Pkg.author_name || author,
             author_id: d1Pkg.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
             name: d1Pkg.name || name,
-            title: d1Pkg.title || name,
-            type: d1Pkg.type || 'mod',
-            short_desc: d1Pkg.short_desc || '',
-            long_description: d1Pkg.long_desc || d1Pkg.short_desc || '',
-            desc: d1Pkg.long_desc || d1Pkg.short_desc || '',
+            title: d1Pkg.title || fastCdbDetail?.title || name,
+            type: d1Pkg.type || fastCdbDetail?.type || 'mod',
+            short_desc: d1Pkg.short_desc || fastCdbDetail?.short_desc || fastCdbDetail?.short_description || '',
+            long_description: fastLongDesc,
+            desc: fastLongDesc,
             thumbnail: fastThumb,
             banner: fastBanner,
             screenshots: fastMergedScreenshots,
-            license: d1Pkg.license,
-            media_license: d1Pkg.media_license || d1Pkg.license,
-            min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
-            max_minetest_version: d1Pkg.max_minetest_version || undefined,
-            repo_url: d1Pkg.repo_url || undefined,
-            git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified',
-            issue_tracker: d1Pkg.issue_tracker || undefined,
-            forum_url: d1Pkg.forum_url || undefined,
-            forums: d1Pkg.forum_url || undefined,
-            donate_url: d1Pkg.donate_url || undefined,
-            translation_url: d1Pkg.translation_url || undefined,
+            license: d1Pkg.license || fastCdbDetail?.license,
+            media_license: d1Pkg.media_license || d1Pkg.license || fastCdbDetail?.media_license || fastCdbDetail?.license,
+            min_minetest_version: d1Pkg.min_minetest_version || extractEngineVersionString(fastCdbDetail?.min_minetest_version) || '5.0.0',
+            max_minetest_version: d1Pkg.max_minetest_version || extractEngineVersionString(fastCdbDetail?.max_minetest_version) || undefined,
+            repo_url: fastRepoUrl,
+            git_repo_status: fastRepoUrl ? 'verified' : 'unverified',
+            website: fastCdbDetail?.website || undefined,
+            issue_tracker: d1Pkg.issue_tracker || fastCdbDetail?.issue_tracker || undefined,
+            forum_url: d1Pkg.forum_url || fastCdbDetail?.forum_url || fastCdbDetail?.forums || undefined,
+            forums: d1Pkg.forum_url || fastCdbDetail?.forum_url || fastCdbDetail?.forums || undefined,
+            donate_url: d1Pkg.donate_url || fastCdbDetail?.donate_url || undefined,
+            translation_url: d1Pkg.translation_url || fastCdbDetail?.translation_url || undefined,
             video_url: fastVideo.video_url || undefined,
             video_thumbnail_url: fastVideo.video_thumbnail_url || undefined,
-            dev_state: d1Pkg.dev_state || undefined,
+            dev_state: d1Pkg.dev_state || fastCdbDetail?.dev_state || undefined,
             provides: parseJsonArray(d1Pkg.provides),
             content_warnings: parseJsonArray(d1Pkg.content_warnings),
             ai_disclosures: parseJsonArray(d1Pkg.ai_disclosures),
             maintainers: parseJsonArray(d1Pkg.maintainers),
             review_thread_counts: parsedRevCounts,
             game_support: d1GameSupport.length > 0 ? d1GameSupport : undefined,
-            created_at: d1Pkg.created_at || undefined,
+            created_at: d1Pkg.created_at || fastCdbDetail?.created_at || undefined,
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
-            tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
+            tags: fastCombinedTags.length > 0 ? fastCombinedTags : [d1Pkg.type || 'mod'],
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
@@ -1601,40 +1638,41 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     : (gitProbeScan?.screenshotUrl ||
        (isGitRepositoryAssetUrl(d1Pkg?.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
        (isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined));
-  const gitScreenshot = gitScreenshotRaw ? toProxiedGitImageIfNeeded(gitScreenshotRaw) : undefined;
+  const gitScreenshot = gitScreenshotRaw ? sanitizePackageImageUrl(gitScreenshotRaw) : undefined;
   const rawScreenshotsSource = Array.isArray(upstreamData.screenshots)
     ? upstreamData.screenshots
     : (Array.isArray(forClientData?.screenshots) ? forClientData.screenshots : []);
-  const d1ParsedShots = parseJsonArray(d1Pkg?.screenshots);
+  const d1ParsedShots = parseJsonArray(d1Pkg?.screenshots).filter(
+    (s: string) => !isDeadMirrorScreenshotUrl(s)
+  );
   const filteredD1Shots = gitProbeVerified
     ? d1ParsedShots.filter((s: string) => !isGitRepositoryAssetUrl(s))
     : d1ParsedShots;
   const nonGitD1Thumb =
-    d1Pkg?.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
-      ? d1Pkg.thumbnail_url
+    d1Pkg?.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
+      ? sanitizePackageImageUrl(d1Pkg.thumbnail_url)
       : undefined;
-  const nonLogoD1Thumb =
-    d1Pkg?.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? d1Pkg.thumbnail_url : undefined;
-  const nonLogoD1Banner =
-    d1Pkg?.banner_url && d1Pkg.banner_url !== 'logo.svg' ? d1Pkg.banner_url : undefined;
+  const nonLogoD1Thumb = sanitizePackageImageUrl(d1Pkg?.thumbnail_url);
+  const nonLogoD1Banner = sanitizePackageImageUrl(d1Pkg?.banner_url);
+  const sanitizedUpstreamThumb = sanitizePackageImageUrl(upstreamData.thumbnail);
   const screenshots: string[] = mergeScreenshotsPreferringGit(
-    [gitScreenshot, upstreamData.thumbnail, gitProbeVerified ? nonGitD1Thumb : nonLogoD1Thumb],
+    [gitScreenshot, sanitizedUpstreamThumb, gitProbeVerified ? nonGitD1Thumb : nonLogoD1Thumb],
     gitProbeScan?.screenshots,
     filteredD1Shots,
     rawScreenshotsSource
   );
   const nonGitDetailThumb =
-    upstreamData.thumbnail ||
+    sanitizedUpstreamThumb ||
     nonGitD1Thumb ||
     screenshots.find(s => !isGitRepositoryAssetUrl(s));
   const resolvedThumbRaw = nonGitDetailThumb || gitScreenshot || (!gitProbeVerified ? nonLogoD1Thumb : null) || null;
-  const resolvedThumb = resolvedThumbRaw ? toProxiedGitImageIfNeeded(String(resolvedThumbRaw)) : null;
+  const resolvedThumb = sanitizePackageImageUrl(resolvedThumbRaw) || null;
   const resolvedBannerRaw =
     gitScreenshot ||
     screenshots[0] ||
     (!gitProbeVerified ? nonLogoD1Banner : null) ||
     resolvedThumb;
-  const resolvedBanner = resolvedBannerRaw ? toProxiedGitImageIfNeeded(String(resolvedBannerRaw)) : null;
+  const resolvedBanner = sanitizePackageImageUrl(resolvedBannerRaw) || null;
 
   // Resolve download_size & file_size from /for-client/, /packages/:author/:name/, latest release, or Content-Length HEAD check
   const rawSizeSource =
@@ -1758,18 +1796,27 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     .map((m: any) => (typeof m === 'string' ? m : m?.username || m?.name || ''))
     .filter(Boolean);
 
-  const rawReviewCounts = upstreamData.reviews && !Array.isArray(upstreamData.reviews) && typeof upstreamData.reviews === 'object'
-    ? upstreamData.reviews
-    : (forClientData?.reviews && !Array.isArray(forClientData.reviews) && typeof forClientData.reviews === 'object'
-        ? forClientData.reviews
-        : undefined);
-  const reviewThreadCounts = rawReviewCounts
-    ? {
-        positive: Number(rawReviewCounts.positive || 0),
-        neutral: Number(rawReviewCounts.neutral || 0),
-        negative: Number(rawReviewCounts.negative || 0)
+  const d1ValidRevCounts = parseNonZeroReviewThreadCounts(d1Pkg?.review_thread_counts);
+  let reviewThreadCounts =
+    parseNonZeroReviewThreadCounts(upstreamData.reviews) ||
+    parseNonZeroReviewThreadCounts(forClientData?.reviews) ||
+    deriveReviewThreadCountsFromList(bundledReviews) ||
+    d1ValidRevCounts;
+
+  if (!reviewThreadCounts && isLite) {
+    const cachedScores = await fetchUpstreamJsonCached<any[]>('/scores/', 1800).catch(() => null);
+    if (Array.isArray(cachedScores)) {
+      const targetScoreEntry = cachedScores.find(
+        (s: any) =>
+          s &&
+          String(s.author || '').toLowerCase() === String(upstreamData.author || author).toLowerCase() &&
+          String(s.name || '').toLowerCase() === String(upstreamData.name || name).toLowerCase()
+      );
+      if (targetScoreEntry?.reviews) {
+        reviewThreadCounts = parseNonZeroReviewThreadCounts(targetScoreEntry.reviews);
       }
-    : undefined;
+    }
+  }
 
   const createdAt = upstreamData.created_at || forClientData?.created_at || d1Pkg?.created_at || undefined;
   const candidateUpdatedAt =
@@ -1814,11 +1861,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     d1ReviewAvg
   );
 
-  // Only backfill D1 if this package already exists as a native/Git row in D1 (never mirror upstream ContentDB packages into D1 on GET reads)
-  if (context.env.DB && d1Pkg && d1Pkg.provider !== 'contentdb' && !isLite) {
+  // Only backfill D1 if this package already exists in D1 (never insert new upstream ContentDB packages into D1 on GET reads)
+  if (context.env.DB && d1Pkg && !isLite) {
     const targetRowId = d1Pkg.id;
     const newRevCountsJson =
-      !d1Pkg.review_thread_counts && reviewThreadCounts ? JSON.stringify(reviewThreadCounts) : null;
+      !d1ValidRevCounts && reviewThreadCounts ? JSON.stringify(reviewThreadCounts) : null;
     const newScoreVal =
       !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
         ? resolvedScore
@@ -1827,9 +1874,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
+      (!d1Pkg.thumbnail_url && resolvedThumb) ||
       ((!d1Pkg.banner_url || d1Pkg.banner_url === 'logo.svg' || (!isGitRepositoryAssetUrl(d1Pkg.banner_url) && isGitRepositoryAssetUrl(resolvedBanner))) &&
         resolvedBanner &&
         resolvedBanner !== 'logo.svg') ||
+      (!d1Pkg.screenshots && screenshots.length > 0) ||
       (!d1Pkg.long_desc && extractedLongDesc) ||
       Boolean(newRevCountsJson) ||
       newScoreVal !== null ||
@@ -1841,16 +1890,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         SET short_desc = COALESCE(short_desc, ?),
             long_desc = COALESCE(long_desc, ?),
             thumbnail_url = CASE
-              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
               ELSE thumbnail_url
             END,
-            banner_url = COALESCE(?, banner_url),
+            banner_url = CASE
+              WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+              ELSE COALESCE(?, banner_url)
+            END,
             license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
             media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
             video_url = COALESCE(video_url, ?),
             video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-            screenshots = COALESCE(screenshots, ?),
-            review_thread_counts = COALESCE(review_thread_counts, ?),
+            screenshots = CASE
+              WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
+              ELSE COALESCE(screenshots, ?)
+            END,
+            review_thread_counts = CASE
+              WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+              ELSE review_thread_counts
+            END,
             score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
             tags = COALESCE(?, tags)
         WHERE id = ?
@@ -1859,10 +1917,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         extractedLongDesc || null,
         resolvedThumb || null,
         resolvedBanner || null,
+        resolvedBanner || null,
         resolvedLicense || null,
         resolvedMediaLicense || resolvedLicense || null,
         videoUrl || null,
         videoThumbnailUrl || null,
+        screenshots.length > 0 ? JSON.stringify(screenshots) : null,
         screenshots.length > 0 ? JSON.stringify(screenshots) : null,
         newRevCountsJson,
         newScoreVal,
@@ -1872,7 +1932,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       ).run().catch(() => {});
     }
 
-    if (d1Releases.length === 0 && bundledReleases.length > 0) {
+    if (d1Pkg.provider !== 'contentdb' && d1Releases.length === 0 && bundledReleases.length > 0) {
       (async () => {
         try {
           const releaseStmts = bundledReleases.slice(0, MAX_PACKAGE_RELEASES).map(rel =>
@@ -1909,8 +1969,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ...upstreamData,
     id: canonicalId,
     author_id: d1Pkg?.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
-    thumbnail: resolvedThumb || upstreamData.thumbnail || undefined,
-    banner: resolvedBanner || upstreamData.banner || undefined,
+    thumbnail: resolvedThumb || sanitizePackageImageUrl(upstreamData.thumbnail) || undefined,
+    banner: resolvedBanner || sanitizePackageImageUrl(upstreamData.banner) || undefined,
     license: resolvedLicense,
     media_license: resolvedMediaLicense,
     min_minetest_version: minVersion,

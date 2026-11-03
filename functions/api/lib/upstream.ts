@@ -285,7 +285,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -326,6 +327,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/lite/${a}/${n}`);
     }
   }
 
@@ -459,6 +463,8 @@ import {
   extractEngineVersionString,
   parseDownloadSizeBytes,
   formatByteSize,
+  parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   computeGenuineStarRating,
   computeStarRatingFromData,
   extractEmbeddedVideo
@@ -472,6 +478,8 @@ export {
   extractEngineVersionString,
   parseDownloadSizeBytes,
   formatByteSize,
+  parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   computeGenuineStarRating,
   computeStarRatingFromData,
   extractEmbeddedVideo,
@@ -3022,6 +3030,8 @@ import {
   toProxiedGitImageIfNeeded,
   unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,
@@ -3039,6 +3049,8 @@ export {
   toProxiedGitImageIfNeeded,
   unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,

@@ -90,6 +90,68 @@ export function formatByteSize(val: unknown): string | undefined {
   return undefined;
 }
 
+export interface ReviewThreadCounts {
+  positive: number;
+  neutral: number;
+  negative: number;
+}
+
+/**
+ * Parses a `review_thread_counts` JSON string or object and returns it ONLY if it has at least one
+ * non-zero thread count (`positive + neutral + negative > 0`).
+ * Note: `{ positive: 0, neutral: 0, negative: 0 }` was injected by the static mirror `contentdb.milcho.org`
+ * for all packages during failover and must never suppress live ContentDB review fetching or D1 backfill.
+ */
+export function parseNonZeroReviewThreadCounts(val: unknown): ReviewThreadCounts | undefined {
+  if (!val) return undefined;
+  let obj: any = val;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed.startsWith('{')) return undefined;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  const positive = Math.max(0, Number(obj.positive) || 0);
+  const neutral = Math.max(0, Number(obj.neutral) || 0);
+  const negative = Math.max(0, Number(obj.negative) || 0);
+  if (positive + neutral + negative <= 0) return undefined;
+  return { positive, neutral, negative };
+}
+
+/**
+ * Derives `{ positive, neutral, negative }` thread counts from a normalized `reviews_list` array
+ * when `Package.as_dict()` (`GET /api/packages/:author/:name/`) does not include a `reviews` summary object.
+ */
+export function deriveReviewThreadCountsFromList(
+  reviewsList?: any[] | null
+): ReviewThreadCounts | undefined {
+  if (!Array.isArray(reviewsList) || reviewsList.length === 0) return undefined;
+  let positive = 0;
+  let neutral = 0;
+  let negative = 0;
+  for (const r of reviewsList) {
+    if (!r || typeof r !== 'object') continue;
+    const rating = Number(r.rating);
+    if (Number.isFinite(rating) && rating >= 1 && rating <= 5) {
+      if (rating > 3) positive++;
+      else if (rating === 3) neutral++;
+      else negative++;
+    } else if (r.is_positive === true || r.recommends === true) {
+      positive++;
+    } else if (r.is_positive === false || r.recommends === false) {
+      negative++;
+    } else {
+      neutral++;
+    }
+  }
+  if (positive + neutral + negative <= 0) return undefined;
+  return { positive, neutral, negative };
+}
+
 /**
  * Computes a genuine 1.0 - 5.0 star rating from D1 reviews and/or ContentDB review arrays.
  * Returns 0 when no verified user star ratings exist.

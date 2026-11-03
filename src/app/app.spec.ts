@@ -7816,4 +7816,124 @@ supported_games = minetest_game, voxelibre
       globalThis.fetch = origFetch;
     }
   });
+
+  it('should reject dead mirror /storage/screenshots/ URLs and all-zero review_thread_counts so ContentDB images and reviews load reliably', async () => {
+    const { isDeadMirrorScreenshotUrl, sanitizePackageImageUrl, mergeScreenshotsPreferringGit } = await import(
+      './core/config/git-providers.config'
+    );
+    const { parseNonZeroReviewThreadCounts, deriveReviewThreadCountsFromList } = await import(
+      './core/config/package-utils.config'
+    );
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. Dead mirror `/storage/screenshots/...` URLs are rejected while official `/thumbnails/` and `/uploads/` are preserved
+    expect(isDeadMirrorScreenshotUrl('https://contentdb.milcho.org/storage/screenshots/TenPlus1/mobs/thumbnail.png')).toBe(true);
+    expect(isDeadMirrorScreenshotUrl('https://content.luanti.org/storage/screenshots/TenPlus1/mobs/shot-0.png')).toBe(true);
+    expect(sanitizePackageImageUrl('https://contentdb.milcho.org/storage/screenshots/TenPlus1/mobs/thumbnail.png')).toBeUndefined();
+    expect(sanitizePackageImageUrl('https://content.luanti.org/thumbnails/1/dc6e96f2d4.png')).toBe(
+      'https://content.luanti.org/thumbnails/1/dc6e96f2d4.png'
+    );
+
+    // 2. Merging screenshots for ElCeejo/draconis preserves Git screenshot + 3 ContentDB gallery uploads while discarding dead mirror URLs
+    const draconisMerged = mergeScreenshotsPreferringGit(
+      ['https://raw.githubusercontent.com/ElCeejo/draconis/main/screenshot.png'],
+      [
+        'https://content.luanti.org/storage/screenshots/ElCeejo/draconis/shot-0.png',
+        'https://cdn.content.luanti.org/uploads/6b78f710d1.png',
+        'https://cdn.content.luanti.org/uploads/f277cb49ae.png',
+        'https://cdn.content.luanti.org/uploads/89fd62a3ef.png'
+      ]
+    );
+    expect(draconisMerged).toEqual([
+      'https://raw.githubusercontent.com/ElCeejo/draconis/main/screenshot.png',
+      'https://cdn.content.luanti.org/uploads/6b78f710d1.png',
+      'https://cdn.content.luanti.org/uploads/f277cb49ae.png',
+      'https://cdn.content.luanti.org/uploads/89fd62a3ef.png'
+    ]);
+
+    // 3. All-zero mirror review_thread_counts (`{positive:0,neutral:0,negative:0}`) are rejected and derived from reviews_list
+    expect(parseNonZeroReviewThreadCounts({ positive: 0, neutral: 0, negative: 0 })).toBeUndefined();
+    expect(parseNonZeroReviewThreadCounts('{"positive":0,"neutral":0,"negative":0}')).toBeUndefined();
+    expect(
+      deriveReviewThreadCountsFromList([
+        { rating: 5, is_positive: true },
+        { rating: 5, is_positive: true },
+        { rating: 3 },
+        { rating: 1, is_positive: false }
+      ])
+    ).toEqual({ positive: 2, neutral: 1, negative: 1 });
+
+    // 4. Poisoned D1 detail response with `/storage/screenshots/` does not overwrite valid catalog thumbnail/banner on TenPlus1/mobs
+    const mobsTile = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs',
+      author: 'TenPlus1',
+      name: 'mobs',
+      title: 'Mobs Redo API',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      thumbnail: 'https://content.luanti.org/thumbnails/1/dc6e96f2d4.png',
+      banner: 'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png',
+      downloads: 521400,
+      score: 4.8
+    });
+    (pkgService as any)._packages.set([mobsTile]);
+    (pkgService as any).deepHydratedIds.delete('tenplus1/mobs');
+    (pkgService as any).reviewsCache.delete('tenplus1/mobs');
+    (pkgService as any).reviewsVerifiedEmptyKeys.delete('tenplus1/mobs');
+    (pkgService as any).edgeApiAvailable = true;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes('/api/packages/TenPlus1/mobs/reviews')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'cdb_501',
+              package_id: 'TenPlus1/mobs',
+              source: 'contentdb',
+              rating: 5,
+              is_positive: true,
+              comment: 'Essential mob API for Luanti!',
+              created_at: '2026-10-20T10:00:00Z',
+              author: { username: 'player1', display_name: 'Player 1', avatar_url: 'logo.svg' }
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          author: 'TenPlus1',
+          name: 'mobs',
+          title: 'Mobs Redo API',
+          type: 'mod',
+          license: 'MIT',
+          downloads: 521400,
+          thumbnail: 'https://content.luanti.org/storage/screenshots/TenPlus1/mobs/thumbnail.png',
+          banner: 'https://content.luanti.org/storage/screenshots/TenPlus1/mobs/shot-0.png',
+          screenshots: ['https://content.luanti.org/storage/screenshots/TenPlus1/mobs/shot-0.png'],
+          review_thread_counts: { positive: 0, neutral: 0, negative: 0 },
+          reviews_list: []
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    });
+
+    try {
+      await pkgService.loadPackageDetails(mobsTile, true);
+      const afterDetail = pkgService.packages().find(p => p.id === 'TenPlus1/mobs')!;
+      expect(afterDetail.thumbnail).toBe('https://content.luanti.org/thumbnails/1/dc6e96f2d4.png');
+      expect(afterDetail.banner).toBe('https://cdn.content.luanti.org/uploads/dc6e96f2d4.png');
+
+      // Ensure fetchReviews is NOT blocked by `{positive:0,neutral:0,negative:0}` and fetches `/api/packages/TenPlus1/mobs/reviews`
+      const fetchedRevs = await pkgService.fetchReviews(afterDetail);
+      expect(fetchedRevs.length).toBe(1);
+      expect(fetchedRevs[0].comment).toBe('Essential mob API for Luanti!');
+      expect(pkgService.packages().find(p => p.id === 'TenPlus1/mobs')?.score).toBe(5);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

@@ -4,8 +4,11 @@ import {
   ensureExtendedPackageColumns,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
+  parseNonZeroReviewThreadCounts,
   computeStarRatingFromData,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
   readEdgeCacheJson,
@@ -35,7 +38,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v4_${encodeURIComponent(
+      ? `/__api_hydrate_v5_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -78,21 +81,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
-          let parsedRowRevCounts: { positive: number; neutral: number; negative: number } | undefined;
-          if (typeof row.review_thread_counts === 'string' && row.review_thread_counts.trim()) {
-            try {
-              const obj = JSON.parse(row.review_thread_counts);
-              if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-                parsedRowRevCounts = {
-                  positive: Number(obj.positive) || 0,
-                  neutral: Number(obj.neutral) || 0,
-                  negative: Number(obj.negative) || 0
-                };
-              }
-            } catch {
-              // ignore
-            }
-          }
+          const parsedRowRevCounts = parseNonZeroReviewThreadCounts(row.review_thread_counts);
           const cdbDl = Number(row.contentdb_downloads || 0);
           const lhDl = Number(row.luantihub_downloads || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
@@ -100,12 +89,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             review_thread_counts: parsedRowRevCounts,
             score: row.score
           });
-          const gitShotD1 = isGitRepositoryAssetUrl(row.banner_url)
-            ? toProxiedGitImageIfNeeded(String(row.banner_url))
-            : (isGitRepositoryAssetUrl(row.thumbnail_url) ? toProxiedGitImageIfNeeded(String(row.thumbnail_url)) : undefined);
+          const sanitizedRowBanner = sanitizePackageImageUrl(row.banner_url);
+          const sanitizedRowThumb = sanitizePackageImageUrl(row.thumbnail_url);
+          const gitShotD1 = isGitRepositoryAssetUrl(sanitizedRowBanner)
+            ? sanitizedRowBanner
+            : (isGitRepositoryAssetUrl(sanitizedRowThumb) ? sanitizedRowThumb : undefined);
           const rowScreenshots = mergeScreenshotsPreferringGit(
-            [gitShotD1, row.banner_url, row.thumbnail_url],
-            parseJsonArray(row.screenshots)
+            [gitShotD1, sanitizedRowBanner, sanitizedRowThumb],
+            parseJsonArray(row.screenshots).filter((s: string) => !isDeadMirrorScreenshotUrl(s))
           );
 
           hydratedMap[lowerKey] = {
@@ -126,13 +117,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             video_thumbnail_url: row.video_thumbnail_url || undefined,
             repo_url: row.repo_url || undefined,
             thumbnail:
-              (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(row.thumbnail_url)
-                ? toProxiedGitImageIfNeeded(row.thumbnail_url)
+              (sanitizedRowThumb && !isGitRepositoryAssetUrl(sanitizedRowThumb)
+                ? sanitizedRowThumb
                 : undefined) ||
               rowScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
               gitShotD1 ||
-              (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.thumbnail_url) : undefined),
-            banner: gitShotD1 || (row.banner_url && row.banner_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.banner_url) : undefined),
+              sanitizedRowThumb,
+            banner: gitShotD1 || sanitizedRowBanner || rowScreenshots[0] || sanitizedRowThumb,
             screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
 
@@ -141,6 +132,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             row.license &&
             (cdbDl > 0 || row.provider !== 'contentdb') &&
             hasRealTags &&
+            Boolean(hydratedMap[lowerKey].thumbnail) &&
             (!isOfficialD1Row || Boolean(parsedRowRevCounts))
           ) {
             missingIds.delete(lowerKey);
@@ -256,6 +248,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     if (toFetchUpstream.length > 0) {
       const persistStatements: any[] = [];
       let repoScanBudget = 6; // Cap server-side Git repo scans per batch (6h Edge-cached) to preserve Worker subrequest quota
+      const scoresList = await fetchUpstreamJsonCached<any[]>('/scores/', 1800).catch(() => null);
+      const scoresByKey = new Map<string, any>();
+      if (Array.isArray(scoresList)) {
+        for (const s of scoresList) {
+          if (s?.author && s?.name) {
+            scoresByKey.set(`${s.author}/${s.name}`.toLowerCase(), s);
+          }
+        }
+      }
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
@@ -263,6 +264,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const lowerKey = rawId.toLowerCase();
           const existing = hydratedMap[lowerKey] || {};
           const existingD1Row = d1ById.get(lowerKey);
+          const scoreEntry = scoresByKey.get(lowerKey);
           const detail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
             3600
@@ -275,19 +277,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             : [];
           let detailTags = Array.from(new Set([...(existing.tags || []), ...rawUpstreamTags])).filter(Boolean);
           const detailRevCounts =
-            detail?.reviews && typeof detail.reviews === 'object' && !Array.isArray(detail.reviews)
-              ? {
-                  positive: Number(detail.reviews.positive) || 0,
-                  neutral: Number(detail.reviews.neutral) || 0,
-                  negative: Number(detail.reviews.negative) || 0
-                }
-              : existing.review_thread_counts;
+            parseNonZeroReviewThreadCounts(detail?.reviews) ||
+            parseNonZeroReviewThreadCounts(scoreEntry?.reviews) ||
+            parseNonZeroReviewThreadCounts(existing.review_thread_counts);
           const resolvedScore = computeStarRatingFromData({
             ...(detail || {}),
             review_thread_counts: detailRevCounts,
             score: existing.score
           });
-          const cdbDl = Math.max(Number(existing.contentdb_downloads || 0), Number(detail?.downloads || 0));
+          const cdbDl = Math.max(
+            Number(existing.contentdb_downloads || 0),
+            Number(detail?.downloads || 0),
+            Number(scoreEntry?.downloads || 0)
+          );
           const lhDl = Number(existing.luantihub_downloads || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
           const rawMinVer = detail?.min_minetest_version && typeof detail.min_minetest_version === 'object'
@@ -338,27 +340,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
           const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
+          const sanitizedDetailThumb = sanitizePackageImageUrl(detail?.thumbnail);
           const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
-            [gitScanShot, existing.banner, existing.thumbnail, detail?.thumbnail],
+            [gitScanShot, existing.banner, existing.thumbnail, sanitizedDetailThumb],
             gitScanCdbShots,
             existing.screenshots,
             detail?.screenshots
           );
           const primaryGitShot =
-            gitScanShot ||
+            sanitizePackageImageUrl(gitScanShot) ||
             (isGitRepositoryAssetUrl(mergedHydrateScreenshots[0]) ? mergedHydrateScreenshots[0] : undefined);
           const nonGitHydrateThumb =
-            detail?.thumbnail ||
-            (existing.thumbnail && !isGitRepositoryAssetUrl(existing.thumbnail) ? existing.thumbnail : undefined) ||
+            sanitizedDetailThumb ||
+            (existing.thumbnail && !isGitRepositoryAssetUrl(existing.thumbnail)
+              ? sanitizePackageImageUrl(existing.thumbnail)
+              : undefined) ||
             mergedHydrateScreenshots.find(s => !isGitRepositoryAssetUrl(s));
-          const resolvedHydrateThumb = nonGitHydrateThumb || primaryGitShot || existing.thumbnail || null;
+          const resolvedHydrateThumb =
+            sanitizePackageImageUrl(nonGitHydrateThumb || primaryGitShot || existing.thumbnail) || null;
           const resolvedHydrateBanner =
-            primaryGitShot ||
-            mergedHydrateScreenshots[0] ||
-            detail?.screenshots?.[0]?.url ||
-            detail?.screenshots?.[0] ||
-            existing.banner ||
-            null;
+            sanitizePackageImageUrl(
+              primaryGitShot ||
+                mergedHydrateScreenshots[0] ||
+                (typeof detail?.screenshots?.[0]?.url === 'string' ? detail.screenshots[0].url : detail?.screenshots?.[0]) ||
+                existing.banner ||
+                resolvedHydrateThumb
+            ) || null;
           hydratedMap[lowerKey] = {
             id: canonicalId,
             license: lic,
@@ -375,16 +382,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined,
-            thumbnail: toProxiedGitImageIfNeeded(resolvedHydrateThumb || '') || undefined,
-            banner: toProxiedGitImageIfNeeded(primaryGitShot || resolvedHydrateBanner || '') || undefined,
+            thumbnail: resolvedHydrateThumb || undefined,
+            banner: resolvedHydrateBanner || undefined,
             screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
           };
 
-          // Only backfill D1 if this package already exists in D1 as a native/Git row AND a missing field was discovered
-          if (env.DB && existingD1Row && existingD1Row.provider !== 'contentdb') {
+          // Only backfill D1 if this package already exists in D1 AND a missing field was discovered
+          if (env.DB && existingD1Row) {
+            const existingValidRevCounts = parseNonZeroReviewThreadCounts(existingD1Row.review_thread_counts);
             const newLic = !existingD1Row.license && lic ? lic : null;
             const newVid = !existingD1Row.video_url && videoUrl ? videoUrl : null;
-            const newRevCounts = !existingD1Row.review_thread_counts && detailRevCounts
+            const newRevCounts = !existingValidRevCounts && detailRevCounts
               ? JSON.stringify(detailRevCounts)
               : null;
             const newScore =
@@ -396,34 +404,48 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             const existingD1Tags = parseJsonArray(existingD1Row.tags);
             const newTagsJson =
               detailTags.length > existingD1Tags.length ? JSON.stringify(detailTags) : null;
-            const newShot =
-              (!existingD1Row.banner_url ||
-                existingD1Row.banner_url === 'logo.svg' ||
-                !isGitRepositoryAssetUrl(existingD1Row.banner_url)) &&
-              primaryGitShot
-                ? primaryGitShot
+            const newThumb =
+              !sanitizePackageImageUrl(existingD1Row.thumbnail_url) && resolvedHydrateThumb
+                ? resolvedHydrateThumb
                 : null;
-            if (newLic || newVid || newShot || newRevCounts || newScore !== null || newTagsJson) {
+            const newBanner =
+              (!sanitizePackageImageUrl(existingD1Row.banner_url) ||
+                (!isGitRepositoryAssetUrl(existingD1Row.banner_url) && Boolean(primaryGitShot))) &&
+              resolvedHydrateBanner
+                ? resolvedHydrateBanner
+                : null;
+            if (newLic || newVid || newThumb || newBanner || newRevCounts || newScore !== null || newTagsJson) {
               persistStatements.push(
                 env.DB.prepare(`
                   UPDATE packages
                   SET thumbnail_url = CASE
-                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
                         ELSE thumbnail_url
                       END,
-                      banner_url = COALESCE(?, banner_url),
-                      screenshots = COALESCE(screenshots, ?),
+                      banner_url = CASE
+                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                        ELSE COALESCE(?, banner_url)
+                      END,
+                      screenshots = CASE
+                        WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
+                        ELSE COALESCE(screenshots, ?)
+                      END,
                       license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
                       media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
                       video_url = COALESCE(video_url, ?),
                       video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-                      review_thread_counts = COALESCE(review_thread_counts, ?),
+                      review_thread_counts = CASE
+                        WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+                        ELSE review_thread_counts
+                      END,
                       score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
                       tags = COALESCE(?, tags)
                   WHERE id = ?
                 `).bind(
-                  newShot,
-                  newShot,
+                  newThumb || newBanner,
+                  newBanner,
+                  newBanner,
+                  mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
                   mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
                   newLic,
                   mediaLic || null,

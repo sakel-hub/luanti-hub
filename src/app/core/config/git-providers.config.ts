@@ -516,10 +516,54 @@ export function getCanonicalScreenshotKey(rawUrl?: string | null): string {
 }
 
 /**
+ * Detects legacy static mirror screenshot/thumbnail paths (`/storage/screenshots/...`)
+ * and synthetic `shot-0.png` banner replacements.
+ * Official ContentDB (`content.luanti.org` / `cdn.content.luanti.org`) does NOT serve
+ * `/storage/screenshots/...` (it returns HTTP 404); official assets use `/thumbnails/...`
+ * and `/uploads/...`.
+ */
+export function isDeadMirrorScreenshotUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const lower = rawUrl.trim().toLowerCase();
+  if (!lower || lower === 'logo.svg') return true;
+  return (
+    lower.includes('/storage/screenshots/') ||
+    (lower.includes('/thumbnails/') && lower.endsWith('/shot-0.png'))
+  );
+}
+
+/**
+ * Sanitizes a single package image URL (`thumbnail` or `banner`):
+ * - Rejects `'logo.svg'` and dead mirror `/storage/screenshots/...` or `/shot-0.png` URLs (returning `undefined`).
+ * - Rewrites legacy `content.minetest.net` or `contentdb.milcho.org` hosts to `https://content.luanti.org/`
+ *   only for valid ContentDB paths (`/thumbnails/`, `/uploads/`).
+ * - Applies `toProxiedGitImageIfNeeded` for MeseHub & Codeberg raw assets.
+ */
+export function sanitizePackageImageUrl(rawUrl?: string | null): string | undefined {
+  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed === 'logo.svg' || isDeadMirrorScreenshotUrl(trimmed)) {
+    return undefined;
+  }
+  if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/api/packages?proxy_image=')) {
+    return undefined;
+  }
+  let normalized = toProxiedGitImageIfNeeded(trimmed);
+  if (/^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i.test(normalized)) {
+    normalized = normalized.replace(
+      /^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i,
+      'https://content.luanti.org/'
+    );
+  }
+  return normalized;
+}
+
+/**
  * Single source of truth for merging and deduplicating package screenshots across backend and frontend:
  * - Always places Git repository screenshots (`screenshot.png` / `.cdb.json`) first (`gitUrls`),
  *   followed by complementary ContentDB gallery screenshots (`otherUrls`).
  * - Normalizes MeseHub & Codeberg proxy URLs (`&ngsw-bypass=true`) and ContentDB mirror hosts (`content.luanti.org`).
+ * - Rejects dead mirror `/storage/screenshots/...` and synthetic `/shot-0.png` URLs.
  * - Deduplicates Git raw URLs across branch/API variants (`/main/`, `/HEAD/`, `/raw/branch/`, `/api/v1/repos/.../raw/`)
  *   using `getCanonicalScreenshotKey`.
  * - When both a Git screenshot and multiple ContentDB gallery screenshots exist, deduplicates ContentDB's
@@ -539,23 +583,12 @@ export function mergeScreenshotsPreferringGit(
   };
 
   const normalizeCandidateUrl = (rawExtracted: string): string => {
-    if (!rawExtracted || rawExtracted === 'logo.svg') return '';
-    if (!/^https?:\/\//i.test(rawExtracted) && !rawExtracted.startsWith('/api/packages?proxy_image=')) {
-      return '';
-    }
-    let normalized = toProxiedGitImageIfNeeded(rawExtracted);
-    if (/^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i.test(normalized)) {
-      normalized = normalized.replace(
-        /^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i,
-        'https://content.luanti.org/'
-      );
-    }
-    return normalized;
+    return sanitizePackageImageUrl(rawExtracted) || '';
   };
 
   const inspectForThumbnailHash = (raw: any) => {
     const rawUrl = extractUrl(raw);
-    if (!rawUrl) return;
+    if (!rawUrl || isDeadMirrorScreenshotUrl(rawUrl)) return;
     const lower = rawUrl.toLowerCase();
     if (isContentDbHost(lower) && lower.includes('/thumbnails/')) {
       const m = lower.match(/\/thumbnails\/[^/]+\/([^/?#]+)/);
@@ -579,7 +612,11 @@ export function mergeScreenshotsPreferringGit(
 
   const isFilteredThumbnailOrSyntheticBanner = (url: string): boolean => {
     const lower = url.toLowerCase();
-    return isContentDbHost(lower) && (lower.includes('/thumbnails/') || lower.endsWith('/shot-0.png'));
+    return (
+      isDeadMirrorScreenshotUrl(lower) ||
+      lower.endsWith('/shot-0.png') ||
+      (isContentDbHost(lower) && lower.includes('/thumbnails/'))
+    );
   };
 
   const gitUrls: string[] = [];

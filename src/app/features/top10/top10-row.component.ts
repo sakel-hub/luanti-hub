@@ -295,12 +295,6 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
   ];
 
   getHighResImage(pkg: LuantiPackage): string {
-    if (pkg.banner && !pkg.banner.includes('thumbnail.png')) {
-      return pkg.banner;
-    }
-    if (pkg.thumbnail && pkg.thumbnail.includes('thumbnail.png')) {
-      return pkg.thumbnail.replace('thumbnail.png', 'shot-0.png');
-    }
     return pkg.banner || pkg.thumbnail || 'logo.svg';
   }
 

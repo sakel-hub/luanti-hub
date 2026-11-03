@@ -4,6 +4,7 @@ import {
   ensureExtendedPackageColumns,
   isPackageDeprecated,
   parseJsonArray,
+  sanitizePackageImageUrl,
   toProxiedGitImageIfNeeded
 } from '../lib/upstream';
 
@@ -212,11 +213,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             const lowerKey = entry.id.toLowerCase();
             const match = upstreamMap.get(lowerKey);
             if (match) {
-              const thumb = toProxiedGitImageIfNeeded(entry.thumbnail || match.thumbnail || 'logo.svg');
-              let banner = toProxiedGitImageIfNeeded(entry.banner || match.banner || '');
-              if (!banner && thumb.includes('thumbnail.png')) {
-                banner = thumb.replace('thumbnail.png', 'shot-0.png');
-              }
+              const thumb =
+                sanitizePackageImageUrl(entry.thumbnail) ||
+                sanitizePackageImageUrl(match.thumbnail) ||
+                'logo.svg';
+              const banner =
+                sanitizePackageImageUrl(entry.banner) ||
+                sanitizePackageImageUrl(match.banner) ||
+                thumb;
               return {
                 ...entry,
                 title: entry.title !== entry.name ? entry.title : (match.title || entry.name),
@@ -229,10 +233,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 license: match.license || entry.license || ''
               };
             }
+            const cleanThumb = sanitizePackageImageUrl(entry.thumbnail) || 'logo.svg';
+            const cleanBanner = sanitizePackageImageUrl(entry.banner) || cleanThumb;
             return {
               ...entry,
-              thumbnail: entry.thumbnail || 'logo.svg',
-              banner: entry.banner || entry.thumbnail || 'logo.svg'
+              thumbnail: cleanThumb,
+              banner: cleanBanner
             };
           })
           .filter(entry => !isPackageDeprecated(entry));
@@ -257,11 +263,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (!canTakeAuthor(item.author, 2)) continue;
           markAuthor(item.author);
 
-          const thumbnail = item.thumbnail || item.thumbnail_url || 'logo.svg';
-          let banner = item.banner || item.banner_url;
-          if (!banner && thumbnail.includes('thumbnail.png')) {
-            banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
-          }
+          const thumbnail =
+            sanitizePackageImageUrl(item.thumbnail || item.thumbnail_url) || 'logo.svg';
+          const banner =
+            sanitizePackageImageUrl(item.banner || item.banner_url) || thumbnail;
 
           top10List.push({
             id: pkgId,

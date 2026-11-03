@@ -2616,17 +2616,23 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
     for (const rawBanner of [pkg?.banner, this.package?.banner]) {
       const candidateBanner = this.packageService.toProxiedGitImageIfNeeded(rawBanner);
-      if (candidateBanner && candidateBanner !== 'logo.svg' && !failed.has(candidateBanner) && !candidateBanner.includes('thumbnail.png')) {
+      if (
+        candidateBanner &&
+        candidateBanner !== 'logo.svg' &&
+        !candidateBanner.includes('/storage/screenshots/') &&
+        !failed.has(candidateBanner)
+      ) {
         return candidateBanner;
       }
     }
     for (const rawThumb of [pkg?.thumbnail, this.package?.thumbnail]) {
       const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb);
-      if (candidateThumb && candidateThumb !== 'logo.svg' && !failed.has(candidateThumb)) {
-        if (candidateThumb.includes('thumbnail.png')) {
-          const shot0 = candidateThumb.replace('thumbnail.png', 'shot-0.png');
-          if (!failed.has(shot0)) return shot0;
-        }
+      if (
+        candidateThumb &&
+        candidateThumb !== 'logo.svg' &&
+        !candidateThumb.includes('/storage/screenshots/') &&
+        !failed.has(candidateThumb)
+      ) {
         return candidateThumb;
       }
     }
@@ -2635,6 +2641,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       if (
         candidateThumb &&
         candidateThumb !== 'logo.svg' &&
+        !candidateThumb.includes('/storage/screenshots/') &&
         !this.packageService.isGitScreenshotUrl(candidateThumb)
       ) {
         return candidateThumb;
@@ -2881,16 +2888,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.dependenciesManualOverride.set(null);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
-    const initialRevCounts = this.package.review_thread_counts;
-    const initialExpectedTotal = initialRevCounts
-      ? Number(initialRevCounts.positive || 0) +
-        Number(initialRevCounts.neutral || 0) +
-        Number(initialRevCounts.negative || 0)
-      : undefined;
-    if (
-      initialCachedReviews !== undefined &&
-      (initialCachedReviews.length > 0 || (initialRevCounts !== undefined && initialExpectedTotal === 0))
-    ) {
+    if (initialCachedReviews !== undefined && initialCachedReviews.length > 0) {
       this.reviews.set(initialCachedReviews);
       this.isLoadingReviews.set(false);
     } else if (isSwitchingPackage || this.reviews().length === 0) {

@@ -15,8 +15,11 @@ import {
   ensurePromotionAndTagTables,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
+  parseNonZeroReviewThreadCounts,
   computeStarRatingFromData,
   isGitRepositoryAssetUrl,
+  isDeadMirrorScreenshotUrl,
+  sanitizePackageImageUrl,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
   isPackageDeprecated,
@@ -274,8 +277,8 @@ export function overlayPromotionRowDeltaOnCatalog(
     ).filter(Boolean);
 
     const shortDesc = item.short_desc || item.short_description || '';
-    const thumb = item.thumbnail && String(item.thumbnail).startsWith('http') ? String(item.thumbnail) : null;
-    const banner = thumb && thumb.includes('thumbnail.png') ? thumb.replace('thumbnail.png', 'shot-0.png') : thumb;
+    const thumb = sanitizePackageImageUrl(item.thumbnail) || null;
+    const banner = sanitizePackageImageUrl(item.banner) || thumb;
     const relEpochMs = Number(item.release) > 100000000 ? Number(item.release) * 1000 : Date.now();
     const isoDate = new Date(relEpochMs).toISOString();
 
@@ -656,7 +659,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -737,8 +740,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let recentReviewsPromise = Promise.resolve<any[]>([]);
 
   if (env.DB) {
-    // One-time automatic purge of legacy unowned mirrored ContentDB rows that bloated `packages` and `releases`
-    const cleanupKey = 'https://cache.luantihub.internal/__d1_contentdb_mirror_cleanup_v1';
+    // One-time automatic purge of legacy unowned mirrored ContentDB rows & dead mirror screenshot/review artifacts
+    const cleanupKey = 'https://cache.luantihub.internal/__d1_contentdb_mirror_cleanup_v2';
     readEdgeCacheJson<boolean>(cleanupKey)
       .then(async (done) => {
         if (done) return;
@@ -749,6 +752,31 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         await env.DB.prepare(
           `DELETE FROM releases WHERE package_id NOT IN (SELECT id FROM packages)`
         ).run().catch(() => {});
+        await env.DB.prepare(`
+          UPDATE packages
+          SET thumbnail_url = CASE
+                WHEN thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN NULL
+                ELSE thumbnail_url
+              END,
+              banner_url = CASE
+                WHEN banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN NULL
+                ELSE banner_url
+              END,
+              screenshots = CASE
+                WHEN screenshots LIKE '%/storage/screenshots/%' THEN NULL
+                ELSE screenshots
+              END,
+              review_thread_counts = CASE
+                WHEN review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN NULL
+                ELSE review_thread_counts
+              END
+          WHERE thumbnail_url LIKE '%/storage/screenshots/%'
+             OR thumbnail_url LIKE '%/shot-0.png'
+             OR banner_url LIKE '%/storage/screenshots/%'
+             OR banner_url LIKE '%/shot-0.png'
+             OR screenshots LIKE '%/storage/screenshots/%'
+             OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}'
+        `).run().catch(() => {});
       })
       .catch(() => {});
 
@@ -1093,26 +1121,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (sources.length === 0) sources.push('official');
 
     const d1StarAvg = d1Ratings.get(canonicalKey) ?? d1Ratings.get(d1Key) ?? 0;
-    let d1ReviewThreadCounts: { positive: number; neutral: number; negative: number } | undefined;
-    if (typeof p.review_thread_counts === 'string' && p.review_thread_counts.trim()) {
-      try {
-        const parsedCounts = JSON.parse(p.review_thread_counts);
-        if (parsedCounts && typeof parsedCounts === 'object' && !Array.isArray(parsedCounts)) {
-          d1ReviewThreadCounts = {
-            positive: Number(parsedCounts.positive) || 0,
-            neutral: Number(parsedCounts.neutral) || 0,
-            negative: Number(parsedCounts.negative) || 0
-          };
-        }
-      } catch {
-        // Ignore malformed JSON
-      }
-    }
+    const d1ReviewThreadCounts = parseNonZeroReviewThreadCounts(p.review_thread_counts);
     const effectiveReviewThreadCounts =
-      (matchedUpstream?.reviews && typeof matchedUpstream.reviews === 'object' && !Array.isArray(matchedUpstream.reviews)
-        ? matchedUpstream.reviews
-        : undefined) ||
-      matchedUpstream?.review_thread_counts ||
+      parseNonZeroReviewThreadCounts(matchedUpstream?.reviews) ||
+      parseNonZeroReviewThreadCounts(matchedUpstream?.review_thread_counts) ||
       d1ReviewThreadCounts;
     const upstreamTags = Array.isArray(matchedUpstream?.tags)
       ? matchedUpstream.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
@@ -1122,31 +1134,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const parsedDeps = parseJsonArray(p.dependencies);
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
 
-    const gitShotD1 = isGitRepositoryAssetUrl(p.banner_url)
-      ? toProxiedGitImageIfNeeded(String(p.banner_url))
-      : (isGitRepositoryAssetUrl(p.thumbnail_url) ? toProxiedGitImageIfNeeded(String(p.thumbnail_url)) : undefined);
+    const sanitizedD1Banner = sanitizePackageImageUrl(p.banner_url);
+    const sanitizedD1Thumb = sanitizePackageImageUrl(p.thumbnail_url);
+    const sanitizedUpstreamThumb = sanitizePackageImageUrl(matchedUpstream?.thumbnail);
+    const gitShotD1 = isGitRepositoryAssetUrl(sanitizedD1Banner)
+      ? sanitizedD1Banner
+      : (isGitRepositoryAssetUrl(sanitizedD1Thumb) ? sanitizedD1Thumb : undefined);
     const mergedCatalogScreenshots = mergeScreenshotsPreferringGit(
-      [gitShotD1, p.banner_url, p.thumbnail_url, matchedUpstream?.thumbnail],
-      parseJsonArray(p.screenshots),
+      [gitShotD1, sanitizedD1Banner, sanitizedD1Thumb, sanitizedUpstreamThumb],
+      parseJsonArray(p.screenshots).filter((s: string) => !isDeadMirrorScreenshotUrl(s)),
       matchedUpstream?.screenshots
     );
     const nonGitThumbCandidate =
-      matchedUpstream?.thumbnail ||
-      (p.thumbnail_url && p.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(p.thumbnail_url)
-        ? p.thumbnail_url
+      sanitizedUpstreamThumb ||
+      (sanitizedD1Thumb && !isGitRepositoryAssetUrl(sanitizedD1Thumb)
+        ? sanitizedD1Thumb
         : '') ||
       mergedCatalogScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
       '';
-    const rawThumbCandidate = nonGitThumbCandidate || gitShotD1 || p.banner_url || '';
-    const resolvedThumb = rawThumbCandidate && (String(rawThumbCandidate).startsWith('http') || String(rawThumbCandidate).startsWith('/api/packages?proxy_image='))
-      ? toProxiedGitImageIfNeeded(String(rawThumbCandidate))
-      : null;
+    const rawThumbCandidate = nonGitThumbCandidate || gitShotD1 || sanitizedD1Banner || '';
+    const resolvedThumb = sanitizePackageImageUrl(rawThumbCandidate) || null;
     const rawBannerCandidate = gitShotD1
       ? gitShotD1
-      : ((p.banner_url && p.banner_url !== 'logo.svg')
-          ? p.banner_url
-          : (mergedCatalogScreenshots[0] || (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : (resolvedThumb || ''))));
-    const resolvedBanner = rawBannerCandidate ? toProxiedGitImageIfNeeded(String(rawBannerCandidate)) : '';
+      : (sanitizedD1Banner || mergedCatalogScreenshots[0] || sanitizedUpstreamThumb || resolvedThumb || '');
+    const resolvedBanner = sanitizePackageImageUrl(rawBannerCandidate) || '';
 
     const cdbDownloads = Math.max(
       typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
@@ -1352,12 +1363,26 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
           }
-          if (detail?.reviews && typeof detail.reviews === 'object' && !Array.isArray(detail.reviews)) {
-            pkg.review_thread_counts = {
-              positive: Number(detail.reviews.positive) || 0,
-              neutral: Number(detail.reviews.neutral) || 0,
-              negative: Number(detail.reviews.negative) || 0
-            };
+          const parsedDetailRevCounts = parseNonZeroReviewThreadCounts(detail?.reviews);
+          if (parsedDetailRevCounts) {
+            pkg.review_thread_counts = parsedDetailRevCounts;
+          }
+          const detailThumbSanitized = sanitizePackageImageUrl(detail?.thumbnail);
+          if (detailThumbSanitized && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.thumbnail))) {
+            pkg.thumbnail = detailThumbSanitized;
+          }
+          if (Array.isArray(detail?.screenshots) && detail.screenshots.length > 0) {
+            const mergedDetailShots = mergeScreenshotsPreferringGit(
+              [pkg.banner, pkg.thumbnail, detailThumbSanitized],
+              pkg.screenshots,
+              detail.screenshots
+            );
+            if (mergedDetailShots.length > 0) {
+              pkg.screenshots = mergedDetailShots;
+              if (!pkg.banner || pkg.banner === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.banner)) {
+                pkg.banner = mergedDetailShots[0];
+              }
+            }
           }
           const lowerPkgKey = String(pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
           const hydratedScore = computeCatalogStarRating(
@@ -1400,10 +1425,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 pkg.screenshots,
                 detail?.screenshots
               );
-              const primaryGitShot = gitScan?.screenshotUrl || mergedShots[0];
+              const primaryGitShot = sanitizePackageImageUrl(gitScan?.screenshotUrl) || mergedShots[0];
               if (primaryGitShot) {
                 if (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isGitRepositoryAssetUrl(pkg.thumbnail)) {
-                  pkg.thumbnail = detail?.thumbnail || primaryGitShot;
+                  pkg.thumbnail = detailThumbSanitized || primaryGitShot;
                 }
                 pkg.banner = primaryGitShot;
               }
@@ -1424,12 +1449,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             pkg.video_thumbnail_url = resolvedVideo.video_thumbnail_url;
           }
 
-          // Only backfill D1 if this package already exists in D1 as a native/Git row AND a previously missing field was discovered
+          // Only backfill D1 if this package already exists in D1 AND a previously missing field was discovered
           const existingD1 = d1ById.get(String(pkg.id || '').toLowerCase());
-          if (env.DB && existingD1 && existingD1.provider !== 'contentdb') {
+          if (env.DB && existingD1) {
+            const existingValidRevCounts = parseNonZeroReviewThreadCounts(existingD1.review_thread_counts);
             const newLic = !existingD1.license && resolvedLic ? resolvedLic : null;
             const newVid = !existingD1.video_url && pkg.video_url ? pkg.video_url : null;
-            const newRevCounts = !existingD1.review_thread_counts && pkg.review_thread_counts
+            const newRevCounts = !existingValidRevCounts && pkg.review_thread_counts
               ? JSON.stringify(pkg.review_thread_counts)
               : null;
             const newScore =
@@ -1440,29 +1466,34 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 ? pkg.score
                 : null;
             const newShot =
-              (!existingD1.banner_url ||
-                existingD1.banner_url === 'logo.svg' ||
+              (!sanitizePackageImageUrl(existingD1.banner_url) ||
                 (!isGitRepositoryAssetUrl(existingD1.banner_url) && isGitRepositoryAssetUrl(pkg.banner))) &&
-              pkg.banner &&
-              pkg.banner !== 'logo.svg'
-                ? pkg.banner
+              sanitizePackageImageUrl(pkg.banner)
+                ? sanitizePackageImageUrl(pkg.banner)!
                 : null;
             if (newLic || newVid || newShot || newRevCounts || newScore !== null) {
               bootHydrateStmts.push(
                 env.DB.prepare(`
                   UPDATE packages
                   SET thumbnail_url = CASE
-                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
                         ELSE thumbnail_url
                       END,
-                      banner_url = COALESCE(?, banner_url),
+                      banner_url = CASE
+                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                        ELSE COALESCE(?, banner_url)
+                      END,
                       license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
                       video_url = COALESCE(video_url, ?),
                       video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-                      review_thread_counts = COALESCE(review_thread_counts, ?),
+                      review_thread_counts = CASE
+                        WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+                        ELSE review_thread_counts
+                      END,
                       score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END
                   WHERE id = ?
                 `).bind(
+                  sanitizePackageImageUrl(pkg.thumbnail) || newShot,
                   newShot,
                   newShot,
                   newLic,
