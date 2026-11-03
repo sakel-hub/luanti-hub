@@ -262,7 +262,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -285,6 +287,12 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/lite/${a}/${n}`);
     }
   }
 
@@ -3187,7 +3195,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v7/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v8/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3854,7 +3862,7 @@ export async function fetchWithAnubisSupport(
     return fetch(url, init);
   }
 
-  const cookieCacheKey = `/__anubis_cookie_v2/${encodeURIComponent(host)}`;
+  const cookieCacheKey = `/__anubis_cookie_v3/${encodeURIComponent(host)}`;
   const cachedCookieObj = await readEdgeCacheJson<{ cookie: string }>(cookieCacheKey);
 
   // Enforce a consistent browser User-Agent across the initial request, `/pass-challenge`, and
@@ -3888,6 +3896,12 @@ export async function fetchWithAnubisSupport(
         }
       }
     }
+    const acceptKey = Object.keys(merged).find(k => k.toLowerCase() === 'accept');
+    if (acceptKey && !merged[acceptKey].toLowerCase().includes('text/html')) {
+      merged[acceptKey] = `${merged[acceptKey]},text/html;q=0.1`;
+    } else if (!acceptKey) {
+      merged['Accept'] = '*/*,text/html;q=0.1';
+    }
     merged['User-Agent'] = ANUBIS_BROWSER_UA;
     if (cookieStr) {
       merged['Cookie'] = merged['Cookie'] ? `${merged['Cookie']}; ${cookieStr}` : cookieStr;
@@ -3901,19 +3915,33 @@ export async function fetchWithAnubisSupport(
   });
 
   const contentType = (firstRes.headers.get('content-type') || '').toLowerCase();
-  if (!contentType.includes('text/html')) {
+  const isPotentialAnubisBlock =
+    contentType.includes('text/html') || firstRes.status === 401 || firstRes.status === 403;
+  if (!isPotentialAnubisBlock) {
     return firstRes;
   }
 
-  let challengeHtml = await firstRes.clone().text().catch(() => '');
+  let challengeHtml = contentType.includes('text/html')
+    ? await firstRes.clone().text().catch(() => '')
+    : '';
   let parsedChallenge = extractAnubisChallengeScript(challengeHtml);
   const cookieMap = new Map<string, string>();
   applySetCookieHeaders(cookieMap, firstRes.headers);
 
-  // If a POST request (e.g. OAuth token exchange) was intercepted with HTML without an inline challenge script,
-  // perform a GET to the origin root to obtain a fresh Anubis challenge.
-  if (!parsedChallenge && (init.method || 'GET').toUpperCase() !== 'GET') {
+  // If the request was intercepted by Anubis without an inline challenge script (e.g. POST token exchange,
+  // 401/403 from a stale cached Anubis cookie, or an Anubis interstitial page), perform a clean GET to the origin root.
+  // Never trigger this on normal Gitea 404 HTML pages so missing-file probes cost only 1 subrequest.
+  const isLikelyAnubisWithoutInlineScript =
+    !parsedChallenge &&
+    ((init.method || 'GET').toUpperCase() !== 'GET' ||
+      firstRes.status === 401 ||
+      firstRes.status === 403 ||
+      firstRes.status === 429 ||
+      firstRes.status === 503 ||
+      challengeHtml.toLowerCase().includes('anubis'));
+  if (isLikelyAnubisWithoutInlineScript) {
     try {
+      cookieMap.clear();
       const getChallengeRes = await fetch(`${origin}/`, {
         method: 'GET',
         headers: {

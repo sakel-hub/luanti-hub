@@ -508,28 +508,74 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ) {
         return new Response('Forbidden image host', { status: 403 });
       }
-      const upstreamRes = await fetchWithAnubisSupport(targetUrl.toString(), {
-        headers: {
-          'Accept': 'image/png,image/jpeg,image/webp,image/*;q=0.8',
-          'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
+      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v2/${encodeURIComponent(targetUrl.toString())}`;
+      const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+      const proxyCacheReq = edgeCache ? new Request(proxyCacheKey, { method: 'GET' }) : null;
+      if (edgeCache && proxyCacheReq) {
+        try {
+          const cachedImgRes = await edgeCache.match(proxyCacheReq);
+          if (cachedImgRes) {
+            return cachedImgRes;
+          }
+        } catch {
+          // Non-fatal edge cache read error
         }
-      });
-      if (!upstreamRes.ok) {
-        return new Response('Upstream image unavailable', { status: upstreamRes.status });
       }
-      const contentType = (upstreamRes.headers.get('content-type') || 'image/png').toLowerCase();
-      if (!contentType.startsWith('image/')) {
-        return new Response('Unsupported media type', { status: 415 });
+
+      const candidateUrls: string[] = [targetUrl.toString()];
+      const giteaRawMatch = targetUrl.pathname.match(
+        /^\/([^/]+)\/([^/]+)\/raw\/branch\/([^/]+)\/(.+)$/i
+      );
+      if (giteaRawMatch) {
+        const [, owner, repo, , filePath] = giteaRawMatch;
+        candidateUrls.push(
+          `https://${targetUrl.host}/api/v1/repos/${owner}/${repo}/raw/${filePath}`
+        );
       }
-      const body = await upstreamRes.arrayBuffer();
-      return new Response(body, {
-        status: 200,
+
+      let lastStatus = 404;
+      for (const candUrl of candidateUrls) {
+        const upstreamRes = await fetchWithAnubisSupport(candUrl, {
+          headers: {
+            'Accept': 'image/png,image/jpeg,image/webp,image/*;q=0.8',
+            'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
+          }
+        });
+        lastStatus = upstreamRes.status;
+        if (!upstreamRes.ok) {
+          continue;
+        }
+        const contentType = (upstreamRes.headers.get('content-type') || 'image/png').toLowerCase();
+        if (!contentType.startsWith('image/')) {
+          lastStatus = 415;
+          continue;
+        }
+        const body = await upstreamRes.arrayBuffer();
+        const okRes = new Response(body, {
+          status: 200,
+          headers: {
+            'Content-Type': contentType,
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=86400, s-maxage=604800'
+          }
+        });
+        if (edgeCache && proxyCacheReq) {
+          await edgeCache.put(proxyCacheReq, okRes.clone()).catch(() => {});
+        }
+        return okRes;
+      }
+      const errStatus = lastStatus || 404;
+      const errRes = new Response('Upstream image unavailable', {
+        status: errStatus,
         headers: {
-          'Content-Type': contentType,
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=86400, s-maxage=604800'
+          'Cache-Control': 'public, max-age=900, s-maxage=900'
         }
       });
+      if (edgeCache && proxyCacheReq && (errStatus === 404 || errStatus === 415)) {
+        await edgeCache.put(proxyCacheReq, errRes.clone()).catch(() => {});
+      }
+      return errRes;
     } catch {
       return new Response('Invalid image URL', { status: 400 });
     }
@@ -574,11 +620,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v5_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v6_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -1022,19 +1068,22 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const gitShotD1 = isGitRepositoryAssetUrl(p.banner_url)
       ? toProxiedGitImageIfNeeded(String(p.banner_url))
       : (isGitRepositoryAssetUrl(p.thumbnail_url) ? toProxiedGitImageIfNeeded(String(p.thumbnail_url)) : undefined);
-    const rawThumbCandidate = gitShotD1
-      ? gitShotD1
-      : ((p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
-          ? p.thumbnail_url
-          : (matchedUpstream?.thumbnail || p.banner_url || ''));
-    const resolvedThumb = rawThumbCandidate && (String(rawThumbCandidate).startsWith('http') || String(rawThumbCandidate).startsWith('/api/packages?proxy_image='))
-      ? toProxiedGitImageIfNeeded(String(rawThumbCandidate))
-      : null;
     const mergedCatalogScreenshots = mergeScreenshotsPreferringGit(
       [gitShotD1, p.banner_url, p.thumbnail_url],
       parseJsonArray(p.screenshots),
       matchedUpstream?.screenshots
     );
+    const nonGitThumbCandidate =
+      matchedUpstream?.thumbnail ||
+      (p.thumbnail_url && p.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(p.thumbnail_url)
+        ? p.thumbnail_url
+        : '') ||
+      mergedCatalogScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
+      '';
+    const rawThumbCandidate = nonGitThumbCandidate || gitShotD1 || p.banner_url || '';
+    const resolvedThumb = rawThumbCandidate && (String(rawThumbCandidate).startsWith('http') || String(rawThumbCandidate).startsWith('/api/packages?proxy_image='))
+      ? toProxiedGitImageIfNeeded(String(rawThumbCandidate))
+      : null;
     const rawBannerCandidate = gitShotD1
       ? gitShotD1
       : ((p.banner_url && p.banner_url !== 'logo.svg')
@@ -1272,7 +1321,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               );
               const primaryGitShot = gitScan?.screenshotUrl || mergedShots[0];
               if (primaryGitShot) {
-                pkg.thumbnail = primaryGitShot;
+                if (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isGitRepositoryAssetUrl(pkg.thumbnail)) {
+                  pkg.thumbnail = detail?.thumbnail || primaryGitShot;
+                }
                 pkg.banner = primaryGitShot;
               }
               if (mergedShots.length > 0) {

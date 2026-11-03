@@ -319,14 +319,20 @@ export function buildProviderRawFileUrl(
  */
 export function toProxiedGitImageIfNeeded(url?: string | null): string {
   const trimmed = url?.trim() ?? '';
-  if (!trimmed || !trimmed.startsWith('http') || trimmed.startsWith('/api/packages?proxy_image=')) {
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed.startsWith('/api/packages?proxy_image=')) {
+    return trimmed.includes('ngsw-bypass=true') ? trimmed : `${trimmed}&ngsw-bypass=true`;
+  }
+  if (!trimmed.startsWith('http')) {
     return trimmed;
   }
   try {
     const parsed = new URL(trimmed);
     const host = parsed.hostname.toLowerCase();
     if (host === 'git.minetest.land' || host.endsWith('.minetest.land')) {
-      return `/api/packages?proxy_image=${encodeURIComponent(trimmed)}`;
+      return `/api/packages?proxy_image=${encodeURIComponent(trimmed)}&ngsw-bypass=true`;
     }
   } catch {
     // Ignore malformed URLs

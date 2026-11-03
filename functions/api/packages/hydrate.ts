@@ -103,7 +103,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
             repo_url: row.repo_url || undefined,
-            thumbnail: gitShotD1 || (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.thumbnail_url) : undefined),
+            thumbnail:
+              (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(row.thumbnail_url)
+                ? toProxiedGitImageIfNeeded(row.thumbnail_url)
+                : undefined) ||
+              rowScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
+              gitShotD1 ||
+              (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.thumbnail_url) : undefined),
             banner: gitShotD1 || (row.banner_url && row.banner_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.banner_url) : undefined),
             screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
@@ -157,7 +163,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                   hydratedMap[lowerKey].video_thumbnail_url = resolvedVid.video_thumbnail_url;
                 }
                 if (primaryGitShot) {
-                  hydratedMap[lowerKey].thumbnail = primaryGitShot;
+                  if (!hydratedMap[lowerKey].thumbnail || isGitRepositoryAssetUrl(hydratedMap[lowerKey].thumbnail)) {
+                    hydratedMap[lowerKey].thumbnail = primaryGitShot;
+                  }
                   hydratedMap[lowerKey].banner = primaryGitShot;
                 }
                 if (mergedRowShots.length > 0) {
@@ -176,7 +184,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                     SET video_url = COALESCE(video_url, ?),
                         video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
                         thumbnail_url = CASE
-                          WHEN ? IS NOT NULL AND ? != '' THEN ?
+                          WHEN (thumbnail_url IS NULL OR thumbnail_url = '' OR thumbnail_url = 'logo.svg') AND ? IS NOT NULL AND ? != '' THEN ?
                           ELSE thumbnail_url
                         END,
                         banner_url = CASE
@@ -296,7 +304,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const primaryGitShot =
             gitScanShot ||
             (isGitRepositoryAssetUrl(mergedHydrateScreenshots[0]) ? mergedHydrateScreenshots[0] : undefined);
-          const resolvedHydrateThumb = primaryGitShot || detail?.thumbnail || existing.thumbnail || null;
+          const nonGitHydrateThumb =
+            detail?.thumbnail ||
+            (existing.thumbnail && !isGitRepositoryAssetUrl(existing.thumbnail) ? existing.thumbnail : undefined) ||
+            mergedHydrateScreenshots.find(s => !isGitRepositoryAssetUrl(s));
+          const resolvedHydrateThumb = nonGitHydrateThumb || primaryGitShot || existing.thumbnail || null;
           const resolvedHydrateBanner =
             primaryGitShot ||
             mergedHydrateScreenshots[0] ||
@@ -318,7 +330,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined,
-            thumbnail: toProxiedGitImageIfNeeded(primaryGitShot || resolvedHydrateThumb || '') || undefined,
+            thumbnail: toProxiedGitImageIfNeeded(resolvedHydrateThumb || '') || undefined,
             banner: toProxiedGitImageIfNeeded(primaryGitShot || resolvedHydrateBanner || '') || undefined,
             screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
           };

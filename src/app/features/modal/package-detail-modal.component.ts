@@ -164,7 +164,8 @@ import {
           <div class="relative w-full aspect-video min-h-[260px] sm:min-h-[380px] lg:min-h-[480px] max-h-[630px] bg-slate-950 flex-shrink-0 overflow-hidden">
             <img
               [src]="activeBannerUrl() || bannerImage"
-              [fallbackThumbnail]="package.thumbnail"
+              [fallbackThumbnail]="fallbackBannerThumbnail"
+              (error)="onScreenshotError(activeBannerUrl() || bannerImage)"
               appImgFallback
               [alt]="package.title"
               decoding="async"
@@ -508,7 +509,8 @@ import {
                                 class="relative w-full h-full cursor-zoom-in group">
                                 <img
                                   [src]="slide.url"
-                                  [fallbackThumbnail]="package.thumbnail"
+                                  [fallbackThumbnail]="fallbackBannerThumbnail"
+                                  (error)="onScreenshotError(slide.url)"
                                   appImgFallback
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
                                   [attr.loading]="idx === mediaCarouselIndex() ? 'eager' : 'lazy'"
@@ -599,8 +601,9 @@ import {
                             <img
                               [src]="slide.thumbnail"
                               [alt]="package.title"
+                              (error)="slide.type === 'image' ? onScreenshotError(slide.url) : null"
                               appImgFallback
-                              [fallbackThumbnail]="package.thumbnail"
+                              [fallbackThumbnail]="fallbackBannerThumbnail"
                               loading="lazy"
                               decoding="async"
                               class="w-full h-full object-cover" />
@@ -2227,19 +2230,38 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly isVideoPlaying = signal<boolean>(false);
   readonly lightboxImageUrl = signal<string | null>(null);
   readonly isLightboxZoomed = signal<boolean>(false);
+  readonly failedScreenshotUrls = signal<Set<string>>(new Set());
   private mediaTouchStartX = 0;
   private mediaTouchStartY = 0;
   private lightboxTouchStartX = 0;
   private lightboxTouchStartY = 0;
 
+  onScreenshotError(url?: string | null): void {
+    const clean = url?.trim();
+    if (!clean || clean === 'logo.svg') return;
+    if (this.activeBannerUrl() === clean) {
+      this.activeBannerUrl.set(null);
+    }
+    const currentFailed = this.failedScreenshotUrls();
+    if (currentFailed.has(clean)) return;
+    const next = new Set(currentFailed);
+    next.add(clean);
+    this.failedScreenshotUrls.set(next);
+    const totalAfter = this.mediaSlides().length;
+    if (totalAfter > 0 && this.mediaCarouselIndex() >= totalAfter) {
+      this.mediaCarouselIndex.set(Math.max(0, totalAfter - 1));
+    }
+  }
+
   readonly activeScreenshots = computed<string[]>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return [];
+    const failed = this.failedScreenshotUrls();
     const merged = this.packageService.mergePackageScreenshots(
       [pkg.banner, pkg.thumbnail],
       pkg.screenshots
     );
-    return merged;
+    return merged.filter(u => !failed.has(u));
   });
 
   readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string }>>(() => {
@@ -2557,19 +2579,42 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   get bannerImage(): string {
     const pkg = this.packageService.activePackage() || this.package;
-    const preferredGitShot = [pkg?.banner, pkg?.thumbnail, this.package?.banner, this.package?.thumbnail].find(
-      u => this.packageService.isGitScreenshotUrl(u)
-    );
+    const failed = this.failedScreenshotUrls();
+    const preferredGitShot = [pkg?.banner, pkg?.thumbnail, this.package?.banner, this.package?.thumbnail]
+      .map(u => this.packageService.toProxiedGitImageIfNeeded(u))
+      .find(u => Boolean(u) && !failed.has(u) && this.packageService.isGitScreenshotUrl(u));
     if (preferredGitShot) {
       return preferredGitShot;
     }
-    if (pkg?.banner && !pkg.banner.includes('thumbnail.png')) {
-      return pkg.banner;
+    const shots = this.activeScreenshots();
+    if (shots.length > 0) {
+      return shots[0];
     }
-    if (pkg?.thumbnail && pkg.thumbnail.includes('thumbnail.png')) {
-      return pkg.thumbnail.replace('thumbnail.png', 'shot-0.png');
+    const candidateBanner = this.packageService.toProxiedGitImageIfNeeded(pkg?.banner);
+    if (candidateBanner && !failed.has(candidateBanner) && !candidateBanner.includes('thumbnail.png')) {
+      return candidateBanner;
     }
-    return pkg?.banner || pkg?.thumbnail || 'logo.svg';
+    const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(pkg?.thumbnail);
+    if (candidateThumb && !failed.has(candidateThumb)) {
+      if (candidateThumb.includes('thumbnail.png')) {
+        const shot0 = candidateThumb.replace('thumbnail.png', 'shot-0.png');
+        if (!failed.has(shot0)) return shot0;
+      }
+      return candidateThumb;
+    }
+    return 'logo.svg';
+  }
+
+  get fallbackBannerThumbnail(): string | undefined {
+    const pkg = this.packageService.activePackage() || this.package;
+    const currentBanner = this.activeBannerUrl() || this.bannerImage;
+    const failed = this.failedScreenshotUrls();
+    const candidates = [
+      ...(this.activeScreenshots() || []),
+      this.packageService.toProxiedGitImageIfNeeded(pkg?.thumbnail),
+      this.packageService.toProxiedGitImageIfNeeded(this.package?.thumbnail)
+    ];
+    return candidates.find(u => Boolean(u) && u !== 'logo.svg' && u !== currentBanner && !failed.has(u));
   }
 
   private static readonly savedViewStateByPkg = new Map<string, {
@@ -2781,6 +2826,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
     this.loadedPackageKey = key;
     this.activeBannerUrl.set(null);
+    this.failedScreenshotUrls.set(new Set());
     this.mediaCarouselIndex.set(0);
     this.isVideoPlaying.set(false);
     this.lightboxImageUrl.set(null);

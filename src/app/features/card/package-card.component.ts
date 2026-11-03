@@ -75,8 +75,8 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
         <!-- Isolated inner clip ends 1px above the bottom edge with a multi-stop alpha feather mask so the scaled <img> blends seamlessly into glass-card without a solid dark bar or zoom seam -->
         <div class="absolute inset-x-0 top-0 bottom-px overflow-hidden card-thumbnail-mask">
           <img
-            [src]="package.banner || package.video_thumbnail_url || package.thumbnail"
-            [fallbackThumbnail]="package.thumbnail"
+            [src]="cardBannerUrl"
+            [fallbackThumbnail]="cardFallbackThumbnail"
             appImgFallback
             [alt]="seoImageAlt"
             loading="lazy"
@@ -116,8 +116,8 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
               </iframe>
               <!-- Smooth thumbnail curtain hides initial YouTube buffer & center play/pause icon flash -->
               <img
-                [src]="package.banner || package.video_thumbnail_url || package.thumbnail || 'logo.svg'"
-                [fallbackThumbnail]="package.thumbnail"
+                [src]="cardBannerUrl"
+                [fallbackThumbnail]="cardFallbackThumbnail"
                 appImgFallback
                 alt=""
                 aria-hidden="true"
@@ -334,6 +334,24 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   ngOnDestroy(): void {
     this.clearHoverVideo();
+  }
+
+  get cardBannerUrl(): string {
+    const raw = this.package?.banner || this.package?.video_thumbnail_url || this.package?.thumbnail || 'logo.svg';
+    return this.packageService.toProxiedGitImageIfNeeded(raw) ?? raw;
+  }
+
+  get cardFallbackThumbnail(): string | undefined {
+    const primary = this.cardBannerUrl;
+    const rawThumb = this.package?.thumbnail;
+    const proxiedThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb) ?? rawThumb;
+    if (proxiedThumb && proxiedThumb !== 'logo.svg' && proxiedThumb !== primary) {
+      return proxiedThumb;
+    }
+    const distinctShot = (this.package?.screenshots ?? [])
+      .map(url => this.packageService.toProxiedGitImageIfNeeded(url) ?? url)
+      .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary);
+    return distinctShot;
   }
 
   get displayTags(): string[] {

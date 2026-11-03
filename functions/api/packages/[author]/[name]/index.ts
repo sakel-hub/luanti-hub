@@ -473,7 +473,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v12/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v13/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -766,7 +766,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             d1Screenshots,
             fastCdbDetail?.screenshots
           );
-          const fastThumb = toProxiedGitImageIfNeeded(fastGitShot || d1Pkg.thumbnail_url || fastCdbDetail?.thumbnail) || undefined;
+          const nonGitFastThumb =
+            fastCdbDetail?.thumbnail ||
+            (d1Pkg.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? d1Pkg.thumbnail_url : undefined) ||
+            fastMergedScreenshots.find(s => !isGitRepositoryAssetUrl(s));
+          const fastThumb = toProxiedGitImageIfNeeded(nonGitFastThumb || fastGitShot || d1Pkg.thumbnail_url) || undefined;
           const fastBanner = toProxiedGitImageIfNeeded(fastGitShot || fastMergedScreenshots[0] || d1Pkg.banner_url || fastThumb) || undefined;
           if (
             d1Pkg.provider !== 'contentdb' &&
@@ -1542,7 +1546,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     parseJsonArray(d1Pkg?.screenshots),
     rawScreenshotsSource
   );
-  const resolvedThumbRaw = gitScreenshot || upstreamData.thumbnail || d1Pkg?.thumbnail_url || null;
+  const nonGitDetailThumb =
+    upstreamData.thumbnail ||
+    (d1Pkg?.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? d1Pkg.thumbnail_url : undefined) ||
+    screenshots.find(s => !isGitRepositoryAssetUrl(s));
+  const resolvedThumbRaw = nonGitDetailThumb || gitScreenshot || d1Pkg?.thumbnail_url || null;
   const resolvedThumb = resolvedThumbRaw ? toProxiedGitImageIfNeeded(String(resolvedThumbRaw)) : null;
   const resolvedBannerRaw =
     gitScreenshot ||

@@ -5597,12 +5597,12 @@ supported_games = minetest_game, voxelibre
       });
       expect(res.status).toBe(200);
       const detailBody = await res.json();
-      expect(detailBody.thumbnail).toBe(gitShot);
       expect(detailBody.banner).toBe(gitShot);
+      expect(detailBody.thumbnail).toBe(cdbThumb);
       expect(detailBody.screenshots).toEqual([gitShot, cdbShot1, cdbShot2]);
       expect(savedRows.length).toBeGreaterThan(0);
 
-      // 4. Verify PackageService.mergeDualSourcePackage and PackageDetailModalComponent preserve Git screenshot.png + merged gallery
+      // 4. Verify PackageService.mergeDualSourcePackage and PackageDetailModalComponent preserve Git screenshot.png + merged gallery + distinct fallback thumbnail
       const cdbEntry = (pkgService as any).normalizePackage({
         id: 'SaKeL/everness',
         author: 'SaKeL',
@@ -5628,8 +5628,8 @@ supported_games = minetest_game, voxelibre
       });
 
       const dualMerged = pkgService.mergeDualSourcePackage(cdbEntry, gitEntry);
-      expect(dualMerged.thumbnail).toBe(gitShot);
       expect(dualMerged.banner).toBe(gitShot);
+      expect(dualMerged.thumbnail).toBe(cdbThumb);
       expect(dualMerged.screenshots).toEqual([gitShot, cdbShot1, cdbShot2]);
 
       const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
@@ -5778,11 +5778,11 @@ supported_games = minetest_game, voxelibre
       expect(hydrateRes.status).toBe(200);
       const hydrateJson = await hydrateRes.json();
       expect(hydrateJson.hydrated['sakel/everness']).toBeDefined();
-      expect(hydrateJson.hydrated['sakel/everness'].thumbnail).toContain('everness');
-      expect(hydrateJson.hydrated['sakel/everness'].thumbnail).toContain('/screenshot.png');
-      expect(hydrateJson.hydrated['sakel/everness'].banner).toBe(hydrateJson.hydrated['sakel/everness'].thumbnail);
+      expect(hydrateJson.hydrated['sakel/everness'].banner).toContain('everness');
+      expect(hydrateJson.hydrated['sakel/everness'].banner).toContain('/screenshot.png');
+      expect(hydrateJson.hydrated['sakel/everness'].thumbnail).toBe(cdbThumb);
       expect(hydrateJson.hydrated['sakel/everness'].screenshots).toEqual([
-        hydrateJson.hydrated['sakel/everness'].thumbnail,
+        hydrateJson.hydrated['sakel/everness'].banner,
         cdbShot1
       ]);
 
@@ -7118,19 +7118,53 @@ supported_games = minetest_game, voxelibre
     expect(pkgService.trendingPackages().some(p => p.id === 'active/good_mod')).toBe(true);
   });
 
-  it('proxies git.minetest.land raw screenshot URLs through /api/packages?proxy_image= to bypass Anubis challenge', () => {
+  it('proxies git.minetest.land raw screenshot URLs through /api/packages?proxy_image= with ngsw-bypass=true and prunes failed gallery slides', () => {
     const pkgService = TestBed.inject(PackageService);
     const rawMeseHubShot = 'https://git.minetest.land/VoxeLibre/VoxeLibre/raw/branch/master/screenshot.png';
     const proxied = pkgService.toProxiedGitImageIfNeeded(rawMeseHubShot);
-    expect(proxied).toBe(`/api/packages?proxy_image=${encodeURIComponent(rawMeseHubShot)}`);
+    expect(proxied).toBe(`/api/packages?proxy_image=${encodeURIComponent(rawMeseHubShot)}&ngsw-bypass=true`);
     expect(pkgService.isGitScreenshotUrl(proxied)).toBe(true);
 
+    const cdbShot1 = 'https://content.luanti.org/uploads/shot1.png';
+    const cdbShot2 = 'https://content.luanti.org/uploads/shot2.png';
     const merged = pkgService.mergePackageScreenshots(
       [rawMeseHubShot],
-      ['https://content.luanti.org/uploads/shot1.png']
+      [cdbShot1, cdbShot2]
     );
     expect(merged[0]).toBe(proxied);
-    expect(merged[1]).toBe('https://content.luanti.org/uploads/shot1.png');
+    expect(merged[1]).toBe(cdbShot1);
+
+    // Verify PackageDetailModalComponent prunes failed screenshot URLs and falls back to the first valid screenshot instead of logo.svg
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const voxeLibrePkg = (pkgService as any).normalizePackage({
+      id: 'wuzzy/mineclone2',
+      author: 'Wuzzy',
+      name: 'mineclone2',
+      title: 'VoxeLibre (formerly MineClone2)',
+      type: 'game',
+      source: 'git',
+      sources: ['official', 'git'],
+      provider: 'mesehub',
+      repo: 'https://git.minetest.land/VoxeLibre/VoxeLibre',
+      banner: proxied,
+      thumbnail: cdbShot1,
+      screenshots: merged
+    });
+    modalFixture.componentInstance.package = voxeLibrePkg;
+    (pkgService as any)._activePackage.set(voxeLibrePkg);
+    modalFixture.detectChanges();
+
+    expect(modalFixture.componentInstance.bannerImage).toBe(proxied);
+    expect(modalFixture.componentInstance.fallbackBannerThumbnail).toBe(cdbShot1);
+    expect(modalFixture.componentInstance.activeScreenshots().length).toBe(3);
+
+    // Simulate the primary Git screenshot failing to load
+    modalFixture.componentInstance.onScreenshotError(proxied);
+    modalFixture.detectChanges();
+
+    expect(modalFixture.componentInstance.activeScreenshots()).toEqual([cdbShot1, cdbShot2]);
+    expect(modalFixture.componentInstance.bannerImage).toBe(cdbShot1);
+    expect(modalFixture.componentInstance.mediaSlides().map(s => s.url)).toEqual([cdbShot1, cdbShot2]);
   });
 
   it('keeps Delete Profile & Stored Data collapsed in a neutral section by default in Profile Drawer until expanded', () => {

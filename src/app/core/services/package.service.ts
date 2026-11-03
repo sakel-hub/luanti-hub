@@ -1682,8 +1682,13 @@ export class PackageService {
       cachedMeta?.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
     const gitShotCandidate = rawGitShotCandidate ? this.toProxiedGitImageIfNeeded(rawGitShotCandidate) : undefined;
+    const nonGitThumbCandidate = [
+      item.thumbnail,
+      item.thumbnail_url,
+      cachedMeta?.thumbnail
+    ].find(u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u));
     const thumbnail = this.toProxiedGitImageIfNeeded(
-      gitShotCandidate || item.thumbnail || item.thumbnail_url || cachedMeta?.thumbnail || 'logo.svg'
+      nonGitThumbCandidate || gitShotCandidate || item.thumbnail || item.thumbnail_url || cachedMeta?.thumbnail || 'logo.svg'
     ) || 'logo.svg';
     let banner = this.toProxiedGitImageIfNeeded(
       gitShotCandidate ||
@@ -2033,16 +2038,22 @@ export class PackageService {
       secondary.screenshots
     );
 
-    const resolvedThumb = preferredGitShot
-      ? preferredGitShot
-      : ((primary.thumbnail && primary.thumbnail !== 'logo.svg')
-          ? primary.thumbnail
-          : (secondary.thumbnail || 'logo.svg'));
-    const resolvedBanner = preferredGitShot
-      ? preferredGitShot
-      : ((primary.banner && primary.banner !== 'logo.svg')
-          ? primary.banner
-          : (mergedScreenshots[0] || secondary.banner || resolvedThumb));
+    const nonGitThumb = [primary.thumbnail, secondary.thumbnail].find(
+      u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
+    );
+    const resolvedThumb = this.toProxiedGitImageIfNeeded(
+      nonGitThumb ||
+      preferredGitShot ||
+      ((primary.thumbnail && primary.thumbnail !== 'logo.svg')
+        ? primary.thumbnail
+        : (secondary.thumbnail || 'logo.svg'))
+    ) || 'logo.svg';
+    const resolvedBanner = this.toProxiedGitImageIfNeeded(
+      preferredGitShot ||
+      ((primary.banner && primary.banner !== 'logo.svg')
+        ? primary.banner
+        : (mergedScreenshots[0] || secondary.banner || resolvedThumb))
+    );
 
     const cdbDl = Math.max(primary.contentdb_downloads || 0, secondary.contentdb_downloads || 0);
     const lhDl = Math.max(primary.luantihub_downloads || 0, secondary.luantihub_downloads || 0);
@@ -2598,6 +2609,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v6');
         sessionStorage.removeItem('lh_boot_cache_v7');
         sessionStorage.removeItem('lh_boot_cache_v8');
+        sessionStorage.removeItem('lh_boot_cache_v9');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -3092,7 +3104,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v9');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v10');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -3160,7 +3172,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v9',
+          'lh_boot_cache_v10',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -3285,7 +3297,8 @@ export class PackageService {
             sessionStorage.removeItem('lh_boot_cache_v6');
             sessionStorage.removeItem('lh_boot_cache_v7');
             sessionStorage.removeItem('lh_boot_cache_v8');
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v9');
+            sessionStorage.removeItem('lh_boot_cache_v9');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v10');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -3621,7 +3634,10 @@ export class PackageService {
             h.screenshots,
             pkg.screenshots
           );
-          const resolvedThumb = this.toProxiedGitImageIfNeeded(preferredGitShot || pkg.thumbnail || h.thumbnail);
+          const nonGitHydrateThumb = [pkg.thumbnail, h.thumbnail].find(
+            u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
+          );
+          const resolvedThumb = this.toProxiedGitImageIfNeeded(nonGitHydrateThumb || preferredGitShot || pkg.thumbnail || h.thumbnail);
           const resolvedBanner = this.toProxiedGitImageIfNeeded(
             preferredGitShot ||
             pkg.banner ||
@@ -5781,7 +5797,10 @@ export class PackageService {
           pkg.screenshots
         );
         const screenshots = mergedScreenshotsList.length > 0 ? mergedScreenshotsList : pkg.screenshots;
-        const resolvedDetailThumb = this.toProxiedGitImageIfNeeded(preferredGitShot || data.thumbnail || pkg.thumbnail);
+        const nonGitDetailThumb =
+          [data.thumbnail, pkg.thumbnail].find(u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)) ||
+          (screenshots || []).find(s => !this.isGitScreenshotUrl(s));
+        const resolvedDetailThumb = this.toProxiedGitImageIfNeeded(nonGitDetailThumb || preferredGitShot || data.thumbnail || pkg.thumbnail);
         const resolvedDetailBanner = this.toProxiedGitImageIfNeeded(
           preferredGitShot ||
           (screenshots && screenshots[0]) ||
