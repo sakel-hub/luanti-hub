@@ -32,6 +32,9 @@ import { TranslationService } from '../i18n/translation.service';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
+  toProxiedGitImageIfNeeded,
+  isGitRepositoryAssetUrl,
+  isPackageDeprecated,
   GitProviderId
 } from '../config/git-providers.config';
 
@@ -367,6 +370,7 @@ export class PackageService {
 
       dynamicMatches = allPkgs.filter(pkg => {
         if (pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+        if (this.isPackageDeprecated(pkg)) return false;
         if (seenIds.has(pkg.id.toLowerCase())) return false;
 
         if (filterType !== 'all' && pkg.type !== filterType) return false;
@@ -440,7 +444,7 @@ export class PackageService {
       ? [this.toBlogSlidePackage(blogPost)]
       : [];
     const pinnedSlides = [...promoSlides, ...blogSlides];
-    const list = this._packages();
+    const list = this._packages().filter(p => !this.isPackageDeprecated(p));
     if (list.length === 0) return pinnedSlides;
 
     const todayRanks = new Map<string, number>();
@@ -1249,9 +1253,10 @@ export class PackageService {
     limit = CAROUSEL_CAP,
     bonusFn?: (pkg: LuantiPackage) => number
   ): LuantiPackage[] {
-    if (items.length === 0) return [];
+    const activeItems = items.filter(pkg => !this.isPackageDeprecated(pkg));
+    if (activeItems.length === 0) return [];
     const nowMs = Date.now();
-    return items
+    return activeItems
       .map(pkg => ({
         pkg,
         score: this.computeSwimlaneRelevance(pkg, nowMs) + (bonusFn ? bonusFn(pkg) : 0)
@@ -1293,19 +1298,24 @@ export class PackageService {
       for (const p of list) {
         byLowerId.set(p.id.toLowerCase(), p);
       }
-      const hydrated = serverList.map(item => {
-        const live = byLowerId.get(item.id.toLowerCase());
-        if (!live) return item;
-        return {
-          ...item,
-          ...live,
-          downloads: Math.max(live.downloads || 0, item.downloads || 0)
-        };
-      });
-      return this.applyTop10DiversityCap(hydrated, 2);
+      const hydrated = serverList
+        .map(item => {
+          const live = byLowerId.get(item.id.toLowerCase());
+          if (!live) return item;
+          return {
+            ...item,
+            ...live,
+            downloads: Math.max(live.downloads || 0, item.downloads || 0)
+          };
+        })
+        .filter(pkg => !this.isPackageDeprecated(pkg));
+      if (hydrated.length >= 5) {
+        return this.applyTop10DiversityCap(hydrated, 2);
+      }
     }
-    if (list.length === 0) return [];
-    const sorted = [...list].sort((a, b) => {
+    const activeList = list.filter(pkg => !this.isPackageDeprecated(pkg));
+    if (activeList.length === 0) return [];
+    const sorted = [...activeList].sort((a, b) => {
       const scoreA =
         (Number(a.daily_downloads || 0) * 180) +
         (Number(a.weekly_downloads || 0) * 35) +
@@ -1333,19 +1343,24 @@ export class PackageService {
       for (const p of list) {
         byLowerId.set(p.id.toLowerCase(), p);
       }
-      const hydrated = serverList.map(item => {
-        const live = byLowerId.get(item.id.toLowerCase());
-        if (!live) return item;
-        return {
-          ...item,
-          ...live,
-          downloads: Math.max(live.downloads || 0, item.downloads || 0)
-        };
-      });
-      return this.applyTop10DiversityCap(hydrated, 2);
+      const hydrated = serverList
+        .map(item => {
+          const live = byLowerId.get(item.id.toLowerCase());
+          if (!live) return item;
+          return {
+            ...item,
+            ...live,
+            downloads: Math.max(live.downloads || 0, item.downloads || 0)
+          };
+        })
+        .filter(pkg => !this.isPackageDeprecated(pkg));
+      if (hydrated.length >= 5) {
+        return this.applyTop10DiversityCap(hydrated, 2);
+      }
     }
-    if (list.length === 0) return [];
-    const sorted = [...list].sort((a, b) => {
+    const activeList = list.filter(pkg => !this.isPackageDeprecated(pkg));
+    if (activeList.length === 0) return [];
+    const sorted = [...activeList].sort((a, b) => {
       const scoreA =
         (Number(a.weekly_downloads || 0) * 120) +
         (Number(a.conversion_rate || 0) * 600) +
@@ -1483,7 +1498,17 @@ export class PackageService {
       if (parsed && typeof parsed === 'object') {
         for (const [k, v] of Object.entries(parsed)) {
           if (k && v && typeof v === 'object') {
-            this.hydratedMetaCache.set(k.toLowerCase(), v as Partial<LuantiPackage>);
+            const entry = { ...(v as Partial<LuantiPackage>) };
+            if (typeof entry.thumbnail === 'string') {
+              entry.thumbnail = toProxiedGitImageIfNeeded(entry.thumbnail);
+            }
+            if (typeof entry.banner === 'string') {
+              entry.banner = toProxiedGitImageIfNeeded(entry.banner);
+            }
+            if (Array.isArray(entry.screenshots)) {
+              entry.screenshots = entry.screenshots.map(s => toProxiedGitImageIfNeeded(s));
+            }
+            this.hydratedMetaCache.set(k.toLowerCase(), entry);
           }
         }
       }
@@ -1648,7 +1673,7 @@ export class PackageService {
     const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? cachedMeta?.contentdb_score ?? 0);
     const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
 
-    const gitShotCandidate = [
+    const rawGitShotCandidate = [
       item.banner,
       item.banner_url,
       item.thumbnail,
@@ -1656,14 +1681,18 @@ export class PackageService {
       cachedMeta?.banner,
       cachedMeta?.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
-    const thumbnail = gitShotCandidate || item.thumbnail || item.thumbnail_url || cachedMeta?.thumbnail || 'logo.svg';
-    let banner =
+    const gitShotCandidate = rawGitShotCandidate ? this.toProxiedGitImageIfNeeded(rawGitShotCandidate) : undefined;
+    const thumbnail = this.toProxiedGitImageIfNeeded(
+      gitShotCandidate || item.thumbnail || item.thumbnail_url || cachedMeta?.thumbnail || 'logo.svg'
+    ) || 'logo.svg';
+    let banner = this.toProxiedGitImageIfNeeded(
       gitShotCandidate ||
       item.banner ||
       item.banner_url ||
       cachedMeta?.banner ||
       item.screenshots?.[0]?.url ||
-      item.screenshots?.[0];
+      item.screenshots?.[0]
+    );
     if (!banner && thumbnail && thumbnail.includes('thumbnail.png')) {
       banner = thumbnail.replace('thumbnail.png', 'shot-0.png');
     }
@@ -1817,7 +1846,7 @@ export class PackageService {
       video_url: resolvedVideo.video_url,
       video_thumbnail_url: resolvedVideo.video_thumbnail_url,
       provides: provides.length > 0 ? provides : undefined,
-      dev_state: item.dev_state || undefined,
+      dev_state: item.dev_state ?? cachedMeta?.dev_state ?? undefined,
       content_warnings: contentWarnings.length > 0 ? contentWarnings : undefined,
       ai_disclosures: aiDisclosures.length > 0 ? aiDisclosures : undefined,
       maintainers: maintainers.length > 0 ? maintainers : undefined,
@@ -1885,18 +1914,28 @@ export class PackageService {
   }
 
   /**
+   * Rewrites direct raw image URLs from Anubis-protected Git hosts (`git.minetest.land`)
+   * to our same-origin `/api/packages?proxy_image=...` endpoint so browsers can load them
+   * without triggering an interactive Anubis anti-bot challenge.
+   */
+  public toProxiedGitImageIfNeeded(url?: string | null): string {
+    return toProxiedGitImageIfNeeded(url);
+  }
+
+  /**
+   * Checks whether a package is marked as deprecated or abandoned via `dev_state === 'DEPRECATED'`,
+   * title/description markers (`(ABANDONED)`, `[DEPRECATED]`, etc.), or tags.
+   */
+  public isPackageDeprecated(pkg?: Partial<LuantiPackage> | null): boolean {
+    return isPackageDeprecated(pkg);
+  }
+
+  /**
    * Checks whether a screenshot/thumbnail/banner URL is hosted in a Git repository or independent CDN
    * rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
    */
   public isGitScreenshotUrl(url?: string | null): boolean {
-    if (!url || typeof url !== 'string') return false;
-    const trimmed = url.trim();
-    if (!trimmed || trimmed === 'logo.svg' || !/^https?:\/\//i.test(trimmed)) return false;
-    const lower = trimmed.toLowerCase();
-    if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
-      return false;
-    }
-    return true;
+    return isGitRepositoryAssetUrl(url);
   }
 
   /**
@@ -1920,8 +1959,15 @@ export class PackageService {
     };
 
     const addCandidate = (raw: any, forceGitPriority = false) => {
-      const url = extractUrl(raw);
-      if (!url || url === 'logo.svg' || !/^https?:\/\//i.test(url)) return;
+      const rawExtracted = extractUrl(raw);
+      if (
+        !rawExtracted ||
+        rawExtracted === 'logo.svg' ||
+        (!/^https?:\/\//i.test(rawExtracted) && !rawExtracted.startsWith('/api/packages?proxy_image='))
+      ) {
+        return;
+      }
+      const url = this.toProxiedGitImageIfNeeded(rawExtracted);
       const lower = url.toLowerCase();
       if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
         return;
@@ -3566,26 +3612,30 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
-          const preferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail].find(u =>
+          const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail].find(u =>
             this.isGitScreenshotUrl(u)
           );
+          const preferredGitShot = rawPreferredGitShot ? this.toProxiedGitImageIfNeeded(rawPreferredGitShot) : undefined;
           const mergedShots = this.mergePackageScreenshots(
             [preferredGitShot],
             h.screenshots,
             pkg.screenshots
           );
-          const resolvedThumb = preferredGitShot || pkg.thumbnail || h.thumbnail;
-          const resolvedBanner =
+          const resolvedThumb = this.toProxiedGitImageIfNeeded(preferredGitShot || pkg.thumbnail || h.thumbnail);
+          const resolvedBanner = this.toProxiedGitImageIfNeeded(
             preferredGitShot ||
             pkg.banner ||
             h.banner ||
-            (mergedShots.length > 0 ? mergedShots[0] : undefined);
+            (mergedShots.length > 0 ? mergedShots[0] : undefined)
+          );
 
           const resolvedAuthorId =
             (h.author_id && !String(h.author_id).startsWith('ext_') ? String(h.author_id) : undefined) ||
             pkg.author_id;
+          const resolvedDevState = h.dev_state ?? pkg.dev_state;
           const patch: Partial<LuantiPackage> = {
             ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
+            ...(resolvedDevState ? { dev_state: resolvedDevState } : {}),
             license: lic,
             media_license: mediaLic,
             contentdb_downloads: cdbDl,
@@ -3930,6 +3980,7 @@ export class PackageService {
     const matchedKeys = new Set<string>();
     if (pkgWeights.size > 0 && catalog.length > 0) {
       for (const item of catalog) {
+        if (this.isPackageDeprecated(item)) continue;
         const idLower = item.id.toLowerCase();
         const nameLower = item.name.toLowerCase();
         const weight = pkgWeights.get(idLower) || pkgWeights.get(nameLower) || 0;
@@ -4346,7 +4397,8 @@ export class PackageService {
       /!\[([^\]]*)\]\((?!https?:\/\/|data:|\/)([^)\s]+)(\s+"[^"]*")?\)/g,
       (_match, alt, relPath, titlePart) => {
         const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
-        return `![${alt}](${base}/${cleanPath}${titlePart || ''})`;
+        const resolvedUrl = this.toProxiedGitImageIfNeeded(`${base}/${cleanPath}`);
+        return `![${alt}](${resolvedUrl}${titlePart || ''})`;
       }
     );
     // Also rewrite relative HTML <img src="relative/path.png"> attributes
@@ -4354,7 +4406,8 @@ export class PackageService {
       /(<img\b[^>]*?\bsrc\s*=\s*["'])(?!https?:\/\/|data:|\/)([^"']+)(["'])/gi,
       (_match, prefix, relPath, suffix) => {
         const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
-        return `${prefix}${base}/${cleanPath}${suffix}`;
+        const resolvedUrl = this.toProxiedGitImageIfNeeded(`${base}/${cleanPath}`);
+        return `${prefix}${resolvedUrl}${suffix}`;
       }
     );
   }
@@ -5714,26 +5767,28 @@ export class PackageService {
           ? data.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
           : [];
 
-        const preferredGitShot = [
+        const rawPreferredGitShot = [
           probedGitScreenshot,
           data.banner,
           data.thumbnail,
           pkg.banner,
           pkg.thumbnail
         ].find(u => this.isGitScreenshotUrl(u));
+        const preferredGitShot = rawPreferredGitShot ? this.toProxiedGitImageIfNeeded(rawPreferredGitShot) : undefined;
         const mergedScreenshotsList = this.mergePackageScreenshots(
           [preferredGitShot],
           data.screenshots,
           pkg.screenshots
         );
         const screenshots = mergedScreenshotsList.length > 0 ? mergedScreenshotsList : pkg.screenshots;
-        const resolvedDetailThumb = preferredGitShot || data.thumbnail || pkg.thumbnail;
-        const resolvedDetailBanner =
+        const resolvedDetailThumb = this.toProxiedGitImageIfNeeded(preferredGitShot || data.thumbnail || pkg.thumbnail);
+        const resolvedDetailBanner = this.toProxiedGitImageIfNeeded(
           preferredGitShot ||
           (screenshots && screenshots[0]) ||
           data.banner ||
           pkg.banner ||
-          resolvedDetailThumb;
+          resolvedDetailThumb
+        );
 
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
@@ -5864,6 +5919,7 @@ export class PackageService {
             contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
             downloads: resolvedDownloads || prevMeta.downloads,
             score: resolvedScore,
+            dev_state: data.dev_state ?? prevMeta.dev_state,
             tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
             download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
             file_size: sizeFormatted || prevMeta.file_size,
@@ -6691,6 +6747,7 @@ export class PackageService {
 
     for (const cand of catalog) {
       if (!cand || cand.status === 'delisted' || cand.status === 'flagged') continue;
+      if (this.isPackageDeprecated(cand)) continue;
       const candId = (cand.id || `${cand.author}/${cand.name}`).toLowerCase();
       if (candId === selfId) continue;
       if ((cand.author || '').toLowerCase() === selfAuthor && (cand.name || '').toLowerCase() === selfName) {

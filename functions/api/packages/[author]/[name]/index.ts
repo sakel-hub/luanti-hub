@@ -31,6 +31,7 @@ import {
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES,
   isGitRepositoryAssetUrl,
+  toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags
 } from '../../../lib/upstream';
@@ -472,7 +473,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v11/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v12/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -555,10 +556,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         d1Pkg.video_thumbnail_url,
         d1Pkg.long_desc
       );
-      const liteGitShot =
+      const liteGitShotRaw =
         liteGitScan?.screenshotUrl ||
         (isGitRepositoryAssetUrl(d1Pkg.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
         (isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined);
+      const liteGitShot = liteGitShotRaw ? toProxiedGitImageIfNeeded(liteGitShotRaw) : undefined;
       const liteScreenshots = mergeScreenshotsPreferringGit(
         [liteGitShot],
         liteGitScan?.screenshots,
@@ -604,8 +606,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         title: d1Pkg.title || name,
         type: d1Pkg.type || 'mod',
         short_desc: d1Pkg.short_desc || '',
-        thumbnail: liteGitShot || d1Pkg.thumbnail_url || undefined,
-        banner: liteGitShot || liteScreenshots[0] || d1Pkg.banner_url || d1Pkg.thumbnail_url || undefined,
+        thumbnail: toProxiedGitImageIfNeeded(liteGitShot || d1Pkg.thumbnail_url) || undefined,
+        banner: toProxiedGitImageIfNeeded(liteGitShot || liteScreenshots[0] || d1Pkg.banner_url || d1Pkg.thumbnail_url) || undefined,
         screenshots: liteScreenshots.length > 0 ? liteScreenshots : undefined,
         license: d1Pkg.license,
         media_license: d1Pkg.media_license || d1Pkg.license,
@@ -753,18 +755,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             d1Pkg.video_thumbnail_url,
             d1Pkg.long_desc
           );
-          const fastGitShot =
+          const fastGitShotRaw =
             fastGitScan?.screenshotUrl ||
             (isGitRepositoryAssetUrl(d1Pkg.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
             (isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined);
+          const fastGitShot = fastGitShotRaw ? toProxiedGitImageIfNeeded(fastGitShotRaw) : undefined;
           const fastMergedScreenshots = mergeScreenshotsPreferringGit(
             [fastGitShot],
             fastGitScan?.screenshots,
             d1Screenshots,
             fastCdbDetail?.screenshots
           );
-          const fastThumb = fastGitShot || d1Pkg.thumbnail_url || fastCdbDetail?.thumbnail || undefined;
-          const fastBanner = fastGitShot || fastMergedScreenshots[0] || d1Pkg.banner_url || fastThumb || undefined;
+          const fastThumb = toProxiedGitImageIfNeeded(fastGitShot || d1Pkg.thumbnail_url || fastCdbDetail?.thumbnail) || undefined;
+          const fastBanner = toProxiedGitImageIfNeeded(fastGitShot || fastMergedScreenshots[0] || d1Pkg.banner_url || fastThumb) || undefined;
           if (
             d1Pkg.provider !== 'contentdb' &&
             ((!d1Pkg.video_url && fastVideo.video_url) || (!hasStoredGitShotFast && fastGitShot))
@@ -1301,11 +1304,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const mergedMediaLicense = d1Pkg?.media_license || gitScan?.mediaLicense || mergedLicense || '';
       const mergedShortDesc = d1Pkg?.short_desc || gitScan?.cdbMeta?.short_description || gitScan?.shortDesc || '';
       const mergedTitle = d1Pkg?.title || gitScan?.cdbMeta?.title || gitScan?.title || resolvedName;
-      const resolvedGitScreenshot =
+      const resolvedGitScreenshotRaw =
         gitScan?.screenshotUrl ||
         (isGitRepositoryAssetUrl(d1Pkg?.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
         (isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined) ||
         (fallbackRawBase ? `${fallbackRawBase}/screenshot.png` : undefined);
+      const resolvedGitScreenshot = resolvedGitScreenshotRaw ? toProxiedGitImageIfNeeded(resolvedGitScreenshotRaw) : undefined;
       const mergedGitScreenshots = mergeScreenshotsPreferringGit(
         [gitScan?.screenshotUrl, d1Pkg?.banner_url, d1Pkg?.thumbnail_url, resolvedGitScreenshot],
         gitScan?.screenshots,
@@ -1353,8 +1357,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         long_description: rawLongDesc || mergedShortDesc,
         desc: rawLongDesc || mergedShortDesc,
         readme: readme || fallbackReadme || undefined,
-        thumbnail: resolvedGitScreenshot || d1Pkg?.thumbnail_url || 'logo.svg',
-        banner: resolvedGitScreenshot || mergedGitScreenshots[0] || d1Pkg?.banner_url || d1Pkg?.thumbnail_url || 'logo.svg',
+        thumbnail: toProxiedGitImageIfNeeded(resolvedGitScreenshot || d1Pkg?.thumbnail_url) || 'logo.svg',
+        banner: toProxiedGitImageIfNeeded(resolvedGitScreenshot || mergedGitScreenshots[0] || d1Pkg?.banner_url || d1Pkg?.thumbnail_url) || 'logo.svg',
         screenshots: mergedGitScreenshots,
         license: mergedLicense,
         media_license: mergedMediaLicense,
@@ -1387,7 +1391,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         created_at: d1Pkg?.created_at || undefined,
         updated_at: d1Pkg?.updated_at || undefined,
         latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
-        provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : resolvedRepo.includes('bitbucket.org') ? 'bitbucket' : 'github'),
+        provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('git.minetest.land') ? 'mesehub' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : resolvedRepo.includes('bitbucket.org') ? 'bitbucket' : 'github'),
         default_branch: d1Pkg?.default_branch || 'main',
         min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
         max_minetest_version: d1Pkg?.max_minetest_version || gitScan?.maxVersion || undefined,
@@ -1523,10 +1527,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   }
 
   // Normalize & merge screenshots array (preferring Git repository screenshot.png first, followed by ContentDB gallery)
-  const gitScreenshot =
+  const gitScreenshotRaw =
     gitProbeScan?.screenshotUrl ||
     (isGitRepositoryAssetUrl(d1Pkg?.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
     (isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined);
+  const gitScreenshot = gitScreenshotRaw ? toProxiedGitImageIfNeeded(gitScreenshotRaw) : undefined;
   const rawScreenshotsSource = Array.isArray(upstreamData.screenshots)
     ? upstreamData.screenshots
     : (Array.isArray(forClientData?.screenshots) ? forClientData.screenshots : []);
@@ -1537,14 +1542,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     parseJsonArray(d1Pkg?.screenshots),
     rawScreenshotsSource
   );
-  const resolvedThumb = gitScreenshot || upstreamData.thumbnail || d1Pkg?.thumbnail_url || null;
-  const resolvedBanner =
+  const resolvedThumbRaw = gitScreenshot || upstreamData.thumbnail || d1Pkg?.thumbnail_url || null;
+  const resolvedThumb = resolvedThumbRaw ? toProxiedGitImageIfNeeded(String(resolvedThumbRaw)) : null;
+  const resolvedBannerRaw =
     gitScreenshot ||
     screenshots[0] ||
     d1Pkg?.banner_url ||
     (resolvedThumb && String(resolvedThumb).includes('thumbnail.png')
       ? String(resolvedThumb).replace('thumbnail.png', 'shot-0.png')
       : resolvedThumb);
+  const resolvedBanner = resolvedBannerRaw ? toProxiedGitImageIfNeeded(String(resolvedBannerRaw)) : null;
 
   // Resolve download_size & file_size from /for-client/, /packages/:author/:name/, latest release, or Content-Length HEAD check
   const rawSizeSource =
@@ -1919,7 +1926,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
   const body = await context.request.json().catch(() => ({})) as { tags?: string[] };
   const rawInputTags = Array.isArray(body.tags) ? body.tags : [];
 
-  const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+  const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
   const cleanedCustomTags = rawInputTags
     .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
     .filter(t => Boolean(t) && !systemTagSet.has(t))

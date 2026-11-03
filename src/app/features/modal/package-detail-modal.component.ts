@@ -596,7 +596,14 @@ import {
                             [class.opacity-100]="mediaCarouselIndex() === idx"
                             [class.opacity-65]="mediaCarouselIndex() !== idx"
                             class="relative w-24 h-14 sm:w-28 sm:h-16 rounded-xl overflow-hidden flex-shrink-0 border border-white/10 hover:border-sky-400/60 hover:opacity-100 transition cursor-pointer">
-                            <img [src]="slide.thumbnail" [alt]="package.title" loading="lazy" decoding="async" class="w-full h-full object-cover" />
+                            <img
+                              [src]="slide.thumbnail"
+                              [alt]="package.title"
+                              appImgFallback
+                              [fallbackThumbnail]="package.thumbnail"
+                              loading="lazy"
+                              decoding="async"
+                              class="w-full h-full object-cover" />
                             @if (slide.type === 'video') {
                               <div class="absolute inset-0 bg-slate-950/35 flex items-center justify-center">
                                 <div class="w-7 h-7 rounded-lg glass-btn flex items-center justify-center text-slate-100">
@@ -642,61 +649,106 @@ import {
                   </div>
                 }
 
-                <!-- Dependencies & Provided Mods Section (Shows skeleton while hydrating instead of false standalone placeholder) -->
-                <div class="space-y-3 p-4 rounded-2xl glass-panel">
-                  <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wider">
-                    {{ 'modal.dependencies' | translate }}
-                  </h3>
-
-                  @if ((package.dependencies && package.dependencies.length > 0) || (package.optional_dependencies && package.optional_dependencies.length > 0) || (package.provides && package.provides.length > 0)) {
-                    @if (package.dependencies && package.dependencies.length > 0) {
-                      <div>
-                        <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.requiredDeps' | translate }} ({{ package.dependencies.length }})</span>
-                        <div class="flex flex-wrap gap-1.5">
-                          @for (dep of package.dependencies; track dep) {
-                            <button
-                              type="button"
-                              (click)="filterByTerm(dep)"
-                              class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 font-mono text-[11px] border border-sky-400/30 transition cursor-pointer">
-                              {{ dep }}
-                            </button>
-                          }
-                        </div>
+                <!-- Dependencies & Provided Mods Section (Collapsible, collapsed by default when > 20 items) -->
+                <div class="space-y-3 p-4 rounded-2xl glass-panel" data-testid="package-dependencies-section">
+                  @if (getTotalDependenciesCount(package) > 0) {
+                    <button
+                      type="button"
+                      data-testid="toggle-dependencies-btn"
+                      (click)="toggleDependencies()"
+                      [attr.aria-expanded]="isDependenciesExpanded()"
+                      class="w-full flex items-center justify-between gap-2 text-left group cursor-pointer">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <h3 class="text-xs font-bold text-slate-200 group-hover:text-sky-300 uppercase tracking-wider truncate transition">
+                          {{ 'modal.dependencies' | translate }}
+                        </h3>
+                        <span class="px-2 py-0.5 rounded-md glass-pill text-[10px] font-semibold text-slate-300 flex-shrink-0">
+                          {{ getTotalDependenciesCount(package) }}
+                        </span>
                       </div>
-                    }
-
-                    @if (package.optional_dependencies && package.optional_dependencies.length > 0) {
-                      <div>
-                        <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.optionalDeps' | translate }} ({{ package.optional_dependencies.length }})</span>
-                        <div class="flex flex-wrap gap-1.5">
-                          @for (opt of package.optional_dependencies; track opt) {
-                            <button
-                              type="button"
-                              (click)="filterByTerm(opt)"
-                              class="px-2.5 py-1 rounded-lg glass-pill hover:border-white/30 text-slate-300 hover:text-white font-mono text-[11px] transition cursor-pointer">
-                              {{ opt }}
-                            </button>
-                          }
-                        </div>
+                      <div class="flex items-center gap-2 flex-shrink-0">
+                        @if (!isDependenciesExpanded()) {
+                          <div class="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
+                            @if (package.dependencies?.length) {
+                              <span class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-400/20">
+                                {{ package.dependencies!.length }} req
+                              </span>
+                            }
+                            @if (package.optional_dependencies?.length) {
+                              <span class="px-1.5 py-0.5 rounded glass-pill text-slate-300">
+                                {{ package.optional_dependencies!.length }} opt
+                              </span>
+                            }
+                            @if (package.provides?.length) {
+                              <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-400/20">
+                                {{ package.provides!.length }} sub
+                              </span>
+                            }
+                          </div>
+                        }
+                        <svg
+                          lucideChevronDown
+                          class="w-4 h-4 text-slate-400 group-hover:text-sky-300 transition-transform duration-200 flex-shrink-0"
+                          [class.rotate-180]="isDependenciesExpanded()">
+                        </svg>
                       </div>
-                    }
+                    </button>
 
-                    @if (package.provides && package.provides.length > 0) {
-                      <div>
-                        <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.providesMods' | translate }} ({{ package.provides.length }})</span>
-                        <div class="flex flex-wrap gap-1.5">
-                          @for (prov of package.provides; track prov) {
-                            <button
-                              type="button"
-                              (click)="filterByTerm(prov)"
-                              class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 font-mono text-[11px] border border-emerald-400/30 transition cursor-pointer">
-                              {{ prov }}
-                            </button>
-                          }
-                        </div>
+                    @if (isDependenciesExpanded()) {
+                      <div class="space-y-3 pt-2 border-t border-white/10">
+                        @if (package.dependencies && package.dependencies.length > 0) {
+                          <div>
+                            <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.requiredDeps' | translate }} ({{ package.dependencies.length }})</span>
+                            <div class="flex flex-wrap gap-1.5">
+                              @for (dep of package.dependencies; track dep) {
+                                <button
+                                  type="button"
+                                  (click)="filterByTerm(dep)"
+                                  class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 font-mono text-[11px] border border-sky-400/30 transition cursor-pointer">
+                                  {{ dep }}
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        }
+
+                        @if (package.optional_dependencies && package.optional_dependencies.length > 0) {
+                          <div>
+                            <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.optionalDeps' | translate }} ({{ package.optional_dependencies.length }})</span>
+                            <div class="flex flex-wrap gap-1.5">
+                              @for (opt of package.optional_dependencies; track opt) {
+                                <button
+                                  type="button"
+                                  (click)="filterByTerm(opt)"
+                                  class="px-2.5 py-1 rounded-lg glass-pill hover:border-white/30 text-slate-300 hover:text-white font-mono text-[11px] transition cursor-pointer">
+                                  {{ opt }}
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        }
+
+                        @if (package.provides && package.provides.length > 0) {
+                          <div>
+                            <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">{{ 'modal.providesMods' | translate }} ({{ package.provides.length }})</span>
+                            <div class="flex flex-wrap gap-1.5">
+                              @for (prov of package.provides; track prov) {
+                                <button
+                                  type="button"
+                                  (click)="filterByTerm(prov)"
+                                  class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 font-mono text-[11px] border border-emerald-400/30 transition cursor-pointer">
+                                  {{ prov }}
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        }
                       </div>
                     }
                   } @else if (isHydratingDetails()) {
+                    <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      {{ 'modal.dependencies' | translate }}
+                    </h3>
                     <div class="space-y-2 py-0.5" aria-busy="true" aria-label="Loading dependencies">
                       <div class="w-28 h-3 rounded skeleton-shimmer"></div>
                       <div class="flex flex-wrap gap-1.5">
@@ -706,6 +758,9 @@ import {
                       </div>
                     </div>
                   } @else {
+                    <h3 class="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      {{ 'modal.dependencies' | translate }}
+                    </h3>
                     <p class="text-xs text-slate-400">
                       {{ 'modal.noDependencies' | translate }}
                     </p>
@@ -715,18 +770,18 @@ import {
                 <!-- Collapsible Repository README.md Markdown Section (Collapsed by Default, Fetched on Demand) -->
                 @if (hasValidGitRepo || renderedReadme() || isHydratingDetails()) {
                   <div class="p-4 sm:p-5 rounded-2xl glass-panel space-y-3">
-                    <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center justify-between gap-2 min-w-0">
                       <button
                         type="button"
                         (click)="toggleReadme()"
                         [attr.aria-expanded]="isReadmeExpanded()"
                         class="flex items-center gap-2 text-left group cursor-pointer flex-1 min-w-0">
                         <svg lucideBookOpen class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
-                        <span class="text-xs font-bold text-sky-400 group-hover:text-sky-300 uppercase tracking-wider transition">
+                        <span class="text-xs font-bold text-sky-400 group-hover:text-sky-300 uppercase tracking-wider truncate transition">
                           {{ 'modal.readmeTitle' | translate }}
                         </span>
-                        <span class="px-2 py-0.5 rounded-md glass-pill text-[10px] font-semibold text-slate-300 group-hover:text-white transition">
-                          {{ isReadmeExpanded() ? 'Hide' : 'Show README' }}
+                        <span class="hidden sm:inline-flex px-2 py-0.5 rounded-md glass-pill text-[10px] font-semibold text-slate-300 group-hover:text-white flex-shrink-0 transition">
+                          {{ isReadmeExpanded() ? 'Hide' : 'Show' }}
                         </span>
                         <svg
                           lucideChevronDown
@@ -740,9 +795,10 @@ import {
                         target="_blank"
                         rel="noopener noreferrer"
                         (click)="$event.stopPropagation()"
-                        class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer flex-shrink-0">
-                        <span>{{ (hasValidGitRepo ? 'modal.viewGitRepo' : 'modal.viewOnContentDb') | translate }}</span>
-                        <svg lucideExternalLink class="w-3 h-3"></svg>
+                        class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer flex-shrink-0 whitespace-nowrap">
+                        <span class="sm:hidden">{{ hasValidGitRepo ? 'Git' : 'ContentDB' }}</span>
+                        <span class="hidden sm:inline">{{ (hasValidGitRepo ? 'modal.viewGitRepo' : 'modal.viewOnContentDb') | translate }}</span>
+                        <svg lucideExternalLink class="w-3 h-3 flex-shrink-0"></svg>
                       </a>
                     </div>
 
@@ -2100,6 +2156,29 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly isLoadingReleases = signal<boolean>(true);
   readonly isReadmeExpanded = signal<boolean>(false);
   readonly isLoadingReadme = signal<boolean>(false);
+  readonly dependenciesManualOverride = signal<boolean | null>(null);
+  readonly DEPENDENCIES_COLLAPSE_THRESHOLD = 20;
+
+  getTotalDependenciesCount(pkg?: LuantiPackage | null): number {
+    const target = pkg ?? this.packageService.activePackage() ?? this.package;
+    if (!target) return 0;
+    return (
+      (target.dependencies?.length ?? 0) +
+      (target.optional_dependencies?.length ?? 0) +
+      (target.provides?.length ?? 0)
+    );
+  }
+
+  readonly isDependenciesExpanded = computed<boolean>(() => {
+    const manual = this.dependenciesManualOverride();
+    if (manual !== null) return manual;
+    const pkg = this.packageService.activePackage() ?? this.package;
+    return this.getTotalDependenciesCount(pkg) <= this.DEPENDENCIES_COLLAPSE_THRESHOLD;
+  });
+
+  toggleDependencies(): void {
+    this.dependenciesManualOverride.set(!this.isDependenciesExpanded());
+  }
   readonly isHydratingDetails = computed<boolean>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return false;
@@ -2710,6 +2789,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.loadingReleaseNotesKey.set(null);
     this.isReadmeExpanded.set(false);
     this.isLoadingReadme.set(false);
+    this.dependenciesManualOverride.set(null);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
     if (initialCachedReviews !== undefined) {

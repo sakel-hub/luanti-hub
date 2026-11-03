@@ -2527,14 +2527,16 @@ export function rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: str
       /!\[([^\]]*)\]\((?!https?:\/\/|data:|\/)([^)\s]+)(\s+"[^"]*")?\)/g,
       (_match, alt, relPath, titlePart) => {
         const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
-        return `![${alt}](${base}/${cleanPath}${titlePart || ''})`;
+        const resolved = toProxiedGitImageIfNeeded(`${base}/${cleanPath}`);
+        return `![${alt}](${resolved}${titlePart || ''})`;
       }
     )
     .replace(
       /(<img\b[^>]*?\bsrc\s*=\s*["'])(?!https?:\/\/|data:|\/)([^"']+)(["'][^>]*>)/gi,
       (_match, prefix, relPath, suffix) => {
         const cleanPath = String(relPath).replace(/^\.\//, '').replace(/^\/+/, '');
-        return `${prefix}${base}/${cleanPath}${suffix}`;
+        const resolved = toProxiedGitImageIfNeeded(`${base}/${cleanPath}`);
+        return `${prefix}${resolved}${suffix}`;
       }
     );
 }
@@ -3037,21 +3039,6 @@ export interface GitRepoScanResult {
 }
 
 /**
- * Checks whether an asset URL (screenshot/thumbnail/banner) originates from a Git repository
- * or independent CDN rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
- */
-export function isGitRepositoryAssetUrl(url?: string | null): boolean {
-  if (!url || typeof url !== 'string') return false;
-  const trimmed = url.trim();
-  if (!trimmed || trimmed === 'logo.svg' || !/^https?:\/\//i.test(trimmed)) return false;
-  const lower = trimmed.toLowerCase();
-  if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
-    return false;
-  }
-  return true;
-}
-
-/**
  * ContentDB-agnostic screenshot merger:
  * Always places Git repository screenshots (`screenshot.png` / `.cdb.json` screenshots) FIRST,
  * followed by any additional ContentDB or gallery screenshots, deduplicated while preserving order.
@@ -3072,8 +3059,10 @@ export function mergeScreenshotsPreferringGit(
   };
 
   const addCandidate = (raw: any, forceGitPriority = false) => {
-    const url = extractUrl(raw);
-    if (!url || url === 'logo.svg' || !/^https?:\/\//i.test(url)) return;
+    const rawUrl = extractUrl(raw);
+    if (!rawUrl || rawUrl === 'logo.svg') return;
+    if (!/^https?:\/\//i.test(rawUrl) && !rawUrl.startsWith('/api/packages?proxy_image=')) return;
+    const url = toProxiedGitImageIfNeeded(rawUrl);
     // Ignore ContentDB resized thumbnail URLs in full-resolution screenshot galleries
     const lower = url.toLowerCase();
     if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
@@ -3159,6 +3148,9 @@ import {
   detectGitProviderFromUrl,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
+  toProxiedGitImageIfNeeded,
+  isGitRepositoryAssetUrl,
+  isPackageDeprecated,
   GIT_PROVIDER_CONFIGS,
   ALL_GIT_PROVIDER_IDS,
   AUTH_LOGIN_GIT_PROVIDER_IDS
@@ -3170,6 +3162,9 @@ export {
   detectGitProviderFromUrl,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
+  toProxiedGitImageIfNeeded,
+  isGitRepositoryAssetUrl,
+  isPackageDeprecated,
   GIT_PROVIDER_CONFIGS,
   ALL_GIT_PROVIDER_IDS,
   AUTH_LOGIN_GIT_PROVIDER_IDS
@@ -3192,7 +3187,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v5/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v7/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3525,8 +3520,9 @@ export async function scanGitRepoMetadataCached(
         .filter(Boolean)
     : [];
 
+  const proxiedScreenshotUrl = screenshotUrl ? toProxiedGitImageIfNeeded(screenshotUrl) : undefined;
   const mergedGitScreenshots = mergeScreenshotsPreferringGit(
-    [screenshotUrl],
+    [proxiedScreenshotUrl],
     resolvedCdbScreenshots
   );
 
@@ -3547,7 +3543,7 @@ export async function scanGitRepoMetadataCached(
     supportedGames,
     unsupportedGames,
     cdbMeta,
-    screenshotUrl: screenshotUrl || mergedGitScreenshots[0],
+    screenshotUrl: proxiedScreenshotUrl || mergedGitScreenshots[0],
     screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined
   };
 

@@ -6,6 +6,7 @@ import {
   extractEmbeddedVideo,
   isGitRepositoryAssetUrl,
   mergeScreenshotsPreferringGit,
+  toProxiedGitImageIfNeeded,
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../lib/upstream';
@@ -33,7 +34,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v2_${encodeURIComponent(
+      ? `/__api_hydrate_v3_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -80,8 +81,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const lhDl = Number(row.luantihub_downloads || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
           const gitShotD1 = isGitRepositoryAssetUrl(row.banner_url)
-            ? String(row.banner_url)
-            : (isGitRepositoryAssetUrl(row.thumbnail_url) ? String(row.thumbnail_url) : undefined);
+            ? toProxiedGitImageIfNeeded(String(row.banner_url))
+            : (isGitRepositoryAssetUrl(row.thumbnail_url) ? toProxiedGitImageIfNeeded(String(row.thumbnail_url)) : undefined);
           const rowScreenshots = mergeScreenshotsPreferringGit(
             [gitShotD1, row.banner_url, row.thumbnail_url],
             parseJsonArray(row.screenshots)
@@ -97,12 +98,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             luantihub_downloads: lhDl,
             downloads: totalDl,
             tags: parsedTags.length > 0 ? parsedTags : undefined,
+            dev_state: row.dev_state || undefined,
             file_size: row.file_size || undefined,
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
             repo_url: row.repo_url || undefined,
-            thumbnail: gitShotD1 || (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? row.thumbnail_url : undefined),
-            banner: gitShotD1 || (row.banner_url && row.banner_url !== 'logo.svg' ? row.banner_url : undefined),
+            thumbnail: gitShotD1 || (row.thumbnail_url && row.thumbnail_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.thumbnail_url) : undefined),
+            banner: gitShotD1 || (row.banner_url && row.banner_url !== 'logo.svg' ? toProxiedGitImageIfNeeded(row.banner_url) : undefined),
             screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
 
@@ -247,6 +249,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           let videoThumbUrl = detail?.video_thumbnail_url || existing.video_thumbnail_url || undefined;
           let shortDesc = detail?.short_desc || detail?.short_description || undefined;
           let title = detail?.title || name;
+          let devState = detail?.dev_state || existing.dev_state || undefined;
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
           // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png)
@@ -264,6 +267,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               repoUrl = repoUrl || gitScan.repoUrl || '';
               minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
               shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
+              devState = devState || gitScan.cdbMeta?.dev_state;
               title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
               if (gitScan.detectedType) pkgType = gitScan.detectedType;
               if (gitScan.screenshotUrl) gitScanShot = gitScan.screenshotUrl;
@@ -309,12 +313,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             luantihub_downloads: lhDl,
             downloads: totalDl,
             tags: detailTags.length > 0 ? detailTags : undefined,
+            dev_state: devState || undefined,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined,
-            thumbnail: primaryGitShot || resolvedHydrateThumb || undefined,
-            banner: primaryGitShot || resolvedHydrateBanner || undefined,
+            thumbnail: toProxiedGitImageIfNeeded(primaryGitShot || resolvedHydrateThumb || '') || undefined,
+            banner: toProxiedGitImageIfNeeded(primaryGitShot || resolvedHydrateBanner || '') || undefined,
             screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
           };
 

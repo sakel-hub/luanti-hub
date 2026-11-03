@@ -26,6 +26,7 @@ import {
   sanitizePublicErrorMessage,
   fetchWithAnubisSupport,
   isGitRepositoryAssetUrl,
+  toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags
 } from '../lib/upstream';
@@ -997,6 +998,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         howToFix: 'Add a 16:9 PNG image named `screenshot.png` (e.g. 1280×720) to the root of your repository.'
       });
     } else {
+      screenshotUrl = toProxiedGitImageIfNeeded(screenshotUrl);
       diagnostics.push({
         code: 'SCREENSHOT_FOUND',
         severity: 'pass',

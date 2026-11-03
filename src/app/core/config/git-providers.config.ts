@@ -312,3 +312,99 @@ export function buildProviderRawFileUrl(
       return `https://${host || 'codeberg.org'}/${owner}/${repo}/raw/branch/${branch}/${cleanFile}`;
   }
 }
+
+/**
+ * Rewrites raw image URLs hosted on Anubis PoW-protected MeseHub (`git.minetest.land`)
+ * through `/api/packages?proxy_image=...` so browsers can render them without failing the PoW challenge.
+ */
+export function toProxiedGitImageIfNeeded(url?: string | null): string {
+  const trimmed = url?.trim() ?? '';
+  if (!trimmed || !trimmed.startsWith('http') || trimmed.startsWith('/api/packages?proxy_image=')) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'git.minetest.land' || host.endsWith('.minetest.land')) {
+      return `/api/packages?proxy_image=${encodeURIComponent(trimmed)}`;
+    }
+  } catch {
+    // Ignore malformed URLs
+  }
+  return trimmed;
+}
+
+/**
+ * Checks whether an asset URL (screenshot/thumbnail/banner) originates from a Git repository
+ * or independent CDN rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
+ */
+export function isGitRepositoryAssetUrl(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === 'logo.svg') return false;
+  if (trimmed.startsWith('/api/packages?proxy_image=')) return true;
+  if (!/^https?:\/\//i.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Single source of truth for determining whether a package is deprecated, abandoned, or unmaintained.
+ * Used across both Cloudflare Pages Functions (Top 10, catalog normalization) and Angular client
+ * (Hero Banner, Home dashboard swimlane rows, Top 10, and personalized taste scoring).
+ */
+export function isPackageDeprecated(pkg?: {
+  dev_state?: string | null;
+  tags?: readonly any[] | string | null;
+  title?: string | null;
+  short_desc?: string | null;
+  short_description?: string | null;
+} | null): boolean {
+  if (!pkg || typeof pkg !== 'object') return false;
+  const devState = String(pkg.dev_state ?? '').trim().toUpperCase();
+  if (devState === 'DEPRECATED' || devState === 'ABANDONED' || devState === 'OBSOLETE') {
+    return true;
+  }
+
+  let tags: readonly any[] = [];
+  if (Array.isArray(pkg.tags)) {
+    tags = pkg.tags;
+  } else if (typeof pkg.tags === 'string' && pkg.tags.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(pkg.tags);
+      if (Array.isArray(parsed)) tags = parsed;
+    } catch {
+      // Ignore malformed JSON tags
+    }
+  }
+  for (const rawTag of tags) {
+    const lower = (typeof rawTag === 'string' ? rawTag : String(rawTag?.name ?? rawTag?.title ?? '')).trim().toLowerCase();
+    if (
+      lower === 'deprecated' ||
+      lower === 'abandoned' ||
+      lower === 'obsolete' ||
+      lower === 'unmaintained'
+    ) {
+      return true;
+    }
+  }
+
+  const title = String(pkg.title ?? '').trim();
+  const shortDesc = String(pkg.short_desc ?? pkg.short_description ?? '').trim();
+  const combined = `${title} ${shortDesc}`;
+  if (/\b(?:deprecated|abandoned|obsolete|unmaintained|discontinued)\b/i.test(combined)) {
+    return true;
+  }
+  if (
+    /\bnot\s+worked\s+on\s+anymore\b/i.test(combined) ||
+    /\b(?:do\s+not|don't)\s+recommend\s+using\s+it\s+anymore\b/i.test(combined) ||
+    /\bno\s+longer\s+(?:maintained|supported|updated|developed)\b/i.test(combined)
+  ) {
+    return true;
+  }
+  return false;
+}
+

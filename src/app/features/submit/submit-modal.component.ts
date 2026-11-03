@@ -5,6 +5,7 @@ import { ActivatedRoute } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { GitAuditReport, GitProvider } from '../../core/models/package.model';
+import { detectGitProviderFromUrl, isAuthLoginGitProvider } from '../../core/config/git-providers.config';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
@@ -487,28 +488,10 @@ export class SubmitModalComponent {
   private readonly repoUrlSignal = signal('');
 
   readonly parsedRepoTarget = computed<{ provider: GitProvider; owner: string; repo: string } | null>(() => {
-    const raw = this.repoUrlSignal().trim();
-    if (!raw) return null;
-    try {
-      const u = new URL(raw);
-      const host = u.hostname.toLowerCase();
-      const parts = u.pathname.replace(/^\/|\/$/g, '').split('/');
-      if (parts.length < 2) return null;
-      const owner = parts[0];
-      const repo = parts[1].replace(/\.git$/i, '');
-      if (!owner || !repo) return null;
-      let provider: GitProvider = 'github';
-      if (host.includes('minetest.land') || host.includes('mesehub')) {
-        provider = 'mesehub';
-      } else if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
-        provider = 'codeberg';
-      } else if (host.includes('gitlab')) {
-        provider = 'gitlab';
-      }
-      return { provider, owner, repo };
-    } catch {
-      return null;
-    }
+    const detected = detectGitProviderFromUrl(this.repoUrlSignal().trim());
+    if (!detected?.owner || !detected?.repo) return null;
+    const provider: GitProvider = isAuthLoginGitProvider(detected.provider) ? detected.provider : 'codeberg';
+    return { provider, owner: detected.owner, repo: detected.repo };
   });
 
   isOwnershipVerified(): boolean {

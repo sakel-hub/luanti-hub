@@ -4,6 +4,7 @@ import { App } from './app';
 import { CatalogRouteReuseStrategy } from './app.config';
 import { routes } from './app.routes';
 import { PackageService } from './core/services/package.service';
+import { LuantiPackage } from './core/models/package.model';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
 import { AuthService, formatFriendlyAuthError, sanitizeUserFacingError } from './core/services/auth.service';
@@ -22,6 +23,7 @@ import { DownloadAnalyticsChartComponent } from './shared/components/download-an
 import { PwaService, PERIODIC_SYNC_TAG, ONE_OFF_OUTBOX_SYNC_TAG, ONE_OFF_CATALOG_SYNC_TAG } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
+import { ImgFallbackDirective } from './shared/directives/img-fallback.directive';
 import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../../functions/api/packages/git';
 import { onRequestGet as packageStatsOnRequestGet } from '../../functions/api/packages/[author]/[name]/stats';
 import { onRequestGet as authorStatsOnRequestGet } from '../../functions/api/authors/[username]/stats';
@@ -6742,7 +6744,7 @@ supported_games = minetest_game, voxelibre
     expect(legalDeleteSection).toBeTruthy();
     expect(legalDeleteSection.textContent).toContain('4. Account & Data Deletion');
     expect(legalDeleteSection.textContent).toContain('LuantiHub');
-    expect(legalDeleteSection.textContent).toContain('0-day retention');
+    expect(legalDeleteSection.textContent).toContain('from our databases');
 
     const legalDeleteBtn = appFixture.nativeElement.querySelector('[data-testid="legal-delete-account-btn"]') as HTMLButtonElement;
     expect(legalDeleteBtn).toBeTruthy();
@@ -6982,5 +6984,207 @@ supported_games = minetest_game, voxelibre
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it('collapses Package Dependencies by default when total items > 20 and keeps it expanded when <= 20', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const appFixture = TestBed.createComponent(App);
+
+    const smallDepsPkg: LuantiPackage = {
+      id: 'wuzzy/small_deps',
+      author: 'Wuzzy',
+      name: 'small_deps',
+      title: 'Small Deps Mod',
+      type: 'mod',
+      short_desc: 'Mod with 5 dependencies',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 4.8,
+      downloads: 1200,
+      license: 'MIT',
+      media_license: 'MIT',
+      source: 'official',
+      sources: ['official'],
+      tags: ['mod'],
+      min_minetest_version: '5.0.0',
+      featured: false,
+      dependencies: ['default', 'farming', 'doors'],
+      optional_dependencies: ['mesecons', 'pipeworks']
+    };
+
+    (pkgService as any)._activePackage.set(smallDepsPkg);
+    appFixture.detectChanges();
+
+    const depsSectionSmall = appFixture.nativeElement.querySelector('[data-testid="package-dependencies-section"]') as HTMLElement;
+    expect(depsSectionSmall).toBeTruthy();
+    const toggleBtnSmall = appFixture.nativeElement.querySelector('[data-testid="toggle-dependencies-btn"]') as HTMLButtonElement;
+    expect(toggleBtnSmall).toBeTruthy();
+    expect(toggleBtnSmall.getAttribute('aria-expanded')).toBe('true');
+    expect(depsSectionSmall.textContent).toContain('default');
+
+    // Now switch to a package with > 20 dependencies/provides (e.g. VoxeLibre)
+    const manyProvides = Array.from({ length: 25 }, (_, i) => `vl_submod_${i + 1}`);
+    const largeDepsPkg: LuantiPackage = {
+      ...smallDepsPkg,
+      id: 'wuzzy/mineclone2',
+      name: 'mineclone2',
+      title: 'VoxeLibre (formerly MineClone2)',
+      type: 'game',
+      dependencies: [],
+      optional_dependencies: [],
+      provides: manyProvides
+    };
+
+    (pkgService as any)._activePackage.set(largeDepsPkg);
+    appFixture.detectChanges();
+
+    const depsSectionLarge = appFixture.nativeElement.querySelector('[data-testid="package-dependencies-section"]') as HTMLElement;
+    const toggleBtnLarge = appFixture.nativeElement.querySelector('[data-testid="toggle-dependencies-btn"]') as HTMLButtonElement;
+    expect(toggleBtnLarge.getAttribute('aria-expanded')).toBe('false');
+    expect(depsSectionLarge.textContent).not.toContain('vl_submod_1');
+
+    // Clicking the header expands the section
+    toggleBtnLarge.click();
+    appFixture.detectChanges();
+    expect(toggleBtnLarge.getAttribute('aria-expanded')).toBe('true');
+    expect(depsSectionLarge.textContent).toContain('vl_submod_1');
+  });
+
+  it('excludes deprecated and abandoned packages from Hero Showcase, Top 10, and Home dashboard rows', () => {
+    const pkgService = TestBed.inject(PackageService);
+
+    const activeMod: LuantiPackage = {
+      id: 'active/good_mod',
+      author: 'active',
+      name: 'good_mod',
+      title: 'Good Active Mod',
+      type: 'mod',
+      short_desc: 'Actively maintained automation mod',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 4.9,
+      downloads: 50000,
+      daily_downloads: 200,
+      weekly_downloads: 1200,
+      license: 'MIT',
+      media_license: 'MIT',
+      source: 'git',
+      sources: ['official', 'git'],
+      tags: ['automation', 'technology'],
+      min_minetest_version: '5.0.0',
+      featured: true,
+      dependencies: [],
+      optional_dependencies: []
+    };
+
+    const deprecatedTxp: LuantiPackage = {
+      id: 'old/ctf_plus',
+      author: 'old',
+      name: 'ctf_plus',
+      title: 'CTF PluS! (ABANDONED)',
+      type: 'txp',
+      short_desc: 'This texture pack is not worked on anymore.',
+      dev_state: 'DEPRECATED',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 5.0,
+      downloads: 999999,
+      daily_downloads: 9000,
+      weekly_downloads: 50000,
+      license: 'CC-BY-3.0',
+      media_license: 'CC-BY-3.0',
+      source: 'official',
+      sources: ['official'],
+      tags: ['txp'],
+      min_minetest_version: '5.0.0',
+      featured: true,
+      dependencies: [],
+      optional_dependencies: []
+    };
+
+    expect(pkgService.isPackageDeprecated(activeMod)).toBe(false);
+    expect(pkgService.isPackageDeprecated(deprecatedTxp)).toBe(true);
+    expect(pkgService.isPackageDeprecated({ title: 'Normal Title', dev_state: 'DEPRECATED' })).toBe(true);
+    expect(pkgService.isPackageDeprecated({ title: 'Some Mod (ABANDONED)' })).toBe(true);
+
+    (pkgService as any)._packages.set([activeMod, deprecatedTxp]);
+    (pkgService as any)._serverTop10Today.set([deprecatedTxp, activeMod]);
+    (pkgService as any)._serverTop10Week.set([deprecatedTxp, activeMod]);
+
+    expect(pkgService.heroShowcasePackages().some(p => p.id === 'old/ctf_plus')).toBe(false);
+    expect(pkgService.top10TodayPackages().some(p => p.id === 'old/ctf_plus')).toBe(false);
+    expect(pkgService.top10WeekPackages().some(p => p.id === 'old/ctf_plus')).toBe(false);
+    expect(pkgService.texturePacks().some(p => p.id === 'old/ctf_plus')).toBe(false);
+    expect(pkgService.trendingPackages().some(p => p.id === 'active/good_mod')).toBe(true);
+  });
+
+  it('proxies git.minetest.land raw screenshot URLs through /api/packages?proxy_image= to bypass Anubis challenge', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const rawMeseHubShot = 'https://git.minetest.land/VoxeLibre/VoxeLibre/raw/branch/master/screenshot.png';
+    const proxied = pkgService.toProxiedGitImageIfNeeded(rawMeseHubShot);
+    expect(proxied).toBe(`/api/packages?proxy_image=${encodeURIComponent(rawMeseHubShot)}`);
+    expect(pkgService.isGitScreenshotUrl(proxied)).toBe(true);
+
+    const merged = pkgService.mergePackageScreenshots(
+      [rawMeseHubShot],
+      ['https://content.luanti.org/uploads/shot1.png']
+    );
+    expect(merged[0]).toBe(proxied);
+    expect(merged[1]).toBe('https://content.luanti.org/uploads/shot1.png');
+  });
+
+  it('keeps Delete Profile & Stored Data collapsed in a neutral section by default in Profile Drawer until expanded', () => {
+    const authService = TestBed.inject(AuthService);
+    const appFixture = TestBed.createComponent(App);
+    (authService as any)._currentUser.set({
+      id: 'usr_neutral_test',
+      username: 'neutral_tester',
+      display_name: 'Neutral Tester',
+      avatar_url: 'logo.svg',
+      bio: '',
+      identities: [{ provider: 'mesehub', username: 'neutral_tester', profile_url: 'https://git.minetest.land/neutral_tester', verified: true }],
+      packages: []
+    });
+    authService.openProfileDrawer(false);
+    appFixture.detectChanges();
+
+    const accountTabBtn = Array.from(
+      appFixture.nativeElement.querySelectorAll('button[role="tab"]') as NodeListOf<HTMLButtonElement>
+    ).find(btn => btn.textContent?.includes('Account'));
+    expect(accountTabBtn).toBeTruthy();
+    accountTabBtn!.click();
+    appFixture.detectChanges();
+
+    const deleteSection = appFixture.nativeElement.querySelector('[data-testid="delete-account-section"]') as HTMLElement;
+    expect(deleteSection).toBeTruthy();
+    const toggleBtn = appFixture.nativeElement.querySelector('[data-testid="toggle-delete-account-section-btn"]') as HTMLButtonElement;
+    expect(toggleBtn).toBeTruthy();
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('false');
+    // Red danger box is hidden while collapsed
+    expect(appFixture.nativeElement.querySelector('[data-testid="delete-account-danger-box"]')).toBeNull();
+
+    // Expanding reveals the red danger box with non-technical database wording
+    toggleBtn.click();
+    appFixture.detectChanges();
+    expect(toggleBtn.getAttribute('aria-expanded')).toBe('true');
+    const dangerBox = appFixture.nativeElement.querySelector('[data-testid="delete-account-danger-box"]') as HTMLElement;
+    expect(dangerBox).toBeTruthy();
+    expect(dangerBox.textContent).toContain('from our databases');
+    expect(dangerBox.textContent).not.toContain('Cloudflare D1');
+  });
+
+  it('falls back to fallbackThumbnail (and proxies git.minetest.land) in ImgFallbackDirective before falling back to logo.svg', () => {
+    const imgEl = document.createElement('img');
+    imgEl.src = 'https://codeberg.org/broken/repo/raw/branch/main/screenshot.png';
+    const directive = new ImgFallbackDirective({ nativeElement: imgEl } as any);
+    directive.fallbackThumbnail = 'https://git.minetest.land/VoxeLibre/VoxeLibre/raw/branch/master/screenshot.png';
+
+    // First error: falls back to proxied fallbackThumbnail
+    directive.onError();
+    expect(imgEl.src).toContain('/api/packages?proxy_image=');
+
+    // Second error: falls back to logo.svg
+    directive.onError();
+    expect(imgEl.src).toContain('logo.svg');
   });
 });

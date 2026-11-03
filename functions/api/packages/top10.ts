@@ -1,4 +1,11 @@
-import { fetchUpstreamJsonCached, computeGenuineStarRating, ensureExtendedPackageColumns } from '../lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  computeGenuineStarRating,
+  ensureExtendedPackageColumns,
+  isPackageDeprecated,
+  parseJsonArray,
+  toProxiedGitImageIfNeeded
+} from '../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -82,6 +89,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.contentdb_downloads,
           p.luantihub_downloads,
           p.file_size,
+          p.dev_state,
+          p.tags,
           p.updated_at
         FROM package_daily_downloads d
         LEFT JOIN packages p ON LOWER(p.id) = LOWER(d.package_id)
@@ -96,6 +105,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         for (const r of res.results) {
           const pkgKey = String(r.package_id || '').toLowerCase();
           if (!pkgKey || blockedIds.has(pkgKey)) continue;
+          const rowTags = parseJsonArray(r.tags);
+          if (isPackageDeprecated({ ...r, tags: rowTags })) continue;
           const parts = String(r.package_id).split('/');
           const author = r.author || parts[0];
           const name = r.name || parts[1];
@@ -146,8 +157,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               title: r.title || name,
               type: r.type || 'mod',
               short_desc: r.short_desc || '',
-              thumbnail: r.thumbnail_url || '',
-              banner: r.banner_url || r.thumbnail_url || '',
+              thumbnail: toProxiedGitImageIfNeeded(r.thumbnail_url || ''),
+              banner: toProxiedGitImageIfNeeded(r.banner_url || r.thumbnail_url || ''),
+              dev_state: r.dev_state || undefined,
               score: resolvedScore,
               contentdb_downloads: cdbDl,
               luantihub_downloads: lhDl,
@@ -195,32 +207,35 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           }
         }
 
-        top10List = top10List.map(entry => {
-          const lowerKey = entry.id.toLowerCase();
-          const match = upstreamMap.get(lowerKey);
-          if (match) {
-            const thumb = entry.thumbnail || match.thumbnail || 'logo.svg';
-            let banner = entry.banner || match.banner;
-            if (!banner && thumb.includes('thumbnail.png')) {
-              banner = thumb.replace('thumbnail.png', 'shot-0.png');
+        top10List = top10List
+          .map(entry => {
+            const lowerKey = entry.id.toLowerCase();
+            const match = upstreamMap.get(lowerKey);
+            if (match) {
+              const thumb = toProxiedGitImageIfNeeded(entry.thumbnail || match.thumbnail || 'logo.svg');
+              let banner = toProxiedGitImageIfNeeded(entry.banner || match.banner || '');
+              if (!banner && thumb.includes('thumbnail.png')) {
+                banner = thumb.replace('thumbnail.png', 'shot-0.png');
+              }
+              return {
+                ...entry,
+                title: entry.title !== entry.name ? entry.title : (match.title || entry.name),
+                type: entry.type || match.type || 'mod',
+                short_desc: entry.short_desc || match.short_desc || match.short_description || '',
+                dev_state: entry.dev_state || match.dev_state || undefined,
+                thumbnail: thumb,
+                banner: banner || thumb,
+                score: d1Ratings.get(lowerKey) ?? computeGenuineStarRating(entry.score, match.reviews),
+                license: match.license || entry.license || ''
+              };
             }
             return {
               ...entry,
-              title: entry.title !== entry.name ? entry.title : (match.title || entry.name),
-              type: entry.type || match.type || 'mod',
-              short_desc: entry.short_desc || match.short_desc || match.short_description || '',
-              thumbnail: thumb,
-              banner: banner || thumb,
-              score: d1Ratings.get(lowerKey) ?? computeGenuineStarRating(entry.score, match.reviews),
-              license: match.license || entry.license || ''
+              thumbnail: entry.thumbnail || 'logo.svg',
+              banner: entry.banner || entry.thumbnail || 'logo.svg'
             };
-          }
-          return {
-            ...entry,
-            thumbnail: entry.thumbnail || 'logo.svg',
-            banner: entry.banner || entry.thumbnail || 'logo.svg'
-          };
-        });
+          })
+          .filter(entry => !isPackageDeprecated(entry));
 
         // Sort upstream candidates by real downloads / score for remaining slots
         const sortedUpstream = [...upstreamData].sort((a, b) => {
@@ -234,6 +249,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
         for (const item of sortedUpstream) {
           if (top10List.length >= 10) break;
+          if (isPackageDeprecated(item)) continue;
           const pkgId = `${item.author}/${item.name}`;
           const lowerId = pkgId.toLowerCase();
           if (blockedIds.has(lowerId)) continue;

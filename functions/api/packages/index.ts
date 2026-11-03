@@ -1,6 +1,7 @@
 import {
   DEFAULT_CONTENTDB_TAGS,
   fetchUpstreamJsonCached,
+  fetchWithAnubisSupport,
   fetchGitRepoReleasesAndTags,
   fetchGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
@@ -16,6 +17,8 @@ import {
   extractEmbeddedVideo,
   isGitRepositoryAssetUrl,
   mergeScreenshotsPreferringGit,
+  toProxiedGitImageIfNeeded,
+  isPackageDeprecated,
   isGitProviderId,
   detectGitProviderFromUrl,
   getLastKnownActivePromotions,
@@ -345,8 +348,9 @@ function buildTop10FromCatalog(
   favoritesMap: Map<string, number>,
   timeframe: 'today' | 'week'
 ): any[] {
+  const activeCatalog = mergedCatalog.filter(item => !isPackageDeprecated(item));
   const catalogByLowerId = new Map<string, any>();
-  for (const item of mergedCatalog) {
+  for (const item of activeCatalog) {
     if (item?.id) {
       catalogByLowerId.set(String(item.id).toLowerCase(), item);
     }
@@ -417,7 +421,7 @@ function buildTop10FromCatalog(
   }
 
   if (top10.length < 10) {
-    const remaining = [...mergedCatalog].sort((a, b) => {
+    const remaining = [...activeCatalog].sort((a, b) => {
       const favA = favoritesMap.get(String(a.id || '').toLowerCase()) || 0;
       const favB = favoritesMap.get(String(b.id || '').toLowerCase()) || 0;
       const convA = Number(a.conversion_rate || 0);
@@ -504,10 +508,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ) {
         return new Response('Forbidden image host', { status: 403 });
       }
-      const upstreamRes = await fetch(targetUrl.toString(), {
+      const upstreamRes = await fetchWithAnubisSupport(targetUrl.toString(), {
         headers: {
           'Accept': 'image/png,image/jpeg,image/webp,image/*;q=0.8',
-          'User-Agent': 'LuantiHub-NotificationImageProxy/1.0'
+          'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
         }
       });
       if (!upstreamRes.ok) {
@@ -570,7 +574,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -1016,26 +1020,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
 
     const gitShotD1 = isGitRepositoryAssetUrl(p.banner_url)
-      ? String(p.banner_url)
-      : (isGitRepositoryAssetUrl(p.thumbnail_url) ? String(p.thumbnail_url) : undefined);
+      ? toProxiedGitImageIfNeeded(String(p.banner_url))
+      : (isGitRepositoryAssetUrl(p.thumbnail_url) ? toProxiedGitImageIfNeeded(String(p.thumbnail_url)) : undefined);
     const rawThumbCandidate = gitShotD1
       ? gitShotD1
       : ((p.thumbnail_url && p.thumbnail_url !== 'logo.svg')
           ? p.thumbnail_url
           : (matchedUpstream?.thumbnail || p.banner_url || ''));
-    const resolvedThumb = rawThumbCandidate && String(rawThumbCandidate).startsWith('http')
-      ? String(rawThumbCandidate)
+    const resolvedThumb = rawThumbCandidate && (String(rawThumbCandidate).startsWith('http') || String(rawThumbCandidate).startsWith('/api/packages?proxy_image='))
+      ? toProxiedGitImageIfNeeded(String(rawThumbCandidate))
       : null;
     const mergedCatalogScreenshots = mergeScreenshotsPreferringGit(
       [gitShotD1, p.banner_url, p.thumbnail_url],
       parseJsonArray(p.screenshots),
       matchedUpstream?.screenshots
     );
-    const resolvedBanner = gitShotD1
+    const rawBannerCandidate = gitShotD1
       ? gitShotD1
       : ((p.banner_url && p.banner_url !== 'logo.svg')
           ? p.banner_url
           : (mergedCatalogScreenshots[0] || (matchedUpstream?.thumbnail ? String(matchedUpstream.thumbnail).replace('thumbnail.png', 'shot-0.png') : (resolvedThumb || ''))));
+    const resolvedBanner = rawBannerCandidate ? toProxiedGitImageIfNeeded(String(rawBannerCandidate)) : '';
 
     const cdbDownloads = Math.max(
       typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
@@ -1177,6 +1182,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const carouselPool: any[] = [];
     const pushPool = (items: any[]) => {
       for (const it of items) {
+        if (isPackageDeprecated(it)) continue;
         const needsGitScreenshotScan =
           Boolean(it?.sources?.includes('git')) &&
           (!it?.banner || it?.banner === 'logo.svg' || !isGitRepositoryAssetUrl(it?.banner));
@@ -1224,6 +1230,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (resolvedLic) {
             pkg.license = resolvedLic;
             pkg.media_license = resolvedMediaLic;
+          }
+          if (detail?.dev_state && !pkg.dev_state) {
+            pkg.dev_state = detail.dev_state;
           }
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);

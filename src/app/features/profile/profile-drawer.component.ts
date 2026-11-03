@@ -766,83 +766,100 @@ import {
                 </div>
               </div>
 
-              <!-- Danger Zone: Delete Profile & Stored Data (Google Play & GDPR Self-Service Erasure) -->
+              <!-- Collapsible Account Removal Section (Neutral when collapsed, Red Danger Box when expanded) -->
               <div
                 data-testid="delete-account-section"
-                class="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/30 space-y-3">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="space-y-1">
-                    <h3 class="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-1.5">
-                      <svg lucideTrash class="w-3.5 h-3.5 text-rose-400 shrink-0"></svg>
-                      <span>{{ 'profile.deleteAccountTitle' | translate }}</span>
-                    </h3>
-                    <p class="text-[11px] text-slate-300 leading-relaxed">
-                      {{ 'profile.deleteAccountDesc' | translate }}
-                    </p>
-                  </div>
-                  @if (!isConfirmingAccountDelete()) {
-                    <button
-                      type="button"
-                      data-testid="open-delete-account-confirm-btn"
-                      (click)="onOpenDeleteAccountConfirm()"
-                      class="px-3.5 py-2 rounded-xl glass-btn-rose text-white text-xs font-bold whitespace-nowrap transition cursor-pointer shrink-0">
-                      {{ 'profile.deleteAccountBtn' | translate }}
-                    </button>
-                  }
-                </div>
+                class="p-4 rounded-2xl glass-panel space-y-3">
+                <button
+                  type="button"
+                  data-testid="toggle-delete-account-section-btn"
+                  (click)="toggleDeleteSection()"
+                  [attr.aria-expanded]="isDeleteSectionExpanded()"
+                  class="w-full flex items-center justify-between gap-3 text-left group cursor-pointer">
+                  <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300 group-hover:text-white flex items-center gap-2 transition">
+                    <svg lucideTrash class="w-3.5 h-3.5 text-slate-400 group-hover:text-rose-400 shrink-0 transition"></svg>
+                    <span>{{ 'profile.deleteAccountTitle' | translate }}</span>
+                  </h3>
+                  <svg
+                    lucideChevronDown
+                    class="w-4 h-4 text-slate-400 group-hover:text-white transition-transform duration-200 shrink-0"
+                    [class.rotate-180]="isDeleteSectionExpanded()">
+                  </svg>
+                </button>
 
-                @if (isConfirmingAccountDelete()) {
+                @if (isDeleteSectionExpanded()) {
                   <div
-                    data-testid="delete-account-confirm-box"
-                    class="p-3.5 rounded-xl bg-slate-950/80 border border-rose-500/40 space-y-3">
-                    <div class="flex items-start gap-2 text-[11px] text-rose-200 leading-relaxed">
-                      <svg lucideShieldAlert class="w-4 h-4 text-rose-400 shrink-0 mt-0.5"></svg>
-                      <p>{{ 'profile.deleteAccountConfirmWarning' | translate }}</p>
-                    </div>
-
-                    @if (userPackages().length > 0) {
-                      <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-white/5 border border-white/10 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          data-testid="delete-account-include-packages-checkbox"
-                          [ngModel]="deleteAccountIncludePackages()"
-                          (ngModelChange)="deleteAccountIncludePackages.set($event)"
-                          name="deleteAccountIncludePackages"
-                          class="mt-0.5 w-3.5 h-3.5 rounded accent-rose-500 cursor-pointer shrink-0"
-                        />
-                        <span class="text-[11px] text-slate-200 leading-snug">
-                          {{ 'profile.deleteAccountIncludePackagesLabel' | translate }}
-                        </span>
-                      </label>
-                    }
-
-                    @if (deleteAccountError()) {
-                      <p class="text-[11px] font-semibold text-rose-400">
-                        {{ deleteAccountError() }}
+                    data-testid="delete-account-danger-box"
+                    class="p-4 rounded-xl bg-rose-950/20 border border-rose-500/30 space-y-3">
+                    <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                      <p class="text-[11px] text-slate-300 leading-relaxed">
+                        {{ 'profile.deleteAccountDesc' | translate }}
                       </p>
-                    }
-
-                    <div class="flex flex-wrap items-center justify-end gap-2 pt-1">
-                      <button
-                        type="button"
-                        data-testid="cancel-delete-account-btn"
-                        [disabled]="isDeletingAccount()"
-                        (click)="onCancelDeleteAccountConfirm()"
-                        class="px-3.5 py-2 rounded-xl glass-btn text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer">
-                        {{ 'common.close' | translate }}
-                      </button>
-                      <button
-                        type="button"
-                        data-testid="confirm-delete-account-btn"
-                        [disabled]="isDeletingAccount()"
-                        (click)="onConfirmDeleteAccount()"
-                        class="px-4 py-2 rounded-xl glass-btn-rose disabled:opacity-50 text-white text-xs font-black transition flex items-center gap-1.5 cursor-pointer">
-                        <svg lucideTrash class="w-3.5 h-3.5"></svg>
-                        <span>
-                          {{ (isDeletingAccount() ? 'profile.deletingAccountBtn' : 'profile.deleteAccountConfirmBtn') | translate }}
-                        </span>
-                      </button>
+                      @if (!isConfirmingAccountDelete()) {
+                        <button
+                          type="button"
+                          data-testid="open-delete-account-confirm-btn"
+                          (click)="onOpenDeleteAccountConfirm()"
+                          class="px-3.5 py-2 rounded-xl glass-btn-rose text-white text-xs font-bold whitespace-nowrap transition cursor-pointer shrink-0 self-start">
+                          {{ 'profile.deleteAccountBtn' | translate }}
+                        </button>
+                      }
                     </div>
+
+                    @if (isConfirmingAccountDelete()) {
+                      <div
+                        data-testid="delete-account-confirm-box"
+                        class="p-3.5 rounded-xl bg-slate-950/80 border border-rose-500/40 space-y-3">
+                        <div class="flex items-start gap-2 text-[11px] text-rose-200 leading-relaxed">
+                          <svg lucideShieldAlert class="w-4 h-4 text-rose-400 shrink-0 mt-0.5"></svg>
+                          <p>{{ 'profile.deleteAccountConfirmWarning' | translate }}</p>
+                        </div>
+
+                        @if (userPackages().length > 0) {
+                          <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-white/5 border border-white/10 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              data-testid="delete-account-include-packages-checkbox"
+                              [ngModel]="deleteAccountIncludePackages()"
+                              (ngModelChange)="deleteAccountIncludePackages.set($event)"
+                              name="deleteAccountIncludePackages"
+                              class="mt-0.5 w-3.5 h-3.5 rounded accent-rose-500 cursor-pointer shrink-0"
+                            />
+                            <span class="text-[11px] text-slate-200 leading-snug">
+                              {{ 'profile.deleteAccountIncludePackagesLabel' | translate }}
+                            </span>
+                          </label>
+                        }
+
+                        @if (deleteAccountError()) {
+                          <p class="text-[11px] font-semibold text-rose-400">
+                            {{ deleteAccountError() }}
+                          </p>
+                        }
+
+                        <div class="flex flex-wrap items-center justify-end gap-2 pt-1">
+                          <button
+                            type="button"
+                            data-testid="cancel-delete-account-btn"
+                            [disabled]="isDeletingAccount()"
+                            (click)="onCancelDeleteAccountConfirm()"
+                            class="px-3.5 py-2 rounded-xl glass-btn text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer">
+                            {{ 'common.close' | translate }}
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="confirm-delete-account-btn"
+                            [disabled]="isDeletingAccount()"
+                            (click)="onConfirmDeleteAccount()"
+                            class="px-4 py-2 rounded-xl glass-btn-rose disabled:opacity-50 text-white text-xs font-black transition flex items-center gap-1.5 cursor-pointer">
+                            <svg lucideTrash class="w-3.5 h-3.5"></svg>
+                            <span>
+                              {{ (isDeletingAccount() ? 'profile.deletingAccountBtn' : 'profile.deleteAccountConfirmBtn') | translate }}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                    }
                   </div>
                 }
               </div>
@@ -2059,6 +2076,7 @@ export class ProfileDrawerComponent implements OnInit {
   editDisplayName = '';
   editBio = '';
   readonly isSavingProfile = signal(false);
+  readonly isDeleteSectionExpanded = signal(false);
   readonly isConfirmingAccountDelete = signal(false);
   readonly deleteAccountIncludePackages = signal(true);
   readonly isDeletingAccount = signal(false);
@@ -2120,6 +2138,7 @@ export class ProfileDrawerComponent implements OnInit {
       if (this.authService.requestAccountDeleteConfirm()) {
         this.authService.requestAccountDeleteConfirm.set(false);
         this.onSelectAccountTab();
+        this.isDeleteSectionExpanded.set(true);
         this.isConfirmingAccountDelete.set(true);
         this.deleteAccountError.set(null);
       }
@@ -2169,8 +2188,8 @@ export class ProfileDrawerComponent implements OnInit {
         title: p.title || p.name,
         type: p.type || 'mod',
         short_desc: p.short_desc || '',
-        thumbnail: p.thumbnail_url || p.thumbnail || 'logo.svg',
-        banner: p.banner_url || p.banner || p.thumbnail_url || p.thumbnail || 'logo.svg',
+        thumbnail: this.packageService.toProxiedGitImageIfNeeded(p.thumbnail_url ?? p.thumbnail) || 'logo.svg',
+        banner: this.packageService.toProxiedGitImageIfNeeded(p.banner_url ?? p.banner ?? p.thumbnail_url ?? p.thumbnail) || 'logo.svg',
         score: (typeof p.score === 'number' && p.score >= 1 && p.score <= 5) ? p.score : 0,
         downloads: p.downloads_count ?? p.downloads ?? 0,
         license: p.license || '',
@@ -2231,11 +2250,24 @@ export class ProfileDrawerComponent implements OnInit {
   onSelectAccountTab(): void {
     this.activeTab.set('account');
     this.myReportsManualOpen.set(null);
+    this.isDeleteSectionExpanded.set(false);
+    this.isConfirmingAccountDelete.set(false);
+    this.deleteAccountError.set(null);
     this.authService.fetchMyReports(false, 1);
+  }
+
+  toggleDeleteSection(): void {
+    const next = !this.isDeleteSectionExpanded();
+    this.isDeleteSectionExpanded.set(next);
+    if (!next) {
+      this.isConfirmingAccountDelete.set(false);
+      this.deleteAccountError.set(null);
+    }
   }
 
   onOpenDeleteAccountConfirm(): void {
     this.deleteAccountError.set(null);
+    this.isDeleteSectionExpanded.set(true);
     this.isConfirmingAccountDelete.set(true);
   }
 
