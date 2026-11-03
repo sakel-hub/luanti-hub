@@ -355,7 +355,15 @@ export const es: TranslationDictionary = {
     notifyNewReviewsLabel: 'Nuevas reseñas y valoraciones de la comunidad',
     permissionGranted: 'Activo',
     permissionBlocked: 'Bloqueado en navegador',
-    permissionResetHint: 'Las notificaciones están silenciadas en LuantiHub. Para revocar por completo el permiso del navegador, haz clic en el icono de configuración del sitio en la barra de direcciones y selecciona «Restablecer permiso».'
+    permissionResetHint: 'Las notificaciones están silenciadas en LuantiHub. Para revocar por completo el permiso del navegador, haz clic en el icono de configuración del sitio en la barra de direcciones y selecciona «Restablecer permiso».',
+    deleteAccountTitle: 'Zona de peligro — Eliminar perfil y datos almacenados',
+    deleteAccountDesc: 'Elimina permanentemente tu perfil de LuantiHub, identidades vinculadas de GitHub / GitLab / Codeberg, favoritos, reseñas e historial de cuenta de Cloudflare D1.',
+    deleteAccountBtn: 'Eliminar cuenta y datos',
+    deleteAccountConfirmWarning: 'Esta acción es inmediata e irreversible. Tu perfil de usuario, identidades OAuth, favoritos guardados, reseñas comunitarias y registros de actividad se borrarán permanentemente sin período de retención adicional.',
+    deleteAccountIncludePackagesLabel: 'Eliminar también mis paquetes Git comunitarios enviados de LuantiHub (los paquetes sincronizados desde ContentDB permanecen en el espejo público pero desvinculados de tu perfil)',
+    deleteAccountConfirmBtn: 'Eliminar permanentemente mi cuenta y datos',
+    deletingAccountBtn: 'Eliminando cuenta y datos...',
+    accountDeletedToast: 'Tu cuenta de LuantiHub y todos los datos personales almacenados han sido eliminados permanentemente.'
   },
   setup: {
     title: 'Usa LuantiHub Dentro del Juego',
@@ -484,6 +492,10 @@ export const es: TranslationDictionary = {
     safeHarborDetail: 'Operado en cumplimiento con 17 U.S.C. § 512 (DMCA Safe Harbor) y la Ley de Servicios Digitales (DSA) de la UE. Los paquetes reportados pueden ser retirados de inmediato mediante nuestro Kill Switch en Cloudflare D1.',
     legalSafeHarbor: 'Operado en cumplimiento con 17 U.S.C. § 512 (DMCA Safe Harbor) y la Ley de Servicios Digitales (DSA) de la UE. Los paquetes reportados pueden ser retirados de inmediato mediante nuestro Kill Switch en Cloudflare D1.',
     legalPrivacy: 'LuantiHub no utiliza rastreadores publicitarios de terceros. Solo se almacenan cookies de sesión esenciales y metadatos públicos de código abierto en Cloudflare D1.',
+    accountDeletionTitle: '4. Eliminación de cuenta y datos (Google Play y RGPD)',
+    accountDeletionSteps: 'Cómo eliminar tu cuenta de LuantiHub: Inicia sesión en LuantiHub (Web o aplicación Android/PWA) → haz clic en tu avatar de perfil en la barra superior → abre la pestaña «Cuenta» (Account) → desplázate hasta «Zona de peligro — Eliminar perfil y datos almacenados» → haz clic en «Eliminar cuenta y datos» y confirma.',
+    accountDeletionDataSpec: 'Datos eliminados vs. conservados (Período de retención: 0 días): Borra inmediatamente tu perfil de LuantiHub (nombre de usuario, correo, biografía, avatar), identidades OAuth vinculadas (GitHub, GitLab, Codeberg), favoritos, reseñas, historial de descargas/vistas y (opcionalmente) tus paquetes Git enviados directamente. Los paquetes públicos de código abierto sincronizados desde ContentDB bajo licencias SPDX permanecen en el espejo público pero se desvinculan permanentemente de tu perfil eliminado.',
+    accountDeletionBtn: 'Gestionar / Eliminar mi cuenta y datos',
     copyright: 'Proyecto comunitario de código abierto (Código: LGPL-2.1+ · Multimedia: CC-BY-SA-4.0).'
   },
   author: {

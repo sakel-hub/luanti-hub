@@ -355,7 +355,15 @@ export const sk: TranslationDictionary = {
     notifyNewReviewsLabel: 'Nové komunitné recenzie a hodnotenia',
     permissionGranted: 'Aktívne',
     permissionBlocked: 'Zablokované v prehliadači',
-    permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.'
+    permissionResetHint: 'Notifikácie sú v LuantiHub stíšené. Pre úplné odobratie povolenia v prehliadači (aby sa pri ďalšom zapnutí opäť zobrazila výzva) kliknite na ikonu nastavení stránky v adresnom riadku a zvoľte „Resetovať povolenie“.',
+    deleteAccountTitle: 'Nebezpečná zóna — Vymazať profil a uložené dáta',
+    deleteAccountDesc: 'Natrvalo vymaže váš profil LuantiHub, prepojené identity GitHub / GitLab / Codeberg, obľúbené balíčky, recenzie a históriu účtu z Cloudflare D1.',
+    deleteAccountBtn: 'Vymazať účet a dáta',
+    deleteAccountConfirmWarning: 'Táto akcia je okamžitá a nevratná. Váš používateľský profil, OAuth identity, uložené obľúbené položky, komunitné recenzie a záznamy o aktivite budú natrvalo vymazané bez dodatočnej doby uchovávania.',
+    deleteAccountIncludePackagesLabel: 'Vymazať z LuantiHub aj mnou odoslané komunitné Git balíčky (balíčky synchronizované z upstream ContentDB zostanú vo verejnom zrkadle bez prepojenia na váš profil)',
+    deleteAccountConfirmBtn: 'Natrvalo vymazať môj účet a dáta',
+    deletingAccountBtn: 'Mažem účet a dáta...',
+    accountDeletedToast: 'Váš účet LuantiHub a všetky uložené osobné údaje boli natrvalo vymazané.'
   },
   setup: {
     title: 'Používajte LuantiHub Priamo v Hre',
@@ -484,6 +492,10 @@ export const sk: TranslationDictionary = {
     safeHarborDetail: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalSafeHarbor: 'Prevádzkované v súlade s 17 U.S.C. § 512 (DMCA Safe Harbor) a nariadením EÚ o digitálnych službách (DSA). Nahlásené balíčky môžu byť okamžite stiahnuté pomocou nášho Cloudflare D1 Kill Switch systému.',
     legalPrivacy: 'LuantiHub nepoužíva žiadne reklamné sledovacie skripty tretích strán. V Cloudflare D1 sú uložené iba nevyhnutné prihlasovacie údaje a verejné open-source metadáta balíčkov.',
+    accountDeletionTitle: '4. Vymazanie účtu a údajov (Google Play & GDPR vymazanie dát)',
+    accountDeletionSteps: 'Ako vymazať svoj účet LuantiHub: Prihláste sa do LuantiHub (web alebo Android/PWA aplikácia) → kliknite na svoj profilový avatar v hornej lište → prejdite na kartu „Účet“ (Account) → prejdite dole na „Nebezpečná zóna — Vymazať profil a uložené dáta“ → kliknite na „Vymazať účet a dáta“ a potvrďte.',
+    accountDeletionDataSpec: 'Vymazané a ponechané dáta (doba uchovávania: 0 dní): Okamžite vymaže váš záznam profilu LuantiHub (používateľské meno, e-mail, bio, avatar), prepojené OAuth identity (GitHub, GitLab, Codeberg), uložené obľúbené položky, recenzie, históriu prezerania/sťahovania a (voliteľne) vami odoslané komunitné Git balíčky. Verejné open-source balíčky synchronizované z upstream ContentDB pod licenciami SPDX zostávajú vo verejnom zrkadle, ale sú natrvalo odpojené od vášho vymazaného profilu.',
+    accountDeletionBtn: 'Spravovať / Vymazať môj účet a dáta',
     copyright: 'Open-Source komunitný projekt (Kód: LGPL-2.1+ · Grafika: CC-BY-SA-4.0).'
   },
   author: {

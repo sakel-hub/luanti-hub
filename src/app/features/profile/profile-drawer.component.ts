@@ -765,6 +765,87 @@ import {
                   </button>
                 </div>
               </div>
+
+              <!-- Danger Zone: Delete Profile & Stored Data (Google Play & GDPR Self-Service Erasure) -->
+              <div
+                data-testid="delete-account-section"
+                class="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/30 space-y-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="space-y-1">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-1.5">
+                      <svg lucideTrash class="w-3.5 h-3.5 text-rose-400 shrink-0"></svg>
+                      <span>{{ 'profile.deleteAccountTitle' | translate }}</span>
+                    </h3>
+                    <p class="text-[11px] text-slate-300 leading-relaxed">
+                      {{ 'profile.deleteAccountDesc' | translate }}
+                    </p>
+                  </div>
+                  @if (!isConfirmingAccountDelete()) {
+                    <button
+                      type="button"
+                      data-testid="open-delete-account-confirm-btn"
+                      (click)="onOpenDeleteAccountConfirm()"
+                      class="px-3.5 py-2 rounded-xl glass-btn-rose text-white text-xs font-bold whitespace-nowrap transition cursor-pointer shrink-0">
+                      {{ 'profile.deleteAccountBtn' | translate }}
+                    </button>
+                  }
+                </div>
+
+                @if (isConfirmingAccountDelete()) {
+                  <div
+                    data-testid="delete-account-confirm-box"
+                    class="p-3.5 rounded-xl bg-slate-950/80 border border-rose-500/40 space-y-3">
+                    <div class="flex items-start gap-2 text-[11px] text-rose-200 leading-relaxed">
+                      <svg lucideShieldAlert class="w-4 h-4 text-rose-400 shrink-0 mt-0.5"></svg>
+                      <p>{{ 'profile.deleteAccountConfirmWarning' | translate }}</p>
+                    </div>
+
+                    @if (userPackages().length > 0) {
+                      <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-white/5 border border-white/10 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          data-testid="delete-account-include-packages-checkbox"
+                          [ngModel]="deleteAccountIncludePackages()"
+                          (ngModelChange)="deleteAccountIncludePackages.set($event)"
+                          name="deleteAccountIncludePackages"
+                          class="mt-0.5 w-3.5 h-3.5 rounded accent-rose-500 cursor-pointer shrink-0"
+                        />
+                        <span class="text-[11px] text-slate-200 leading-snug">
+                          {{ 'profile.deleteAccountIncludePackagesLabel' | translate }}
+                        </span>
+                      </label>
+                    }
+
+                    @if (deleteAccountError()) {
+                      <p class="text-[11px] font-semibold text-rose-400">
+                        {{ deleteAccountError() }}
+                      </p>
+                    }
+
+                    <div class="flex flex-wrap items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        data-testid="cancel-delete-account-btn"
+                        [disabled]="isDeletingAccount()"
+                        (click)="onCancelDeleteAccountConfirm()"
+                        class="px-3.5 py-2 rounded-xl glass-btn text-slate-300 hover:text-white text-xs font-semibold transition cursor-pointer">
+                        {{ 'common.close' | translate }}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="confirm-delete-account-btn"
+                        [disabled]="isDeletingAccount()"
+                        (click)="onConfirmDeleteAccount()"
+                        class="px-4 py-2 rounded-xl glass-btn-rose disabled:opacity-50 text-white text-xs font-black transition flex items-center gap-1.5 cursor-pointer">
+                        <svg lucideTrash class="w-3.5 h-3.5"></svg>
+                        <span>
+                          {{ (isDeletingAccount() ? 'profile.deletingAccountBtn' : 'profile.deleteAccountConfirmBtn') | translate }}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                }
+              </div>
             </div>
           }
 
@@ -1978,6 +2059,10 @@ export class ProfileDrawerComponent implements OnInit {
   editDisplayName = '';
   editBio = '';
   readonly isSavingProfile = signal(false);
+  readonly isConfirmingAccountDelete = signal(false);
+  readonly deleteAccountIncludePackages = signal(true);
+  readonly isDeletingAccount = signal(false);
+  readonly deleteAccountError = signal<string | null>(null);
 
   private readonly noteInputs = signal<Record<string, string>>({});
   private readonly actingReportIds = signal<Record<string, boolean>>({});
@@ -2031,6 +2116,12 @@ export class ProfileDrawerComponent implements OnInit {
         } else {
           this.activeTab.set(requestedTab);
         }
+      }
+      if (this.authService.requestAccountDeleteConfirm()) {
+        this.authService.requestAccountDeleteConfirm.set(false);
+        this.onSelectAccountTab();
+        this.isConfirmingAccountDelete.set(true);
+        this.deleteAccountError.set(null);
       }
     });
   }
@@ -2141,6 +2232,45 @@ export class ProfileDrawerComponent implements OnInit {
     this.activeTab.set('account');
     this.myReportsManualOpen.set(null);
     this.authService.fetchMyReports(false, 1);
+  }
+
+  onOpenDeleteAccountConfirm(): void {
+    this.deleteAccountError.set(null);
+    this.isConfirmingAccountDelete.set(true);
+  }
+
+  onCancelDeleteAccountConfirm(): void {
+    this.deleteAccountError.set(null);
+    this.isConfirmingAccountDelete.set(false);
+  }
+
+  async onConfirmDeleteAccount(): Promise<void> {
+    if (this.isDeletingAccount()) return;
+    this.isDeletingAccount.set(true);
+    this.deleteAccountError.set(null);
+    const currentUser = this.authService.currentUser();
+    const userId = currentUser?.id || '';
+    const handles = [
+      currentUser?.username || '',
+      ...(currentUser?.identities || []).filter(i => Boolean(i.verified)).map(i => i.username)
+    ].filter(Boolean);
+    try {
+      const includePackages = this.deleteAccountIncludePackages();
+      const res = await this.authService.deleteAccount({
+        deleteSubmittedPackages: includePackages
+      });
+      if (!res.success) {
+        this.deleteAccountError.set(res.message || 'Could not delete account right now.');
+        return;
+      }
+      this.isConfirmingAccountDelete.set(false);
+      this.packageService.removeDeletedUserPackagesFromCatalog(userId, handles, includePackages);
+      if (includePackages) {
+        this.packageService.initCatalog(true);
+      }
+    } finally {
+      this.isDeletingAccount.set(false);
+    }
   }
 
   toggleMyReports(): void {

@@ -1,4 +1,6 @@
 https://luanti-hub.pages.dev/*  https://luantihub.org/:splat  301
-/api/*       /api/:splat       200
-/packages/*  /packages/:splat  200
-/*           /index.html       200
+/privacy         /legal          301
+/delete-account  /legal          301
+/api/*           /api/:splat     200
+/packages/*      /packages/:splat 200
+/*               /index.html     200

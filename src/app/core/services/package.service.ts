@@ -2264,7 +2264,9 @@ export class PackageService {
       path === '/submit' ||
       path === '/setup' ||
       path === '/profile' ||
-      path === '/legal';
+      path === '/legal' ||
+      path === '/privacy' ||
+      path === '/delete-account';
 
     const isFirstSync = !this.initialUrlSynced;
     if (path !== '/blog') {
@@ -2389,13 +2391,21 @@ export class PackageService {
       this.authService.closeProfileDrawer(false);
       this.seoService?.updateStaticRoute('Download Analytics', 'Author and package download telemetry, reasons, platforms, and time-series charts.', path);
       return;
-    } else if (path === '/legal') {
+    } else if (path === '/legal' || path === '/privacy' || path === '/delete-account') {
       this._activePackage.set(null);
       this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(true);
-      this.seoService?.updateStaticRoute('Legal, DMCA & Safe Harbor', 'Official Luanti trademark disclaimer, SPDX open-source terms, and DMCA / EU DSA Safe Harbor policy.', '/legal');
+      this.authService.closeProfileDrawer(false);
+      if ((path === '/privacy' || path === '/delete-account') && this.router) {
+        this.router.navigate(['/legal'], { replaceUrl: true, queryParamsHandling: 'preserve' }).catch(() => {});
+      }
+      this.seoService?.updateStaticRoute(
+        'Legal, Privacy Policy, DMCA Safe Harbor & Account Deletion',
+        'Official LuantiHub Privacy Policy, Google Play & GDPR Account & Data Deletion instructions, Luanti trademark disclaimer, and DMCA / EU DSA Safe Harbor policy.',
+        '/legal'
+      );
       return;
     } else if (path === '/blog') {
       this._activePackage.set(null);
@@ -7360,6 +7370,7 @@ export class PackageService {
 
   openLegalModal(updateUrl = true): void {
     this._isLegalModalOpen.set(true);
+    this.authService.closeProfileDrawer(false);
     if (updateUrl) {
       this.navigatePreservingScroll(['/legal']);
     }
@@ -7371,6 +7382,44 @@ export class PackageService {
     if (updateUrl) {
       this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
     }
+  }
+
+  removeDeletedUserPackagesFromCatalog(
+    userId: string,
+    verifiedHandles: string[],
+    deleteGitPackages: boolean
+  ): void {
+    const cleanUserId = (userId || '').trim();
+    const handleSet = new Set(
+      (verifiedHandles || [])
+        .map(h => String(h || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+    for (const h of handleSet) {
+      this.authorProfileCache.delete(h);
+    }
+
+    this._packages.update(current =>
+      current
+        .filter(pkg => {
+          if (!deleteGitPackages) return true;
+          const isOwned =
+            (cleanUserId && String(pkg.author_id || '') === cleanUserId) ||
+            handleSet.has(String(pkg.author || '').toLowerCase());
+          if (!isOwned) return true;
+          const isPureGit =
+            pkg.source === 'git' &&
+            !pkg.sources?.includes('official') &&
+            String(pkg.provider || 'github').toLowerCase() !== 'contentdb';
+          return !isPureGit;
+        })
+        .map(pkg => {
+          if (cleanUserId && String(pkg.author_id || '') === cleanUserId) {
+            return { ...pkg, author_id: undefined };
+          }
+          return pkg;
+        })
+    );
   }
 
   openVideoTheater(pkg: LuantiPackage, startSeconds = 0): void {

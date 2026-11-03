@@ -43,6 +43,8 @@ function getConfiguredOAuthProviders(env: Env): Record<string, boolean> {
   };
 }
 
+const deletedUserIdsInIsolate = new Set<string>();
+
 function buildFallbackUserFromClaims(
   claims: SessionTokenClaims,
   env: Env
@@ -140,16 +142,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
   try {
     // 1. Reconcile & auto-merge any duplicate suffixed accounts (memoized per user per isolate)
-    const user = await reconcileAndMergeUserAccount(context.env.DB, userId);
+    const user = deletedUserIdsInIsolate.has(userId)
+      ? null
+      : await reconcileAndMergeUserAccount(context.env.DB, userId);
 
     if (!user) {
-      // If the token carries verified OAuth/PAT claims (e.g. minted while D1 was over quota), keep the session alive
-      const fallbackUser = buildFallbackUserFromClaims(claims, context.env);
-      if (fallbackUser) {
-        return Response.json(
-          { user: fallbackUser, oauthProviders, transientDbFallback: true },
-          { headers: { 'Cache-Control': 'no-store' } }
-        );
+      if (!deletedUserIdsInIsolate.has(userId)) {
+        // If the token carries verified OAuth/PAT claims (e.g. minted while D1 was over quota), keep the session alive
+        const fallbackUser = buildFallbackUserFromClaims(claims, context.env);
+        if (fallbackUser) {
+          return Response.json(
+            { user: fallbackUser, oauthProviders, transientDbFallback: true },
+            { headers: { 'Cache-Control': 'no-store' } }
+          );
+        }
       }
 
       const clearHeaders = new Headers({ 'Cache-Control': 'no-store' });
@@ -548,6 +554,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
+    deletedUserIdsInIsolate.delete(userId);
     invalidateCachedAuthMePayload(userId);
     const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET, {
       username: verifiedUsername,
@@ -629,20 +636,262 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
   }
 }
 
-// DELETE /api/auth/me?provider=github&username=sakel: Unlink a specific identity handle
+// DELETE /api/auth/me:
+// - ?account=1(&deletePackages=1|0): Permanently delete user profile and all stored personal data (Google Play & GDPR Right to Erasure)
+// - ?provider=github&username=sakel: Unlink a specific secondary identity handle
 export async function onRequestDelete(context: { request: Request; env: Env }) {
+  const url = new URL(context.request.url);
+  const requestHost = url.host.toLowerCase();
+
+  // Defense-in-depth CSRF & cross-origin protection on DELETE /api/auth/me
+  const secFetchSite = (context.request.headers.get('Sec-Fetch-Site') || '').toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return Response.json({ error: 'Forbidden: Cross-site delete requests are blocked.' }, { status: 403 });
+  }
+  const originHeader = context.request.headers.get('Origin');
+  if (originHeader) {
+    try {
+      if (new URL(originHeader).host.toLowerCase() !== requestHost) {
+        return Response.json({ error: 'Forbidden: Invalid request origin.' }, { status: 403 });
+      }
+    } catch {
+      return Response.json({ error: 'Forbidden: Malformed request origin.' }, { status: 403 });
+    }
+  }
+  const refererHeader = context.request.headers.get('Referer');
+  if (refererHeader) {
+    try {
+      if (new URL(refererHeader).host.toLowerCase() !== requestHost) {
+        return Response.json({ error: 'Forbidden: Invalid request referer.' }, { status: 403 });
+      }
+    } catch {
+      return Response.json({ error: 'Forbidden: Malformed request referer.' }, { status: 403 });
+    }
+  }
+
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
   if (!sessionToken) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
-  if (!userId || !context.env.DB) {
+  const tokenClaims = await verifySessionTokenClaims(sessionToken, context.env.SESSION_SECRET);
+  const userId = tokenClaims?.userId || null;
+  if (!userId || !context.env.DB || deletedUserIdsInIsolate.has(userId)) {
     return Response.json({ error: 'Invalid session' }, { status: 401 });
   }
 
-  const url = new URL(context.request.url);
+  const isFullAccountDeletion = url.searchParams.get('account') === '1';
+
+  if (isFullAccountDeletion) {
+    // Require explicit custom confirmation header (prevents CSRF & accidental/unintended invocation)
+    const confirmHeader = (context.request.headers.get('X-Confirm-Account-Delete') || '').trim().toLowerCase();
+    if (confirmHeader !== 'permanent') {
+      return Response.json(
+        { error: 'Explicit account deletion confirmation header (X-Confirm-Account-Delete: permanent) is required.' },
+        { status: 403 }
+      );
+    }
+
+    // Block IDOR attempts trying to target another userId or username via query params
+    const targetUserIdParam = (url.searchParams.get('userId') || url.searchParams.get('id') || '').trim();
+    if (targetUserIdParam && targetUserIdParam !== userId) {
+      return Response.json({ error: 'Forbidden: Cannot delete another user profile.' }, { status: 403 });
+    }
+
+    const deleteSubmittedPackages = url.searchParams.get('deletePackages') !== '0';
+
+    try {
+      const uRow = await context.env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(userId).first();
+      if (!uRow) {
+        deletedUserIdsInIsolate.add(userId);
+        return Response.json({ error: 'Account not found or already deleted.' }, { status: 404 });
+      }
+
+      const targetUsernameParam = (url.searchParams.get('username') || '').trim();
+      if (
+        targetUsernameParam &&
+        String(uRow.username || '').trim().toLowerCase() !== targetUsernameParam.toLowerCase()
+      ) {
+        return Response.json({ error: 'Forbidden: Cannot delete another user profile.' }, { status: 403 });
+      }
+
+      const keysToEvict: string[] = [];
+      const verifiedGitIdentities: { provider: string; username: string }[] = [];
+      let hasAnyVerifiedIdentity = Boolean(tokenClaims?.verified);
+      try {
+        const idRows = await context.env.DB.prepare(
+          `SELECT provider, provider_username, verified FROM user_identities WHERE user_id = ?`
+        ).bind(userId).all();
+        if (uRow?.username) {
+          keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(String(uRow.username).toLowerCase())}`);
+        }
+        for (const r of (idRows?.results || [])) {
+          const handle = String(r?.provider_username || r?.username || '').trim();
+          const prov = String(r?.provider || '').trim().toLowerCase();
+          if (Boolean(r?.verified)) {
+            hasAnyVerifiedIdentity = true;
+          }
+          if (handle) {
+            keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(handle.toLowerCase())}`);
+            if (Boolean(r?.verified) && prov && prov !== 'contentdb') {
+              verifiedGitIdentities.push({ provider: prov, username: handle.toLowerCase() });
+            }
+          }
+        }
+      } catch {
+        // Ignore handle lookup errors if table is empty
+      }
+
+      // 1. Handle user's packages (delete pure-Git submissions when requested AND user has verified identity; unlink upstream ContentDB mirrors)
+      let deletedSubmittedPackagesCount = 0;
+      try {
+        if (deleteSubmittedPackages && hasAnyVerifiedIdentity) {
+          const identityClauses = verifiedGitIdentities
+            .map(() => `(LOWER(provider) = ? AND LOWER(author_name) = ?)`)
+            .join(' OR ');
+          const identityParams = verifiedGitIdentities.flatMap(i => [i.provider, i.username]);
+          const gitPkgSql = identityClauses
+            ? `SELECT id, provider, author_id FROM packages WHERE (author_id = ? OR ((author_id IS NULL OR author_id = '') AND (${identityClauses}))) AND COALESCE(LOWER(provider), 'github') != 'contentdb'`
+            : `SELECT id, provider, author_id FROM packages WHERE author_id = ? AND COALESCE(LOWER(provider), 'github') != 'contentdb'`;
+
+          const gitPkgsRes = await context.env.DB.prepare(gitPkgSql)
+            .bind(userId, ...identityParams)
+            .all();
+          const gitPkgIds = Array.from(
+            new Set(
+              (gitPkgsRes?.results || [])
+                .filter((row: any) => {
+                  const prov = String(row?.provider || 'github').trim().toLowerCase();
+                  if (prov === 'contentdb') return false;
+                  const rowAuthorId = String(row?.author_id || '').trim();
+                  if (rowAuthorId && rowAuthorId !== userId) return false;
+                  return true;
+                })
+                .map((row: any) => String(row?.id || '').trim())
+                .filter(Boolean)
+            )
+          );
+
+          for (const pkgId of gitPkgIds) {
+            try {
+              await context.env.DB.prepare(`DELETE FROM releases WHERE LOWER(package_id) = LOWER(?)`).bind(pkgId).run();
+            } catch {
+              // Ignore if releases table missing
+            }
+            try {
+              await context.env.DB.prepare(`DELETE FROM package_daily_downloads WHERE LOWER(package_id) = LOWER(?)`).bind(pkgId).run();
+            } catch {
+              // Ignore if package_daily_downloads table missing
+            }
+            try {
+              await context.env.DB.prepare(`DELETE FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`).bind(pkgId).run();
+            } catch {
+              // Ignore if promo_tag_packages table missing
+            }
+            try {
+              await context.env.DB.prepare(`DELETE FROM reviews WHERE LOWER(package_id) = LOWER(?)`).bind(pkgId).run();
+            } catch {
+              // Ignore if reviews table missing
+            }
+            await context.env.DB.prepare(`DELETE FROM packages WHERE id = ?`).bind(pkgId).run();
+          }
+
+          deletedSubmittedPackagesCount = gitPkgIds.length;
+          if (gitPkgIds.length > 0) {
+            keysToEvict.push('/__api_packages_d1_active_v3');
+          }
+        }
+
+        // Unlink any remaining packages (e.g. upstream ContentDB mirrors or when deletePackages=0)
+        await context.env.DB.prepare(`UPDATE packages SET author_id = NULL WHERE author_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if packages table missing
+      }
+
+      // 2. Delete user's community reviews & ratings
+      try {
+        await context.env.DB.prepare(`DELETE FROM reviews WHERE user_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if reviews table missing
+      }
+
+      // 3. Delete user's synced favorites
+      try {
+        await context.env.DB.prepare(`DELETE FROM user_favorites WHERE user_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if user_favorites table missing
+      }
+
+      // 4. Delete user's personal download & view telemetry history
+      try {
+        await context.env.DB.prepare(`DELETE FROM user_downloads WHERE user_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if user_downloads table missing
+      }
+      try {
+        await context.env.DB.prepare(`DELETE FROM user_views WHERE user_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if user_views table missing
+      }
+
+      // 5. Delete closed moderation reports submitted by user and anonymize open reports
+      try {
+        await context.env.DB.prepare(
+          `DELETE FROM moderation_reports WHERE reporter_user_id = ? AND status IN ('resolved', 'dismissed')`
+        ).bind(userId).run();
+        await context.env.DB.prepare(
+          `UPDATE moderation_reports SET reporter_user_id = NULL WHERE reporter_user_id = ?`
+        ).bind(userId).run();
+      } catch {
+        // Ignore if moderation_reports table missing
+      }
+
+      // 6. Delete all linked OAuth/PAT identities and the core user profile row
+      try {
+        await context.env.DB.prepare(`DELETE FROM user_identities WHERE user_id = ?`).bind(userId).run();
+      } catch {
+        // Ignore if user_identities table missing
+      }
+      await context.env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(userId).run();
+
+      deletedUserIdsInIsolate.add(userId);
+      invalidateCachedAuthMePayload(userId);
+
+      if (keysToEvict.length > 0) {
+        try {
+          await invalidateEdgeCacheKeys(keysToEvict);
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      const headers = new Headers({
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      });
+      for (const c of buildClearSessionCookies(context.request.url)) {
+        headers.append('Set-Cookie', c);
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          accountDeleted: true,
+          deletedUserId: userId,
+          deletedPackages: deleteSubmittedPackages,
+          deletedSubmittedPackagesCount
+        }),
+        { status: 200, headers }
+      );
+    } catch (err: any) {
+      return Response.json(
+        { error: sanitizePublicErrorMessage(err, 'Failed to delete account and associated data.') },
+        { status: 500 }
+      );
+    }
+  }
+
   const provider = url.searchParams.get('provider');
   const username = (url.searchParams.get('username') || '').trim();
 

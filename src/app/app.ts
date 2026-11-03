@@ -16,7 +16,7 @@ import { PwaService } from './core/services/pwa.service';
 import { AuthService } from './core/services/auth.service';
 import { LuantiBlogPost, LuantiPackage, sanitizeAndFormatBlogHtml } from './core/models/package.model';
 import { TranslatePipe } from './core/i18n/translate.pipe';
-import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } from '@lucide/angular';
+import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo, LucideTrash } from '@lucide/angular';
 
 @Component({
   selector: 'app-root',
@@ -39,7 +39,8 @@ import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo } f
     LucideShieldCheck,
     LucideCheck,
     LucideDownload,
-    LucideInfo
+    LucideInfo,
+    LucideTrash
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
@@ -246,6 +247,11 @@ export class App {
         }, durationMs);
       }
     });
+  }
+
+  onOpenAccountDeletionFromLegal(): void {
+    this.packageService.closeLegalModal(!this.authService.isLoggedIn());
+    this.authService.openAccountDeletionFlow();
   }
 
   onFooterNavClick(

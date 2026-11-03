@@ -136,6 +136,7 @@ export class AuthService {
   private readonly _moderationReasonFilter = signal<string>('all');
   private readonly _closedReportsCount = signal<number>(0);
   private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions' | null>(null);
+  readonly requestAccountDeleteConfirm = signal<boolean>(false);
   private lastModerationFetchAt = 0;
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
@@ -341,6 +342,11 @@ export class AuthService {
         this._isCompletingOAuth.set(true);
         let returnedToPackage = false;
         try {
+          if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('lh_oauth_account_delete') === '1') {
+            sessionStorage.removeItem('lh_oauth_account_delete');
+            this._requestedDrawerTab.set('account');
+            this.requestAccountDeleteConfirm.set(true);
+          }
           const savedPath = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('lh_oauth_return_path') : null;
           if (savedPath) {
             sessionStorage.removeItem('lh_oauth_return_path');
@@ -608,6 +614,19 @@ export class AuthService {
     this._isAuthModalOpen.set(false);
     this._authError.set(null);
     this.returnToPackageOnAuthClose = false;
+    if (!this._isOAuthRedirecting() && !this.isLoggedIn()) {
+      this.requestAccountDeleteConfirm.set(false);
+      if (this._requestedDrawerTab() === 'account') {
+        this._requestedDrawerTab.set(null);
+      }
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.removeItem('lh_oauth_account_delete');
+        }
+      } catch {
+        // Ignore storage error
+      }
+    }
   }
 
   openProfileDrawer(updateUrl = true): void {
@@ -890,6 +909,62 @@ export class AuthService {
       return { success: false, message: sanitizeUserFacingError(data.error, 'Could not unlink identity.') };
     } catch (err: any) {
       return { success: false, message: sanitizeUserFacingError(err, 'Error unlinking identity.') };
+    }
+  }
+
+  openAccountDeletionFlow(): void {
+    this._requestedDrawerTab.set('account');
+    this.requestAccountDeleteConfirm.set(true);
+    if (this.isLoggedIn()) {
+      this.openProfileDrawer();
+    } else {
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem('lh_oauth_account_delete', '1');
+        }
+      } catch {
+        // Ignore storage error
+      }
+      this.openAuthModal();
+    }
+  }
+
+  async deleteAccount(options?: { deleteSubmittedPackages?: boolean }): Promise<{ success: boolean; message?: string }> {
+    const deletePackagesParam = options?.deleteSubmittedPackages === false ? '0' : '1';
+    try {
+      const res = await fetch(`/api/auth/me?account=1&deletePackages=${deletePackagesParam}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          return {
+            success: false,
+            message: sanitizeUserFacingError(data.error, 'Could not delete account right now. Please try again.')
+          };
+        }
+      }
+      this.clearAuthCache();
+      this.requestAccountDeleteConfirm.set(false);
+      this.settingsService.favorites.set([]);
+      this.settingsService.downloadedPackages.set({});
+      this.settingsService.recentlyViewedPackages.set([]);
+      this.settingsService.isAuthenticatedSession.set(false);
+      this._myReports.set([]);
+      this._currentUser.set(null);
+      this.closeProfileDrawer();
+      this.pwaService.showToast('profile.accountDeletedToast');
+      return { success: true };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: sanitizeUserFacingError(err, 'Network error while deleting account.')
+      };
     }
   }
 

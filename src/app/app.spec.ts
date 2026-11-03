@@ -6702,4 +6702,285 @@ supported_games = minetest_game, voxelibre
 
     pkgService.setPromotions([]);
   });
+
+  it('should redirect /privacy and /delete-account to /legal, expose Google Play compliant deletion policy in /legal, and permanently erase user profile & D1 data via DELETE /api/auth/me?account=1', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    // 1. Verify Angular routes include /privacy and /delete-account redirecting to /legal
+    const privacyRoute = routes.find(r => r.path === 'privacy');
+    const deleteAccountRoute = routes.find(r => r.path === 'delete-account');
+    expect(privacyRoute).toBeTruthy();
+    expect(privacyRoute?.redirectTo).toBe('legal');
+    expect(deleteAccountRoute).toBeTruthy();
+    expect(deleteAccountRoute?.redirectTo).toBe('legal');
+
+    // 2. Verify Cloudflare Pages Edge _middleware.ts returns 301 redirect for /privacy and /delete-account -> /legal
+    const privacyEdgeRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/privacy?lang=en'),
+      next: async () => new Response('<html></html>', { status: 200 }),
+      env: {}
+    });
+    expect(privacyEdgeRes.status).toBe(301);
+    expect(privacyEdgeRes.headers.get('location')).toBe('https://luantihub.org/legal?lang=en');
+
+    const deleteEdgeRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/delete-account'),
+      next: async () => new Response('<html></html>', { status: 200 }),
+      env: {}
+    });
+    expect(deleteEdgeRes.status).toBe(301);
+    expect(deleteEdgeRes.headers.get('location')).toBe('https://luantihub.org/legal');
+
+    // 3. Verify /legal modal renders Section 4 (Account & Data Deletion) and triggers openAccountDeletionFlow()
+    const appFixture = TestBed.createComponent(App);
+    pkgService.openLegalModal(false);
+    appFixture.detectChanges();
+
+    const legalDeleteSection = appFixture.nativeElement.querySelector('[data-testid="legal-account-deletion-section"]') as HTMLElement;
+    expect(legalDeleteSection).toBeTruthy();
+    expect(legalDeleteSection.textContent).toContain('4. Account & Data Deletion');
+    expect(legalDeleteSection.textContent).toContain('LuantiHub');
+    expect(legalDeleteSection.textContent).toContain('0-day retention');
+
+    const legalDeleteBtn = appFixture.nativeElement.querySelector('[data-testid="legal-delete-account-btn"]') as HTMLButtonElement;
+    expect(legalDeleteBtn).toBeTruthy();
+
+    // 3b. When unauthenticated, clicking "Manage / Delete My Account & Data" opens the Auth Modal and persists lh_oauth_account_delete; closing Auth Modal cancels it cleanly
+    (authService as any)._currentUser.set(null);
+    authService.openAccountDeletionFlow();
+    expect(authService.isAuthModalOpen()).toBe(true);
+    expect(authService.requestAccountDeleteConfirm()).toBe(true);
+    expect(sessionStorage.getItem('lh_oauth_account_delete')).toBe('1');
+    authService.closeAuthModal();
+    expect(authService.isAuthModalOpen()).toBe(false);
+    expect(authService.requestAccountDeleteConfirm()).toBe(false);
+    expect(sessionStorage.getItem('lh_oauth_account_delete')).toBeNull();
+
+    // When signed in, clicking the button in /legal closes Legal modal and opens Profile Drawer on the Account tab with delete confirmation open
+    (authService as any)._currentUser.set({
+      id: 'usr_delete_test',
+      username: 'del_tester',
+      display_name: 'Delete Tester',
+      avatar_url: 'logo.svg',
+      bio: 'Testing deletion',
+      identities: [{ provider: 'github', username: 'del_tester', profile_url: 'https://github.com/del_tester', verified: true }],
+      packages: [{ id: 'del_tester/my_git_mod', name: 'my_git_mod', title: 'My Git Mod', type: 'mod', provider: 'github', source: 'git' }]
+    });
+    settingsService.favorites.set(['del_tester/my_git_mod']);
+    appFixture.detectChanges();
+
+    legalDeleteBtn.click();
+    appFixture.detectChanges();
+    expect(pkgService.isLegalModalOpen()).toBe(false);
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+
+    // 4. Verify ProfileDrawerComponent rendered inside App has Account tab active and Danger Zone confirmation UI expanded
+    const deleteSectionEl = appFixture.nativeElement.querySelector('[data-testid="delete-account-section"]') as HTMLElement;
+    expect(deleteSectionEl).toBeTruthy();
+    const confirmBoxEl = appFixture.nativeElement.querySelector('[data-testid="delete-account-confirm-box"]') as HTMLElement;
+    expect(confirmBoxEl).toBeTruthy();
+    const includePkgCheckbox = appFixture.nativeElement.querySelector('[data-testid="delete-account-include-packages-checkbox"]') as HTMLInputElement;
+    expect(includePkgCheckbox).toBeTruthy();
+
+    // 5. Verify Backend DELETE /api/auth/me?account=1&deletePackages=1 erases all D1 tables and prevents session resurrection
+    const { onRequestDelete: authMeDelete, onRequestGet: authMeGet } = await import('../../functions/api/auth/me');
+    const executedSql: { sql: string; args: any[] }[] = [];
+    let userDeletedInDb = false;
+
+    const mockDeleteDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM users WHERE id = ?')) {
+                  if (userDeletedInDb) return null;
+                  return { id: 'usr_delete_test', username: 'del_tester', display_name: 'Delete Tester', role: 'user' };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM packages WHERE')) {
+                  return {
+                    results: [
+                      { id: 'del_tester/my_git_mod', provider: 'github', author_id: 'usr_delete_test' },
+                      { id: 'del_tester/cdb_mod', provider: 'contentdb', author_id: 'usr_delete_test' },
+                      { id: 'other_author/hijack_mod', provider: 'github', author_id: 'usr_other_owner' }
+                    ]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                executedSql.push({ sql, args });
+                if (sql.includes('DELETE FROM users WHERE id = ?')) {
+                  userDeletedInDb = true;
+                }
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    const sessionToken = await createSessionToken('usr_delete_test', 'test-delete-secret', {
+      username: 'del_tester',
+      displayName: 'Delete Tester',
+      provider: 'github',
+      verified: true
+    });
+
+    // 5a. Security checks: reject unauthenticated, forged token, missing confirmation header, cross-site CSRF, and IDOR userId/username
+    const unauthDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1', {
+        method: 'DELETE',
+        headers: { 'X-Confirm-Account-Delete': 'permanent' }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(unauthDelRes.status).toBe(401);
+
+    const forgedTokenDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1', {
+        method: 'DELETE',
+        headers: {
+          Cookie: 'lh_session=forged.token',
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(forgedTokenDelRes.status).toBe(401);
+
+    const missingHeaderDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1', {
+        method: 'DELETE',
+        headers: { Cookie: `lh_session=${sessionToken}` }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(missingHeaderDelRes.status).toBe(403);
+
+    const csrfOriginDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1', {
+        method: 'DELETE',
+        headers: {
+          Cookie: `lh_session=${sessionToken}`,
+          Origin: 'https://evil-attacker.example.com',
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(csrfOriginDelRes.status).toBe(403);
+
+    const idorUserDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1&userId=usr_victim', {
+        method: 'DELETE',
+        headers: {
+          Cookie: `lh_session=${sessionToken}`,
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(idorUserDelRes.status).toBe(403);
+
+    const idorUsernameDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1&username=victim_handle', {
+        method: 'DELETE',
+        headers: {
+          Cookie: `lh_session=${sessionToken}`,
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(idorUsernameDelRes.status).toBe(403);
+    expect(executedSql.length).toBe(0);
+
+    // 5b. Legitimate self-service deletion with valid session + X-Confirm-Account-Delete: permanent
+    const delRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1&deletePackages=1', {
+        method: 'DELETE',
+        headers: {
+          Cookie: `lh_session=${sessionToken}`,
+          Origin: 'https://luantihub.org',
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(delRes.status).toBe(200);
+    const delJson = await delRes.json();
+    expect(delJson.success).toBe(true);
+    expect(delJson.accountDeleted).toBe(true);
+    expect(delJson.deletedUserId).toBe('usr_delete_test');
+    expect(delJson.deletedPackages).toBe(true);
+    expect(delJson.deletedSubmittedPackagesCount).toBe(1);
+    expect(delRes.headers.get('set-cookie')).toContain('Max-Age=0');
+
+    // Verify another user's package (other_author/hijack_mod) and ContentDB package (del_tester/cdb_mod) were NEVER deleted
+    const deletedPkgArgs = executedSql
+      .filter(e => e.sql.includes('DELETE FROM packages WHERE id = ?'))
+      .map(e => e.args[0]);
+    expect(deletedPkgArgs).toEqual(['del_tester/my_git_mod']);
+
+    // Replay of DELETE with the same token in the same isolate is immediately rejected (401)
+    const replayDelRes = await authMeDelete({
+      request: new Request('https://luantihub.org/api/auth/me?account=1', {
+        method: 'DELETE',
+        headers: {
+          Cookie: `lh_session=${sessionToken}`,
+          'X-Confirm-Account-Delete': 'permanent'
+        }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    expect(replayDelRes.status).toBe(401);
+
+    // Verify all personal tables were cleaned up and pure-Git package was deleted while ContentDB package was unlinked
+    const sqlStrings = executedSql.map(e => e.sql);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM packages WHERE id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('UPDATE packages SET author_id = NULL WHERE author_id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM reviews WHERE user_id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM user_favorites'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM user_downloads WHERE user_id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM user_views WHERE user_id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('UPDATE moderation_reports SET reporter_user_id = NULL'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM user_identities WHERE user_id = ?'))).toBe(true);
+    expect(sqlStrings.some(s => s.includes('DELETE FROM users WHERE id = ?'))).toBe(true);
+
+    // Subsequent GET /api/auth/me with the old cookie must NOT resurrect the deleted user from cookie claims
+    const afterGetRes = await authMeGet({
+      request: new Request('https://luantihub.org/api/auth/me', {
+        headers: { Cookie: `lh_session=${sessionToken}` }
+      }),
+      env: { DB: mockDeleteDb, SESSION_SECRET: 'test-delete-secret' }
+    });
+    const afterGetJson = await afterGetRes.json();
+    expect(afterGetJson.user).toBeNull();
+
+    // 6. Verify confirming deletion in ProfileDrawerComponent calls AuthService.deleteAccount(), clears client state & favorites, and closes drawer
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ success: true, accountDeleted: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })) as any;
+    try {
+      const confirmDeleteBtn = appFixture.nativeElement.querySelector('[data-testid="confirm-delete-account-btn"]') as HTMLButtonElement;
+      expect(confirmDeleteBtn).toBeTruthy();
+      confirmDeleteBtn.click();
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(authService.currentUser()).toBeNull();
+      expect(settingsService.favorites()).toEqual([]);
+      expect(authService.isProfileDrawerOpen()).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

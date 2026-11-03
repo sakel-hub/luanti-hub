@@ -122,10 +122,10 @@ const SECTION_HUB_SEO_MAP: Record<
       'Publish your Luanti mod, game, or texture pack directly from GitHub, Codeberg, Mesehub, or GitLab with instant automated verification.'
   },
   '/legal': {
-    title: 'Legal, DMCA & Safe Harbor — SPDX Open-Source Governance | Luanti Hub',
-    breadcrumbName: 'Terms & Privacy',
+    title: 'Legal, Privacy Policy, DMCA Safe Harbor & Account Deletion | Luanti Hub',
+    breadcrumbName: 'Terms, Privacy & Data Deletion',
     description:
-      'Official Luanti trademark disclaimer, SPDX open-source license enforcement, and DMCA / EU DSA Safe Harbor policy.'
+      'Official LuantiHub Privacy Policy, Google Play & GDPR Account & Data Deletion instructions, Luanti trademark disclaimer, and DMCA / EU DSA Safe Harbor policy.'
   },
   '/blog': {
     title: 'Official Luanti Blog — Engine News & Updates | Luanti Hub',
@@ -239,6 +239,11 @@ export async function onRequest(context: {
   // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
   if (url.hostname.toLowerCase() === 'luanti-hub.pages.dev' && !isApiRoute && !isDownloadRoute) {
     return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
+  }
+
+  // Redirect /privacy and /delete-account to canonical /legal route (for Google Play Console & GDPR compliance)
+  if ((pathname === '/privacy' || pathname === '/delete-account') && !isApiRoute) {
+    return Response.redirect(`${url.origin}/legal${url.search}`, 301);
   }
 
   if (!isApiRoute && !isDownloadRoute) {

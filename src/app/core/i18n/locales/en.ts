@@ -355,7 +355,15 @@ export const en: TranslationDictionary = {
     notifyNewReviewsLabel: 'New Community Reviews & Star Ratings',
     permissionGranted: 'Active',
     permissionBlocked: 'Blocked in Browser',
-    permissionResetHint: 'Notifications are muted in LuantiHub. To fully revoke browser permission and be prompted again next time, click the site settings icon in your address bar and select "Reset permission".'
+    permissionResetHint: 'Notifications are muted in LuantiHub. To fully revoke browser permission and be prompted again next time, click the site settings icon in your address bar and select "Reset permission".',
+    deleteAccountTitle: 'Delete Profile & Stored Data',
+    deleteAccountDesc: 'Permanently erase your LuantiHub profile, connected OAuth identities, synced favorites, personal download/view history, and community reviews from Cloudflare D1 (0-day retention).',
+    deleteAccountBtn: 'Delete Account & Data',
+    deleteAccountConfirmWarning: 'This action is immediate and irreversible. Your LuantiHub profile, linked OAuth/PAT handles, favorites, download/view history, and community reviews will be permanently deleted.',
+    deleteAccountIncludePackagesLabel: 'Also remove my submitted Git packages and release history from LuantiHub (official ContentDB mirrors remain public)',
+    deleteAccountConfirmBtn: 'Permanently Delete My Account & Data',
+    deletingAccountBtn: 'Deleting Account...',
+    accountDeletedToast: 'Your LuantiHub profile and all associated personal data have been permanently deleted.'
   },
   setup: {
     title: 'Use LuantiHub Inside Your Game',
@@ -484,6 +492,10 @@ export const en: TranslationDictionary = {
     safeHarborDetail: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalSafeHarbor: 'Operated in compliance with 17 U.S.C. § 512 (DMCA Safe Harbor) and the EU Digital Services Act (DSA). Flagged packages are subject to immediate removal via our Cloudflare D1 Kill Switch.',
     legalPrivacy: 'LuantiHub uses zero third-party ad trackers. Only essential session cookies and public open-source package metadata are stored in Cloudflare D1.',
+    accountDeletionTitle: '4. Account & Data Deletion (Google Play & GDPR Data Erasure)',
+    accountDeletionSteps: 'To delete your LuantiHub (luantihub.org) account and associated data at any time: (1) Sign in and open your Profile Drawer -> Account tab, (2) Scroll to "Delete Profile & Stored Data", or click the button below, and (3) Confirm permanent deletion.',
+    accountDeletionDataSpec: 'Deleted immediately (0-day retention): Core profile (username, display name, bio, avatar), all linked OAuth/forge identities (GitHub, Codeberg, GitLab, Mesehub, ContentDB), synced favorites, personal download/view history, community reviews, and (optionally) your submitted Git packages. Kept: Public open-source packages mirrored from upstream ContentDB (unlinked from your profile) and anonymized aggregate download counters.',
+    accountDeletionBtn: 'Manage / Delete My Account & Data',
     copyright: 'Open-Source Community Project (Code: LGPL-2.1+ · Assets: CC-BY-SA-4.0).'
   },
   author: {

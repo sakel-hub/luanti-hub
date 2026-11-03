@@ -371,6 +371,14 @@ export interface TranslationDictionary {
     permissionGranted: string;
     permissionBlocked: string;
     permissionResetHint: string;
+    deleteAccountTitle: string;
+    deleteAccountDesc: string;
+    deleteAccountBtn: string;
+    deleteAccountConfirmWarning: string;
+    deleteAccountIncludePackagesLabel: string;
+    deleteAccountConfirmBtn: string;
+    deletingAccountBtn: string;
+    accountDeletedToast: string;
   };
   setup: {
     title: string;
@@ -499,6 +507,10 @@ export interface TranslationDictionary {
     safeHarborDetail: string;
     legalSafeHarbor: string;
     legalPrivacy: string;
+    accountDeletionTitle: string;
+    accountDeletionSteps: string;
+    accountDeletionDataSpec: string;
+    accountDeletionBtn: string;
     copyright: string;
   };
   author: {

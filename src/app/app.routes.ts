@@ -60,6 +60,16 @@ export const routes: Routes = [
     component: CatalogComponent
   },
   {
+    path: 'privacy',
+    redirectTo: 'legal',
+    pathMatch: 'full'
+  },
+  {
+    path: 'delete-account',
+    redirectTo: 'legal',
+    pathMatch: 'full'
+  },
+  {
     path: 'legal',
     component: CatalogComponent
   },
