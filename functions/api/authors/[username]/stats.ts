@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage
 } from '../../lib/upstream';
@@ -59,14 +60,7 @@ export async function onRequestGet(context: {
   env: Env;
 }) {
   const { request, env } = context;
-  const safeDecode = (val: string) => {
-    try {
-      return decodeURIComponent(val);
-    } catch {
-      return val;
-    }
-  };
-  const requestedUsername = safeDecode(context.params.username || '').trim();
+  const requestedUsername = safeDecodeParam(context.params.username || '').trim();
   if (!requestedUsername) {
     return Response.json({ error: 'Author username is required.' }, { status: 400 });
   }

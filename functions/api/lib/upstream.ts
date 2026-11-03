@@ -2,6 +2,25 @@
 const PRIMARY_UPSTREAM = 'https://content.luanti.org/api';
 const MIRROR_UPSTREAM = 'https://contentdb.milcho.org/api';
 
+/**
+ * Safely URL-decodes a Cloudflare Pages `context.params` route segment, iteratively unwrapping
+ * nested `%25` double/multi-encoding (e.g. `"LC%252520Creations"` -> `"LC Creations"`) without
+ * throwing `URIError` on malformed percent sequences.
+ */
+export function safeDecodeParam(value: unknown, maxIterations = 16): string {
+  let current = String(value ?? '').replace(/%(?:25)+([0-9A-Fa-f]{2})/g, '%$1');
+  for (let i = 0; i < maxIterations && current.includes('%'); i++) {
+    try {
+      const next = decodeURIComponent(current);
+      if (next === current) break;
+      current = next.replace(/%(?:25)+([0-9A-Fa-f]{2})/g, '%$1');
+    } catch {
+      break;
+    }
+  }
+  return current;
+}
+
 export async function fetchWithFailover(path: string, options: RequestInit = {}): Promise<Response> {
   // Primary ContentDB (https://content.luanti.org/api) is online and serves as our primary source of truth.
   // Give bulk endpoints (/scores/, ?fmt=vcs) 7500ms and standard endpoints 5500ms before failing over to the mirror.

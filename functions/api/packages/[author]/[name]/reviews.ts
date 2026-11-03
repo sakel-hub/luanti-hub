@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   invalidateEdgeCacheKeys,
   ensureModerationColumns,
   ensureExtendedPackageColumns,
@@ -22,7 +23,8 @@ interface Env {
 
 // GET: Mixed Reviews (ContentDB + LuantiHub Native)
 export async function onRequestGet(context: { params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const packageId = `${author}/${name}`;
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
@@ -111,7 +113,8 @@ async function recalculateAndPersistPackageScore(db: any, packageId: string): Pr
 // POST: Submit a Community Review, Flag an Inappropriate Comment, or Remove a Comment (Admin/Author)
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   try {
-    const { author, name } = context.params;
+    const author = safeDecodeParam(context.params.author);
+    const name = safeDecodeParam(context.params.name);
     const packageId = `${author}/${name}`;
 
     // 1. Verify User Authentication

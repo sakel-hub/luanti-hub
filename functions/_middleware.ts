@@ -11,6 +11,9 @@ const MAX_STORE_ENTRIES = 5000;
 const BLOCKED_BOT_PATTERN =
   /\b(GPTBot|ChatGPT-User|CCBot|ClaudeBot|anthropic-ai|Bytespider|PetalBot|SemrushBot|AhrefsBot|MJ12bot|DotBot|BLEXBot|DataForSeoBot|Scrapy)\b/i;
 
+const SCANNER_PROBE_PATTERN =
+  /^\/(?:\.env|\.git|wp-admin|wp-login|wp-content|wp-includes|phpmyadmin|xmlrpc\.php|vendor\/phpunit)(?:\/|$|\.)/i;
+
 function pruneRateLimitStore(now: number): void {
   if (rateLimitStore.size <= MAX_STORE_ENTRIES) return;
   for (const [key, bucket] of rateLimitStore.entries()) {
@@ -232,6 +235,18 @@ export async function onRequest(context: {
   const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
 
+  // Immediately block automated vulnerability scanner probes (/.env, /wp-admin/*, /.git/*, etc.)
+  // with an edge-cached 404 Not Found so they do not fall through to the SPA 200 OK shell.
+  if (SCANNER_PROBE_PATTERN.test(pathname)) {
+    return new Response('Not Found', {
+      status: 404,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400, s-maxage=86400'
+      }
+    });
+  }
+
   const isApiRoute = pathname.startsWith('/api/');
   const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
@@ -248,18 +263,37 @@ export async function onRequest(context: {
 
   if (!isApiRoute && !isDownloadRoute) {
     const sectionMeta = SECTION_HUB_SEO_MAP[pathname];
-    const res = await next();
     const assetsBinding = context.env?.['ASSETS'];
-    if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
-      const rootUrl = new URL('/', url.origin);
-      const spaRes = await assetsBinding.fetch(
-        new Request(rootUrl.toString(), {
-          method: 'GET',
-          headers: { Accept: 'text/html,application/xhtml+xml' }
-        })
-      );
-      if (sectionMeta) {
-        const rawHtml = await spaRes.text();
+    try {
+      const res = await next();
+      if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
+        const rootUrl = new URL('/', url.origin);
+        const spaRes = await assetsBinding.fetch(
+          new Request(rootUrl.toString(), {
+            method: 'GET',
+            headers: { Accept: 'text/html,application/xhtml+xml' }
+          })
+        );
+        if (sectionMeta) {
+          const rawHtml = await spaRes.text();
+          return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'public, max-age=300, s-maxage=900'
+            }
+          });
+        }
+        return new Response(spaRes.body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate'
+          }
+        });
+      }
+      if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+        const rawHtml = await res.text();
         return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
           status: 200,
           headers: {
@@ -268,25 +302,35 @@ export async function onRequest(context: {
           }
         });
       }
-      return new Response(spaRes.body, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store, no-cache, must-revalidate'
-        }
+      return res;
+    } catch (err: any) {
+      console.error('[Edge Navigation Error]', {
+        method,
+        url: request.url,
+        error: err?.stack || String(err)
       });
+      if (method === 'GET' && assetsBinding && typeof assetsBinding.fetch === 'function') {
+        const rootUrl = new URL('/', url.origin);
+        const spaRes = await assetsBinding.fetch(
+          new Request(rootUrl.toString(), {
+            method: 'GET',
+            headers: { Accept: 'text/html,application/xhtml+xml' }
+          })
+        );
+        const rawHtml = await spaRes.text();
+        return new Response(
+          sectionMeta ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta) : rawHtml,
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store, no-cache, must-revalidate'
+            }
+          }
+        );
+      }
+      throw err;
     }
-    if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
-      const rawHtml = await res.text();
-      return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'public, max-age=300, s-maxage=900'
-        }
-      });
-    }
-    return res;
   }
 
   // 1. Block known aggressive AI scrapers & automated SEO crawlers from burning Function/D1 quotas
@@ -321,8 +365,9 @@ export async function onRequest(context: {
   }
 
   const isStateMutating = method === 'POST' || method === 'PUT' || method === 'DELETE' || method === 'PATCH';
+  const isReadOnlyAuthStatus = pathname === '/api/auth/me' && (method === 'GET' || method === 'HEAD');
   const isInternalWebEndpoint =
-    (pathname.startsWith('/api/auth/') && !isOAuthFlow) ||
+    (pathname.startsWith('/api/auth/') && !isOAuthFlow && !isReadOnlyAuthStatus) ||
     pathname.startsWith('/api/packages/git') ||
     pathname.startsWith('/api/packages/top10') ||
     pathname.startsWith('/api/users/') ||
@@ -382,5 +427,17 @@ export async function onRequest(context: {
     );
   }
 
-  return next();
+  try {
+    return await next();
+  } catch (err: any) {
+    console.error('[Edge API Unhandled Error]', {
+      method,
+      url: request.url,
+      error: err?.stack || String(err)
+    });
+    return Response.json(
+      { error: 'Internal server error.' },
+      { status: 500 }
+    );
+  }
 }

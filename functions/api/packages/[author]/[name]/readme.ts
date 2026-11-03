@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   fetchRepoReadmeCached,
   readEdgeCacheJson,
   writeEdgeCacheJson,
@@ -16,7 +17,8 @@ export async function onRequestGet(context: {
   params: { author: string; name: string };
   env: Env;
 }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const pkgId = `${author}/${name}`;
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const noCache = reqUrl?.searchParams.get('nocache') === '1';

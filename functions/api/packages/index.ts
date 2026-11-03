@@ -494,6 +494,52 @@ const ALLOWED_IMAGE_PROXY_HOSTS = new Set([
   'api.bitbucket.org'
 ]);
 
+const TRANSPARENT_FALLBACK_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1"/>';
+
+function detectImageMimeType(contentTypeHeader: string, bytes: Uint8Array): string | null {
+  const ct = (contentTypeHeader || '').split(';')[0].trim().toLowerCase();
+  if (ct.startsWith('text/html') || ct.startsWith('application/json') || ct.startsWith('text/plain')) {
+    return null;
+  }
+  if (bytes.length >= 4) {
+    // PNG: 89 50 4E 47
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+      return 'image/png';
+    }
+    // JPEG: FF D8 FF
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return 'image/jpeg';
+    }
+    // GIF: 47 49 46 38
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+      return 'image/gif';
+    }
+    // WEBP: 52 49 46 46 ... 57 45 42 50
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    ) {
+      return 'image/webp';
+    }
+    // Reject HTML documents masquerading as binary/image
+    if (bytes[0] === 0x3c && ct !== 'image/svg+xml') {
+      return null;
+    }
+  }
+  if (ct.startsWith('image/')) {
+    return ct;
+  }
+  return null;
+}
+
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -508,7 +554,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ) {
         return new Response('Forbidden image host', { status: 403 });
       }
-      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v2/${encodeURIComponent(targetUrl.toString())}`;
+      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v3/${encodeURIComponent(targetUrl.toString())}`;
       const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
       const proxyCacheReq = edgeCache ? new Request(proxyCacheKey, { method: 'GET' }) : null;
       if (edgeCache && proxyCacheReq) {
@@ -527,13 +573,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         /^\/([^/]+)\/([^/]+)\/raw\/branch\/([^/]+)\/(.+)$/i
       );
       if (giteaRawMatch) {
-        const [, owner, repo, , filePath] = giteaRawMatch;
+        const [, owner, repo, branch, filePath] = giteaRawMatch;
         candidateUrls.push(
+          `https://${targetUrl.host}/api/v1/repos/${owner}/${repo}/raw/${filePath}?ref=${encodeURIComponent(branch)}`,
           `https://${targetUrl.host}/api/v1/repos/${owner}/${repo}/raw/${filePath}`
         );
       }
 
-      let lastStatus = 404;
       for (const candUrl of candidateUrls) {
         const upstreamRes = await fetchWithAnubisSupport(candUrl, {
           headers: {
@@ -541,20 +587,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
           }
         });
-        lastStatus = upstreamRes.status;
         if (!upstreamRes.ok) {
           continue;
         }
-        const contentType = (upstreamRes.headers.get('content-type') || 'image/png').toLowerCase();
-        if (!contentType.startsWith('image/')) {
-          lastStatus = 415;
+        const rawContentType = upstreamRes.headers.get('content-type') || '';
+        const body = await upstreamRes.arrayBuffer();
+        const resolvedMime = detectImageMimeType(rawContentType, new Uint8Array(body));
+        if (!resolvedMime) {
           continue;
         }
-        const body = await upstreamRes.arrayBuffer();
         const okRes = new Response(body, {
           status: 200,
           headers: {
-            'Content-Type': contentType,
+            'Content-Type': resolvedMime,
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=86400, s-maxage=604800'
           }
@@ -564,18 +609,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         }
         return okRes;
       }
-      const errStatus = lastStatus || 404;
-      const errRes = new Response('Upstream image unavailable', {
-        status: errStatus,
+      const fallbackRes = new Response(TRANSPARENT_FALLBACK_SVG, {
+        status: 200,
         headers: {
+          'Content-Type': 'image/svg+xml; charset=utf-8',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=900, s-maxage=900'
+          'Cache-Control': 'public, max-age=300, s-maxage=300',
+          'X-Proxy-Fallback': 'non-image-upstream'
         }
       });
-      if (edgeCache && proxyCacheReq && (errStatus === 404 || errStatus === 415)) {
-        await edgeCache.put(proxyCacheReq, errRes.clone()).catch(() => {});
+      if (edgeCache && proxyCacheReq) {
+        await edgeCache.put(proxyCacheReq, fallbackRes.clone()).catch(() => {});
       }
-      return errRes;
+      return fallbackRes;
     } catch {
       return new Response('Invalid image URL', { status: 400 });
     }

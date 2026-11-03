@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage
 } from '../../../lib/upstream';
@@ -60,15 +61,8 @@ export async function onRequestGet(context: {
   env: Env;
 }) {
   const { request, env } = context;
-  const safeDecode = (val: string) => {
-    try {
-      return decodeURIComponent(val);
-    } catch {
-      return val;
-    }
-  };
-  const author = safeDecode(context.params.author || '').trim();
-  const name = safeDecode(context.params.name || '').trim();
+  const author = safeDecodeParam(context.params.author || '').trim();
+  const name = safeDecodeParam(context.params.name || '').trim();
   const packageId = `${author}/${name}`;
 
   if (!author || !name) {

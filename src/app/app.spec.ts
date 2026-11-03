@@ -7221,4 +7221,144 @@ supported_games = minetest_game, voxelibre
     directive.onError();
     expect(imgEl.src).toContain('logo.svg');
   });
+
+  it('prevents %2520 crawler canonical loops, SSR 500 stream crashes, scanner 200 false positives, and 415 image proxy errors', async () => {
+    const { safeDecodeParam } = await import('../../functions/api/lib/upstream');
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const { onRequestGet: packagesApiGet } = await import('../../functions/api/packages/index');
+
+    // 1. safeDecodeParam unwraps single-encoded, 59x-nested %2525...20, and malformed % strings safely
+    expect(safeDecodeParam('Hybrid%20Dog')).toBe('Hybrid Dog');
+    const deeplyEncoded = `LC%${'25'.repeat(58)}20Creations`;
+    expect(safeDecodeParam(deeplyEncoded)).toBe('LC Creations');
+    expect(safeDecodeParam('Bad%ZZPercent')).toBe('Bad%ZZPercent');
+
+    // 2. /package/:author/:name 301-redirects double-encoded %25 URLs to clean canonical URLs
+    const loopRedirectRes = await packageSsrGet({
+      request: new Request(`https://luantihub.org/package/${deeplyEncoded}/blocky_portaling?lang=en`),
+      params: { author: deeplyEncoded, name: 'blocky_portaling' },
+      env: {}
+    });
+    expect(loopRedirectRes.status).toBe(301);
+    expect(loopRedirectRes.headers.get('Location')).toBe(
+      'https://luantihub.org/package/LC%20Creations/blocky_portaling?lang=en'
+    );
+
+    // 3. /package/:author/:name decodes single-encoded params without re-encoding % into %25,
+    //    injects SEO metadata deterministically, and escapes </script> in JSON-LD / initial state
+    const sampleShellHtml = `<!doctype html><html><head><title>Default</title><meta name="description" content="" /><meta name="keywords" content="" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><meta property="og:title" content="" /><meta property="og:description" content="" /><meta property="og:url" content="" /><meta property="og:image" content="" /><meta name="twitter:title" content="" /><meta name="twitter:description" content="" /><meta name="twitter:image" content="" /></head><body><main class="sr-only"></main></body></html>`;
+    const ssrRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/Hybrid%20Dog/technic'),
+      params: { author: 'Hybrid%20Dog', name: 'technic' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(sampleShellHtml, { status: 200 })
+        },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('FROM packages')
+                  ? {
+                      title: 'Technic',
+                      author_name: 'Hybrid Dog',
+                      name: 'technic',
+                      provider: 'github',
+                      short_desc: 'Automation mod </script><script>alert(1)</script>',
+                      long_desc: 'Full description',
+                      type: 'mod',
+                      license: 'LGPL-2.1',
+                      downloads_count: 420
+                    }
+                  : { avg_rating: 4.8, cnt: 5 }
+            })
+          })
+        }
+      }
+    });
+    expect(ssrRes.status).toBe(200);
+    const ssrHtml = await ssrRes.text();
+    expect(ssrHtml).toContain('href="https://luantihub.org/package/Hybrid%20Dog/technic"');
+    expect(ssrHtml).not.toContain('Hybrid%2520Dog');
+    expect(ssrHtml).toContain('window.__LUANTI_INITIAL_PACKAGE__=');
+    expect(ssrHtml).toContain('<\\/script>');
+    expect(ssrHtml).not.toContain('</script><script>alert(1)</script>');
+
+    // 4. Middleware blocks scanner probes (/.env, /wp-admin/*) with edge-cached 404 Not Found
+    for (const probePath of ['/.env', '/wp-admin/install.php', '/.git/config']) {
+      const probeRes = await edgeMiddleware({
+        request: new Request(`https://luantihub.org${probePath}`),
+        next: async () => new Response('should_not_reach_spa', { status: 200 }),
+        env: {}
+      });
+      expect(probeRes.status).toBe(404);
+      expect(probeRes.headers.get('Cache-Control')).toContain('max-age=86400');
+    }
+
+    // 5. Middleware allows read-only GET /api/auth/me on cross-site navigation while blocking POST /api/auth/me
+    const crossSiteGetAuthRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/api/auth/me', {
+        method: 'GET',
+        headers: {
+          'Sec-Fetch-Site': 'cross-site',
+          Referer: 'https://www.google.com/'
+        }
+      }),
+      next: async () => Response.json({ user: null }),
+      env: {}
+    });
+    expect(crossSiteGetAuthRes.status).toBe(200);
+
+    // 6. Middleware error boundary catches downstream navigation exceptions and falls back to SPA shell
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const recoveredNavRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/package/TenPlus1/hopper'),
+      next: async () => {
+        throw new Error('Simulated stream lock crash');
+      },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(sampleShellHtml, { status: 200 })
+        }
+      }
+    });
+    expect(recoveredNavRes.status).toBe(200);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+
+    // 7. Image proxy detects PNG magic bytes on application/octet-stream and returns 200 fallback SVG instead of 415 on HTML
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      const target = typeof input === 'string' ? input : input?.url || '';
+      if (target.includes('broadleaf')) {
+        return new Response('<!DOCTYPE html><html><body>Anubis</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' }
+        });
+      }
+      // Valid PNG magic bytes with application/octet-stream (as returned by Gitea /api/v1/repos/.../raw/...)
+      return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/octet-stream' }
+      });
+    });
+
+    const htmlProxyRes = await packagesApiGet({
+      request: new Request(
+        'https://luantihub.org/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2FMeseHub%2Fbroadleaf%2Fraw%2Fbranch%2Fmaster%2Fscreenshot.png'
+      ),
+      env: {}
+    });
+    expect(htmlProxyRes.status).toBe(200);
+    expect(htmlProxyRes.headers.get('X-Proxy-Fallback')).toBe('non-image-upstream');
+
+    const octetPngProxyRes = await packagesApiGet({
+      request: new Request(
+        'https://luantihub.org/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2FVoxeLibre%2FVoxeLibre%2Fraw%2Fbranch%2Fmaster%2Fscreenshot.png'
+      ),
+      env: {}
+    });
+    expect(octetPngProxyRes.status).toBe(200);
+    expect(octetPngProxyRes.headers.get('Content-Type')).toBe('image/png');
+    fetchSpy.mockRestore();
+  });
 });

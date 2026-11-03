@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   fetchGitRepoReleasesAndTags,
   fetchGitReleaseNotesBetweenRefs,
   fetchGitSmartHttpRefs,
@@ -24,7 +25,8 @@ interface Env {
 const releasesRefreshCooldown = new Map<string, number>();
 
 export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const packageId = `${author}/${name}`;
   const reqUrl = context.request?.url ? new URL(context.request.url) : null;
   const isNotesQuery = reqUrl?.searchParams.get('notes') === '1';

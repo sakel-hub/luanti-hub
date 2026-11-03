@@ -8,6 +8,7 @@ import {
 } from '../../../auth/lib/session';
 import {
   invalidateEdgeCacheKeys,
+  safeDecodeParam,
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage
@@ -26,7 +27,8 @@ export async function onRequestPost(context: {
   env: Env;
 }) {
   try {
-    const { author, name } = context.params;
+    const author = safeDecodeParam(context.params.author);
+    const name = safeDecodeParam(context.params.name);
     const packageId = `${author}/${name}`;
     const { request, env } = context;
 

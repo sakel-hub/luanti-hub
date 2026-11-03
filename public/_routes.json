@@ -11,7 +11,14 @@
     "/setup",
     "/submit",
     "/legal",
-    "/sitemap.xml"
+    "/sitemap.xml",
+    "/.env*",
+    "/.git*",
+    "/wp-admin*",
+    "/wp-login*",
+    "/wp-content*",
+    "/wp-includes*",
+    "/phpmyadmin*"
   ],
   "exclude": [
     "/assets/*",

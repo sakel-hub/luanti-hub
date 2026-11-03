@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   parseJsonArray,
   readEdgeCacheJson,
   writeEdgeCacheJson
@@ -14,7 +15,8 @@ export async function onRequestGet(context: {
   params: { author: string; name: string };
   env?: Env;
 }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
   const pkgId = `${author}/${name}`;

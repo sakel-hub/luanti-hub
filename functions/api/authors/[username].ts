@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   readEdgeCacheJson,
   writeEdgeCacheJson,
   sanitizePublicErrorMessage
@@ -18,7 +19,7 @@ export async function onRequestGet(context: {
   env: Env;
   params: { username: string };
 }) {
-  const rawUsername = decodeURIComponent(context.params?.username || '').trim();
+  const rawUsername = safeDecodeParam(context.params?.username || '').trim();
   if (!rawUsername) {
     return Response.json({ error: 'Username is required.' }, { status: 400 });
   }

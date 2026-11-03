@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   fetchGitRepoReleasesAndTags,
   buildGitBranchArchiveUrl,
   buildGitTagArchiveUrl,
@@ -84,16 +85,9 @@ export async function onRequest(context: {
   env: Env;
   waitUntil?: (promise: Promise<any>) => void;
 }) {
-  const safeDecode = (val: string) => {
-    try {
-      return decodeURIComponent(val);
-    } catch {
-      return val;
-    }
-  };
-  const author = safeDecode(context.params.author || '');
-  const name = safeDecode(context.params.name || '');
-  const release = context.params.release ? safeDecode(context.params.release) : undefined;
+  const author = safeDecodeParam(context.params.author || '');
+  const name = safeDecodeParam(context.params.name || '');
+  const release = context.params.release ? safeDecodeParam(context.params.release) : undefined;
   const packageId = `${author}/${name}`;
   const { env, request } = context;
 

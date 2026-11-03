@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   parseJsonArray,
   ensureExtendedPackageColumns,
   formatByteSize,
@@ -114,7 +115,8 @@ function markdownToLuantiHypertext(md: string, linksMap: Record<string, string>,
 }
 
 export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
   const pkgId = `${author}/${name}`;

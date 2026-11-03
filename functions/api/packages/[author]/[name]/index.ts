@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  safeDecodeParam,
   parseJsonArray,
   detectSpdxFromText,
   readEdgeCacheJson,
@@ -452,7 +453,8 @@ async function recordWebPackageView(
 const pkgDetailRefreshCooldown = new Map<string, number>();
 
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
-  const { author, name } = context.params;
+  const author = safeDecodeParam(context.params.author);
+  const name = safeDecodeParam(context.params.name);
   const pkgId = `${author}/${name}`;
   const reqUrl = context.request ? new URL(context.request.url) : null;
   const isLite = reqUrl?.searchParams.get('lite') === '1';
@@ -1875,7 +1877,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 // PATCH /api/packages/:author/:name — Allow package author or admin to edit package tags
 export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   try {
-    const { author, name } = context.params;
+    const author = safeDecodeParam(context.params.author);
+    const name = safeDecodeParam(context.params.name);
     const pkgId = `${author}/${name}`;
 
     if (!context.env.DB) {
@@ -1990,7 +1993,8 @@ export async function onRequestPatch(context: { request: Request; params: { auth
 // POST /api/packages/:author/:name?view=1 — Lightweight non-blocking web view beacon
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   try {
-    const { author, name } = context.params;
+    const author = safeDecodeParam(context.params.author);
+    const name = safeDecodeParam(context.params.name);
     if (!author || !name) {
       return Response.json({ recorded: false }, { status: 400 });
     }
