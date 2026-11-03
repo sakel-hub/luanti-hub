@@ -666,11 +666,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v6_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v7_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -1115,7 +1115,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ? toProxiedGitImageIfNeeded(String(p.banner_url))
       : (isGitRepositoryAssetUrl(p.thumbnail_url) ? toProxiedGitImageIfNeeded(String(p.thumbnail_url)) : undefined);
     const mergedCatalogScreenshots = mergeScreenshotsPreferringGit(
-      [gitShotD1, p.banner_url, p.thumbnail_url],
+      [gitShotD1, p.banner_url, p.thumbnail_url, matchedUpstream?.thumbnail],
       parseJsonArray(p.screenshots),
       matchedUpstream?.screenshots
     );

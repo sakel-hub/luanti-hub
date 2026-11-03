@@ -1259,23 +1259,39 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? discoveredReleases[0].download_url
       : branchArchiveUrl;
 
+    const resolvedCdbScreenshots = Array.isArray(cdbMeta?.screenshots)
+      ? cdbMeta.screenshots
+          .map((s: string) => {
+            const clean = String(s || '').trim();
+            if (!clean) return '';
+            if (/^https?:\/\//i.test(clean)) return toProxiedGitImageIfNeeded(clean);
+            return toProxiedGitImageIfNeeded(`${rawAssetBase}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`);
+          })
+          .filter(Boolean)
+      : [];
+
     const existingGitScreenshot = isGitRepositoryAssetUrl(existingD1Pkg?.banner_url)
       ? String(existingD1Pkg.banner_url)
       : (isGitRepositoryAssetUrl(existingD1Pkg?.thumbnail_url) ? String(existingD1Pkg.thumbnail_url) : undefined);
-    const primaryGitScreenshot = hasScreenshot ? screenshotUrl : existingGitScreenshot;
+    const primaryGitScreenshot =
+      resolvedCdbScreenshots[0] || (hasScreenshot ? screenshotUrl : existingGitScreenshot);
+    const nonGitFallbackThumb =
+      matchedContentDbPkg?.thumbnail ||
+      (!isGitRepositoryAssetUrl(existingD1Pkg?.thumbnail_url) && existingD1Pkg?.thumbnail_url !== 'logo.svg'
+        ? existingD1Pkg?.thumbnail_url
+        : undefined);
     const mergedScreenshots = mergeScreenshotsPreferringGit(
-      [primaryGitScreenshot],
-      cdbMeta?.screenshots,
+      resolvedCdbScreenshots.length > 0 ? [nonGitFallbackThumb] : [primaryGitScreenshot, nonGitFallbackThumb],
+      resolvedCdbScreenshots,
       parseJsonArray(existingD1Pkg?.screenshots),
       matchedContentDbPkg?.screenshots
     );
 
-    const resolvedThumbnail = primaryGitScreenshot
-      ? primaryGitScreenshot
-      : (matchedContentDbPkg?.thumbnail || existingD1Pkg?.thumbnail_url || screenshotUrl);
+    const resolvedThumbnail =
+      nonGitFallbackThumb || primaryGitScreenshot || existingD1Pkg?.thumbnail_url || screenshotUrl;
     const resolvedBanner = primaryGitScreenshot
       ? primaryGitScreenshot
-      : (mergedScreenshots[0] || (matchedContentDbPkg?.thumbnail ? String(matchedContentDbPkg.thumbnail).replace('thumbnail.png', 'shot-0.png') : resolvedThumbnail));
+      : (mergedScreenshots[0] || resolvedThumbnail);
     const resolvedCdbDownloads = Math.max(
       Number(matchedContentDbPkg?.downloads) || 0,
       Number(existingD1Pkg?.contentdb_downloads) || 0

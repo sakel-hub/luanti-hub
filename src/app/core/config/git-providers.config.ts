@@ -341,8 +341,37 @@ export function toProxiedGitImageIfNeeded(url?: string | null): string {
 }
 
 /**
+ * Unwraps `/api/packages?proxy_image=<encoded>` URLs back to the underlying raw image URL.
+ */
+export function unwrapProxiedImageUrl(rawUrl?: string | null): string {
+  const trimmed = rawUrl?.trim() ?? '';
+  if (!trimmed) return '';
+  const proxyIdx = trimmed.indexOf('proxy_image=');
+  if (proxyIdx !== -1 && (trimmed.startsWith('/api/packages') || trimmed.includes('/api/packages?'))) {
+    const queryPart = trimmed.slice(proxyIdx + 'proxy_image='.length);
+    const ampIdx = queryPart.indexOf('&');
+    const encodedTarget = ampIdx !== -1 ? queryPart.slice(0, ampIdx) : queryPart;
+    try {
+      return decodeURIComponent(encodedTarget).trim();
+    } catch {
+      return encodedTarget.trim();
+    }
+  }
+  return trimmed;
+}
+
+function isContentDbHost(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    lower.includes('content.luanti.org') ||
+    lower.includes('contentdb.milcho.org') ||
+    lower.includes('content.minetest.net')
+  );
+}
+
+/**
  * Checks whether an asset URL (screenshot/thumbnail/banner) originates from a Git repository
- * or independent CDN rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org`).
+ * or independent CDN rather than ContentDB (`content.luanti.org` / `contentdb.milcho.org` / `content.minetest.net`).
  */
 export function isGitRepositoryAssetUrl(url?: string | null): boolean {
   if (!url || typeof url !== 'string') return false;
@@ -350,11 +379,298 @@ export function isGitRepositoryAssetUrl(url?: string | null): boolean {
   if (!trimmed || trimmed === 'logo.svg') return false;
   if (trimmed.startsWith('/api/packages?proxy_image=')) return true;
   if (!/^https?:\/\//i.test(trimmed)) return false;
-  const lower = trimmed.toLowerCase();
-  if (lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) {
-    return false;
+  return !isContentDbHost(trimmed);
+}
+
+/**
+ * Computes a provider- and branch-agnostic canonical identity key for a screenshot URL so that:
+ * - `/main/screenshot.png` and `/HEAD/screenshot.png` (GitHub / GitLab / Bitbucket)
+ * - `/raw/branch/main/screenshot.png` and `/api/v1/repos/<owner>/<repo>/raw/screenshot.png` (Codeberg / MeseHub / Gitea)
+ * - Proxied MeseHub URLs with or without `&ngsw-bypass=true`
+ * - ContentDB URLs across `content.luanti.org`, `contentdb.milcho.org`, and `content.minetest.net`
+ * all map to the exact same canonical key.
+ */
+export function getCanonicalScreenshotKey(rawUrl?: string | null): string {
+  const target = unwrapProxiedImageUrl(rawUrl);
+  if (!target || target === 'logo.svg') return '';
+  try {
+    const u = new URL(target);
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    let pathname = u.pathname;
+    try {
+      pathname = decodeURIComponent(pathname);
+    } catch {
+      // Keep raw pathname if percent-decoding fails
+    }
+    pathname = pathname.replace(/\/+/g, '/').replace(/\/+(\.\/+)+/g, '/');
+
+    if (isContentDbHost(host)) {
+      return `cdb:${pathname.toLowerCase()}`;
+    }
+
+    const parts = pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+
+    // 1. GitHub (`raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` or `github.com/<owner>/<repo>/(raw|blob)/<ref>/<path>`)
+    if (host === 'raw.githubusercontent.com' && parts.length >= 4) {
+      const owner = parts[0].toLowerCase();
+      const repo = parts[1].replace(/\.git$/i, '').toLowerCase();
+      const fileStartIdx =
+        parts[2] === 'refs' && (parts[3] === 'heads' || parts[3] === 'tags') && parts.length >= 6
+          ? 5
+          : 3;
+      const filePath = parts.slice(fileStartIdx).join('/').toLowerCase();
+      if (filePath) {
+        return `git:github.com/${owner}/${repo}/${filePath}`;
+      }
+    }
+    if (host === 'github.com' && parts.length >= 5 && (parts[2] === 'raw' || parts[2] === 'blob')) {
+      const owner = parts[0].toLowerCase();
+      const repo = parts[1].replace(/\.git$/i, '').toLowerCase();
+      const fileStartIdx =
+        parts[3] === 'refs' && (parts[4] === 'heads' || parts[4] === 'tags') && parts.length >= 7
+          ? 6
+          : 4;
+      const filePath = parts.slice(fileStartIdx).join('/').toLowerCase();
+      if (filePath) {
+        return `git:github.com/${owner}/${repo}/${filePath}`;
+      }
+    }
+
+    // 2. GitLab (`<host>/<group...>/<repo>/-/(raw|blob)/<ref>/<path>` or `<host>/<owner>/<repo>/(raw|blob)/<ref>/<path>`)
+    if (host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org') {
+      const glDashMatch = pathname.match(
+        /^\/(.+?)\/-\/(?:raw|blob)\/(?:refs\/(?:heads|tags)\/[^/]+|[^/]+)\/(.+)$/i
+      );
+      if (glDashMatch) {
+        const repoPath = glDashMatch[1].replace(/\.git$/i, '').toLowerCase();
+        const filePath = glDashMatch[2].replace(/^\/+/, '').toLowerCase();
+        return `git:${host}/${repoPath}/${filePath}`;
+      }
+      const glLegacyMatch = pathname.match(
+        /^\/([^/]+\/[^/]+)\/(?:raw|blob)\/(?:refs\/(?:heads|tags)\/[^/]+|[^/]+)\/(.+)$/i
+      );
+      if (glLegacyMatch) {
+        const repoPath = glLegacyMatch[1].replace(/\.git$/i, '').toLowerCase();
+        const filePath = glLegacyMatch[2].replace(/^\/+/, '').toLowerCase();
+        return `git:${host}/${repoPath}/${filePath}`;
+      }
+    }
+
+    // 3. Bitbucket (`bitbucket.org/<owner>/<repo>/(raw|src)/<ref>/<path>` or `api.bitbucket.org/2.0/repositories/<owner>/<repo>/src/<ref>/<path>`)
+    if (host === 'api.bitbucket.org') {
+      const bbApiMatch = pathname.match(/^\/2\.0\/repositories\/([^/]+)\/([^/]+)\/src\/[^/]+\/(.+)$/i);
+      if (bbApiMatch) {
+        const owner = bbApiMatch[1].toLowerCase();
+        const repo = bbApiMatch[2].replace(/\.git$/i, '').toLowerCase();
+        const filePath = bbApiMatch[3].replace(/^\/+/, '').toLowerCase();
+        return `git:bitbucket.org/${owner}/${repo}/${filePath}`;
+      }
+    }
+    if (host === 'bitbucket.org') {
+      const bbWebMatch = pathname.match(/^\/([^/]+)\/([^/]+)\/(?:raw|src)\/[^/]+\/(.+)$/i);
+      if (bbWebMatch) {
+        const owner = bbWebMatch[1].toLowerCase();
+        const repo = bbWebMatch[2].replace(/\.git$/i, '').toLowerCase();
+        const filePath = bbWebMatch[3].replace(/^\/+/, '').toLowerCase();
+        return `git:bitbucket.org/${owner}/${repo}/${filePath}`;
+      }
+    }
+
+    // 4. Gitea / Forgejo / Codeberg / MeseHub
+    // - `/api/v1/repos/<owner>/<repo>/(raw|media)/<path>`
+    // - `/<owner>/<repo>/(raw|media|src)/(branch|commit|tag)/<ref>/<path>`
+    // - `/<owner>/<repo>/(raw|media|src)/<ref>/<path>`
+    const giteaApiMatch = pathname.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/(?:raw|media)\/(.+)$/i);
+    if (giteaApiMatch) {
+      const owner = giteaApiMatch[1].toLowerCase();
+      const repo = giteaApiMatch[2].replace(/\.git$/i, '').toLowerCase();
+      const filePath = giteaApiMatch[3].replace(/^\/+/, '').toLowerCase();
+      return `git:${host}/${owner}/${repo}/${filePath}`;
+    }
+    const giteaBranchMatch = pathname.match(
+      /^\/([^/]+)\/([^/]+)\/(?:raw|media|src)\/(?:branch|commit|tag)\/[^/]+\/(.+)$/i
+    );
+    if (giteaBranchMatch) {
+      const owner = giteaBranchMatch[1].toLowerCase();
+      const repo = giteaBranchMatch[2].replace(/\.git$/i, '').toLowerCase();
+      const filePath = giteaBranchMatch[3].replace(/^\/+/, '').toLowerCase();
+      return `git:${host}/${owner}/${repo}/${filePath}`;
+    }
+    const giteaDirectMatch = pathname.match(/^\/([^/]+)\/([^/]+)\/(?:raw|media|src)\/[^/]+\/(.+)$/i);
+    if (giteaDirectMatch) {
+      const owner = giteaDirectMatch[1].toLowerCase();
+      const repo = giteaDirectMatch[2].replace(/\.git$/i, '').toLowerCase();
+      const filePath = giteaDirectMatch[3].replace(/^\/+/, '').toLowerCase();
+      return `git:${host}/${owner}/${repo}/${filePath}`;
+    }
+
+    return `${host}${pathname.toLowerCase()}${u.search.toLowerCase()}`;
+  } catch {
+    return target.toLowerCase();
   }
-  return true;
+}
+
+/**
+ * Single source of truth for merging and deduplicating package screenshots across backend and frontend:
+ * - Normalizes MeseHub proxy URLs (`&ngsw-bypass=true`) and ContentDB mirror hosts (`content.luanti.org`).
+ * - Deduplicates Git raw URLs across branch/API variants (`/main/`, `/HEAD/`, `/raw/branch/`, `/api/v1/repos/.../raw/`)
+ *   using `getCanonicalScreenshotKey`.
+ * - Prevents `.cdb.json` vs ContentDB `/uploads/` gallery duplication when a package has a multi-image Git
+ *   screenshot gallery (`gitUrls.length > 1`) or a single mirrored screenshot (`gitUrls.length === 1 && otherUrls.length === 1`),
+ *   and removes ContentDB `/uploads/<hash>` entries that match the package's `/thumbnails/<n>/<hash>` primary thumbnail.
+ */
+export function mergeScreenshotsPreferringGit(
+  preferredGitUrls: Array<string | null | undefined>,
+  ...screenshotLists: any[]
+): string[] {
+  const cdbThumbnailFileNames = new Set<string>();
+
+  const extractUrl = (entry: any): string => {
+    if (!entry) return '';
+    if (typeof entry === 'string') return entry.trim();
+    if (typeof entry === 'object' && typeof entry.url === 'string') return entry.url.trim();
+    return '';
+  };
+
+  const normalizeCandidateUrl = (rawExtracted: string): string => {
+    if (!rawExtracted || rawExtracted === 'logo.svg') return '';
+    if (!/^https?:\/\//i.test(rawExtracted) && !rawExtracted.startsWith('/api/packages?proxy_image=')) {
+      return '';
+    }
+    let normalized = toProxiedGitImageIfNeeded(rawExtracted);
+    if (/^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i.test(normalized)) {
+      normalized = normalized.replace(
+        /^https?:\/\/(?:contentdb\.milcho\.org|content\.minetest\.net)\//i,
+        'https://content.luanti.org/'
+      );
+    }
+    return normalized;
+  };
+
+  const inspectForThumbnailHash = (raw: any) => {
+    const rawUrl = extractUrl(raw);
+    if (!rawUrl) return;
+    const lower = rawUrl.toLowerCase();
+    if (isContentDbHost(lower) && lower.includes('/thumbnails/')) {
+      const m = lower.match(/\/thumbnails\/[^/]+\/([^/?#]+)/);
+      if (m?.[1]) {
+        cdbThumbnailFileNames.add(m[1]);
+      }
+    }
+  };
+
+  if (Array.isArray(preferredGitUrls)) {
+    for (const u of preferredGitUrls) {
+      inspectForThumbnailHash(u);
+    }
+  }
+  for (const list of screenshotLists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      inspectForThumbnailHash(item);
+    }
+  }
+
+  const isFilteredThumbnailOrSyntheticBanner = (url: string): boolean => {
+    const lower = url.toLowerCase();
+    return isContentDbHost(lower) && (lower.includes('/thumbnails/') || lower.endsWith('/shot-0.png'));
+  };
+
+  const listGitUrls: string[] = [];
+  const otherUrls: string[] = [];
+  const seenListKeys = new Set<string>();
+
+  for (const list of screenshotLists) {
+    if (!Array.isArray(list)) continue;
+    const lockGitFromPriorList = listGitUrls.length > 0;
+    for (const item of list) {
+      const url = normalizeCandidateUrl(extractUrl(item));
+      if (!url || isFilteredThumbnailOrSyntheticBanner(url)) continue;
+      const key = getCanonicalScreenshotKey(url);
+      if (!key) continue;
+
+      if (isGitRepositoryAssetUrl(url)) {
+        if (lockGitFromPriorList) continue;
+        if (!seenListKeys.has(key)) {
+          seenListKeys.add(key);
+          listGitUrls.push(url);
+        }
+      } else if (!seenListKeys.has(key)) {
+        seenListKeys.add(key);
+        otherUrls.push(url);
+      }
+    }
+  }
+
+  // Self-heal legacy arrays where root `/screenshot.png` was prepended before a `.cdb.json` gallery
+  if (listGitUrls.length >= 2) {
+    const firstKey = getCanonicalScreenshotKey(listGitUrls[0]);
+    if (/^git:[^/]+\/[^/]+\/[^/]+\/screenshot\.(?:png|jpe?g|webp)$/i.test(firstKey)) {
+      const restKeys = listGitUrls.slice(1).map(u => getCanonicalScreenshotKey(u));
+      const allRestInSubdirOrNumbered = restKeys.every(k => {
+        const afterRepo = k.replace(/^git:[^/]+\/[^/]+\/[^/]+\//, '');
+        return afterRepo.includes('/') || /(?:^|[_-])\d+\.(?:png|jpe?g|webp)$/i.test(afterRepo);
+      });
+      if (allRestInSubdirOrNumbered) {
+        listGitUrls.shift();
+      }
+    }
+  }
+
+  const preferredGitByKey = new Map<string, string>();
+  const preferredGitList: Array<{ key: string; url: string }> = [];
+  if (Array.isArray(preferredGitUrls)) {
+    for (const raw of preferredGitUrls) {
+      const url = normalizeCandidateUrl(extractUrl(raw));
+      if (!url || isFilteredThumbnailOrSyntheticBanner(url) || !isGitRepositoryAssetUrl(url)) continue;
+      const key = getCanonicalScreenshotKey(url);
+      if (key && !preferredGitByKey.has(key)) {
+        preferredGitByKey.set(key, url);
+        preferredGitList.push({ key, url });
+      }
+    }
+  }
+
+  const gitUrls: string[] = [];
+  const seenGitKeys = new Set<string>();
+
+  if (listGitUrls.length === 0) {
+    for (const { key, url } of preferredGitList) {
+      if (!seenGitKeys.has(key)) {
+        seenGitKeys.add(key);
+        gitUrls.push(url);
+      }
+    }
+  } else {
+    for (const url of listGitUrls) {
+      const key = getCanonicalScreenshotKey(url);
+      if (key && !seenGitKeys.has(key)) {
+        seenGitKeys.add(key);
+        gitUrls.push(preferredGitByKey.get(key) ?? url);
+      }
+    }
+  }
+
+  if (gitUrls.length === 0) {
+    return otherUrls;
+  }
+
+  // When `.cdb.json` provides a multi-image Git screenshot gallery (`gitUrls.length > 1`),
+  // ContentDB's `/uploads/` URLs are re-hosted copies of that exact `.cdb.json` gallery.
+  if (gitUrls.length > 1) {
+    return gitUrls;
+  }
+
+  // Remove any ContentDB `/uploads/<filename>` that matches the package's `/thumbnails/<n>/<filename>` primary thumbnail
+  const filteredOtherUrls = otherUrls.filter(u => {
+    const m = u.toLowerCase().match(/\/uploads\/([^/?#]+)/);
+    if (m?.[1] && cdbThumbnailFileNames.has(m[1])) {
+      return false;
+    }
+    return true;
+  });
+
+  return [...gitUrls, ...filteredOtherUrls];
 }
 
 /**

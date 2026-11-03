@@ -34,6 +34,7 @@ import {
   detectGitProviderFromUrl,
   toProxiedGitImageIfNeeded,
   isGitRepositoryAssetUrl,
+  mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   GitProviderId
 } from '../config/git-providers.config';
@@ -1769,7 +1770,7 @@ export class PackageService {
 
     const mergedItemScreenshots =
       Array.isArray(item.screenshots) || Array.isArray(cachedMeta?.screenshots)
-        ? this.mergePackageScreenshots([gitShotCandidate], item.screenshots, cachedMeta?.screenshots)
+        ? this.mergePackageScreenshots([gitShotCandidate, nonGitThumbCandidate], item.screenshots, cachedMeta?.screenshots)
         : undefined;
     const screenshots = mergedItemScreenshots && mergedItemScreenshots.length > 0
       ? mergedItemScreenshots
@@ -1952,56 +1953,7 @@ export class PackageService {
     preferredGitUrls: Array<string | null | undefined>,
     ...screenshotLists: any[]
   ): string[] {
-    const gitUrls: string[] = [];
-    const otherUrls: string[] = [];
-    const seen = new Set<string>();
-
-    const extractUrl = (entry: any): string => {
-      if (!entry) return '';
-      if (typeof entry === 'string') return entry.trim();
-      if (typeof entry === 'object' && typeof entry.url === 'string') return entry.url.trim();
-      return '';
-    };
-
-    const addCandidate = (raw: any, forceGitPriority = false) => {
-      const rawExtracted = extractUrl(raw);
-      if (
-        !rawExtracted ||
-        rawExtracted === 'logo.svg' ||
-        (!/^https?:\/\//i.test(rawExtracted) && !rawExtracted.startsWith('/api/packages?proxy_image='))
-      ) {
-        return;
-      }
-      const url = this.toProxiedGitImageIfNeeded(rawExtracted);
-      const lower = url.toLowerCase();
-      if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
-        return;
-      }
-      if (seen.has(lower)) return;
-      seen.add(lower);
-      if (forceGitPriority || this.isGitScreenshotUrl(url)) {
-        gitUrls.push(url);
-      } else {
-        otherUrls.push(url);
-      }
-    };
-
-    if (Array.isArray(preferredGitUrls)) {
-      for (const u of preferredGitUrls) {
-        if (u && this.isGitScreenshotUrl(u)) {
-          addCandidate(u, true);
-        }
-      }
-    }
-
-    for (const list of screenshotLists) {
-      if (!Array.isArray(list)) continue;
-      for (const item of list) {
-        addCandidate(item, false);
-      }
-    }
-
-    return [...gitUrls, ...otherUrls];
+    return mergeScreenshotsPreferringGit(preferredGitUrls, ...screenshotLists);
   }
 
   /**
@@ -2032,14 +1984,14 @@ export class PackageService {
       secondary.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
 
-    const mergedScreenshots = this.mergePackageScreenshots(
-      [preferredGitShot],
-      primary.screenshots,
-      secondary.screenshots
-    );
-
     const nonGitThumb = [primary.thumbnail, secondary.thumbnail].find(
       u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
+    );
+
+    const mergedScreenshots = this.mergePackageScreenshots(
+      [preferredGitShot, nonGitThumb],
+      primary.screenshots,
+      secondary.screenshots
     );
     const resolvedThumb = this.toProxiedGitImageIfNeeded(
       nonGitThumb ||
@@ -2610,6 +2562,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v7');
         sessionStorage.removeItem('lh_boot_cache_v8');
         sessionStorage.removeItem('lh_boot_cache_v9');
+        sessionStorage.removeItem('lh_boot_cache_v10');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -3104,7 +3057,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v10');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v11');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -3172,7 +3125,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v10',
+          'lh_boot_cache_v11',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -3298,7 +3251,8 @@ export class PackageService {
             sessionStorage.removeItem('lh_boot_cache_v7');
             sessionStorage.removeItem('lh_boot_cache_v8');
             sessionStorage.removeItem('lh_boot_cache_v9');
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v10');
+            sessionStorage.removeItem('lh_boot_cache_v10');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v11');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -3629,13 +3583,13 @@ export class PackageService {
             this.isGitScreenshotUrl(u)
           );
           const preferredGitShot = rawPreferredGitShot ? this.toProxiedGitImageIfNeeded(rawPreferredGitShot) : undefined;
-          const mergedShots = this.mergePackageScreenshots(
-            [preferredGitShot],
-            h.screenshots,
-            pkg.screenshots
-          );
           const nonGitHydrateThumb = [pkg.thumbnail, h.thumbnail].find(
             u => u && u !== 'logo.svg' && !this.isGitScreenshotUrl(u)
+          );
+          const mergedShots = this.mergePackageScreenshots(
+            [preferredGitShot, nonGitHydrateThumb],
+            h.screenshots,
+            pkg.screenshots
           );
           const resolvedThumb = this.toProxiedGitImageIfNeeded(nonGitHydrateThumb || preferredGitShot || pkg.thumbnail || h.thumbnail);
           const resolvedBanner = this.toProxiedGitImageIfNeeded(

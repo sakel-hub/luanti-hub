@@ -7361,4 +7361,138 @@ supported_games = minetest_game, voxelibre
     expect(octetPngProxyRes.headers.get('Content-Type')).toBe('image/png');
     fetchSpy.mockRestore();
   });
+
+  it('deduplicates Git raw URL variants, .cdb.json vs ContentDB uploads galleries, and primary thumbnail hashes across backend and frontend', async () => {
+    const {
+      getCanonicalScreenshotKey,
+      mergeScreenshotsPreferringGit,
+      scanGitRepoMetadataCached
+    } = await import('../../functions/api/lib/upstream');
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. Canonical key matches across branch/API formats and proxy wrappers
+    expect(
+      getCanonicalScreenshotKey('https://raw.githubusercontent.com/Author/WaySigns/main/screenshot.png')
+    ).toBe(
+      getCanonicalScreenshotKey('https://raw.githubusercontent.com/Author/WaySigns/HEAD/screenshot.png')
+    );
+    expect(
+      getCanonicalScreenshotKey('https://codeberg.org/Author/WaySigns/raw/branch/main/screenshot.png')
+    ).toBe(
+      getCanonicalScreenshotKey('https://codeberg.org/api/v1/repos/Author/WaySigns/raw/screenshot.png')
+    );
+    expect(
+      getCanonicalScreenshotKey('https://gitlab.com/Author/WaySigns/-/raw/main/screenshot.png')
+    ).toBe(
+      getCanonicalScreenshotKey('https://gitlab.com/Author/WaySigns/-/raw/HEAD/screenshot.png')
+    );
+    expect(
+      getCanonicalScreenshotKey('https://bitbucket.org/Author/WaySigns/raw/master/screenshot.png')
+    ).toBe(
+      getCanonicalScreenshotKey(
+        'https://api.bitbucket.org/2.0/repositories/author/waysigns/src/master/screenshot.png'
+      )
+    );
+    expect(
+      getCanonicalScreenshotKey(
+        '/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2FVoxeLibre%2FVoxeLibre%2Fraw%2Fbranch%2Fmaster%2Fscreenshot.png'
+      )
+    ).toBe(
+      getCanonicalScreenshotKey(
+        '/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2Fapi%2Fv1%2Frepos%2FVoxeLibre%2FVoxeLibre%2Fraw%2Fscreenshot.png&ngsw-bypass=true'
+      )
+    );
+    expect(getCanonicalScreenshotKey('https://content.luanti.org/uploads/abc1234.png')).toBe(
+      getCanonicalScreenshotKey('https://contentdb.milcho.org/uploads/abc1234.png')
+    );
+
+    // 2. WaySigns scenario: 1 branch raw screenshot.png + 5 .cdb.json Git screenshots + 5 ContentDB re-hosted uploads -> 5 unique Git screenshots
+    const branchShot = 'https://codeberg.org/Author/waysigns/raw/branch/main/screenshot.png';
+    const cdbJsonGitShots = [
+      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/1.png',
+      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/2.png',
+      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/3.png',
+      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/4.png',
+      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/5.png'
+    ];
+    const cdbUploadsShots = [
+      'https://content.luanti.org/uploads/ws_hash_1.png',
+      'https://content.luanti.org/uploads/ws_hash_2.png',
+      'https://content.luanti.org/uploads/ws_hash_3.png',
+      'https://content.luanti.org/uploads/ws_hash_4.png',
+      'https://content.luanti.org/uploads/ws_hash_5.png'
+    ];
+
+    const mergedWaySigns = pkgService.mergePackageScreenshots(
+      [branchShot],
+      cdbJsonGitShots,
+      cdbUploadsShots
+    );
+    expect(mergedWaySigns).toEqual(cdbJsonGitShots);
+    expect(mergedWaySigns.length).toBe(5);
+
+    // Self-heals even when a single legacy D1 array already had [branchShot, ...cdbJsonGitShots, ...cdbUploadsShots]
+    const healedWaySigns = mergeScreenshotsPreferringGit(
+      [branchShot],
+      [branchShot, ...cdbJsonGitShots, ...cdbUploadsShots]
+    );
+    expect(healedWaySigns).toEqual(cdbJsonGitShots);
+
+    // 3. VoxeLibre scenario: 1 Git screenshot.png + ContentDB thumbnail `/thumbnails/1/8f7c4f97f4.png` + `/uploads/8f7c4f97f4.png` + 2 more uploads
+    const voxeGitShot = 'https://git.minetest.land/api/v1/repos/VoxeLibre/VoxeLibre/raw/screenshot.png';
+    const voxeCdbThumb = 'https://content.luanti.org/thumbnails/1/8f7c4f97f4.png';
+    const voxeCdbDup0 = 'https://content.luanti.org/uploads/8f7c4f97f4.png';
+    const voxeCdbShot1 = 'https://content.luanti.org/uploads/gameplay_1.png';
+    const voxeCdbShot2 = 'https://content.luanti.org/uploads/gameplay_2.png';
+
+    const mergedVoxe = mergeScreenshotsPreferringGit(
+      [voxeGitShot, voxeCdbThumb],
+      [voxeCdbDup0, voxeCdbShot1, voxeCdbShot2]
+    );
+    expect(mergedVoxe.length).toBe(3);
+    expect(mergedVoxe[0]).toContain('proxy_image=');
+    expect(mergedVoxe.slice(1)).toEqual([voxeCdbShot1, voxeCdbShot2]);
+
+    // 4. scanGitRepoMetadataCached uses .cdb.json `screenshots` as authoritative replacement for root screenshot.png
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith('/mod.conf')) {
+        return new Response('name = waysigns\ntitle = WaySigns\nlicense = LGPL-2.1-or-later\n', {
+          status: 200
+        });
+      }
+      if (url.endsWith('/.cdb.json')) {
+        return new Response(
+          JSON.stringify({
+            screenshots: ['./screenshots/1.png', './screenshots/2.png']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/screenshot.png')) {
+        return new Response('', { status: 200, headers: { 'Content-Type': 'image/png' } });
+      }
+      return new Response('Not found', { status: 404 });
+    });
+
+    try {
+      const scanRes = await scanGitRepoMetadataCached(
+        'TestAuthor',
+        'waysigns',
+        'mod',
+        'https://codeberg.org/TestAuthor/waysigns',
+        0
+      );
+      expect(scanRes.screenshots).toEqual([
+        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/1.png',
+        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/2.png'
+      ]);
+      expect(scanRes.screenshotUrl).toBe(
+        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/1.png'
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

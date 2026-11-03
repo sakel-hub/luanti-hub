@@ -283,7 +283,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -312,6 +313,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/lite/${a}/${n}`);
     }
   }
 
@@ -3065,63 +3069,6 @@ export interface GitRepoScanResult {
   screenshots?: string[];
 }
 
-/**
- * ContentDB-agnostic screenshot merger:
- * Always places Git repository screenshots (`screenshot.png` / `.cdb.json` screenshots) FIRST,
- * followed by any additional ContentDB or gallery screenshots, deduplicated while preserving order.
- */
-export function mergeScreenshotsPreferringGit(
-  preferredGitUrls: Array<string | null | undefined>,
-  ...screenshotLists: any[]
-): string[] {
-  const gitUrls: string[] = [];
-  const otherUrls: string[] = [];
-  const seen = new Set<string>();
-
-  const extractUrl = (entry: any): string => {
-    if (!entry) return '';
-    if (typeof entry === 'string') return entry.trim();
-    if (typeof entry === 'object' && typeof entry.url === 'string') return entry.url.trim();
-    return '';
-  };
-
-  const addCandidate = (raw: any, forceGitPriority = false) => {
-    const rawUrl = extractUrl(raw);
-    if (!rawUrl || rawUrl === 'logo.svg') return;
-    if (!/^https?:\/\//i.test(rawUrl) && !rawUrl.startsWith('/api/packages?proxy_image=')) return;
-    const url = toProxiedGitImageIfNeeded(rawUrl);
-    // Ignore ContentDB resized thumbnail URLs in full-resolution screenshot galleries
-    const lower = url.toLowerCase();
-    if ((lower.includes('content.luanti.org') || lower.includes('contentdb.milcho.org')) && lower.includes('/thumbnails/')) {
-      return;
-    }
-    if (seen.has(lower)) return;
-    seen.add(lower);
-    if (forceGitPriority || isGitRepositoryAssetUrl(url)) {
-      gitUrls.push(url);
-    } else {
-      otherUrls.push(url);
-    }
-  };
-
-  if (Array.isArray(preferredGitUrls)) {
-    for (const u of preferredGitUrls) {
-      if (u && isGitRepositoryAssetUrl(u)) {
-        addCandidate(u, true);
-      }
-    }
-  }
-
-  for (const list of screenshotLists) {
-    if (!Array.isArray(list)) continue;
-    for (const item of list) {
-      addCandidate(item, false);
-    }
-  }
-
-  return [...gitUrls, ...otherUrls];
-}
-
 export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
   if (!rawUrl || typeof rawUrl !== 'string') return undefined;
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
@@ -3176,7 +3123,10 @@ import {
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
   toProxiedGitImageIfNeeded,
+  unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
+  getCanonicalScreenshotKey,
+  mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   GIT_PROVIDER_CONFIGS,
   ALL_GIT_PROVIDER_IDS,
@@ -3190,7 +3140,10 @@ export {
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
   toProxiedGitImageIfNeeded,
+  unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
+  getCanonicalScreenshotKey,
+  mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   GIT_PROVIDER_CONFIGS,
   ALL_GIT_PROVIDER_IDS,
@@ -3214,7 +3167,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v8/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v9/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3540,7 +3493,7 @@ export async function scanGitRepoMetadataCached(
           if (!clean) return '';
           if (/^https?:\/\//i.test(clean)) return clean;
           if (resolvedRawBaseUrl) {
-            return `${resolvedRawBaseUrl.replace(/\/+$/, '')}/${clean.replace(/^\/+/, '')}`;
+            return `${resolvedRawBaseUrl.replace(/\/+$/, '')}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`;
           }
           return '';
         })
@@ -3548,10 +3501,12 @@ export async function scanGitRepoMetadataCached(
     : [];
 
   const proxiedScreenshotUrl = screenshotUrl ? toProxiedGitImageIfNeeded(screenshotUrl) : undefined;
-  const mergedGitScreenshots = mergeScreenshotsPreferringGit(
-    [proxiedScreenshotUrl],
-    resolvedCdbScreenshots
-  );
+  // Per ContentDB `.cdb.json` specification (https://content.luanti.org/help/cdb_json/),
+  // a non-empty `screenshots` array in `.cdb.json` replaces the default root `screenshot.png` detection.
+  const mergedGitScreenshots =
+    resolvedCdbScreenshots.length > 0
+      ? mergeScreenshotsPreferringGit([], resolvedCdbScreenshots)
+      : mergeScreenshotsPreferringGit([proxiedScreenshotUrl]);
 
   const scanResult: GitRepoScanResult = {
     repoUrl: resolvedRepoUrl || normalizedInputUrl,
@@ -3570,7 +3525,7 @@ export async function scanGitRepoMetadataCached(
     supportedGames,
     unsupportedGames,
     cdbMeta,
-    screenshotUrl: proxiedScreenshotUrl || mergedGitScreenshots[0],
+    screenshotUrl: mergedGitScreenshots[0] || proxiedScreenshotUrl,
     screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined
   };
 

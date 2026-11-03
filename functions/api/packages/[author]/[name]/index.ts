@@ -475,7 +475,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v13/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v14/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -763,7 +763,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             (isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) ? String(d1Pkg.thumbnail_url) : undefined);
           const fastGitShot = fastGitShotRaw ? toProxiedGitImageIfNeeded(fastGitShotRaw) : undefined;
           const fastMergedScreenshots = mergeScreenshotsPreferringGit(
-            [fastGitShot],
+            [fastGitShot, fastCdbDetail?.thumbnail, d1Pkg.thumbnail_url],
             fastGitScan?.screenshots,
             d1Screenshots,
             fastCdbDetail?.screenshots
@@ -776,7 +776,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           const fastBanner = toProxiedGitImageIfNeeded(fastGitShot || fastMergedScreenshots[0] || d1Pkg.banner_url || fastThumb) || undefined;
           if (
             d1Pkg.provider !== 'contentdb' &&
-            ((!d1Pkg.video_url && fastVideo.video_url) || (!hasStoredGitShotFast && fastGitShot))
+            ((!d1Pkg.video_url && fastVideo.video_url) ||
+              (!hasStoredGitShotFast && fastGitShot) ||
+              (fastMergedScreenshots.length > 0 && fastMergedScreenshots.length !== d1Screenshots.length))
           ) {
             context.env.DB.prepare(`
               UPDATE packages
@@ -789,7 +791,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             `).bind(
               fastVideo.video_url || null,
               fastVideo.video_thumbnail_url || null,
-              fastGitShot || null,
+              fastThumb || null,
               fastBanner || null,
               fastMergedScreenshots.length > 0 ? JSON.stringify(fastMergedScreenshots) : null,
               d1Pkg.id
@@ -1532,7 +1534,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     normalizedTags = Array.from(new Set([...normalizedTags, ...probedCdbMeta.tags]));
   }
 
-  // Normalize & merge screenshots array (preferring Git repository screenshot.png first, followed by ContentDB gallery)
+  // Normalize & merge screenshots array (preferring Git repository screenshot.png / .cdb.json first, followed by ContentDB gallery)
   const gitScreenshotRaw =
     gitProbeScan?.screenshotUrl ||
     (isGitRepositoryAssetUrl(d1Pkg?.banner_url) ? String(d1Pkg.banner_url) : undefined) ||
@@ -1542,9 +1544,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ? upstreamData.screenshots
     : (Array.isArray(forClientData?.screenshots) ? forClientData.screenshots : []);
   const screenshots: string[] = mergeScreenshotsPreferringGit(
-    [gitScreenshot],
+    [gitScreenshot, upstreamData.thumbnail, d1Pkg?.thumbnail_url],
     gitProbeScan?.screenshots,
-    probedCdbMeta?.screenshots,
     parseJsonArray(d1Pkg?.screenshots),
     rawScreenshotsSource
   );
@@ -1558,9 +1559,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     gitScreenshot ||
     screenshots[0] ||
     d1Pkg?.banner_url ||
-    (resolvedThumb && String(resolvedThumb).includes('thumbnail.png')
-      ? String(resolvedThumb).replace('thumbnail.png', 'shot-0.png')
-      : resolvedThumb);
+    resolvedThumb;
   const resolvedBanner = resolvedBannerRaw ? toProxiedGitImageIfNeeded(String(resolvedBannerRaw)) : null;
 
   // Resolve download_size & file_size from /for-client/, /packages/:author/:name/, latest release, or Content-Length HEAD check
