@@ -110,7 +110,9 @@
         <div class="flex items-center justify-between gap-3 flex-wrap px-1">
           <div class="flex items-center gap-3 min-w-0">
             <img
-              [src]="theater.pkg.thumbnail || 'logo.svg'"
+              [src]="theater.pkg.banner || theater.pkg.thumbnail || 'logo.svg'"
+              [fallbackThumbnail]="theater.pkg.thumbnail || ''"
+              appImgFallback
               [alt]="theater.pkg.title"
               class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-cover bg-slate-900 border border-white/15 flex-shrink-0"
             />

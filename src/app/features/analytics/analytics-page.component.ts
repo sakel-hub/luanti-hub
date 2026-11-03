@@ -15,6 +15,7 @@ import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { LuantiPackage } from '../../core/models/package.model';
 import { DownloadAnalyticsChartComponent } from '../../shared/components/download-analytics-chart.component';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideArrowLeft,
@@ -33,6 +34,7 @@ import {
     CommonModule,
     FormsModule,
     TranslatePipe,
+    ImgFallbackDirective,
     DownloadAnalyticsChartComponent,
     LucideArrowLeft,
     LucideTrendingUp,
@@ -165,7 +167,9 @@ import {
                   : 'glass-btn text-slate-300 hover:text-white'"
                 class="px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-2 transition cursor-pointer flex-shrink-0">
                 <img
-                  [src]="pkg.thumbnail || 'logo.svg'"
+                  [src]="pkg.banner || pkg.thumbnail || 'logo.svg'"
+                  [fallbackThumbnail]="pkg.thumbnail || ''"
+                  appImgFallback
                   [alt]="pkg.title"
                   class="w-4 h-4 rounded object-cover bg-slate-900 flex-shrink-0"
                 />

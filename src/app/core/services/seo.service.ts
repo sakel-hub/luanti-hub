@@ -25,7 +25,7 @@ export class SeoService {
       pkg.short_desc ||
       `Download ${pkg.title} by ${pkg.author} (${typeLabel}) for Luanti / Minetest on Luanti Hub.`;
     const canonicalUrl = `${this.baseUrl}/package/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}`;
-    const imageUrl = pkg.banner || pkg.thumbnail || `${this.baseUrl}/icons/icon-512x512.png`;
+    const imageUrl = this.toAbsoluteImageUrl(pkg.banner || pkg.thumbnail);
     const keywords = [
       'luanti',
       `luanti ${pkg.type === 'txp' ? 'texture pack' : pkg.type}`,
@@ -89,6 +89,17 @@ export class SeoService {
     });
     this.setCanonicalUrl(`${this.baseUrl}/`);
     this.removePackageJsonLd();
+  }
+
+  private toAbsoluteImageUrl(rawUrl?: string | null): string {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed || trimmed === 'logo.svg' || trimmed === '/logo.svg') {
+      return `${this.baseUrl}/icons/icon-512x512.png`;
+    }
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return `${this.baseUrl}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
   }
 
   private setCanonicalUrl(url: string): void {

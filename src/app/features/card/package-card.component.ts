@@ -78,6 +78,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             [src]="cardBannerUrl"
             [fallbackThumbnail]="cardFallbackThumbnail"
             appImgFallback
+            (error)="onCardBannerError(cardBannerUrl, $event)"
             [alt]="seoImageAlt"
             loading="lazy"
             class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-300"
@@ -310,6 +311,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   readonly isHoverMuted = signal<boolean>(true);
   readonly isEmbedVideoReady = signal<boolean>(false);
   readonly hoverEmbedSafeUrl = signal<SafeResourceUrl | null>(null);
+  readonly failedBannerUrls = signal<Set<string>>(new Set());
 
   private hoverIntentTimer: any = null;
   private embedReadyTimer: any = null;
@@ -319,12 +321,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   currentHoverSeconds = 0;
 
   ngOnChanges(): void {
-    if (
-      this.package &&
-      ((!this.package.downloads && !this.package.contentdb_downloads) ||
-        !this.package.banner ||
-        this.package.banner === 'logo.svg')
-    ) {
+    if (this.package && this.packageService.needsTileHydration(this.package)) {
       this.packageService.ensurePackageHydrated(this.package);
     }
     if (this.package?.video_url && this.isDesktopHoverViewport()) {
@@ -336,22 +333,55 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     this.clearHoverVideo();
   }
 
+  onCardBannerError(url: string, event?: Event): void {
+    const imgEl = event?.target as HTMLImageElement | null;
+    const actualFailedSrc =
+      imgEl?.getAttribute('data-lh-failed-src')?.trim() ||
+      url;
+    const normalized = this.packageService.toProxiedGitImageIfNeeded(actualFailedSrc) ?? actualFailedSrc;
+    this.failedBannerUrls.update(prev => {
+      const next = new Set(prev);
+      if (actualFailedSrc && actualFailedSrc !== 'logo.svg') next.add(actualFailedSrc);
+      if (normalized && normalized !== 'logo.svg') next.add(normalized);
+      return next;
+    });
+  }
+
   get cardBannerUrl(): string {
-    const raw = this.package?.banner || this.package?.video_thumbnail_url || this.package?.thumbnail || 'logo.svg';
-    return this.packageService.toProxiedGitImageIfNeeded(raw) ?? raw;
+    const failed = this.failedBannerUrls();
+    const candidates = [
+      this.package?.banner,
+      this.package?.video_thumbnail_url,
+      this.package?.thumbnail,
+      ...(this.package?.screenshots ?? [])
+    ]
+      .map(u => (typeof u === 'string' && u.trim() ? (this.packageService.toProxiedGitImageIfNeeded(u) ?? u) : undefined))
+      .filter((u): u is string => Boolean(u) && u !== 'logo.svg');
+    return (
+      candidates.find(u => !failed.has(u)) ||
+      candidates.find(u => !this.packageService.isGitScreenshotUrl(u)) ||
+      'logo.svg'
+    );
   }
 
   get cardFallbackThumbnail(): string | undefined {
     const primary = this.cardBannerUrl;
+    const failed = this.failedBannerUrls();
     const rawThumb = this.package?.thumbnail;
     const proxiedThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb) ?? rawThumb;
-    if (proxiedThumb && proxiedThumb !== 'logo.svg' && proxiedThumb !== primary) {
+    if (proxiedThumb && proxiedThumb !== 'logo.svg' && proxiedThumb !== primary && !failed.has(proxiedThumb)) {
       return proxiedThumb;
     }
     const distinctShot = (this.package?.screenshots ?? [])
       .map(url => this.packageService.toProxiedGitImageIfNeeded(url) ?? url)
-      .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary);
-    return distinctShot;
+      .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary && !failed.has(url));
+    if (distinctShot) {
+      return distinctShot;
+    }
+    if (proxiedThumb && proxiedThumb !== 'logo.svg' && !this.packageService.isGitScreenshotUrl(proxiedThumb)) {
+      return proxiedThumb;
+    }
+    return undefined;
   }
 
   get displayTags(): string[] {

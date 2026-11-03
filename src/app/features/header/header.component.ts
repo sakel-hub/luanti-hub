@@ -15,6 +15,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { TranslationService } from '../../core/i18n/translation.service';
 import { LocaleId } from '../../core/i18n/translation.types';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { FrostedPreloaderComponent } from '../../shared/components/frosted-preloader.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
@@ -54,6 +55,7 @@ import {
     CommonModule,
     FormsModule,
     TooltipDirective,
+    ImgFallbackDirective,
     FrostedPreloaderComponent,
     TranslatePipe,
     LucideDownload,
@@ -469,7 +471,7 @@ import {
               type="button"
               (click)="authService.openProfileDrawer()"
               class="relative h-9 flex items-center gap-2 p-1 rounded-xl glass-btn transition flex-shrink-0 cursor-pointer">
-              <img [src]="user.avatar_url" [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
+              <img [src]="user.avatar_url || 'logo.svg'" appImgFallback [alt]="user.username" class="w-7 h-7 rounded-lg object-cover" />
               <span [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:inline text-xs font-bold text-white pr-2 max-w-[96px] truncate'">
                 {{ user.display_name || user.username }}
               </span>

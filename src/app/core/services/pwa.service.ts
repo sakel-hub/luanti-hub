@@ -1543,6 +1543,7 @@ export class PwaService {
     seenSet.add(postId);
     try {
       localStorage.setItem(SEEN_BLOG_POSTS_KEY, JSON.stringify(Array.from(seenSet).slice(-100)));
+      this.syncNotificationStateToIndexedDb().catch(() => {});
     } catch {
       // ignore storage errors
     }
@@ -1580,6 +1581,8 @@ export class PwaService {
       title?: string;
       type?: string;
       short_desc?: string;
+      banner?: string;
+      banner_url?: string;
       thumbnail?: string;
       thumbnail_url?: string;
       source?: string;
@@ -1707,7 +1710,7 @@ export class PwaService {
       const resolvedId = pkg.id || `${author}/${name}`;
       const typeLabel = String(pkg.type || 'mod').toUpperCase();
       const displayTitle = pkg.title || name;
-      const thumb = pkg.thumbnail || pkg.thumbnail_url;
+      const thumb = pkg.banner || pkg.banner_url || pkg.thumbnail || pkg.thumbnail_url;
 
       this.sendNativeNotification({
         title: `New Git Package · [${typeLabel}] ${displayTitle}`,
@@ -1742,6 +1745,8 @@ export class PwaService {
       title?: string;
       type?: string;
       short_desc?: string;
+      banner?: string;
+      banner_url?: string;
       thumbnail?: string;
       thumbnail_url?: string;
       source?: string;
@@ -1993,7 +1998,7 @@ export class PwaService {
       const name = pkg.name || String(pkg.id).split('/')[1];
       const typeLabel = String(pkg.type || 'mod').toUpperCase();
       const displayTitle = pkg.title || name;
-      const thumb = pkg.thumbnail || pkg.thumbnail_url;
+      const thumb = pkg.banner || pkg.banner_url || pkg.thumbnail || pkg.thumbnail_url;
       const rawCommitSha = String(pkg.latest_commit_sha || pkg.commit_sha || '').trim();
       const shortCommitLabel = /^[0-9a-f]{7,40}$/i.test(rawCommitSha) ? rawCommitSha.slice(0, 7) : '';
       const relLabel = pkg.release_title
@@ -2047,6 +2052,7 @@ export class PwaService {
       if (!list.includes(cleanId)) {
         list.push(cleanId);
         localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(list.slice(-500)));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       }
     } catch {
       // ignore storage errors
@@ -2126,6 +2132,7 @@ export class PwaService {
           new Set(validReviews.map(rev => String(rev.id).trim().replace(/^lh_/i, '')))
         ).slice(-500);
         localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(initialIds));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage errors
       }

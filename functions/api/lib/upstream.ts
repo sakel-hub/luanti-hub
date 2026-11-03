@@ -46,10 +46,11 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
     });
 
     clearTimeout(timeoutId);
-    if (res.ok) return res;
-    // If primary ContentDB is online and returns a 4xx (e.g. 404 Not Found), do NOT retry the mirror
-    // (retrying the static mirror on a genuine 404 only adds latency and duplicate 404s).
-    if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+    const ct = (res.headers?.get('content-type') || '').toLowerCase();
+    if (res.ok && !ct.includes('text/html')) return res;
+    // If primary ContentDB is online and returns a genuine 400/404/410, do NOT retry the mirror
+    // (retrying the static mirror on a genuine 404 only adds latency, whereas 401/403/429/HTML challenges must fail over).
+    if (res.status === 400 || res.status === 404 || res.status === 410) {
       return res;
     }
     throw new Error(`Primary returned HTTP ${res.status}`);
@@ -316,6 +317,15 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/lite/${a}/${n}`);
     }
   }
 
@@ -444,21 +454,30 @@ export function formatTagTitle(tagName: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/**
- * Safely parses a JSON array column or comma-separated string into string[]
- */
-export function parseJsonArray(val: any): string[] {
-  if (Array.isArray(val)) return val.map(String).filter(Boolean);
-  if (typeof val === 'string' && val.trim()) {
-    try {
-      const parsed = JSON.parse(val);
-      if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
-    } catch {
-      return val.split(',').map(s => s.trim()).filter(Boolean);
-    }
-  }
-  return [];
-}
+import {
+  parseJsonArray,
+  extractEngineVersionString,
+  parseDownloadSizeBytes,
+  formatByteSize,
+  computeGenuineStarRating,
+  computeStarRatingFromData,
+  extractEmbeddedVideo
+} from '../../../src/app/core/config/package-utils.config';
+import {
+  normalizeRepoComparisonKey,
+  normalizeRepoKey
+} from '../../../src/app/core/config/git-providers.config';
+export {
+  parseJsonArray,
+  extractEngineVersionString,
+  parseDownloadSizeBytes,
+  formatByteSize,
+  computeGenuineStarRating,
+  computeStarRatingFromData,
+  extractEmbeddedVideo,
+  normalizeRepoComparisonKey,
+  normalizeRepoKey
+};
 
 /**
  * Heuristic SPDX license identifier detection from LICENSE or README text
@@ -497,59 +516,6 @@ export function isDefunctGitHost(urlStr: string): boolean {
   } catch {
     return true;
   }
-}
-
-/**
- * Normalizes a Git repository URL into a canonical host/owner/repo key for deduplication
- */
-export function normalizeRepoKey(urlStr?: string | null): string {
-  if (!urlStr || typeof urlStr !== 'string') return '';
-  try {
-    const parsed = new URL(urlStr.trim());
-    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    const cleanPath = parsed.pathname
-      .replace(/^\/+|\/+$/g, '')
-      .replace(/\.git$/i, '')
-      .toLowerCase();
-    const parts = cleanPath.split('/').filter(Boolean);
-    if (parts.length >= 2) {
-      return `${host}/${parts[0]}/${parts[1]}`;
-    }
-    return cleanPath ? `${host}/${cleanPath}` : '';
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Computes a genuine 1.0 - 5.0 star rating from D1 reviews and/or ContentDB review arrays.
- * Returns 0 when no verified user star ratings exist (never returns raw popularity scores > 5 or hardcoded defaults).
- */
-export function computeGenuineStarRating(
-  d1RatingAvg?: number | null,
-  cdbReviewsOrScore?: any
-): number {
-  const ratings: number[] = [];
-
-  if (typeof d1RatingAvg === 'number' && d1RatingAvg >= 1 && d1RatingAvg <= 5) {
-    ratings.push(d1RatingAvg);
-  }
-
-  if (Array.isArray(cdbReviewsOrScore) && cdbReviewsOrScore.length > 0) {
-    const cdbScores = cdbReviewsOrScore
-      .map((r: any) => (typeof r.rating === 'number' ? r.rating : r.is_positive === false ? 2 : 5))
-      .filter((n: number) => n >= 1 && n <= 5);
-    if (cdbScores.length > 0) {
-      const avg = cdbScores.reduce((a: number, b: number) => a + b, 0) / cdbScores.length;
-      ratings.push(avg);
-    }
-  } else if (typeof cdbReviewsOrScore === 'number' && cdbReviewsOrScore >= 1 && cdbReviewsOrScore <= 5) {
-    ratings.push(cdbReviewsOrScore);
-  }
-
-  if (ratings.length === 0) return 0;
-  const combined = ratings.reduce((a, b) => a + b, 0) / ratings.length;
-  return Math.round(combined * 10) / 10;
 }
 
 export interface DiscoveredGitRelease {
@@ -898,6 +864,7 @@ export async function getUnifiedCatalogTags(
     addTag(defTag.name, defTag.title);
   }
 
+  const existingD1Tags = new Map<string, string>();
   if (Array.isArray(cached) && cached.length > 0) {
     for (const c of cached) {
       if (c?.name) addTag(c.name, c.title);
@@ -907,7 +874,12 @@ export async function getUnifiedCatalogTags(
       const d1Res = await db.prepare(`SELECT name, title FROM tags ORDER BY name ASC LIMIT 250`).all().catch(() => null);
       if (Array.isArray(d1Res?.results)) {
         for (const r of d1Res.results) {
-          if (r?.name) addTag(String(r.name), r.title ? String(r.title) : undefined);
+          if (r?.name) {
+            const nameStr = String(r.name);
+            const titleStr = r.title ? String(r.title) : '';
+            existingD1Tags.set(nameStr.toLowerCase(), titleStr);
+            addTag(nameStr, titleStr || undefined);
+          }
         }
       }
     } catch {
@@ -932,14 +904,17 @@ export async function getUnifiedCatalogTags(
     }
 
     if (db && normalizedUpstream.length > 0) {
-      const mirrorGateKey = '/__d1_tags_mirror_sync_v1';
-      readEdgeCacheJson<boolean>(mirrorGateKey)
-        .then(async (alreadyMirrored) => {
-          if (alreadyMirrored) return;
-          await writeEdgeCacheJson(mirrorGateKey, true, 21600);
-          await upsertCustomAppTags(db, normalizedUpstream, 'contentdb');
-        })
-        .catch(() => {});
+      const mirrorGateKey = 'https://edge-cache.luantihub.local/d1-tags-synced-v1';
+      const alreadyMirrored = await readEdgeCacheJson<boolean>(mirrorGateKey).catch(() => false);
+      if (!alreadyMirrored) {
+        await writeEdgeCacheJson(mirrorGateKey, true, 43200).catch(() => {});
+        const deltaToUpsert = normalizedUpstream.filter(
+          (t) => existingD1Tags.get(t.name.toLowerCase()) !== t.title
+        );
+        if (deltaToUpsert.length > 0) {
+          await upsertCustomAppTags(db, deltaToUpsert, 'contentdb').catch(() => {});
+        }
+      }
     }
   }
 
@@ -998,60 +973,6 @@ export function extractLongDescriptionText(val: any): string {
       .trim();
   }
   return '';
-}
-
-/**
- * Resolves `video_url` and `video_thumbnail_url` from explicit ContentDB/D1 fields,
- * falling back to extracting embedded YouTube, Vimeo, or direct `.mp4`/`.webm` showcase
- * links from `long_description` or `README.md` when `video_url` is not explicitly set.
- */
-export function extractEmbeddedVideo(
-  videoUrl?: string | null,
-  videoThumbUrl?: string | null,
-  longDesc?: string | null,
-  readme?: string | null
-): { video_url?: string; video_thumbnail_url?: string } {
-  let resolvedVideo = typeof videoUrl === 'string' && videoUrl.trim() ? videoUrl.trim() : undefined;
-  let resolvedThumb = typeof videoThumbUrl === 'string' && videoThumbUrl.trim() ? videoThumbUrl.trim() : undefined;
-
-  if (!resolvedVideo) {
-    const combinedText = `${longDesc || ''}\n${readme || ''}`;
-    if (combinedText.trim()) {
-      const ytMatch = combinedText.match(
-        /https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
-      );
-      if (ytMatch && ytMatch[1]) {
-        resolvedVideo = `https://www.youtube.com/watch?v=${ytMatch[1]}`;
-        if (!resolvedThumb) {
-          resolvedThumb = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
-        }
-      } else {
-        const directMatch = combinedText.match(
-          /https?:\/\/[^\s)"'<>]+?\.(?:mp4|webm)(?:\?[^\s)"'<>]*)?/i
-        );
-        if (directMatch && directMatch[0]) {
-          resolvedVideo = directMatch[0];
-        } else {
-          const vimeoMatch = combinedText.match(/https?:\/\/(?:www\.)?vimeo\.com\/(\d{6,12})/i);
-          if (vimeoMatch && vimeoMatch[0]) {
-            resolvedVideo = vimeoMatch[0];
-          }
-        }
-      }
-    }
-  } else if (!resolvedThumb) {
-    const ytMatch = resolvedVideo.match(
-      /(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
-    );
-    if (ytMatch && ytMatch[1]) {
-      resolvedThumb = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
-    }
-  }
-
-  return {
-    video_url: resolvedVideo,
-    video_thumbnail_url: resolvedThumb
-  };
 }
 
 export function parseGitRepoTarget(
@@ -2572,30 +2493,6 @@ export function rewriteRelativeMarkdownUrls(markdown: string, rawAssetBase?: str
     );
 }
 
-/**
- * Formats a numeric byte count or size string into a human-readable KB / MB label.
- */
-export function formatByteSize(val: any): string | undefined {
-  let bytes = 0;
-  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-    bytes = val;
-  } else if (typeof val === 'string') {
-    const trimmed = val.trim();
-    if (/^\d+$/.test(trimmed)) {
-      bytes = parseInt(trimmed, 10);
-    } else if (trimmed && /[a-zA-Z]/.test(trimmed) && trimmed !== '2 KB') {
-      return trimmed;
-    }
-  }
-  if (bytes > 0) {
-    if (bytes >= 1024 * 1024) {
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    }
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  }
-  return undefined;
-}
-
 export interface AccurateGitZipSizeOptions {
   tag?: string | null;
   defaultBranch?: string | null;
@@ -3167,7 +3064,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v9/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v10/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3216,27 +3113,48 @@ export async function scanGitRepoMetadataCached(
       .split(/\s+#/)[0]
       .trim();
 
-  const probeRawScreenshotUrl = async (baseUrl: string, signal: AbortSignal): Promise<string | undefined> => {
-    const shotUrl = `${baseUrl}/screenshot.png`;
+  const isValidScreenshotResponse = (res: Response): boolean => {
+    const ct = (res.headers?.get('content-type') || '').toLowerCase();
+    if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
+      return false;
+    }
+    const cl = res.headers?.get('content-length');
+    if (cl !== null && cl !== '') {
+      const len = Number(cl);
+      if (Number.isFinite(len) && len >= 0 && len < 32) {
+        return false;
+      }
+    }
+    return !ct || ct.startsWith('image/') || ct.includes('octet-stream') || ct.includes('binary');
+  };
+
+  const probeRawScreenshotUrl = async (
+    baseUrl: string,
+    signal: AbortSignal,
+    relativeFile = 'screenshot.png'
+  ): Promise<string | undefined> => {
+    const cleanRel = relativeFile.replace(/^(?:\.\/+|\/+)+/, '');
+    const shotUrl = `${baseUrl.replace(/\/+$/, '')}/${cleanRel}`;
     try {
       const headRes = await fetchWithAnubisSupport(shotUrl, { method: 'HEAD', signal }).catch(() => null);
-      if (headRes && headRes.ok) {
-        const ct = (headRes.headers?.get('content-type') || '').toLowerCase();
-        if (!ct.includes('text/html')) {
-          return shotUrl;
-        }
+      if (headRes && headRes.ok && isValidScreenshotResponse(headRes)) {
+        return shotUrl;
       }
-      if (!headRes || headRes.status === 405 || headRes.status === 403 || headRes.status === 501) {
+      const headCt = (headRes?.headers?.get('content-type') || '').toLowerCase();
+      if (
+        !headRes ||
+        headRes.status === 405 ||
+        headRes.status === 403 ||
+        headRes.status === 501 ||
+        (headRes.ok && headCt.includes('text/html'))
+      ) {
         const getRes = await fetchWithAnubisSupport(shotUrl, {
           method: 'GET',
           headers: { Range: 'bytes=0-63' },
           signal
         }).catch(() => null);
-        if (getRes && (getRes.ok || getRes.status === 206)) {
-          const ct = (getRes.headers?.get('content-type') || '').toLowerCase();
-          if (!ct.includes('text/html')) {
-            return shotUrl;
-          }
+        if (getRes && (getRes.ok || getRes.status === 206) && isValidScreenshotResponse(getRes)) {
+          return shotUrl;
         }
       }
     } catch {
@@ -3486,27 +3404,35 @@ export async function scanGitRepoMetadataCached(
   }
 
   const cdbScreenshotsRaw = (cdbMeta as CdbJsonMetadata | null)?.screenshots;
-  const resolvedCdbScreenshots = Array.isArray(cdbScreenshotsRaw)
-    ? cdbScreenshotsRaw
-        .map((s: string) => {
+  const resolvedCdbScreenshots: string[] = [];
+  if (Array.isArray(cdbScreenshotsRaw)) {
+    const probeCtrl = new AbortController();
+    const probeTimer = setTimeout(() => probeCtrl.abort(), 1400);
+    try {
+      const verifiedEntries = await Promise.all(
+        cdbScreenshotsRaw.slice(0, 12).map(async (s: string) => {
           const clean = String(s || '').trim();
           if (!clean) return '';
           if (/^https?:\/\//i.test(clean)) return clean;
           if (resolvedRawBaseUrl) {
-            return `${resolvedRawBaseUrl.replace(/\/+$/, '')}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`;
+            return (await probeRawScreenshotUrl(resolvedRawBaseUrl, probeCtrl.signal, clean)) || '';
           }
           return '';
         })
-        .filter(Boolean)
-    : [];
+      );
+      for (const entry of verifiedEntries) {
+        if (entry) resolvedCdbScreenshots.push(entry);
+      }
+    } finally {
+      clearTimeout(probeTimer);
+    }
+  }
 
   const proxiedScreenshotUrl = screenshotUrl ? toProxiedGitImageIfNeeded(screenshotUrl) : undefined;
-  // Per ContentDB `.cdb.json` specification (https://content.luanti.org/help/cdb_json/),
-  // a non-empty `screenshots` array in `.cdb.json` replaces the default root `screenshot.png` detection.
-  const mergedGitScreenshots =
-    resolvedCdbScreenshots.length > 0
-      ? mergeScreenshotsPreferringGit([], resolvedCdbScreenshots)
-      : mergeScreenshotsPreferringGit([proxiedScreenshotUrl]);
+  const mergedGitScreenshots = mergeScreenshotsPreferringGit(
+    [proxiedScreenshotUrl],
+    resolvedCdbScreenshots
+  );
 
   const scanResult: GitRepoScanResult = {
     repoUrl: resolvedRepoUrl || normalizedInputUrl,
@@ -3525,7 +3451,7 @@ export async function scanGitRepoMetadataCached(
     supportedGames,
     unsupportedGames,
     cdbMeta,
-    screenshotUrl: mergedGitScreenshots[0] || proxiedScreenshotUrl,
+    screenshotUrl: proxiedScreenshotUrl || mergedGitScreenshots[0],
     screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined
   };
 

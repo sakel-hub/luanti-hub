@@ -18,13 +18,14 @@ import { LuantiPackage, SortOption, UserIdentity } from '../../core/models/packa
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import {
   LucideX,
   LucideCheck,
   LucideStar,
   LucideDownload,
   LucideHeart,
-  LucideGitBranch,
   LucideGlobe,
   LucideShare2,
   LucideExternalLink,
@@ -49,12 +50,13 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
     CompactNumberPipe,
     TranslatePipe,
     TooltipDirective,
+    ImgFallbackDirective,
+    PackageBadgesComponent,
     LucideX,
     LucideCheck,
     LucideStar,
     LucideDownload,
     LucideHeart,
-    LucideGitBranch,
     LucideGlobe,
     LucideShare2,
     LucideExternalLink,
@@ -288,7 +290,7 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
               </span>
               <div class="flex items-center gap-1.5 mt-1 flex-wrap">
                 @if (officialCount() > 0) {
-                  <span class="glass-badge glass-badge-sky font-bold text-[10px]">
+                  <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
                     {{ officialCount() }} CDB
                   </span>
                 }
@@ -427,7 +429,9 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
                       (click)="openPackage(pkg)"
                       class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
                       <img
-                        [src]="pkg.thumbnail || 'logo.svg'"
+                        [src]="pkg.banner || pkg.thumbnail || 'logo.svg'"
+                        [fallbackThumbnail]="pkg.thumbnail || ''"
+                        appImgFallback
                         [alt]="pkg.title"
                         loading="lazy"
                         decoding="async"
@@ -449,17 +453,12 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
                           {{ pkg.short_desc || pkg.name }}
                         </p>
                         <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1 flex-wrap">
-                          <span
-                            [class]="pkg.type === 'game' ? 'glass-badge-emerald' : pkg.type === 'txp' ? 'glass-badge-purple' : 'glass-badge-sky'"
-                            class="glass-badge font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
-                            {{ pkg.type }}
-                          </span>
-                          @if (pkg.sources?.includes('git') || pkg.source === 'git') {
-                            <span class="glass-badge glass-badge-amber font-bold text-[9px] px-1.5 py-0 flex items-center gap-0.5">
-                              <svg lucideGitBranch class="w-2.5 h-2.5"></svg>
-                              Git
-                            </span>
-                          }
+                          <app-package-badges
+                            [package]="pkg"
+                            [compact]="true"
+                            [showOfficial]="false"
+                            [showFeatured]="false">
+                          </app-package-badges>
                           <span>•</span>
                           <span class="font-mono">{{ (pkg.downloads || 0) | compactNumber }} dl</span>
                         </div>

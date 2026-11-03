@@ -4,6 +4,7 @@ import {
   ensureExtendedPackageColumns,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
+  computeStarRatingFromData,
   isGitRepositoryAssetUrl,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
@@ -34,7 +35,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v3_${encodeURIComponent(
+      ? `/__api_hydrate_v4_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -77,9 +78,28 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
+          let parsedRowRevCounts: { positive: number; neutral: number; negative: number } | undefined;
+          if (typeof row.review_thread_counts === 'string' && row.review_thread_counts.trim()) {
+            try {
+              const obj = JSON.parse(row.review_thread_counts);
+              if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+                parsedRowRevCounts = {
+                  positive: Number(obj.positive) || 0,
+                  neutral: Number(obj.neutral) || 0,
+                  negative: Number(obj.negative) || 0
+                };
+              }
+            } catch {
+              // ignore
+            }
+          }
           const cdbDl = Number(row.contentdb_downloads || 0);
           const lhDl = Number(row.luantihub_downloads || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
+          const rowScore = computeStarRatingFromData({
+            review_thread_counts: parsedRowRevCounts,
+            score: row.score
+          });
           const gitShotD1 = isGitRepositoryAssetUrl(row.banner_url)
             ? toProxiedGitImageIfNeeded(String(row.banner_url))
             : (isGitRepositoryAssetUrl(row.thumbnail_url) ? toProxiedGitImageIfNeeded(String(row.thumbnail_url)) : undefined);
@@ -97,6 +117,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
+            score: rowScore > 0 ? rowScore : undefined,
+            review_thread_counts: parsedRowRevCounts,
             tags: parsedTags.length > 0 ? parsedTags : undefined,
             dev_state: row.dev_state || undefined,
             file_size: row.file_size || undefined,
@@ -114,7 +136,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
 
-          if (row.license && (cdbDl > 0 || row.provider !== 'contentdb') && hasRealTags) {
+          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
+          if (
+            row.license &&
+            (cdbDl > 0 || row.provider !== 'contentdb') &&
+            hasRealTags &&
+            (!isOfficialD1Row || Boolean(parsedRowRevCounts))
+          ) {
             missingIds.delete(lowerKey);
             if (
               row.provider !== 'contentdb' &&
@@ -149,11 +177,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 row.long_desc || gitScan?.cdbMeta?.long_description || gitScan?.longDesc
               );
               const scannedGitShot = gitScan?.screenshotUrl;
-              const scannedCdbShots = gitScan?.cdbMeta?.screenshots || [];
+              const scannedCdbShots = gitScan?.screenshots || [];
               const mergedRowShots = mergeScreenshotsPreferringGit(
                 [scannedGitShot, ...scannedCdbShots],
                 hydratedMap[lowerKey]?.screenshots,
-                existingRowShots
+                existingRowShots.filter((s: string) => !isGitRepositoryAssetUrl(s))
               );
               const primaryGitShot = scannedGitShot || (isGitRepositoryAssetUrl(mergedRowShots[0]) ? mergedRowShots[0] : undefined);
 
@@ -242,9 +270,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           let lic = detail?.license || detail?.media_license || existing.license || '';
           let mediaLic = detail?.media_license || detail?.license || existing.media_license || '';
-          let detailTags = Array.isArray(detail?.tags)
+          const rawUpstreamTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
-            : (existing.tags || []);
+            : [];
+          let detailTags = Array.from(new Set([...(existing.tags || []), ...rawUpstreamTags])).filter(Boolean);
+          const detailRevCounts =
+            detail?.reviews && typeof detail.reviews === 'object' && !Array.isArray(detail.reviews)
+              ? {
+                  positive: Number(detail.reviews.positive) || 0,
+                  neutral: Number(detail.reviews.neutral) || 0,
+                  negative: Number(detail.reviews.negative) || 0
+                }
+              : existing.review_thread_counts;
+          const resolvedScore = computeStarRatingFromData({
+            ...(detail || {}),
+            review_thread_counts: detailRevCounts,
+            score: existing.score
+          });
           const cdbDl = Math.max(Number(existing.contentdb_downloads || 0), Number(detail?.downloads || 0));
           const lhDl = Number(existing.luantihub_downloads || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
@@ -279,8 +321,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               title = (title === name && (gitScan.cdbMeta?.title || gitScan.title)) ? (gitScan.cdbMeta?.title || gitScan.title)! : title;
               if (gitScan.detectedType) pkgType = gitScan.detectedType;
               if (gitScan.screenshotUrl) gitScanShot = gitScan.screenshotUrl;
-              if (gitScan.cdbMeta?.screenshots?.length) {
-                gitScanCdbShots = gitScan.cdbMeta.screenshots;
+              if (gitScan.screenshots?.length) {
+                gitScanCdbShots = gitScan.screenshots;
               }
               if (gitScan.cdbMeta?.tags?.length) {
                 detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
@@ -297,7 +339,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
           const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
           const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
-            [gitScanShot, ...gitScanCdbShots, existing.banner, existing.thumbnail],
+            [gitScanShot, existing.banner, existing.thumbnail, detail?.thumbnail],
+            gitScanCdbShots,
             existing.screenshots,
             detail?.screenshots
           );
@@ -324,6 +367,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
+            score: resolvedScore > 0 ? resolvedScore : undefined,
+            review_thread_counts: detailRevCounts,
             tags: detailTags.length > 0 ? detailTags : undefined,
             dev_state: devState || undefined,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
@@ -339,28 +384,55 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (env.DB && existingD1Row && existingD1Row.provider !== 'contentdb') {
             const newLic = !existingD1Row.license && lic ? lic : null;
             const newVid = !existingD1Row.video_url && videoUrl ? videoUrl : null;
+            const newRevCounts = !existingD1Row.review_thread_counts && detailRevCounts
+              ? JSON.stringify(detailRevCounts)
+              : null;
+            const newScore =
+              !(Number(existingD1Row.score) >= 1 && Number(existingD1Row.score) <= 5) &&
+              resolvedScore >= 1 &&
+              resolvedScore <= 5
+                ? resolvedScore
+                : null;
+            const existingD1Tags = parseJsonArray(existingD1Row.tags);
+            const newTagsJson =
+              detailTags.length > existingD1Tags.length ? JSON.stringify(detailTags) : null;
             const newShot =
-              (!existingD1Row.banner_url || existingD1Row.banner_url === 'logo.svg') && primaryGitShot
+              (!existingD1Row.banner_url ||
+                existingD1Row.banner_url === 'logo.svg' ||
+                !isGitRepositoryAssetUrl(existingD1Row.banner_url)) &&
+              primaryGitShot
                 ? primaryGitShot
                 : null;
-            if (newLic || newVid || newShot) {
+            if (newLic || newVid || newShot || newRevCounts || newScore !== null || newTagsJson) {
               persistStatements.push(
                 env.DB.prepare(`
                   UPDATE packages
-                  SET thumbnail_url = COALESCE(?, thumbnail_url),
+                  SET thumbnail_url = CASE
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                        ELSE thumbnail_url
+                      END,
                       banner_url = COALESCE(?, banner_url),
+                      screenshots = COALESCE(screenshots, ?),
                       license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
                       media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
                       video_url = COALESCE(video_url, ?),
-                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                      review_thread_counts = COALESCE(review_thread_counts, ?),
+                      score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                      tags = COALESCE(?, tags)
                   WHERE id = ?
                 `).bind(
                   newShot,
                   newShot,
+                  mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
                   newLic,
                   mediaLic || null,
                   newVid,
                   videoThumbUrl || null,
+                  newRevCounts,
+                  newScore,
+                  newScore,
+                  newTagsJson,
                   existingD1Row.id
                 )
               );

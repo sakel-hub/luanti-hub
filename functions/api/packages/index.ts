@@ -15,6 +15,7 @@ import {
   ensurePromotionAndTagTables,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
+  computeStarRatingFromData,
   isGitRepositoryAssetUrl,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
@@ -311,25 +312,7 @@ export function overlayPromotionRowDeltaOnCatalog(
 }
 
 function computeCatalogStarRating(item: any, d1StarAvg?: number): number {
-  if (d1StarAvg !== undefined && d1StarAvg >= 1 && d1StarAvg <= 5) {
-    return Number(d1StarAvg.toFixed(1));
-  }
-  const rev = item?.reviews;
-  if (rev && typeof rev === 'object' && !Array.isArray(rev)) {
-    const pos = Number(rev.positive) || 0;
-    const neu = Number(rev.neutral) || 0;
-    const neg = Number(rev.negative) || 0;
-    const total = pos + neu + neg;
-    if (total > 0) {
-      const stars = (pos * 5 + neu * 3 + neg * 1) / total;
-      return Number(Math.min(5.0, Math.max(1.0, stars)).toFixed(1));
-    }
-  }
-  const rawScore = Number(item?.score || 0);
-  if (rawScore >= 1.0 && rawScore <= 5.0) {
-    return Number(rawScore.toFixed(1));
-  }
-  return 0;
+  return computeStarRatingFromData(item, 0, d1StarAvg);
 }
 
 interface PackageVelocityMetrics {
@@ -554,7 +537,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ) {
         return new Response('Forbidden image host', { status: 403 });
       }
-      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v3/${encodeURIComponent(targetUrl.toString())}`;
+      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v4/${encodeURIComponent(targetUrl.toString())}`;
       const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
       const proxyCacheReq = edgeCache ? new Request(proxyCacheKey, { method: 'GET' }) : null;
       if (edgeCache && proxyCacheReq) {
@@ -578,6 +561,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           `https://${targetUrl.host}/api/v1/repos/${owner}/${repo}/raw/${filePath}?ref=${encodeURIComponent(branch)}`,
           `https://${targetUrl.host}/api/v1/repos/${owner}/${repo}/raw/${filePath}`
         );
+      } else {
+        const giteaApiRawMatch = targetUrl.pathname.match(
+          /^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/raw\/(.+)$/i
+        );
+        if (giteaApiRawMatch) {
+          const [, owner, repo, filePath] = giteaApiRawMatch;
+          candidateUrls.push(
+            `https://${targetUrl.host}/${owner}/${repo}/raw/branch/main/${filePath}`,
+            `https://${targetUrl.host}/${owner}/${repo}/raw/branch/master/${filePath}`
+          );
+        }
       }
 
       for (const candUrl of candidateUrls) {
@@ -609,19 +603,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         }
         return okRes;
       }
-      const fallbackRes = new Response(TRANSPARENT_FALLBACK_SVG, {
-        status: 200,
+      return new Response('Upstream image not found', {
+        status: 404,
         headers: {
-          'Content-Type': 'image/svg+xml; charset=utf-8',
+          'Content-Type': 'text/plain; charset=utf-8',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=300, s-maxage=300',
+          'Cache-Control': 'no-store',
           'X-Proxy-Fallback': 'non-image-upstream'
         }
       });
-      if (edgeCache && proxyCacheReq) {
-        await edgeCache.put(proxyCacheReq, fallbackRes.clone()).catch(() => {});
-      }
-      return fallbackRes;
     } catch {
       return new Response('Invalid image URL', { status: 400 });
     }
@@ -1103,6 +1093,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (sources.length === 0) sources.push('official');
 
     const d1StarAvg = d1Ratings.get(canonicalKey) ?? d1Ratings.get(d1Key) ?? 0;
+    let d1ReviewThreadCounts: { positive: number; neutral: number; negative: number } | undefined;
+    if (typeof p.review_thread_counts === 'string' && p.review_thread_counts.trim()) {
+      try {
+        const parsedCounts = JSON.parse(p.review_thread_counts);
+        if (parsedCounts && typeof parsedCounts === 'object' && !Array.isArray(parsedCounts)) {
+          d1ReviewThreadCounts = {
+            positive: Number(parsedCounts.positive) || 0,
+            neutral: Number(parsedCounts.neutral) || 0,
+            negative: Number(parsedCounts.negative) || 0
+          };
+        }
+      } catch {
+        // Ignore malformed JSON
+      }
+    }
+    const effectiveReviewThreadCounts =
+      (matchedUpstream?.reviews && typeof matchedUpstream.reviews === 'object' && !Array.isArray(matchedUpstream.reviews)
+        ? matchedUpstream.reviews
+        : undefined) ||
+      matchedUpstream?.review_thread_counts ||
+      d1ReviewThreadCounts;
     const upstreamTags = Array.isArray(matchedUpstream?.tags)
       ? matchedUpstream.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
       : [];
@@ -1181,7 +1192,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
       screenshots: mergedCatalogScreenshots.length > 0 ? mergedCatalogScreenshots : undefined,
-      score: computeCatalogStarRating(matchedUpstream, d1StarAvg),
+      review_thread_counts: effectiveReviewThreadCounts,
+      score: computeCatalogStarRating(
+        {
+          ...(matchedUpstream || {}),
+          review_thread_counts: effectiveReviewThreadCounts,
+          score: p.score ?? matchedUpstream?.score
+        },
+        d1StarAvg
+      ),
       contentdb_score: Number(matchedUpstream?.score || 0),
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
@@ -1286,7 +1305,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           it.author &&
           it.name &&
           (!it.license ||
-            (it.sources?.includes('official') && !(Number(it.contentdb_downloads || 0) > 0)) ||
+            (it.sources?.includes('official') &&
+              (!(Number(it.contentdb_downloads || 0) > 0) || !it.review_thread_counts)) ||
             needsGitScreenshotScan) &&
           !carouselPool.some(x => x.id === it.id)
         ) {
@@ -1332,6 +1352,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
           }
+          if (detail?.reviews && typeof detail.reviews === 'object' && !Array.isArray(detail.reviews)) {
+            pkg.review_thread_counts = {
+              positive: Number(detail.reviews.positive) || 0,
+              neutral: Number(detail.reviews.neutral) || 0,
+              negative: Number(detail.reviews.negative) || 0
+            };
+          }
+          const lowerPkgKey = String(pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+          const hydratedScore = computeCatalogStarRating(
+            { ...detail, review_thread_counts: pkg.review_thread_counts, score: pkg.score },
+            d1Ratings.get(lowerPkgKey)
+          );
+          if (hydratedScore > 0) {
+            pkg.score = hydratedScore;
+          }
           if (typeof detail?.downloads === 'number' && detail.downloads > 0) {
             pkg.contentdb_downloads = Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads);
             pkg.downloads = Math.max(
@@ -1359,9 +1394,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             if (gitScan?.cdbMeta?.video_url) {
               rawVideoUrl = gitScan.cdbMeta.video_url;
             }
-            if (gitScan?.screenshotUrl || (gitScan?.cdbMeta?.screenshots && gitScan.cdbMeta.screenshots.length > 0)) {
+            if (gitScan?.screenshotUrl || (gitScan?.screenshots && gitScan.screenshots.length > 0)) {
               const mergedShots = mergeScreenshotsPreferringGit(
-                [gitScan?.screenshotUrl, ...(gitScan?.cdbMeta?.screenshots || [])],
+                [gitScan?.screenshotUrl, ...(gitScan?.screenshots || [])],
                 pkg.screenshots,
                 detail?.screenshots
               );
@@ -1394,6 +1429,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (env.DB && existingD1 && existingD1.provider !== 'contentdb') {
             const newLic = !existingD1.license && resolvedLic ? resolvedLic : null;
             const newVid = !existingD1.video_url && pkg.video_url ? pkg.video_url : null;
+            const newRevCounts = !existingD1.review_thread_counts && pkg.review_thread_counts
+              ? JSON.stringify(pkg.review_thread_counts)
+              : null;
+            const newScore =
+              !(Number(existingD1.score) >= 1 && Number(existingD1.score) <= 5) &&
+              typeof pkg.score === 'number' &&
+              pkg.score >= 1 &&
+              pkg.score <= 5
+                ? pkg.score
+                : null;
             const newShot =
               (!existingD1.banner_url ||
                 existingD1.banner_url === 'logo.svg' ||
@@ -1402,15 +1447,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               pkg.banner !== 'logo.svg'
                 ? pkg.banner
                 : null;
-            if (newLic || newVid || newShot) {
+            if (newLic || newVid || newShot || newRevCounts || newScore !== null) {
               bootHydrateStmts.push(
                 env.DB.prepare(`
                   UPDATE packages
-                  SET thumbnail_url = COALESCE(?, thumbnail_url),
+                  SET thumbnail_url = CASE
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                        ELSE thumbnail_url
+                      END,
                       banner_url = COALESCE(?, banner_url),
                       license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
                       video_url = COALESCE(video_url, ?),
-                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?)
+                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                      review_thread_counts = COALESCE(review_thread_counts, ?),
+                      score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END
                   WHERE id = ?
                 `).bind(
                   newShot,
@@ -1418,6 +1468,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                   newLic,
                   newVid,
                   pkg.video_thumbnail_url || null,
+                  newRevCounts,
+                  newScore,
+                  newScore,
                   existingD1.id
                 )
               );

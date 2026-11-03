@@ -314,8 +314,9 @@ export function buildProviderRawFileUrl(
 }
 
 /**
- * Rewrites raw image URLs hosted on Anubis PoW-protected MeseHub (`git.minetest.land`)
- * through `/api/packages?proxy_image=...` so browsers can render them without failing the PoW challenge.
+ * Rewrites raw image URLs hosted on Anubis PoW-protected Git forges (`git.minetest.land`, `mese.hub`)
+ * through `/api/packages?proxy_image=...` so browsers receive verified `image/*` MIME headers
+ * and edge-cached responses without failing PoW challenges.
  */
 export function toProxiedGitImageIfNeeded(url?: string | null): string {
   const trimmed = url?.trim() ?? '';
@@ -331,7 +332,11 @@ export function toProxiedGitImageIfNeeded(url?: string | null): string {
   try {
     const parsed = new URL(trimmed);
     const host = parsed.hostname.toLowerCase();
-    if (host === 'git.minetest.land' || host.endsWith('.minetest.land')) {
+    if (
+      host === 'git.minetest.land' ||
+      host.endsWith('.minetest.land') ||
+      host === 'mese.hub'
+    ) {
       return `/api/packages?proxy_image=${encodeURIComponent(trimmed)}&ngsw-bypass=true`;
     }
   } catch {
@@ -512,12 +517,13 @@ export function getCanonicalScreenshotKey(rawUrl?: string | null): string {
 
 /**
  * Single source of truth for merging and deduplicating package screenshots across backend and frontend:
- * - Normalizes MeseHub proxy URLs (`&ngsw-bypass=true`) and ContentDB mirror hosts (`content.luanti.org`).
+ * - Always places Git repository screenshots (`screenshot.png` / `.cdb.json`) first (`gitUrls`),
+ *   followed by complementary ContentDB gallery screenshots (`otherUrls`).
+ * - Normalizes MeseHub & Codeberg proxy URLs (`&ngsw-bypass=true`) and ContentDB mirror hosts (`content.luanti.org`).
  * - Deduplicates Git raw URLs across branch/API variants (`/main/`, `/HEAD/`, `/raw/branch/`, `/api/v1/repos/.../raw/`)
  *   using `getCanonicalScreenshotKey`.
- * - Prevents `.cdb.json` vs ContentDB `/uploads/` gallery duplication when a package has a multi-image Git
- *   screenshot gallery (`gitUrls.length > 1`) or a single mirrored screenshot (`gitUrls.length === 1 && otherUrls.length === 1`),
- *   and removes ContentDB `/uploads/<hash>` entries that match the package's `/thumbnails/<n>/<hash>` primary thumbnail.
+ * - When both a Git screenshot and multiple ContentDB gallery screenshots exist, deduplicates ContentDB's
+ *   `/uploads/<hash>` copy that matches the package's `/thumbnails/<n>/<hash>` primary thumbnail.
  */
 export function mergeScreenshotsPreferringGit(
   preferredGitUrls: Array<string | null | undefined>,
@@ -576,78 +582,37 @@ export function mergeScreenshotsPreferringGit(
     return isContentDbHost(lower) && (lower.includes('/thumbnails/') || lower.endsWith('/shot-0.png'));
   };
 
-  const listGitUrls: string[] = [];
+  const gitUrls: string[] = [];
   const otherUrls: string[] = [];
-  const seenListKeys = new Set<string>();
+  const seenKeys = new Set<string>();
+
+  const addCandidate = (raw: any, forceGitPriority = false) => {
+    const url = normalizeCandidateUrl(extractUrl(raw));
+    if (!url || isFilteredThumbnailOrSyntheticBanner(url)) return;
+    const key = getCanonicalScreenshotKey(url);
+    if (!key || seenKeys.has(key)) return;
+    seenKeys.add(key);
+
+    if (forceGitPriority || isGitRepositoryAssetUrl(url)) {
+      gitUrls.push(url);
+    } else {
+      otherUrls.push(url);
+    }
+  };
+
+  if (Array.isArray(preferredGitUrls)) {
+    for (const raw of preferredGitUrls) {
+      const extracted = extractUrl(raw);
+      if (extracted && isGitRepositoryAssetUrl(extracted)) {
+        addCandidate(extracted, true);
+      }
+    }
+  }
 
   for (const list of screenshotLists) {
     if (!Array.isArray(list)) continue;
-    const lockGitFromPriorList = listGitUrls.length > 0;
     for (const item of list) {
-      const url = normalizeCandidateUrl(extractUrl(item));
-      if (!url || isFilteredThumbnailOrSyntheticBanner(url)) continue;
-      const key = getCanonicalScreenshotKey(url);
-      if (!key) continue;
-
-      if (isGitRepositoryAssetUrl(url)) {
-        if (lockGitFromPriorList) continue;
-        if (!seenListKeys.has(key)) {
-          seenListKeys.add(key);
-          listGitUrls.push(url);
-        }
-      } else if (!seenListKeys.has(key)) {
-        seenListKeys.add(key);
-        otherUrls.push(url);
-      }
-    }
-  }
-
-  // Self-heal legacy arrays where root `/screenshot.png` was prepended before a `.cdb.json` gallery
-  if (listGitUrls.length >= 2) {
-    const firstKey = getCanonicalScreenshotKey(listGitUrls[0]);
-    if (/^git:[^/]+\/[^/]+\/[^/]+\/screenshot\.(?:png|jpe?g|webp)$/i.test(firstKey)) {
-      const restKeys = listGitUrls.slice(1).map(u => getCanonicalScreenshotKey(u));
-      const allRestInSubdirOrNumbered = restKeys.every(k => {
-        const afterRepo = k.replace(/^git:[^/]+\/[^/]+\/[^/]+\//, '');
-        return afterRepo.includes('/') || /(?:^|[_-])\d+\.(?:png|jpe?g|webp)$/i.test(afterRepo);
-      });
-      if (allRestInSubdirOrNumbered) {
-        listGitUrls.shift();
-      }
-    }
-  }
-
-  const preferredGitByKey = new Map<string, string>();
-  const preferredGitList: Array<{ key: string; url: string }> = [];
-  if (Array.isArray(preferredGitUrls)) {
-    for (const raw of preferredGitUrls) {
-      const url = normalizeCandidateUrl(extractUrl(raw));
-      if (!url || isFilteredThumbnailOrSyntheticBanner(url) || !isGitRepositoryAssetUrl(url)) continue;
-      const key = getCanonicalScreenshotKey(url);
-      if (key && !preferredGitByKey.has(key)) {
-        preferredGitByKey.set(key, url);
-        preferredGitList.push({ key, url });
-      }
-    }
-  }
-
-  const gitUrls: string[] = [];
-  const seenGitKeys = new Set<string>();
-
-  if (listGitUrls.length === 0) {
-    for (const { key, url } of preferredGitList) {
-      if (!seenGitKeys.has(key)) {
-        seenGitKeys.add(key);
-        gitUrls.push(url);
-      }
-    }
-  } else {
-    for (const url of listGitUrls) {
-      const key = getCanonicalScreenshotKey(url);
-      if (key && !seenGitKeys.has(key)) {
-        seenGitKeys.add(key);
-        gitUrls.push(preferredGitByKey.get(key) ?? url);
-      }
+      addCandidate(item, false);
     }
   }
 
@@ -655,20 +620,16 @@ export function mergeScreenshotsPreferringGit(
     return otherUrls;
   }
 
-  // When `.cdb.json` provides a multi-image Git screenshot gallery (`gitUrls.length > 1`),
-  // ContentDB's `/uploads/` URLs are re-hosted copies of that exact `.cdb.json` gallery.
-  if (gitUrls.length > 1) {
-    return gitUrls;
-  }
-
-  // Remove any ContentDB `/uploads/<filename>` that matches the package's `/thumbnails/<n>/<filename>` primary thumbnail
-  const filteredOtherUrls = otherUrls.filter(u => {
-    const m = u.toLowerCase().match(/\/uploads\/([^/?#]+)/);
-    if (m?.[1] && cdbThumbnailFileNames.has(m[1])) {
-      return false;
-    }
-    return true;
-  });
+  // When a Git screenshot is present alongside a multi-image ContentDB gallery (`otherUrls.length > 1`),
+  // remove ContentDB's `/uploads/<filename>` entry if it is just the primary `/thumbnails/<n>/<filename>` duplicate.
+  // Keep `otherUrls` intact when `otherUrls.length === 1` so single-image packages always retain a fallback screenshot.
+  const filteredOtherUrls =
+    otherUrls.length > 1 && cdbThumbnailFileNames.size > 0
+      ? otherUrls.filter(u => {
+          const m = u.toLowerCase().match(/\/uploads\/([^/?#]+)/);
+          return !(m?.[1] && cdbThumbnailFileNames.has(m[1]));
+        })
+      : otherUrls;
 
   return [...gitUrls, ...filteredOtherUrls];
 }
@@ -729,4 +690,30 @@ export function isPackageDeprecated(pkg?: {
   }
   return false;
 }
+
+/**
+ * Normalizes a Git repository URL into a canonical `host/owner/repo` key for deduplication
+ * across ContentDB and D1 Git packages.
+ */
+export function normalizeRepoComparisonKey(urlStr?: string | null): string {
+  if (!urlStr || typeof urlStr !== 'string') return '';
+  try {
+    const parsed = new URL(urlStr.trim());
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const cleanPath = parsed.pathname
+      .replace(/^\/+|\/+$/g, '')
+      .replace(/\.git$/i, '')
+      .toLowerCase();
+    const parts = cleanPath.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+      return `${host}/${parts[0]}/${parts[1]}`;
+    }
+    return cleanPath ? `${host}/${cleanPath}` : '';
+  } catch {
+    return '';
+  }
+}
+
+export const normalizeRepoKey = normalizeRepoComparisonKey;
+
 

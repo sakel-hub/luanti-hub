@@ -1259,31 +1259,52 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? discoveredReleases[0].download_url
       : branchArchiveUrl;
 
-    const resolvedCdbScreenshots = Array.isArray(cdbMeta?.screenshots)
+    const candidateCdbScreenshots = Array.isArray(cdbMeta?.screenshots)
       ? cdbMeta.screenshots
           .map((s: string) => {
             const clean = String(s || '').trim();
             if (!clean) return '';
-            if (/^https?:\/\//i.test(clean)) return toProxiedGitImageIfNeeded(clean);
-            return toProxiedGitImageIfNeeded(`${rawAssetBase}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`);
+            if (/^https?:\/\//i.test(clean)) return clean;
+            return `${rawAssetBase}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`;
           })
           .filter(Boolean)
+          .slice(0, 6)
       : [];
 
-    const existingGitScreenshot = isGitRepositoryAssetUrl(existingD1Pkg?.banner_url)
-      ? String(existingD1Pkg.banner_url)
-      : (isGitRepositoryAssetUrl(existingD1Pkg?.thumbnail_url) ? String(existingD1Pkg.thumbnail_url) : undefined);
+    const verifiedCdbScreenshots = (
+      await Promise.all(
+        candidateCdbScreenshots.map(async (rawUrl: string) => {
+          try {
+            const r = await fetchWithAnubisSupport(rawUrl, { method: 'HEAD' });
+            const ct = (r.headers.get('content-type') || '').toLowerCase();
+            if (r.ok && !ct.includes('text/html') && !ct.includes('text/plain')) {
+              return toProxiedGitImageIfNeeded(rawUrl);
+            }
+          } catch {
+            // Ignore unreachable screenshot candidate
+          }
+          return '';
+        })
+      )
+    ).filter(Boolean);
+
+    const resolvedCdbScreenshots = [
+      ...(hasScreenshot && screenshotUrl !== 'logo.svg' ? [screenshotUrl] : []),
+      ...verifiedCdbScreenshots
+    ];
+
     const primaryGitScreenshot =
-      resolvedCdbScreenshots[0] || (hasScreenshot ? screenshotUrl : existingGitScreenshot);
+      (hasScreenshot && screenshotUrl !== 'logo.svg' ? screenshotUrl : undefined) ||
+      resolvedCdbScreenshots[0];
     const nonGitFallbackThumb =
       matchedContentDbPkg?.thumbnail ||
       (!isGitRepositoryAssetUrl(existingD1Pkg?.thumbnail_url) && existingD1Pkg?.thumbnail_url !== 'logo.svg'
         ? existingD1Pkg?.thumbnail_url
         : undefined);
     const mergedScreenshots = mergeScreenshotsPreferringGit(
-      resolvedCdbScreenshots.length > 0 ? [nonGitFallbackThumb] : [primaryGitScreenshot, nonGitFallbackThumb],
+      [primaryGitScreenshot, nonGitFallbackThumb],
       resolvedCdbScreenshots,
-      parseJsonArray(existingD1Pkg?.screenshots),
+      parseJsonArray(existingD1Pkg?.screenshots).filter((s: string) => !isGitRepositoryAssetUrl(s)),
       matchedContentDbPkg?.screenshots
     );
 

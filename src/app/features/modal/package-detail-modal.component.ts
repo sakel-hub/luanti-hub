@@ -165,7 +165,8 @@ import {
             <img
               [src]="activeBannerUrl() || bannerImage"
               [fallbackThumbnail]="fallbackBannerThumbnail"
-              (error)="onScreenshotError(activeBannerUrl() || bannerImage)"
+              (load)="onScreenshotLoad($event)"
+              (error)="onScreenshotError(undefined, $event)"
               appImgFallback
               [alt]="package.title"
               decoding="async"
@@ -509,11 +510,10 @@ import {
                                 class="relative w-full h-full cursor-zoom-in group">
                                 <img
                                   [src]="slide.url"
-                                  [fallbackThumbnail]="fallbackBannerThumbnail"
+                                  (load)="onScreenshotLoad($event, slide.url)"
                                   (error)="onScreenshotError(slide.url)"
-                                  appImgFallback
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
-                                  [attr.loading]="idx === mediaCarouselIndex() ? 'eager' : 'lazy'"
+                                  [attr.loading]="idx <= mediaCarouselIndex() + 2 ? 'eager' : 'lazy'"
                                   decoding="async"
                                   class="w-full h-full object-cover object-center group-hover:scale-[1.02] transition-transform duration-500"
                                 />
@@ -601,10 +601,9 @@ import {
                             <img
                               [src]="slide.thumbnail"
                               [alt]="package.title"
+                              (load)="slide.type === 'image' ? onScreenshotLoad($event, slide.url) : null"
                               (error)="slide.type === 'image' ? onScreenshotError(slide.url) : null"
-                              appImgFallback
-                              [fallbackThumbnail]="fallbackBannerThumbnail"
-                              loading="lazy"
+                              [attr.loading]="idx < 8 ? 'eager' : 'lazy'"
                               decoding="async"
                               class="w-full h-full object-cover" />
                             @if (slide.type === 'video') {
@@ -1204,7 +1203,7 @@ import {
                           (click)="packageService.openPackageModalById(gs.game.author, gs.game.name, true)"
                           class="px-2 py-1 rounded-lg glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-semibold flex items-center gap-1.5 transition cursor-pointer">
                           @if (gs.game.thumbnail) {
-                            <img [src]="gs.game.thumbnail" [alt]="gs.game.title" class="w-3.5 h-3.5 rounded object-cover" />
+                            <img [src]="gs.game.thumbnail" appImgFallback [alt]="gs.game.title" class="w-3.5 h-3.5 rounded object-cover" />
                           }
                           <span class="truncate max-w-[130px]">{{ gs.game.title }}</span>
                         </button>
@@ -2236,17 +2235,42 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private lightboxTouchStartX = 0;
   private lightboxTouchStartY = 0;
 
-  onScreenshotError(url?: string | null): void {
-    const clean = url?.trim();
-    if (!clean || clean === 'logo.svg') return;
-    if (this.activeBannerUrl() === clean) {
+  onScreenshotLoad(event: Event, url?: string | null): void {
+    const img = event?.target as HTMLImageElement | null;
+    if (!img) return;
+    const failed1x1 = img.getAttribute('data-lh-failed-1x1');
+    if (failed1x1) {
+      img.removeAttribute('data-lh-failed-1x1');
+      this.onScreenshotError(url || failed1x1);
+      return;
+    }
+    if (img.naturalWidth > 0 && img.naturalWidth <= 1 && img.naturalHeight > 0 && img.naturalHeight <= 1) {
+      this.onScreenshotError(url, event);
+    }
+  }
+
+  onScreenshotError(url?: string | null, event?: Event): void {
+    const img = event?.target as HTMLImageElement | null;
+    const failedAttr = img?.getAttribute('data-lh-failed-src') || '';
+    if (failedAttr && img) {
+      img.removeAttribute('data-lh-failed-src');
+    }
+    const domSrc = img ? (failedAttr || img.getAttribute('src') || img.currentSrc || img.src || '') : '';
+    const rawCandidate = (url?.trim() || domSrc).trim();
+    const clean = this.packageService.toProxiedGitImageIfNeeded(rawCandidate) || rawCandidate;
+    if (!clean || clean === 'logo.svg' || clean.endsWith('/logo.svg')) return;
+    if (this.activeBannerUrl() === clean || this.activeBannerUrl() === rawCandidate) {
       this.activeBannerUrl.set(null);
     }
     const currentFailed = this.failedScreenshotUrls();
-    if (currentFailed.has(clean)) return;
-    const next = new Set(currentFailed);
-    next.add(clean);
-    this.failedScreenshotUrls.set(next);
+    if (!currentFailed.has(clean)) {
+      const next = new Set(currentFailed);
+      next.add(clean);
+      if (rawCandidate && rawCandidate !== clean) {
+        next.add(rawCandidate);
+      }
+      this.failedScreenshotUrls.set(next);
+    }
     const totalAfter = this.mediaSlides().length;
     if (totalAfter > 0 && this.mediaCarouselIndex() >= totalAfter) {
       this.mediaCarouselIndex.set(Math.max(0, totalAfter - 1));
@@ -2582,7 +2606,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const failed = this.failedScreenshotUrls();
     const preferredGitShot = [pkg?.banner, pkg?.thumbnail, this.package?.banner, this.package?.thumbnail]
       .map(u => this.packageService.toProxiedGitImageIfNeeded(u))
-      .find(u => Boolean(u) && !failed.has(u) && this.packageService.isGitScreenshotUrl(u));
+      .find(u => Boolean(u) && u !== 'logo.svg' && !failed.has(u) && this.packageService.isGitScreenshotUrl(u));
     if (preferredGitShot) {
       return preferredGitShot;
     }
@@ -2590,17 +2614,31 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (shots.length > 0) {
       return shots[0];
     }
-    const candidateBanner = this.packageService.toProxiedGitImageIfNeeded(pkg?.banner);
-    if (candidateBanner && !failed.has(candidateBanner) && !candidateBanner.includes('thumbnail.png')) {
-      return candidateBanner;
-    }
-    const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(pkg?.thumbnail);
-    if (candidateThumb && !failed.has(candidateThumb)) {
-      if (candidateThumb.includes('thumbnail.png')) {
-        const shot0 = candidateThumb.replace('thumbnail.png', 'shot-0.png');
-        if (!failed.has(shot0)) return shot0;
+    for (const rawBanner of [pkg?.banner, this.package?.banner]) {
+      const candidateBanner = this.packageService.toProxiedGitImageIfNeeded(rawBanner);
+      if (candidateBanner && candidateBanner !== 'logo.svg' && !failed.has(candidateBanner) && !candidateBanner.includes('thumbnail.png')) {
+        return candidateBanner;
       }
-      return candidateThumb;
+    }
+    for (const rawThumb of [pkg?.thumbnail, this.package?.thumbnail]) {
+      const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb);
+      if (candidateThumb && candidateThumb !== 'logo.svg' && !failed.has(candidateThumb)) {
+        if (candidateThumb.includes('thumbnail.png')) {
+          const shot0 = candidateThumb.replace('thumbnail.png', 'shot-0.png');
+          if (!failed.has(shot0)) return shot0;
+        }
+        return candidateThumb;
+      }
+    }
+    for (const rawThumb of [pkg?.thumbnail, this.package?.thumbnail]) {
+      const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb);
+      if (
+        candidateThumb &&
+        candidateThumb !== 'logo.svg' &&
+        !this.packageService.isGitScreenshotUrl(candidateThumb)
+      ) {
+        return candidateThumb;
+      }
     }
     return 'logo.svg';
   }
@@ -2609,12 +2647,17 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     const currentBanner = this.activeBannerUrl() || this.bannerImage;
     const failed = this.failedScreenshotUrls();
+    const pkgThumb = this.packageService.toProxiedGitImageIfNeeded(pkg?.thumbnail);
+    const inputThumb = this.packageService.toProxiedGitImageIfNeeded(this.package?.thumbnail);
     const candidates = [
       ...(this.activeScreenshots() || []),
-      this.packageService.toProxiedGitImageIfNeeded(pkg?.thumbnail),
-      this.packageService.toProxiedGitImageIfNeeded(this.package?.thumbnail)
+      pkgThumb,
+      inputThumb
     ];
-    return candidates.find(u => Boolean(u) && u !== 'logo.svg' && u !== currentBanner && !failed.has(u));
+    return (
+      candidates.find(u => Boolean(u) && u !== 'logo.svg' && u !== currentBanner && !failed.has(u)) ||
+      [pkgThumb, inputThumb].find(u => Boolean(u) && u !== 'logo.svg' && !failed.has(u))
+    );
   }
 
   private static readonly savedViewStateByPkg = new Map<string, {
@@ -2838,7 +2881,16 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.dependenciesManualOverride.set(null);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
-    if (initialCachedReviews !== undefined) {
+    const initialRevCounts = this.package.review_thread_counts;
+    const initialExpectedTotal = initialRevCounts
+      ? Number(initialRevCounts.positive || 0) +
+        Number(initialRevCounts.neutral || 0) +
+        Number(initialRevCounts.negative || 0)
+      : undefined;
+    if (
+      initialCachedReviews !== undefined &&
+      (initialCachedReviews.length > 0 || (initialRevCounts !== undefined && initialExpectedTotal === 0))
+    ) {
       this.reviews.set(initialCachedReviews);
       this.isLoadingReviews.set(false);
     } else if (isSwitchingPackage || this.reviews().length === 0) {
@@ -2885,20 +2937,21 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     await this.packageService.loadPackageDetails(this.package, true);
     if (this.loadedPackageKey !== key) return;
 
-    const bundledCachedReviews = this.packageService.getCachedReviews(this.package);
-    if (bundledCachedReviews !== undefined) {
+    const latestPkg = this.packageService.activePackage() || this.package;
+    const bundledCachedReviews = this.packageService.getCachedReviews(latestPkg);
+    if (bundledCachedReviews !== undefined && bundledCachedReviews.length > 0) {
       this.reviews.set(bundledCachedReviews);
       this.isLoadingReviews.set(false);
     }
 
-    const bundledCachedReleases = this.packageService.getCachedReleases(this.package);
+    const bundledCachedReleases = this.packageService.getCachedReleases(latestPkg);
     if (bundledCachedReleases && bundledCachedReleases.length > 0) {
       this.releases.set(bundledCachedReleases);
       this.isLoadingReleases.set(false);
     }
 
     this.packageService
-      .fetchReviews(this.package, false)
+      .fetchReviews(latestPkg, false)
       .then(res => {
         if (this.loadedPackageKey !== key) return;
         if (res.length > 0 || this.reviews().length === 0 || isSwitchingPackage) {

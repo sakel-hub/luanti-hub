@@ -1,7 +1,9 @@
 import {
   fetchUpstreamJsonCached,
   computeGenuineStarRating,
-  safeDecodeParam
+  safeDecodeParam,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
 } from '../../api/lib/upstream';
 
 interface Env {
@@ -152,6 +154,7 @@ export async function onRequestGet(context: {
   let pkgDesc = `Download and install ${name} by ${author} for Luanti (Minetest) on Luanti Hub.`;
   let pkgLongDesc = '';
   let pkgThumb = `${canonicalOrigin}/icons/icon-512x512.png`;
+  let pkgBanner = '';
   let pkgType = 'mod';
   let pkgLicense = 'Open Source';
   let pkgDownloads = 0;
@@ -160,8 +163,36 @@ export async function onRequestGet(context: {
   let pkgTags: string[] = [];
   let pkgDeps: string[] = [];
 
+  const toAbsoluteSeoImageUrl = (rawImg?: string | null): string => {
+    const trimmed = String(rawImg || '').trim();
+    if (!trimmed || trimmed === 'logo.svg' || trimmed === '/logo.svg') {
+      return `${canonicalOrigin}/icons/icon-512x512.png`;
+    }
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return `${canonicalOrigin}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
+  };
+
+  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+
   const lookupMetadata = async () => {
     try {
+      const cachedMeta = await readEdgeCacheJson<any>(ssrMetaCacheKey);
+      if (cachedMeta && typeof cachedMeta === 'object' && cachedMeta.pkgCleanTitle) {
+        pkgCleanTitle = cachedMeta.pkgCleanTitle;
+        pkgDesc = cachedMeta.pkgDesc || pkgDesc;
+        pkgLongDesc = cachedMeta.pkgLongDesc || pkgDesc;
+        pkgThumb = cachedMeta.pkgThumb || pkgThumb;
+        pkgBanner = cachedMeta.pkgBanner || '';
+        pkgType = cachedMeta.pkgType || 'mod';
+        pkgLicense = cachedMeta.pkgLicense || pkgLicense;
+        pkgDownloads = Number(cachedMeta.pkgDownloads) || 0;
+        pkgScore = Number(cachedMeta.pkgScore) || 0;
+        pkgReviewCount = Number(cachedMeta.pkgReviewCount) || 0;
+        pkgTags = Array.isArray(cachedMeta.pkgTags) ? cachedMeta.pkgTags : [];
+        pkgDeps = Array.isArray(cachedMeta.pkgDeps) ? cachedMeta.pkgDeps : [];
+        return;
+      }
+
       let pkgData: any = null;
       let d1RatingAvg: number | null = null;
 
@@ -181,11 +212,14 @@ export async function onRequestGet(context: {
         }
       }
 
-      if (pkgData && (pkgData.provider !== 'contentdb' || pkgData.long_desc || pkgData.short_desc)) {
+      if (pkgData && (pkgData.provider !== 'contentdb' || pkgData.long_desc || pkgData.short_desc || pkgData.banner_url)) {
         pkgCleanTitle = pkgData.title || name;
         pkgDesc = pkgData.short_desc || pkgDesc;
         pkgLongDesc = pkgData.long_desc || pkgDesc;
-        pkgThumb = pkgData.thumbnail_url || pkgThumb;
+        if (pkgData.banner_url && pkgData.banner_url !== 'logo.svg') {
+          pkgBanner = String(pkgData.banner_url);
+        }
+        pkgThumb = pkgBanner || pkgData.thumbnail_url || pkgThumb;
         pkgType = pkgData.type || 'mod';
         pkgLicense = pkgData.license || pkgLicense;
         pkgDownloads = Number(pkgData.downloads_count) || 0;
@@ -211,7 +245,10 @@ export async function onRequestGet(context: {
           pkgCleanTitle = upstream.title || pkgCleanTitle;
           pkgDesc = upstream.short_desc || upstream.short_description || pkgDesc;
           pkgLongDesc = upstream.long_description || pkgLongDesc || pkgDesc;
-          pkgThumb = upstream.thumbnail || (Array.isArray(upstream.screenshots) && upstream.screenshots[0]?.url) || pkgThumb;
+          const upstreamThumb =
+            upstream.thumbnail ||
+            (Array.isArray(upstream.screenshots) && (upstream.screenshots[0]?.url || upstream.screenshots[0]));
+          pkgThumb = pkgBanner || upstreamThumb || pkgThumb;
           pkgType = upstream.type || pkgType || 'mod';
           pkgLicense = upstream.license || pkgLicense;
           pkgDownloads = Math.max(pkgDownloads, Number(upstream.downloads) || 0);
@@ -224,6 +261,30 @@ export async function onRequestGet(context: {
           pkgScore = computeGenuineStarRating(d1RatingAvg, upstream.reviews);
         }
       }
+
+      pkgThumb = toAbsoluteSeoImageUrl(pkgBanner || pkgThumb);
+      if (pkgBanner) {
+        pkgBanner = toAbsoluteSeoImageUrl(pkgBanner);
+      }
+
+      await writeEdgeCacheJson(
+        ssrMetaCacheKey,
+        {
+          pkgCleanTitle,
+          pkgDesc,
+          pkgLongDesc,
+          pkgThumb,
+          pkgBanner,
+          pkgType,
+          pkgLicense,
+          pkgDownloads,
+          pkgScore,
+          pkgReviewCount,
+          pkgTags,
+          pkgDeps
+        },
+        600
+      );
     } catch (err: any) {
       console.error('[Package Metadata Lookup Error]', {
         author,
@@ -327,6 +388,7 @@ export async function onRequestGet(context: {
       title: pkgCleanTitle,
       short_desc: pkgDesc,
       thumbnail: pkgThumb,
+      ...(pkgBanner ? { banner: pkgBanner } : {}),
       type: pkgType,
       downloads: pkgDownloads,
       score: pkgScore

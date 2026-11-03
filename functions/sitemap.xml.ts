@@ -1,4 +1,8 @@
-import { fetchUpstreamJsonCached } from './api/lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
+} from './api/lib/upstream';
 
 interface Env {
   DB?: any;
@@ -16,6 +20,17 @@ function escapeXml(value: string): string {
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const origin = 'https://luantihub.org';
   const today = new Date().toISOString().split('T')[0];
+  const sitemapCacheKey = `https://cache.luantihub.internal/sitemap-xml-v2/${today}`;
+
+  const cachedXml = await readEdgeCacheJson<{ xml: string }>(sitemapCacheKey);
+  if (cachedXml && typeof cachedXml.xml === 'string' && cachedXml.xml.startsWith('<?xml')) {
+    return new Response(cachedXml.xml, {
+      headers: {
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400'
+      }
+    });
+  }
 
   const staticUrls = [
     { loc: `${origin}/`, priority: '1.0', changefreq: 'hourly' },
@@ -23,6 +38,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     { loc: `${origin}/mods`, priority: '0.9', changefreq: 'daily' },
     { loc: `${origin}/texture-packs`, priority: '0.9', changefreq: 'daily' },
     { loc: `${origin}/git`, priority: '0.9', changefreq: 'daily' },
+    { loc: `${origin}/blog`, priority: '0.8', changefreq: 'daily' },
     { loc: `${origin}/setup`, priority: '0.9', changefreq: 'monthly' },
     { loc: `${origin}/submit`, priority: '0.9', changefreq: 'weekly' },
     { loc: `${origin}/legal`, priority: '0.8', changefreq: 'monthly' }
@@ -106,6 +122,8 @@ ${hreflangLinks}
         xmlns:xhtml="http://www.w3.org/1999/xhtml">
 ${urlEntries.join('\n')}
 </urlset>`;
+
+  await writeEdgeCacheJson(sitemapCacheKey, { xml }, 21600);
 
   return new Response(xml, {
     headers: {

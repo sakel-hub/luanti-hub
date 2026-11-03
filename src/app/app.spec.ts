@@ -7348,7 +7348,7 @@ supported_games = minetest_game, voxelibre
       ),
       env: {}
     });
-    expect(htmlProxyRes.status).toBe(200);
+    expect(htmlProxyRes.status).toBe(404);
     expect(htmlProxyRes.headers.get('X-Proxy-Fallback')).toBe('non-image-upstream');
 
     const octetPngProxyRes = await packagesApiGet({
@@ -7461,54 +7461,80 @@ supported_games = minetest_game, voxelibre
       getCanonicalScreenshotKey('https://contentdb.milcho.org/uploads/abc1234.png')
     );
 
-    // 2. WaySigns scenario: 1 branch raw screenshot.png + 5 .cdb.json Git screenshots + 5 ContentDB re-hosted uploads -> 5 unique Git screenshots
-    const branchShot = 'https://codeberg.org/Author/waysigns/raw/branch/main/screenshot.png';
-    const cdbJsonGitShots = [
-      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/1.png',
-      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/2.png',
-      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/3.png',
-      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/4.png',
-      'https://codeberg.org/api/v1/repos/Author/waysigns/raw/screenshots/5.png'
-    ];
-    const cdbUploadsShots = [
-      'https://content.luanti.org/uploads/ws_hash_1.png',
-      'https://content.luanti.org/uploads/ws_hash_2.png',
-      'https://content.luanti.org/uploads/ws_hash_3.png',
-      'https://content.luanti.org/uploads/ws_hash_4.png',
-      'https://content.luanti.org/uploads/ws_hash_5.png'
-    ];
-
-    const mergedWaySigns = pkgService.mergePackageScreenshots(
-      [branchShot],
-      cdbJsonGitShots,
-      cdbUploadsShots
+    // 2. MeseHub raw URLs are proxied through /api/packages?proxy_image=..., while Codeberg raw URLs stay direct
+    const codebergRawShot = 'https://codeberg.org/api/v1/repos/tenplus1/mobs_redo/raw/screenshot.png';
+    const proxiedCodebergShot = pkgService.toProxiedGitImageIfNeeded(codebergRawShot);
+    expect(proxiedCodebergShot).toBe(codebergRawShot);
+    const mesehubRawShot = 'https://git.minetest.land/VoxeLibre/VoxeLibre/raw/branch/master/screenshot.png';
+    expect(pkgService.toProxiedGitImageIfNeeded(mesehubRawShot)).toBe(
+      `/api/packages?proxy_image=${encodeURIComponent(mesehubRawShot)}&ngsw-bypass=true`
     );
-    expect(mergedWaySigns).toEqual(cdbJsonGitShots);
-    expect(mergedWaySigns.length).toBe(5);
 
-    // Self-heals even when a single legacy D1 array already had [branchShot, ...cdbJsonGitShots, ...cdbUploadsShots]
-    const healedWaySigns = mergeScreenshotsPreferringGit(
-      [branchShot],
-      [branchShot, ...cdbJsonGitShots, ...cdbUploadsShots]
-    );
-    expect(healedWaySigns).toEqual(cdbJsonGitShots);
+    // 3. Single-screenshot package (Mobs Redo API scenario): never synthesizes a 404 /uploads/.png URL from a /thumbnails/1/.png URL
+    const mobsCdbThumb = 'https://content.luanti.org/thumbnails/1/mobs_hash.png';
+    const mergedMobs = mergeScreenshotsPreferringGit([codebergRawShot, mobsCdbThumb], []);
+    expect(mergedMobs).toEqual([proxiedCodebergShot]);
 
-    // 3. VoxeLibre scenario: 1 Git screenshot.png + ContentDB thumbnail `/thumbnails/1/8f7c4f97f4.png` + `/uploads/8f7c4f97f4.png` + 2 more uploads
+    // 3b. Modal bannerImage falls back cleanly to ContentDB thumbnail when banner is logo.svg or fails, without mutating catalog thumbnail
+    const mobsPkg = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs',
+      author: 'TenPlus1',
+      name: 'mobs',
+      title: 'Mobs Redo API',
+      type: 'mod',
+      thumbnail: mobsCdbThumb,
+      banner: 'logo.svg',
+      screenshots: []
+    });
+    expect(mobsPkg.thumbnail).toBe(mobsCdbThumb);
+    expect(mobsPkg.banner).toBe(mobsCdbThumb);
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = { ...mobsPkg, banner: 'logo.svg', thumbnail: mobsCdbThumb };
+    (pkgService as any)._activePackage.set(modalComp.package);
+    expect(modalComp.bannerImage).toBe(mobsCdbThumb);
+
+    // 3c. Hero banner (error) event race: if a Git screenshot fails on the hero <img> after the carousel
+    // already marked it failed (so bannerImage already switched to mobsCdbThumb), onScreenshotError(undefined, event)
+    // must read the failing Git URL from the DOM <img> element rather than marking mobsCdbThumb as failed
+    modalComp.package = {
+      ...mobsPkg,
+      banner: codebergRawShot,
+      thumbnail: mobsCdbThumb,
+      screenshots: [codebergRawShot]
+    };
+    (pkgService as any)._activePackage.set(modalComp.package);
+    modalComp.onScreenshotError(codebergRawShot);
+    expect(modalComp.bannerImage).toBe(mobsCdbThumb);
+    const fakeHeroImg = document.createElement('img');
+    fakeHeroImg.setAttribute('src', codebergRawShot);
+    modalComp.onScreenshotError(undefined, { target: fakeHeroImg } as unknown as Event);
+    expect(modalComp.failedScreenshotUrls().has(mobsCdbThumb)).toBe(false);
+    expect(modalComp.bannerImage).toBe(mobsCdbThumb);
+
+    // 4. Multi-screenshot package (Draconis / VoxeLibre scenario): Git screenshot.png first + complementary ContentDB gallery with primary thumbnail duplicate removed
     const voxeGitShot = 'https://git.minetest.land/api/v1/repos/VoxeLibre/VoxeLibre/raw/screenshot.png';
     const voxeCdbThumb = 'https://content.luanti.org/thumbnails/1/8f7c4f97f4.png';
     const voxeCdbDup0 = 'https://content.luanti.org/uploads/8f7c4f97f4.png';
     const voxeCdbShot1 = 'https://content.luanti.org/uploads/gameplay_1.png';
     const voxeCdbShot2 = 'https://content.luanti.org/uploads/gameplay_2.png';
+    const voxeCdbShot3 = 'https://content.luanti.org/uploads/gameplay_3.png';
 
     const mergedVoxe = mergeScreenshotsPreferringGit(
       [voxeGitShot, voxeCdbThumb],
-      [voxeCdbDup0, voxeCdbShot1, voxeCdbShot2]
+      [voxeCdbDup0, voxeCdbShot1, voxeCdbShot2, voxeCdbShot3]
     );
-    expect(mergedVoxe.length).toBe(3);
+    expect(mergedVoxe.length).toBe(4);
     expect(mergedVoxe[0]).toContain('proxy_image=');
-    expect(mergedVoxe.slice(1)).toEqual([voxeCdbShot1, voxeCdbShot2]);
+    expect(mergedVoxe.slice(1)).toEqual([voxeCdbShot1, voxeCdbShot2, voxeCdbShot3]);
 
-    // 4. scanGitRepoMetadataCached uses .cdb.json `screenshots` as authoritative replacement for root screenshot.png
+    // When a ContentDB package has 4 screenshots and no separate Git screenshot.png, all 4 ContentDB screenshots are preserved
+    const draconisShots = [voxeCdbDup0, voxeCdbShot1, voxeCdbShot2, voxeCdbShot3];
+    const mergedDraconis = mergeScreenshotsPreferringGit([voxeCdbThumb], draconisShots);
+    expect(mergedDraconis).toEqual(draconisShots);
+
+    // 5. scanGitRepoMetadataCached prefers root screenshot.png first and only includes verified .cdb.json relative screenshots
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -7520,13 +7546,16 @@ supported_games = minetest_game, voxelibre
       if (url.endsWith('/.cdb.json')) {
         return new Response(
           JSON.stringify({
-            screenshots: ['./screenshots/1.png', './screenshots/2.png']
+            screenshots: ['./screenshots/1.png', './screenshots/missing.png']
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         );
       }
-      if (url.endsWith('/screenshot.png')) {
-        return new Response('', { status: 200, headers: { 'Content-Type': 'image/png' } });
+      if (url.endsWith('/screenshot.png') || url.endsWith('/screenshots/1.png')) {
+        return new Response('PNG_BYTES_LONGER_THAN_32_BYTES_1234567890', {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
       }
       return new Response('Not found', { status: 404 });
     });
@@ -7539,13 +7568,250 @@ supported_games = minetest_game, voxelibre
         'https://codeberg.org/TestAuthor/waysigns',
         0
       );
-      expect(scanRes.screenshots).toEqual([
-        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/1.png',
-        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/2.png'
-      ]);
-      expect(scanRes.screenshotUrl).toBe(
+      const expectedRootProxied = pkgService.toProxiedGitImageIfNeeded(
+        'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshot.png'
+      );
+      const expectedSubProxied = pkgService.toProxiedGitImageIfNeeded(
         'https://codeberg.org/api/v1/repos/TestAuthor/waysigns/raw/screenshots/1.png'
       );
+      expect(scanRes.screenshotUrl).toBe(expectedRootProxied);
+      expect(scanRes.screenshots).toEqual([expectedRootProxied, expectedSubProxied]);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should share DRY package utilities, prioritize Git banner in notifications & SEO with IndexedDB sync, and render reusable compact badges in AuthorDrawer', async () => {
+    const {
+      parseJsonArray,
+      extractEngineVersionString,
+      parseDownloadSizeBytes,
+      formatByteSize,
+      computeStarRatingFromData,
+      extractEmbeddedVideo
+    } = await import('./core/config/package-utils.config');
+    const { normalizeRepoComparisonKey } = await import('./core/config/git-providers.config');
+
+    // 1. Verify shared DRY utilities
+    expect(parseJsonArray('["mod", "survival"]')).toEqual(['mod', 'survival']);
+    expect(parseJsonArray('mod, survival')).toEqual(['mod', 'survival']);
+    expect(parseJsonArray('[broken')).toEqual([]);
+    expect(extractEngineVersionString({ name: '5.8.0' })).toBe('5.8.0');
+    expect(parseDownloadSizeBytes('2.5 MB')).toBe(Math.round(2.5 * 1024 * 1024));
+    expect(formatByteSize(512 * 1024)).toBe('512 KB');
+    expect(
+      computeStarRatingFromData({
+        score: 300,
+        review_thread_counts: { positive: 9, neutral: 1, negative: 0 }
+      })
+    ).toBeGreaterThanOrEqual(4.5);
+    const extractedVideo = extractEmbeddedVideo(
+      undefined,
+      undefined,
+      'Check out https://youtu.be/dQw4w9WgXcQ in action!'
+    );
+    expect(extractedVideo?.video_url).toBe('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    expect(extractedVideo?.video_thumbnail_url).toContain('dQw4w9WgXcQ');
+    expect(normalizeRepoComparisonKey('https://github.com/SaKeL/Everness.git/')).toBe(
+      'github.com/sakel/everness'
+    );
+
+    // 2. Verify SeoService normalizes relative/proxied package banner URLs to absolute https://luantihub.org/...
+    const seoService = TestBed.inject(SeoService);
+    const pkgService = TestBed.inject(PackageService);
+    const proxiedGitPkg = (pkgService as any).normalizePackage({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Custom biomes',
+      banner: '/api/packages?proxy_image=https%3A%2F%2Fcodeberg.org%2FSaKeL%2Feverness%2Fraw%2Fbranch%2Fmain%2Fscreenshot.png',
+      thumbnail: 'https://content.luanti.org/thumbnails/1/everness.png',
+      source: 'git'
+    });
+    seoService.updateForPackage(proxiedGitPkg);
+    const ogImg = document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
+    expect(ogImg).toBe(
+      'https://luantihub.org/api/packages?proxy_image=https%3A%2F%2Fcodeberg.org%2FSaKeL%2Feverness%2Fraw%2Fbranch%2Fmain%2Fscreenshot.png&ngsw-bypass=true'
+    );
+
+    // 3. Verify PwaService syncs notification state to IndexedDB on markReviewSeen() and prefers pkg.banner for notifications
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    const syncSpy = vi
+      .spyOn(pwaService as any, 'syncNotificationStateToIndexedDb')
+      .mockResolvedValue(undefined);
+
+    pwaService.markReviewSeen('rev_test_sync_1');
+    expect(syncSpy).toHaveBeenCalled();
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyPackageUpdates.set(true);
+    localStorage.removeItem('lh_known_package_versions_v1');
+
+    const sentNotifs: any[] = [];
+    const origSend = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      sentNotifs.push(payload);
+      return true;
+    };
+
+    try {
+      const baseCatalog = [
+        {
+          ...proxiedGitPkg,
+          banner: 'https://raw.githubusercontent.com/SaKeL/everness/main/screenshot.png',
+          thumbnail: 'https://content.luanti.org/thumbnails/1/old_cdb_thumb.png',
+          release_id: 'v1.0.0',
+          updated_at: '2026-10-01T10:00:00Z'
+        }
+      ];
+      await pwaService.checkAndNotifyUpdatedPackages(baseCatalog, { isBaselineSeedAllowed: true });
+      await pwaService.checkAndNotifyUpdatedPackages(
+        [
+          {
+            ...baseCatalog[0],
+            release_id: 'v1.1.0',
+            updated_at: new Date(Date.now() - 10_000).toISOString()
+          }
+        ],
+        { isBaselineSeedAllowed: false }
+      );
+      expect(sentNotifs.length).toBe(1);
+      // Git-first banner is preferred over legacy ContentDB thumbnail
+      expect(sentNotifs[0].icon).toBe('https://raw.githubusercontent.com/SaKeL/everness/main/screenshot.png');
+    } finally {
+      pwaService.sendNativeNotification = origSend;
+      syncSpy.mockRestore();
+      localStorage.removeItem('lh_known_package_versions_v1');
+    }
+  });
+
+  it('should compute star ratings from ContentDB review_thread_counts and reviews_list, queue official tiles for rating hydration, and preserve cached reviews across modal reopens', async () => {
+    const { computeStarRatingFromData } = await import('./core/config/package-utils.config');
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. computeStarRatingFromData derives star rating from reviews_list when review_thread_counts is missing
+    const ratingFromList = computeStarRatingFromData({
+      score: 1200, // ContentDB popularity score (> 5)
+      reviews_list: [
+        { rating: 5, is_positive: true },
+        { rating: 5, is_positive: true },
+        { rating: 5, is_positive: true }
+      ]
+    });
+    expect(ratingFromList).toBe(5);
+
+    // 2. Official package without rating_checked or review_thread_counts is queued by needsTileHydration
+    (pkgService as any).hydratedIds.clear();
+    (pkgService as any).hydratedMetaCache.delete('philipbenr/realism_512');
+    const realismPkg = (pkgService as any).normalizePackage({
+      id: 'philipbenr/realism_512',
+      author: 'philipbenr',
+      name: 'realism_512',
+      title: 'Realism 512',
+      type: 'txp',
+      source: 'official',
+      sources: ['official'],
+      license: 'CC-BY-SA-4.0',
+      downloads: 8400,
+      contentdb_downloads: 8400,
+      tags: ['realistic', '512px'],
+      banner: 'https://content.luanti.org/uploads/realism_512.png',
+      thumbnail: 'https://content.luanti.org/thumbnails/1/realism_512.png',
+      score: 420 // ContentDB popularity score (> 5), so star score starts at 0 until hydrated
+    });
+    expect(realismPkg.score).toBe(0);
+    expect((pkgService as any).needsTileHydration(realismPkg)).toBe(true);
+
+    // 3. Batch hydration via POST /api/packages/hydrate updates score, review_thread_counts, and rating_checked
+    (pkgService as any)._packages.set([realismPkg]);
+    (pkgService as any)._serverTop10Today.set([realismPkg]);
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes('/api/packages/hydrate')) {
+        return new Response(
+          JSON.stringify({
+            hydrated: {
+              'philipbenr/realism_512': {
+                license: 'CC-BY-SA-4.0',
+                contentdb_downloads: 8400,
+                downloads: 8400,
+                score: 5,
+                review_thread_counts: { positive: 3, neutral: 0, negative: 0 },
+                tags: ['realistic', '512px']
+              }
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    try {
+      await (pkgService as any).hydratePackageBatch([realismPkg]);
+      const hydratedRealism = pkgService.packages().find(p => p.id === 'philipbenr/realism_512');
+      expect(hydratedRealism?.score).toBe(5);
+      expect(hydratedRealism?.review_thread_counts).toEqual({ positive: 3, neutral: 0, negative: 0 });
+      expect(pkgService.top10TodayPackages()[0]?.score).toBe(5);
+      expect(((pkgService as any).hydratedMetaCache.get('philipbenr/realism_512') as any)?.rating_checked).toBe(true);
+
+      // 4. Subsequent catalog normalization preserves hydrated score and review_thread_counts even when catalog item lacks reviews
+      const reNormalized = (pkgService as any).normalizePackage({
+        id: 'philipbenr/realism_512',
+        author: 'philipbenr',
+        name: 'realism_512',
+        title: 'Realism 512',
+        type: 'txp',
+        source: 'official',
+        downloads: 8400,
+        score: 420
+      });
+      expect(reNormalized.score).toBe(5);
+      expect(reNormalized.review_thread_counts).toEqual({ positive: 3, neutral: 0, negative: 0 });
+
+      // 5. Cached ContentDB reviews are never wiped by a lite detail load or empty bundled reviews_list when review_thread_counts > 0
+      const cdbReviews = [
+        {
+          id: 'cdb_101',
+          package_id: 'philipbenr/realism_512',
+          source: 'contentdb' as const,
+          rating: 5,
+          is_positive: true,
+          comment: 'Amazing 512x textures!',
+          created_at: '2026-10-15T12:00:00Z',
+          author: { username: 'voxel_fan', display_name: 'Voxel Fan', avatar_url: 'logo.svg' }
+        }
+      ];
+      (pkgService as any).reviewsCache.set('philipbenr/realism_512', cdbReviews);
+      (pkgService as any).edgeApiAvailable = true;
+
+      globalThis.fetch = vi.fn().mockImplementation(async () => {
+        return new Response(
+          JSON.stringify({
+            author: 'philipbenr',
+            name: 'realism_512',
+            title: 'Realism 512',
+            type: 'txp',
+            license: 'CC-BY-SA-4.0',
+            downloads: 8400,
+            score: 0,
+            review_thread_counts: { positive: 3, neutral: 0, negative: 0 },
+            reviews_list: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+
+      await pkgService.loadPackageDetails(reNormalized, true);
+      const cachedAfterReload = pkgService.getCachedReviews(reNormalized);
+      expect(cachedAfterReload?.length).toBe(1);
+      expect(cachedAfterReload?.[0].comment).toBe('Amazing 512x textures!');
+      const updatedInCatalog = pkgService.packages().find(p => p.id === 'philipbenr/realism_512');
+      expect(updatedInCatalog?.score).toBe(5);
     } finally {
       globalThis.fetch = origFetch;
     }

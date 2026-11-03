@@ -5,7 +5,6 @@
     "changeOrigin": true,
     "logLevel": "info",
     "headers": {
-      "Accept": "application/json",
       "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
     }
   },
@@ -17,8 +16,7 @@
       "^/mirror-api": "/api"
     },
     "headers": {
-      "Accept": "application/json",
-      "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
+      "Accept": "application/json"
     }
   },
   "/cdb-api": {
@@ -29,8 +27,7 @@
       "^/cdb-api": "/api"
     },
     "headers": {
-      "Accept": "application/json",
-      "User-Agent": "LuantiHub/1.0 (+https://luantihub.org)"
+      "Accept": "application/json"
     }
   },
   "/blog-api": {

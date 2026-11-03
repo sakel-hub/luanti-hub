@@ -397,7 +397,7 @@
       await checkNgswAppUpdateInSw(state, prefs, fireSwNotif, stateUpdates);
 
       // 1. Evaluate New Git Packages
-      if (prefs.notifyNewGitPackages && Array.isArray(state.knownGitPackages) && state.knownGitPackages.length > 0) {
+      if (prefs.notifyNewGitPackages && Array.isArray(state.knownGitPackages)) {
         const knownGitSet = new Set(state.knownGitPackages.map((id) => String(id).toLowerCase()));
         let gitChanged = false;
         const newlyDiscoveredGit = [];
@@ -431,7 +431,12 @@
         for (const item of newlyDiscoveredGit.slice(0, 3)) {
           const typeLabel = String(item.pkg.type || 'mod').toUpperCase();
           const displayTitle = item.pkg.title || item.name;
-          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/notif-new-package.png';
+          const thumb =
+            item.pkg.banner ||
+            item.pkg.banner_url ||
+            item.pkg.thumbnail ||
+            item.pkg.thumbnail_url ||
+            '/icons/notif-new-package.png';
           await fireSwNotif(`New Git Package · [${typeLabel}] ${displayTitle}`, {
             body: `by ${item.author} — ${item.pkg.short_desc || 'New community Git repository published on LuantiHub.'}`,
             icon: thumb,
@@ -530,7 +535,12 @@
           cooldownChanged = true;
           const typeLabel = String(item.pkg.type || 'mod').toUpperCase();
           const displayTitle = item.pkg.title || item.name;
-          const thumb = item.pkg.thumbnail || item.pkg.thumbnail_url || '/icons/notif-package-update.png';
+          const thumb =
+            item.pkg.banner ||
+            item.pkg.banner_url ||
+            item.pkg.thumbnail ||
+            item.pkg.thumbnail_url ||
+            '/icons/notif-package-update.png';
           await fireSwNotif(`Package Updated · [${typeLabel}] ${displayTitle}`, {
             body: `by ${item.author} — ${item.pkg.short_desc || 'New release available on LuantiHub.'}`,
             icon: thumb,
@@ -593,12 +603,14 @@
 
       // 5. Evaluate New Community Reviews
       const recentReviews = Array.isArray(bootPayload?.recentReviews) ? bootPayload.recentReviews : [];
-      if (prefs.notifyNewReviews && recentReviews.length > 0 && Array.isArray(state.seenReviewIds) && state.seenReviewIds.length > 0) {
-        const seenRevSet = new Set(state.seenReviewIds.map((id) => String(id).trim()));
+      if (prefs.notifyNewReviews && recentReviews.length > 0 && Array.isArray(state.seenReviewIds)) {
+        const seenRevSet = new Set(
+          state.seenReviewIds.map((id) => String(id || '').trim().replace(/^lh_/i, '')).filter(Boolean)
+        );
         let revChanged = false;
         const newRevs = [];
         for (const rev of recentReviews) {
-          const revId = String(rev?.id || '').trim();
+          const revId = String(rev?.id || '').trim().replace(/^lh_/i, '');
           const pkgId = String(rev?.package_id || rev?.packageId || '').trim();
           if (!revId || !pkgId) continue;
           if (!seenRevSet.has(revId)) {
@@ -620,7 +632,7 @@
             body: `${reviewer}: "${String(item.rev.comment || item.rev.title || '').slice(0, 120)}"`,
             icon: thumb,
             badge: '/icons/icon-72x72.png',
-            tag: `lh-new-review-${item.revId}`,
+            tag: `lh-review-${item.revId}`,
             data: { packageId: item.pkgId }
           });
         }

@@ -5,6 +5,7 @@ import {
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   normalizeContentDbReviewItem,
+  computeStarRatingFromData,
   sanitizePublicErrorMessage
 } from '../../../lib/upstream';
 import {
@@ -29,10 +30,53 @@ export async function onRequestGet(context: { params: { author: string; name: st
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
 
-  // 1. Fetch Official ContentDB Reviews (with Edge Cache + failover)
-  const officialPromise = fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
-    .then(list => (Array.isArray(list) ? list : []))
-    .catch(() => []);
+  // 1. Fetch Official ContentDB Reviews (with Edge Cache + failover + canonical author/name resolution for dual-source packages)
+  const officialPromise = (async () => {
+    try {
+      const direct = await fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300);
+      if (Array.isArray(direct)) {
+        return direct;
+      }
+      const strippedAuthor = author.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      if (strippedAuthor && strippedAuthor.toLowerCase() !== author.toLowerCase()) {
+        const strippedRes = await fetchUpstreamJsonCached<any[]>(
+          `/packages/${encodeURIComponent(strippedAuthor)}/${encName}/reviews/`,
+          300
+        );
+        if (Array.isArray(strippedRes)) {
+          return strippedRes;
+        }
+      }
+      const catalogList = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 300).catch(() => null);
+      if (Array.isArray(catalogList)) {
+        const lowerName = name.toLowerCase();
+        const lowerBaseAuthor = (strippedAuthor || author).toLowerCase();
+        const exactBaseMatch = catalogList.find(
+          (item) =>
+            item?.author &&
+            item?.name &&
+            String(item.name).toLowerCase() === lowerName &&
+            String(item.author).toLowerCase() === lowerBaseAuthor
+        );
+        const nameMatches = catalogList.filter(
+          (item) => item?.author && item?.name && String(item.name).toLowerCase() === lowerName
+        );
+        const matched = exactBaseMatch || (nameMatches.length === 1 ? nameMatches[0] : null);
+        if (matched && (matched.author !== author || matched.name !== name)) {
+          const fallbackRes = await fetchUpstreamJsonCached<any[]>(
+            `/packages/${encodeURIComponent(matched.author)}/${encodeURIComponent(matched.name)}/reviews/`,
+            300
+          );
+          if (Array.isArray(fallbackRes)) {
+            return fallbackRes;
+          }
+        }
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  })();
 
   // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1 (case-insensitive package_id match)
   let localPromise = Promise.resolve([]);
@@ -88,19 +132,35 @@ export async function onRequestGet(context: { params: { author: string; name: st
 
 async function recalculateAndPersistPackageScore(db: any, packageId: string): Promise<number> {
   if (!db) return 0;
-  const avgResult = await db.prepare(`
-    SELECT AVG(rating) as avg_score, COUNT(*) as total_reviews
-    FROM reviews WHERE LOWER(package_id) = LOWER(?)
-  `).bind(packageId).first().catch(() => null);
+  const parts = String(packageId).split('/');
+  const authorPart = parts[0] || '';
+  const namePart = parts[1] || '';
+
+  const [avgResult, pkgRow] = await Promise.all([
+    db.prepare(`
+      SELECT AVG(rating) as avg_score, COUNT(*) as total_reviews
+      FROM reviews WHERE LOWER(package_id) = LOWER(?)
+    `).bind(packageId).first().catch(() => null),
+    db.prepare(`
+      SELECT review_thread_counts FROM packages
+      WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
+      LIMIT 1
+    `).bind(packageId, authorPart, namePart).first().catch(() => null)
+  ]);
+
+  let parsedRevCounts: any;
+  if (typeof pkgRow?.review_thread_counts === 'string' && pkgRow.review_thread_counts.trim()) {
+    try {
+      parsedRevCounts = JSON.parse(pkgRow.review_thread_counts);
+    } catch {
+      // ignore
+    }
+  }
 
   const count = Number(avgResult?.total_reviews || 0);
   const roundedScore = count > 0 && avgResult?.avg_score != null
     ? Math.round(Number(avgResult.avg_score) * 10) / 10
-    : 0;
-
-  const parts = String(packageId).split('/');
-  const authorPart = parts[0] || '';
-  const namePart = parts[1] || '';
+    : computeStarRatingFromData({ review_thread_counts: parsedRevCounts });
 
   await db.prepare(`
     UPDATE packages SET score = ?

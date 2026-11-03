@@ -19,6 +19,8 @@ import {
 import { LocaleId } from '../../core/i18n/translation.types';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { PROMO_ROW_ICON_OPTIONS, ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideX,
@@ -52,6 +54,8 @@ import {
     FormsModule,
     CompactNumberPipe,
     TranslatePipe,
+    ImgFallbackDirective,
+    PackageBadgesComponent,
     ThemeIconComponent,
     LucideX,
     LucideCheck,
@@ -91,7 +95,7 @@ import {
           <div class="flex items-center justify-between border-b border-white/10 pb-4">
             <div class="flex items-center gap-3.5 min-w-0">
               <div class="relative flex-shrink-0">
-                <img [src]="user.avatar_url" [alt]="user.username" class="w-12 h-12 rounded-2xl border border-white/20 shadow-lg object-cover bg-slate-900" />
+                <img [src]="user.avatar_url || 'logo.svg'" appImgFallback [alt]="user.username" class="w-12 h-12 rounded-2xl border border-white/20 shadow-lg object-cover bg-slate-900" />
                 <span class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-emerald-400 ring-2 ring-slate-950"></span>
               </div>
               <div class="min-w-0">
@@ -257,17 +261,18 @@ import {
                             type="button"
                             (click)="openPackage(pkg)"
                             class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
-                            <img [src]="pkg.thumbnail || 'logo.svg'" [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
+                            <img [src]="pkg.banner || pkg.thumbnail || 'logo.svg'" [fallbackThumbnail]="pkg.thumbnail || ''" appImgFallback [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
                             <div class="min-w-0 flex-1">
                               <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
                               <div class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 flex-wrap">
                                 <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
                                 <span>•</span>
-                                <span
-                                  [class]="pkg.type === 'game' ? 'glass-badge-emerald' : pkg.type === 'txp' ? 'glass-badge-purple' : 'glass-badge-sky'"
-                                  class="glass-badge font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
-                                  {{ pkg.type }}
-                                </span>
+                                <app-package-badges
+                                  [package]="pkg"
+                                  [compact]="true"
+                                  [showOfficial]="false"
+                                  [showFeatured]="false">
+                                </app-package-badges>
                                 @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
                                   <span class="glass-badge glass-badge-amber font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
                                     {{ pkg.status }}
@@ -386,7 +391,7 @@ import {
                         type="button"
                         (click)="openPackage(pkg)"
                         class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
-                        <img [src]="pkg.thumbnail || 'logo.svg'" [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
+                        <img [src]="pkg.banner || pkg.thumbnail || 'logo.svg'" [fallbackThumbnail]="pkg.thumbnail || ''" appImgFallback [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
                         <div class="min-w-0 flex-1">
                           <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
                           <span class="text-[11px] text-slate-400 truncate block">by {{ pkg.author }}</span>
@@ -1886,6 +1891,7 @@ import {
                           <div class="flex items-center gap-3 min-w-0 flex-1">
                             <img
                               [src]="promo.banner_url || 'logo.svg'"
+                              appImgFallback
                               [alt]="promo.title || promo.row_title || 'Promotion'"
                               loading="lazy"
                               decoding="async"

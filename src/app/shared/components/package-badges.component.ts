@@ -18,18 +18,18 @@ import { LucideGitBranch, LucideGlobe } from '@lucide/angular';
     LucideGlobe
   ],
   template: `
-    <div class="flex items-center gap-1.5 flex-wrap">
+    <div [class]="compact ? 'inline-flex items-center gap-1 flex-wrap' : 'flex items-center gap-1.5 flex-wrap'">
       <!-- Category Type Badge (MOD / GAME / TXP) -->
       <span
-        [class]="typeBadgeClass"
+        [class]="typeBadgeClass + (compact ? ' text-[9px] px-1.5 py-0' : '')"
         class="glass-badge font-black uppercase tracking-wider">
         {{ package.type }}
       </span>
 
       <!-- Official ContentDB Source Badge -->
-      @if (isOfficialSource) {
-        <span class="glass-badge glass-badge-emerald font-bold">
-          <svg lucideGlobe class="w-3 h-3 text-emerald-300 flex-shrink-0"></svg>
+      @if (showOfficial && isOfficialSource) {
+        <span [class]="compact ? 'glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-emerald font-bold'">
+          <svg lucideGlobe [class]="compact ? 'w-2.5 h-2.5 text-emerald-300 flex-shrink-0' : 'w-3 h-3 text-emerald-300 flex-shrink-0'"></svg>
           <span>ContentDB</span>
         </span>
       }
@@ -38,15 +38,15 @@ import { LucideGitBranch, LucideGlobe } from '@lucide/angular';
       @if (isGitSource) {
         <span
           [appTooltip]="showGitTooltip ? ('card.gitSourceTooltip' | translate) : ''"
-          class="glass-badge glass-badge-amber font-bold">
-          <svg lucideGitBranch class="w-3 h-3 text-amber-300 flex-shrink-0"></svg>
+          [class]="compact ? 'glass-badge glass-badge-amber font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-amber font-bold'">
+          <svg lucideGitBranch [class]="compact ? 'w-2.5 h-2.5 text-amber-300 flex-shrink-0' : 'w-3 h-3 text-amber-300 flex-shrink-0'"></svg>
           <span>Git</span>
         </span>
       }
 
       <!-- Featured Badge (Detail Modal) -->
       @if (showFeatured && package.featured) {
-        <span class="glass-badge glass-badge-sky font-bold">
+        <span [class]="compact ? 'glass-badge glass-badge-sky font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-sky font-bold'">
           Featured
         </span>
       }
@@ -59,6 +59,8 @@ export class PackageBadgesComponent {
   @Input({ required: true }) package!: LuantiPackage;
   @Input() showFeatured = false;
   @Input() showGitTooltip = false;
+  @Input() showOfficial = true;
+  @Input() compact = false;
 
   get typeBadgeClass(): string {
     if (this.package?.type === 'game') {
