@@ -430,6 +430,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             rating_checked: ratingChecked || undefined,
             tags: detailTags.length > 0 ? detailTags : undefined,
             dev_state: devState || undefined,
+            created_at: detail?.created_at || detail?.approved_at || undefined,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,

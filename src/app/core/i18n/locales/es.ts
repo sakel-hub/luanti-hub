@@ -55,6 +55,7 @@ export const es: TranslationDictionary = {
     learnMore: 'Más información'
   },
   carousel: {
+    recentlyAdded: 'Añadidos Recientemente',
     trending: 'Tendencias Esta Semana',
     freshGit: 'Lanzamientos de la Comunidad Git',
     standaloneGames: 'Juegos Completos Independientes',
@@ -69,6 +70,7 @@ export const es: TranslationDictionary = {
     viewAll: 'Ver todo',
     infoHero: 'Selección diaria con juegos destacados, mods populares, paquetes de automatización y texturas — priorizados según las descargas recientes, la frecuencia con la que los visitantes instalan tras verlos, las valoraciones de la comunidad, actualizaciones y tus gustos.',
     infoTags: 'Explora paquetes por temas y categorías de juego, ordenados según la cantidad de paquetes disponibles en cada tema.',
+    infoRecentlyAdded: 'Los juegos, mods y paquetes de texturas más nuevos publicados recientemente en repositorios Git descentralizados y ContentDB, ordenados del más reciente al más antiguo.',
     infoTrending: 'Mods en auge de ContentDB y repositorios Git comunitarios, priorizados por descargas recientes, popularidad de instalación, valoraciones de la comunidad, actualizaciones y tus preferencias.',
     infoTop10Today: 'Los 10 paquetes más activos de las últimas 24 horas — combinando nuevas instalaciones y actualizaciones de hoy, la frecuencia de descarga tras visitar la página y las valoraciones de jugadores (máximo 2 paquetes por creador para mayor variedad).',
     infoGames: 'Juegos voxel independientes y completos listos para jugar en Luanti, priorizados por actividad reciente de los jugadores, valoraciones de la comunidad, actualizaciones y popularidad general.',
@@ -97,6 +99,7 @@ export const es: TranslationDictionary = {
     sortDownloads: 'Más descargados',
     sortRating: 'Mejor valorados',
     sortScore: 'Mejor valorados',
+    sortCreated: 'Añadidos recientemente',
     sortUpdated: 'Actualizados recientemente',
     sortTitle: 'Título (A–Z)',
     loadMore: 'Cargar más paquetes',

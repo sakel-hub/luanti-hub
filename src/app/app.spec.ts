@@ -8315,4 +8315,315 @@ supported_games = minetest_game, voxelibre
     }
     (pkgService as any)._activePackage.set(null);
   });
+
+  it('should render Recently Added carousel above Trending This Week combining Git and ContentDB packages and support View All sorting by created_at', () => {
+    const pkgService = TestBed.inject(PackageService);
+    pkgService.resetFilters(true);
+
+    (pkgService as any).applyBootPayload(
+      {
+        packages: [
+          {
+            id: 'OldAuthor/legacy_mod',
+            author: 'OldAuthor',
+            name: 'legacy_mod',
+            title: 'Legacy Popular Mod',
+            type: 'mod',
+            short_desc: 'Popular older mod',
+            thumbnail: 'logo.svg',
+            downloads: 120000,
+            score: 4.9,
+            release: 99999,
+            created_at: '2023-05-10T00:00:00.000Z',
+            updated_at: '2026-11-04T04:00:00.000Z',
+            source: 'official'
+          },
+          {
+            id: 'DualAuthor/dual_source_mod',
+            author: 'DualAuthor',
+            name: 'dual_source_mod',
+            title: 'Dual Source Mod',
+            type: 'mod',
+            short_desc: 'Existing ContentDB mod that also linked a Git repo',
+            thumbnail: 'logo.svg',
+            downloads: 45000,
+            score: 4.9,
+            release: 88888,
+            created_at: '2026-11-04T04:30:00.000Z',
+            source: 'official',
+            sources: ['official', 'git']
+          },
+          {
+            id: 'CdbCreator/fresh_cdb_game',
+            author: 'CdbCreator',
+            name: 'fresh_cdb_game',
+            title: 'Fresh ContentDB Game',
+            type: 'game',
+            short_desc: 'Newly approved ContentDB game',
+            thumbnail: 'logo.svg',
+            downloads: 240,
+            score: 4.8,
+            release: 39800,
+            source: 'official'
+          },
+          {
+            id: 'GitCreator/brand_new_git_mod',
+            author: 'GitCreator',
+            name: 'brand_new_git_mod',
+            title: 'Brand New Git Mod',
+            type: 'mod',
+            short_desc: 'Newly submitted Git repository mod',
+            thumbnail: 'logo.svg',
+            downloads: 45,
+            score: 5.0,
+            created_at: '2026-11-04T03:00:00.000Z',
+            source: 'git',
+            sources: ['git']
+          }
+        ],
+        recentlyAdded: [
+          {
+            id: 'GitCreator/brand_new_git_mod',
+            author: 'GitCreator',
+            name: 'brand_new_git_mod',
+            title: 'Brand New Git Mod',
+            type: 'mod',
+            short_desc: 'Newly submitted Git repository mod',
+            thumbnail: 'logo.svg',
+            downloads: 45,
+            score: 5.0,
+            created_at: '2026-11-04T03:00:00.000Z',
+            source: 'git',
+            sources: ['git']
+          },
+          {
+            id: 'CdbCreator/fresh_cdb_game',
+            author: 'CdbCreator',
+            name: 'fresh_cdb_game',
+            title: 'Fresh ContentDB Game',
+            type: 'game',
+            short_desc: 'Newly approved ContentDB game',
+            thumbnail: 'logo.svg',
+            downloads: 240,
+            score: 4.8,
+            release: 39800,
+            created_at: '2026-11-03T18:00:00.000Z',
+            source: 'official'
+          }
+        ]
+      },
+      { fromCache: true }
+    );
+
+    const recent = pkgService.recentlyAddedPackages();
+    expect(recent.map(p => p.id)).toEqual([
+      'GitCreator/brand_new_git_mod',
+      'CdbCreator/fresh_cdb_game'
+    ]);
+    expect(recent.some(p => p.id === 'OldAuthor/legacy_mod')).toBe(false);
+    expect(recent.some(p => p.id === 'DualAuthor/dual_source_mod')).toBe(false);
+
+    const catalogFixture = TestBed.createComponent(CatalogComponent);
+    catalogFixture.detectChanges();
+    const catalogEl = catalogFixture.nativeElement as HTMLElement;
+    const headings = Array.from(catalogEl.querySelectorAll('app-package-carousel h2')).map(
+      el => el.textContent?.trim() || ''
+    );
+    const recentlyAddedIdx = headings.findIndex(h => h.includes('Recently Added'));
+    const trendingIdx = headings.findIndex(h => h.includes('Trending This Week'));
+    expect(recentlyAddedIdx).toBeGreaterThanOrEqual(0);
+    expect(trendingIdx).toBeGreaterThan(recentlyAddedIdx);
+
+    const firstCarouselSection = catalogEl.querySelector('app-package-carousel section') as HTMLElement | null;
+    expect(firstCarouselSection?.style.contentVisibility).toBe('auto');
+
+    const scrollSpy = vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    pkgService.viewAllRecentlyAdded();
+    expect(pkgService.sortBy()).toBe('created');
+    expect(pkgService.hasActiveFilters()).toBe(true);
+    expect( pkgService.filteredPackages().map(p => p.id).slice(0, 3)).toEqual([
+      'GitCreator/brand_new_git_mod',
+      'CdbCreator/fresh_cdb_game',
+      'OldAuthor/legacy_mod'
+    ]);
+    scrollSpy.mockRestore();
+    pkgService.resetFilters(true);
+  });
+
+  it('should push browser history entries when browsing categories and opening/closing package detail dialogs (Home -> Open Dialog -> Close Dialog -> Mods -> Textures), and seed Home (/) for direct deep links', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const router = (pkgService as any).router;
+    window.history.replaceState({ __lhNavIdx: 0 }, '', '/');
+    pkgService.resetFilters(true, true);
+
+    const navigateSpy = vi.spyOn(router, 'navigate').mockImplementation(((commands: any, extras?: any) => {
+      const targetPath = Array.isArray(commands) && commands.length > 0 ? commands.join('/').replace(/^\/\//, '/') : '/';
+      const normalizedPath = targetPath.startsWith('/') ? targetPath : `/${targetPath}`;
+      const qs = (pkgService as any).buildCanonicalUrlString(normalizedPath, extras?.queryParams || {});
+      if (extras?.replaceUrl) {
+        window.history.replaceState(window.history.state, '', qs);
+      } else {
+        window.history.pushState(window.history.state, '', qs);
+      }
+      return Promise.resolve(true);
+    }) as any);
+
+    // 1. Step-by-step category navigation pushes real history entries (replaceUrl: false)
+    pkgService.selectPrimaryNavTab('game');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/games'], expect.objectContaining({ replaceUrl: false }));
+    expect(window.location.pathname).toBe('/games');
+
+    // Clicking the already-active tab replaces instead of pushing a duplicate entry
+    pkgService.selectPrimaryNavTab('game');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/games'], expect.objectContaining({ replaceUrl: true }));
+
+    pkgService.selectPrimaryNavTab('mod');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/mods'], expect.objectContaining({ replaceUrl: false }));
+    expect(window.location.pathname).toBe('/mods');
+
+    pkgService.selectPrimaryNavTab('txp');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/texture-packs'], expect.objectContaining({ replaceUrl: false }));
+    expect(window.location.pathname).toBe('/texture-packs');
+
+    // Simulating Browser Back step-by-step via popstate restores Mods -> Games -> Home
+    window.history.replaceState(window.history.state, '', '/mods');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.selectedType()).toBe('mod');
+
+    window.history.replaceState(window.history.state, '', '/games');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.selectedType()).toBe('game');
+
+    window.history.replaceState(window.history.state, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.selectedType()).toBe('all');
+    expect(pkgService.hasActiveFilters()).toBe(false);
+
+    // 2. Full dialog + category history flow:
+    // Home (/) -> Open Package Details (/package/ElCeejo/draconis) -> Close Dialog (/) -> Mods (/mods) -> Textures (/texture-packs)
+    pkgService.openPackageModal({
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      short_desc: 'Dragons mod',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 48000,
+      license: 'MIT',
+      source: 'official',
+      tags: ['mobs']
+    });
+    expect(navigateSpy).toHaveBeenLastCalledWith(
+      ['/package', 'ElCeejo', 'draconis'],
+      expect.objectContaining({ replaceUrl: false })
+    );
+    expect(window.location.pathname).toBe('/package/ElCeejo/draconis');
+    expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
+
+    // Closing the dialog pushes the underlying catalog URL ('/') onto browser history (replaceUrl: false)
+    pkgService.closePackageModal(true);
+    expect(navigateSpy).toHaveBeenLastCalledWith(
+      ['/'],
+      expect.objectContaining({ replaceUrl: false })
+    );
+    expect(pkgService.activePackage()).toBeNull();
+    expect(window.location.pathname).toBe('/');
+
+    // Navigate to Mods (/mods) -> Textures (/texture-packs)
+    pkgService.selectPrimaryNavTab('mod');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/mods'], expect.objectContaining({ replaceUrl: false }));
+    pkgService.selectPrimaryNavTab('txp');
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/texture-packs'], expect.objectContaining({ replaceUrl: false }));
+
+    // Step backward through history: Textures -> Mods -> Home (dialog closed) -> Package Details (dialog open) -> Home (dialog closed)
+    window.history.replaceState(window.history.state, '', '/mods');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.selectedType()).toBe('mod');
+    expect(pkgService.activePackage()).toBeNull();
+
+    window.history.replaceState(window.history.state, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.selectedType()).toBe('all');
+    expect(pkgService.activePackage()).toBeNull();
+
+    window.history.replaceState(window.history.state, '', '/package/ElCeejo/draconis');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
+
+    window.history.replaceState(window.history.state, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.selectedType()).toBe('all');
+
+    // 3. Direct deep-link entry on /package/:author/:name seeds '/' (Home) in window.history first
+    const pwaService = TestBed.inject(PwaService);
+    (pwaService as any).navHistoryCursor = 0;
+    const replaceStateSpy = vi.spyOn(window.history, 'replaceState');
+    const pushStateSpy = vi.spyOn(window.history, 'pushState');
+    window.history.replaceState({}, '', '/package/ElCeejo/draconis');
+    replaceStateSpy.mockClear();
+    pushStateSpy.mockClear();
+
+    pkgService.ensureHomeBaseHistoryForDeepLink('/package/ElCeejo/draconis');
+    expect(replaceStateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ __lhNavIdx: 0, __lhSeededBase: true }),
+      '',
+      '/'
+    );
+    expect(pushStateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ __lhNavIdx: 1, __lhSeededBase: true }),
+      '',
+      '/package/ElCeejo/draconis'
+    );
+    expect((pkgService as any).inAppModalHistoryDepth).toBe(1);
+
+    replaceStateSpy.mockRestore();
+    pushStateSpy.mockRestore();
+    navigateSpy.mockRestore();
+    window.history.replaceState({ __lhNavIdx: 0 }, '', '/');
+    pkgService.resetFilters(true, true);
+
+    // 4. Clicking "+ Direct Author / Community Sign-In" in ProfileDrawerComponent while logged in
+    //    must open AuthModalComponent with Direct Sign-In expanded (and pre-select unlinked provider)
+    const authService = TestBed.inject(AuthService);
+    (authService as any)._currentUser.set({
+      id: 'usr_sakel',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      bio: '',
+      role: 'admin',
+      is_admin: true,
+      identities: [
+        { provider: 'github', username: 'sakel-hub', profile_url: 'https://github.com/sakel-hub', verified: true },
+        { provider: 'gitlab', username: 'sakel-hub', profile_url: 'https://gitlab.com/sakel-hub', verified: true },
+        { provider: 'codeberg', username: 'sakel-hub', profile_url: 'https://codeberg.org/sakel-hub', verified: true },
+        { provider: 'mesehub', username: 'sakel-hub', profile_url: 'https://git.minetest.land/sakel-hub', verified: true }
+      ],
+      packages: []
+    });
+    authService.openProfileDrawer(false);
+    const drawerFixture = TestBed.createComponent(ProfileDrawerComponent);
+    drawerFixture.detectChanges();
+    drawerFixture.componentInstance.onOpenLinkAccountModal();
+    expect(authService.isProfileDrawerOpen()).toBe(false);
+    expect(authService.isAuthModalOpen()).toBe(true);
+    expect(authService.expandDirectSignInOnOpen()).toBe(true);
+    expect(authService.selectedProvider()).toBe('contentdb');
+
+    const authModalFixture = TestBed.createComponent(AuthModalComponent);
+    authModalFixture.detectChanges();
+    expect(authModalFixture.componentInstance.isDirectSignInExpanded()).toBe(true);
+
+    // Closing AuthModal returns to ProfileDrawer on the Account tab
+    authService.closeAuthModal();
+    drawerFixture.detectChanges();
+    expect(authService.isAuthModalOpen()).toBe(false);
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(drawerFixture.componentInstance.activeTab()).toBe('account');
+    authService.closeProfileDrawer(false);
+    (authService as any)._currentUser.set(null);
+  });
 });

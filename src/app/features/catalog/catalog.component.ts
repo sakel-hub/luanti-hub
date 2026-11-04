@@ -231,6 +231,7 @@ import {
                 class="bg-transparent text-white font-bold focus:outline-none cursor-pointer">
                 <option value="downloads" class="bg-slate-900 text-white">{{ 'catalog.sortDownloads' | translate }}</option>
                 <option value="score" class="bg-slate-900 text-white">{{ 'catalog.sortScore' | translate }}</option>
+                <option value="created" class="bg-slate-900 text-white">{{ 'catalog.sortCreated' | translate }}</option>
                 <option value="updated" class="bg-slate-900 text-white">{{ 'catalog.sortUpdated' | translate }}</option>
                 <option value="title" class="bg-slate-900 text-white">{{ 'catalog.sortTitle' | translate }}</option>
               </select>
@@ -378,6 +379,15 @@ import {
             (promoCtaClicked)="onPromoRowCtaClick($event)">
           </app-package-carousel>
         }
+
+        <!-- Swimlane: Recently Added (Git + ContentDB) -->
+        <app-package-carousel
+          icon="sparkles"
+          [title]="'carousel.recentlyAdded' | translate"
+          [infoTooltip]="'carousel.infoRecentlyAdded' | translate"
+          [packages]="packageService.recentlyAddedPackages()"
+          (viewAll)="packageService.viewAllRecentlyAdded()">
+        </app-package-carousel>
 
         <!-- Swimlane 1: Trending Engine Mods -->
         <app-package-carousel

@@ -712,7 +712,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -775,6 +775,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           edgeBody = {
             ...edgeBody,
             packages: edgeBody.packages.map(applySharedRating),
+            ...(Array.isArray(edgeBody.recentlyAdded)
+              ? { recentlyAdded: edgeBody.recentlyAdded.map(applySharedRating) }
+              : {}),
             ...(Array.isArray(edgeBody.top10Today)
               ? { top10Today: edgeBody.top10Today.map(applySharedRating) }
               : {}),
@@ -797,7 +800,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   }
 
-  // 1. Fetch Upstream Packages + Bulk Scores/Downloads (with Cloudflare Edge Cache + mirror failover)
+  // 1. Fetch Upstream Packages + Bulk Scores/Downloads + Newest ContentDB Packages (with Cloudflare Edge Cache + mirror failover)
   const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, 300)
     .then(list => Array.isArray(list) ? list : [])
     .catch(() => []);
@@ -805,6 +808,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const scoresPromise = fetchUpstreamJsonCached<any[]>('/scores/', 900)
     .then(list => Array.isArray(list) ? list : [])
     .catch(() => []);
+
+  const recentUpstreamPromise = isBootBundle
+    ? fetchUpstreamJsonCached<any[]>('/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs', 900)
+        .then(list => Array.isArray(list) ? list : [])
+        .catch(() => [])
+    : Promise.resolve<any[]>([]);
 
   const tagsPromise = isBootBundle
     ? getUnifiedCatalogTags(env.DB).catch(() => DEFAULT_CONTENTDB_TAGS)
@@ -1069,6 +1078,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
   const [
     upstreamList,
+    recentUpstreamList,
     scoresList,
     d1List,
     blockedIds,
@@ -1082,6 +1092,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     recentReviews
   ] = await Promise.all([
     upstreamPromise,
+    recentUpstreamPromise,
     scoresPromise,
     d1Promise,
     blockedPromise,
@@ -1297,8 +1308,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       updated_at: isGitSource
         ? (p.updated_at || matchedUpstream?.updated_at || undefined)
         : (matchedUpstream?.updated_at || undefined),
-      created_at: isGitSource
-        ? (p.created_at || matchedUpstream?.created_at || undefined)
+      created_at: !isAlsoOfficial && isGitSource
+        ? (p.created_at || undefined)
         : (matchedUpstream?.created_at || undefined),
       thumbnail: resolvedThumb,
       banner: resolvedBanner,
@@ -1452,6 +1463,22 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
+    const recentUpstreamRankById = new Map<string, number>();
+    if (Array.isArray(recentUpstreamList) && recentUpstreamList.length <= 100) {
+      recentUpstreamList.slice(0, 24).forEach((item: any, idx: number) => {
+        if (item?.author && item?.name) {
+          recentUpstreamRankById.set(`${item.author}/${item.name}`.toLowerCase(), idx);
+        }
+      });
+    }
+    const recentUpstreamMerged = merged
+      .filter(p => p?.id && recentUpstreamRankById.has(String(p.id).toLowerCase()) && !isPackageDeprecated(p))
+      .sort(
+        (a, b) =>
+          (recentUpstreamRankById.get(String(a.id).toLowerCase()) ?? 999) -
+          (recentUpstreamRankById.get(String(b.id).toLowerCase()) ?? 999)
+      );
+
     const carouselPool: any[] = [];
     const pushPool = (items: any[]) => {
       for (const it of items) {
@@ -1467,6 +1494,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           it.author &&
           it.name &&
           (!it.license ||
+            !it.created_at ||
             (it.sources?.includes('official') &&
               (!(Number(it.contentdb_downloads || 0) > 0) || !it.review_thread_counts)) ||
             needsGitScreenshotScan ||
@@ -1486,6 +1514,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       const promoPkgKeys = new Set(Object.keys(promoDelta.tagMap));
       pushPool(merged.filter(p => promoPkgKeys.has(String(p.id || '').toLowerCase())).slice(0, 8));
     }
+    pushPool(recentUpstreamMerged.slice(0, 8));
     pushPool(merged.filter(p => p.sources?.includes('git')));
     pushPool(top10Today);
     pushPool(top10Week);
@@ -1518,6 +1547,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           }
           if (detail?.dev_state && !pkg.dev_state) {
             pkg.dev_state = detail.dev_state;
+          }
+          if ((detail?.created_at || detail?.approved_at) && !pkg.created_at) {
+            pkg.created_at = detail.created_at || detail.approved_at;
           }
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
@@ -1759,11 +1791,53 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week = syncPreHydratedToTop10(top10Week);
     }
 
+    // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB)
+    let maxRecentCdbMs = 0;
+    for (const pkg of recentUpstreamMerged) {
+      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+      if (Number.isFinite(parsedMs) && parsedMs > maxRecentCdbMs) {
+        maxRecentCdbMs = parsedMs;
+      }
+    }
+    let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : Date.now()) + 60_000;
+    for (const pkg of recentUpstreamMerged) {
+      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+      if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs < anchorMs) {
+        anchorMs = parsedMs;
+      } else {
+        anchorMs -= 60_000;
+        pkg.created_at = new Date(anchorMs).toISOString();
+      }
+    }
+    const recentlyAddedById = new Map<string, any>();
+    for (const pkg of recentUpstreamMerged) {
+      if (pkg?.id && !isPackageDeprecated(pkg)) {
+        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
+      }
+    }
+    for (const pkg of merged) {
+      const isPureGit = pkg?.source === 'git' && !pkg?.sources?.includes('official');
+      if (pkg?.id && isPureGit && pkg.created_at && !isPackageDeprecated(pkg)) {
+        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
+      }
+    }
+    const recentlyAdded = Array.from(recentlyAddedById.values())
+      .sort((a, b) => {
+        const ta = a.created_at ? Date.parse(String(a.created_at)) : 0;
+        const tb = b.created_at ? Date.parse(String(b.created_at)) : 0;
+        if (tb !== ta) return tb - ta;
+        const rankA = recentUpstreamRankById.get(String(a.id || '').toLowerCase()) ?? 999;
+        const rankB = recentUpstreamRankById.get(String(b.id || '').toLowerCase()) ?? 999;
+        return rankA - rankB;
+      })
+      .slice(0, 24);
+
     responsePayload = {
       packages: merged,
       tags,
       top10Week,
       top10Today,
+      recentlyAdded,
       ...(Array.isArray(activePromotions) ? { promotions: activePromotions } : {}),
       latestBlogPost: latestBlogPost || null,
       recentReviews: Array.isArray(recentReviews) ? recentReviews : []

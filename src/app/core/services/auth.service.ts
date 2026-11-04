@@ -136,7 +136,9 @@ export class AuthService {
   private readonly _moderationReasonFilter = signal<string>('all');
   private readonly _closedReportsCount = signal<number>(0);
   private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions' | null>(null);
+  private readonly _expandDirectSignInOnOpen = signal<boolean>(false);
   readonly requestAccountDeleteConfirm = signal<boolean>(false);
+  readonly expandDirectSignInOnOpen = this._expandDirectSignInOnOpen.asReadonly();
   private lastModerationFetchAt = 0;
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
@@ -596,24 +598,51 @@ export class AuthService {
   }
 
   private returnToPackageOnAuthClose = false;
+  private returnToProfileDrawerOnAuthClose = false;
 
-  openAuthModal(fromPackageReview = false): void {
+  openAuthModal(
+    fromPackageReview = false,
+    options?: {
+      allowWhenLoggedIn?: boolean;
+      expandDirectSignIn?: boolean;
+      returnToProfileDrawer?: boolean;
+    }
+  ): void {
     if (this.isBusyAuthenticating()) {
       return;
     }
-    if (this._currentUser()) {
+    if (this._currentUser() && !options?.allowWhenLoggedIn) {
       this.openProfileDrawer();
       return;
     }
+    if (options?.expandDirectSignIn) {
+      const linked = new Set((this._currentUser()?.identities || []).map(i => i.provider));
+      const unlinkedOrder: GitProvider[] = ['contentdb', 'github', 'codeberg', 'gitlab', 'mesehub'];
+      const firstUnlinked = unlinkedOrder.find(p => !linked.has(p));
+      if (firstUnlinked) {
+        this._selectedProvider.set(firstUnlinked);
+      }
+    }
     this.returnToPackageOnAuthClose = fromPackageReview;
+    this.returnToProfileDrawerOnAuthClose = Boolean(options?.returnToProfileDrawer);
+    this._expandDirectSignInOnOpen.set(Boolean(options?.expandDirectSignIn));
     this._authError.set(null);
     this._isAuthModalOpen.set(true);
   }
 
-  closeAuthModal(): void {
+  closeAuthModal(restoreProfileDrawer = true): void {
+    const shouldReturnToDrawer =
+      restoreProfileDrawer && this.returnToProfileDrawerOnAuthClose && Boolean(this._currentUser());
     this._isAuthModalOpen.set(false);
+    this._expandDirectSignInOnOpen.set(false);
     this._authError.set(null);
     this.returnToPackageOnAuthClose = false;
+    this.returnToProfileDrawerOnAuthClose = false;
+    if (shouldReturnToDrawer) {
+      this._requestedDrawerTab.set('account');
+      this.openProfileDrawer();
+      return;
+    }
     if (!this._isOAuthRedirecting() && !this.isLoggedIn()) {
       this.requestAccountDeleteConfirm.set(false);
       if (this._requestedDrawerTab() === 'account') {
@@ -753,8 +782,12 @@ export class AuthService {
         this.clearAuthCache();
         await this.initAuth(true);
         const stayOnPackage = this.returnToPackageOnAuthClose;
-        this.closeAuthModal();
+        const wasLinkingFromDrawer = this.returnToProfileDrawerOnAuthClose;
+        this.closeAuthModal(false);
         if (!stayOnPackage) {
+          if (wasLinkingFromDrawer) {
+            this._requestedDrawerTab.set('account');
+          }
           this.openProfileDrawer();
         }
         return { success: true };
@@ -787,8 +820,12 @@ export class AuthService {
       };
       this._currentUser.set(localUser);
       const stayOnPackage = this.returnToPackageOnAuthClose;
-      this.closeAuthModal();
+      const wasLinkingFromDrawer = this.returnToProfileDrawerOnAuthClose;
+      this.closeAuthModal(false);
       if (!stayOnPackage) {
+        if (wasLinkingFromDrawer) {
+          this._requestedDrawerTab.set('account');
+        }
         this.openProfileDrawer();
       }
       return { success: true };

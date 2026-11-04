@@ -55,6 +55,7 @@ export const en: TranslationDictionary = {
     learnMore: 'Learn More'
   },
   carousel: {
+    recentlyAdded: 'Recently Added',
     trending: 'Trending This Week',
     freshGit: 'Git Community Releases',
     standaloneGames: 'Complete Standalone Games',
@@ -69,6 +70,7 @@ export const en: TranslationDictionary = {
     viewAll: 'View All',
     infoHero: 'Daily spotlight rotating standout games, popular mods, automation packs, and texture packs—prioritized by recent player downloads, how often visitors install after viewing, community ratings, recent updates, and your personal taste.',
     infoTags: 'Browse packages by popular themes and gameplay categories, ordered by how many packages belong to each topic.',
+    infoRecentlyAdded: 'The newest games, mods, and texture packs recently published across decentralized Git repositories and ContentDB, ordered newest-first.',
     infoTrending: 'Mods gaining momentum across ContentDB and community Git repositories, prioritized by recent player downloads, install popularity, community ratings, recent updates, and your personal taste.',
     infoTop10Today: 'The 10 most active packages over the last 24 hours—combining today’s new installs and updates, how often players download after viewing, and community ratings (up to 2 packages per creator for variety).',
     infoGames: 'Complete standalone voxel games ready to play in Luanti, prioritized by recent player activity, community ratings, recent updates, and overall popularity.',
@@ -97,6 +99,7 @@ export const en: TranslationDictionary = {
     sortDownloads: 'Most Downloaded',
     sortRating: 'Highest Rated',
     sortScore: 'Highest Rated',
+    sortCreated: 'Recently Added',
     sortUpdated: 'Recently Updated',
     sortTitle: 'Title (A–Z)',
     loadMore: 'Load More Packages',

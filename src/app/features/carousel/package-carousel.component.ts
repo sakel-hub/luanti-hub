@@ -45,7 +45,10 @@ import {
   ],
   template: `
     @if (packages.length > 0 || showWhenEmpty) {
-      <section class="py-2 sm:py-3 space-y-2.5 select-none overflow-hidden max-w-full">
+      <section
+        [style.content-visibility]="'auto'"
+        [style.contain-intrinsic-size]="'auto 340px'"
+        class="py-2 sm:py-3 space-y-2.5 select-none overflow-hidden max-w-full">
 
         <!-- Section Header -->
         <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 flex items-center justify-between gap-2 flex-wrap">

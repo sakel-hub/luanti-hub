@@ -55,6 +55,7 @@ export const sk: TranslationDictionary = {
     learnMore: 'Zistiť viac'
   },
   carousel: {
+    recentlyAdded: 'Nedávno Pridané',
     trending: 'Populárne Tento Týždeň',
     freshGit: 'Komunitné Vydania z Gitu',
     standaloneGames: 'Kompletné Samostatné Hry',
@@ -69,6 +70,7 @@ export const sk: TranslationDictionary = {
     viewAll: 'Zobraziť všetko',
     infoHero: 'Denný výber najzaujímavejších hier, populárnych módov, automatizácie a balíčkov textúr – zoradený podľa nedávnych stiahnutí, záujmu návštevníkov o inštaláciu, hodnotení komunity, aktualizácií a vašich preferencií.',
     infoTags: 'Prehľadávajte balíčky podľa obľúbených tém a herných kategórií zoradených podľa počtu dostupných balíčkov.',
+    infoRecentlyAdded: 'Najnovšie hry, módy a balíčky textúr nedávno publikované v decentralizovaných Git repozitároch a na ContentDB, zoradené od najnovších.',
     infoTrending: 'Módy naberaúce na popularite z ContentDB a komunitných Git repozitárov, zoradené podľa nedávnych stiahnutí, obľúbenosti inštalácií, hodnotení komunity, aktualizácií a vašich preferencií.',
     infoTop10Today: '10 najaktívnejších balíčkov za posledných 24 hodín – kombinuje dnešné nové inštalácie a aktualizácie, mieru stiahnutí po zobrazení a hodnotenia hráčov (najviac 2 balíčky od jedného autora pre väčšiu pestrosť).',
     infoGames: 'Kompletné samostatné voxelové hry pripravené na hranie v Luanti, zoradené podľa nedávnej aktivity hráčov, hodnotení komunity, aktualizácií a celkovej obľúbenosti.',
@@ -97,6 +99,7 @@ export const sk: TranslationDictionary = {
     sortDownloads: 'Najviac sťahované',
     sortRating: 'Najlepšie hodnotené',
     sortScore: 'Najlepšie hodnotené',
+    sortCreated: 'Nedávno pridané',
     sortUpdated: 'Nedávno aktualizované',
     sortTitle: 'Názov (A–Z)',
     loadMore: 'Načítať ďalšie balíčky',

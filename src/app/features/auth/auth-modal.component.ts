@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, ViewChild, ElementRef } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, effect, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
@@ -301,7 +301,20 @@ export class AuthModalComponent {
   handleInput = '';
   tokenInput = '';
   readonly localError = signal<string | null>(null);
-  readonly isDirectSignInExpanded = signal<boolean>(this.authService.authError() === 'oauth_not_configured');
+  readonly isDirectSignInExpanded = signal<boolean>(
+    this.authService.authError() === 'oauth_not_configured' || this.authService.expandDirectSignInOnOpen()
+  );
+
+  constructor() {
+    effect(() => {
+      if (this.authService.expandDirectSignInOnOpen() || this.authService.authError() === 'oauth_not_configured') {
+        this.isDirectSignInExpanded.set(true);
+        setTimeout(() => {
+          this.handleInputEl?.nativeElement?.focus({ preventScroll: true });
+        }, 0);
+      }
+    });
+  }
 
   toggleDirectSignIn(): void {
     this.isDirectSignInExpanded.update(v => !v);

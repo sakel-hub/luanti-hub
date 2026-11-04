@@ -1,7 +1,7 @@
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
 export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'forums' | 'custom';
-export type SortOption = 'downloads' | 'score' | 'updated' | 'title';
+export type SortOption = 'downloads' | 'score' | 'created' | 'updated' | 'title';
 
 export interface ContentDbTag {
   name: string;

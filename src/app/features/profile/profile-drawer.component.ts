@@ -2823,7 +2823,11 @@ export class ProfileDrawerComponent implements OnInit {
 
   onOpenLinkAccountModal(): void {
     this.authService.closeProfileDrawer(false);
-    this.authService.openAuthModal();
+    this.authService.openAuthModal(false, {
+      allowWhenLoggedIn: true,
+      expandDirectSignIn: true,
+      returnToProfileDrawer: true
+    });
   }
 
   onPreviewPublicProfile(): void {

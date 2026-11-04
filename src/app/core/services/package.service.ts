@@ -170,6 +170,7 @@ export class PackageService {
   private blogFeedInFlight: Promise<void> | null = null;
   private initialUrlSynced = false;
   private wasOnAnalyticsRoute = false;
+  private inAppModalHistoryDepth = 0;
   private pendingRoutePackage: { author: string; name: string } | null = null;
   private pendingRouteBlogModal = false;
   private readonly pendingCatalogPatches = new Map<string, Partial<LuantiPackage>>();
@@ -455,6 +456,7 @@ export class PackageService {
       this._selectedType() !== 'all' ||
       this._selectedSource() !== 'all' ||
       this._selectedTag() !== 'all' ||
+      this._sortBy() === 'created' ||
       this._showFavoritesOnly()
     );
   });
@@ -1194,9 +1196,41 @@ export class PackageService {
       return true;
     });
 
+    const recentCreatedMsById = new Map<string, number>();
+    const recentRankById = new Map<string, number>();
+    if (sortBy === 'created') {
+      for (const [idx, item] of this.recentlyAddedPackages().entries()) {
+        const key = item.id.toLowerCase();
+        recentRankById.set(key, idx);
+        const ms = item?.created_at ? Date.parse(String(item.created_at)) : 0;
+        if (ms > 0) {
+          recentCreatedMsById.set(key, ms);
+        }
+      }
+    }
+
     return filtered.sort((a, b) => {
       if (sortBy === 'score') {
         return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
+      }
+      if (sortBy === 'created') {
+        const keyA = a.id.toLowerCase();
+        const keyB = b.id.toLowerCase();
+        const isPureGitA = a.source === 'git' && !a.sources?.includes('official');
+        const isPureGitB = b.source === 'git' && !b.sources?.includes('official');
+        const timeA =
+          recentCreatedMsById.get(keyA) ||
+          ((isPureGitA || !a.sources?.includes('git')) && a.created_at ? Date.parse(String(a.created_at)) : 0) ||
+          0;
+        const timeB =
+          recentCreatedMsById.get(keyB) ||
+          ((isPureGitB || !b.sources?.includes('git')) && b.created_at ? Date.parse(String(b.created_at)) : 0) ||
+          0;
+        if (timeB !== timeA) return timeB - timeA;
+        const rankA = recentRankById.get(keyA) ?? 9999;
+        const rankB = recentRankById.get(keyB) ?? 9999;
+        if (rankA !== rankB) return rankA - rankB;
+        return (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'updated') {
         const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
@@ -1222,6 +1256,7 @@ export class PackageService {
   // Netflix Swimlanes (All Capped to CAROUSEL_CAP for 60fps DOM performance)
   private readonly _serverTop10Today = signal<LuantiPackage[]>([]);
   private readonly _serverTop10Week = signal<LuantiPackage[]>([]);
+  private readonly _serverRecentlyAdded = signal<LuantiPackage[]>([]);
 
   private computeSwimlaneRelevance(pkg: LuantiPackage, nowMs = Date.now()): number {
     const dayDl = Number(pkg.daily_downloads || 0);
@@ -1447,6 +1482,64 @@ export class PackageService {
     const nonDepSorted = sorted.filter(pkg => !isPrimarilyDependencyPackage(pkg));
     const depSorted = sorted.filter(pkg => isPrimarilyDependencyPackage(pkg));
     return this.applyTop10DiversityCap([...nonDepSorted, ...depSorted], 2);
+  });
+
+  readonly recentlyAddedPackages = computed<LuantiPackage[]>(() => {
+    const serverList = this._serverRecentlyAdded();
+    const list = this._packages();
+    const byLowerId = new Map<string, LuantiPackage>();
+    for (const p of list) {
+      byLowerId.set(p.id.toLowerCase(), p);
+    }
+
+    const serverRankById = new Map<string, number>();
+    const candidatesById = new Map<string, LuantiPackage>();
+    for (const [idx, item] of serverList.entries()) {
+      const key = item.id.toLowerCase();
+      serverRankById.set(key, idx);
+      const live = byLowerId.get(key);
+      const mergedItem = live
+        ? {
+            ...item,
+            ...live,
+            created_at: item.created_at || live.created_at,
+            downloads: Math.max(live.downloads || 0, item.downloads || 0)
+          }
+        : item;
+      if (!this.isPackageDeprecated(mergedItem)) {
+        candidatesById.set(key, mergedItem);
+      }
+    }
+
+    for (const pkg of list) {
+      const isPureGit = pkg.source === 'git' && !pkg.sources?.includes('official');
+      const allowCreatedAt = isPureGit || serverList.length === 0;
+      if (allowCreatedAt && pkg.created_at && !this.isPackageDeprecated(pkg)) {
+        const key = pkg.id.toLowerCase();
+        const existing = candidatesById.get(key);
+        candidatesById.set(
+          key,
+          existing
+            ? {
+                ...existing,
+                ...pkg,
+                created_at: existing.created_at || pkg.created_at
+              }
+            : pkg
+        );
+      }
+    }
+
+    return Array.from(candidatesById.values())
+      .sort((a, b) => {
+        const timeA = a.created_at ? Date.parse(String(a.created_at)) || 0 : 0;
+        const timeB = b.created_at ? Date.parse(String(b.created_at)) || 0 : 0;
+        if (timeB !== timeA) return timeB - timeA;
+        const rankA = serverRankById.get(a.id.toLowerCase()) ?? 9999;
+        const rankB = serverRankById.get(b.id.toLowerCase()) ?? 9999;
+        return rankA - rankB;
+      })
+      .slice(0, CAROUSEL_CAP);
   });
 
   readonly trendingPackages = computed(() => {
@@ -1999,7 +2092,10 @@ export class PackageService {
       optional_dependencies: optDeps,
       release_id: item.release || item.release_id,
       latest_commit_sha: item.latest_commit_sha || undefined,
-      created_at: item.created_at || undefined,
+      created_at:
+        (hasOfficial && hasGit
+          ? cachedMeta?.created_at
+          : (item.created_at || cachedMeta?.created_at)) || undefined,
       updated_at: item.updated_at || undefined,
       status: item.status || 'active'
     };
@@ -2185,6 +2281,12 @@ export class PackageService {
       provider: secondary.provider && secondary.provider !== 'contentdb' ? secondary.provider : primary.provider,
       default_branch: secondary.default_branch || primary.default_branch,
       latest_commit_sha: secondary.latest_commit_sha || primary.latest_commit_sha,
+      created_at: existingIsOfficial
+        ? existing.created_at
+        : incomingIsOfficial
+          ? incoming.created_at
+          : (primary.created_at || secondary.created_at),
+      updated_at: primary.updated_at || secondary.updated_at,
       dependencies: mergedDeps,
       optional_dependencies: mergedOptDeps,
       tags: mergedTags,
@@ -2250,14 +2352,70 @@ export class PackageService {
     return result;
   }
 
+  private isModalUrlPath(rawPath: string): boolean {
+    const path = (rawPath || '/').split('?')[0] || '/';
+    return (
+      path === '/package' ||
+      path.startsWith('/package/') ||
+      path === '/packages' ||
+      path.startsWith('/packages/') ||
+      path === '/author' ||
+      path.startsWith('/author/') ||
+      path === '/analytics' ||
+      path.startsWith('/analytics/') ||
+      path === '/blog' ||
+      path === '/submit' ||
+      path === '/setup' ||
+      path === '/profile' ||
+      path === '/legal' ||
+      path === '/privacy' ||
+      path === '/delete-account'
+    );
+  }
+
+  /**
+   * Ensures that when a user enters the app directly on a deep link (e.g. `/package/:author/:name`
+   * or `/games`, `/mods`, `/texture-packs`, `/git`), Home (`/`) is seeded as the base history entry
+   * so pressing Browser Back navigates back to Home rather than exiting the tab.
+   */
+  ensureHomeBaseHistoryForDeepLink(initialUrl: string): void {
+    if (typeof window === 'undefined' || !window.history) return;
+    const cleanUrl = (initialUrl || '').trim();
+    if (!cleanUrl || cleanUrl === '/') return;
+    try {
+      const state = window.history.state;
+      const initialPath = cleanUrl.split('?')[0] || '/';
+      const hasPriorInAppHistory =
+        state &&
+        (Boolean(state.__lhSeededBase) || (typeof state.__lhNavIdx === 'number' && state.__lhNavIdx > 0));
+      if (!hasPriorInAppHistory) {
+        const baseState = state && typeof state === 'object' ? state : {};
+        window.history.replaceState({ ...baseState, __lhNavIdx: 0, __lhSeededBase: true }, '', '/');
+        window.history.pushState({ ...baseState, __lhNavIdx: 1, __lhSeededBase: true }, '', cleanUrl);
+        this.inAppModalHistoryDepth = this.isModalUrlPath(initialPath) ? 1 : 0;
+        this.pwaService.updateNavigationHistoryState();
+      } else if (state?.__lhSeededBase) {
+        this.inAppModalHistoryDepth = this.isModalUrlPath(initialPath) ? 1 : 0;
+      }
+    } catch {
+      // Ignore history seeding errors in restricted environments
+    }
+  }
+
   private initRouterSync(): void {
     if (typeof window !== 'undefined') {
       const initialUrl =
         this.router?.url && this.router.url !== '/'
           ? this.router.url
           : window.location.pathname + window.location.search;
+      this.ensureHomeBaseHistoryForDeepLink(initialUrl);
       this.syncStateFromUrl(initialUrl);
       this.initPwaLaunchCapture();
+
+      window.addEventListener('popstate', () => {
+        const currentUrl = (window.location.pathname || '/') + (window.location.search || '');
+        this.syncStateFromUrl(currentUrl);
+      });
     }
     if (this.router) {
       this.router.events
@@ -2391,6 +2549,9 @@ export class PackageService {
       path === '/delete-account';
 
     const isFirstSync = !this.initialUrlSynced;
+    if (!isModalRoute) {
+      this.inAppModalHistoryDepth = 0;
+    }
     if (path !== '/blog') {
       this.pendingRouteBlogModal = false;
       this._activeBlogArticle.set(null);
@@ -2406,9 +2567,9 @@ export class PackageService {
       this.edgeInitialPackageSeed = edgeSeed;
     }
 
-    // Only apply filter query params on initial page load or when navigating to a catalog route ('/', '/games', '/mods', '/texture-packs', '/git').
-    // Opening a modal route (/package/:author/:name, /submit, /setup, /legal) must never mutate the underlying catalog filter state.
-    if (!this.initialUrlSynced || !isModalRoute) {
+    // Apply filter query params on initial page load, when navigating to a catalog route ('/', '/games', '/mods', '/texture-packs', '/git'),
+    // or when a modal route explicitly carries catalog query params in its URL (e.g. /package/:author/:name?type=mod).
+    if (!this.initialUrlSynced || !isModalRoute || queryPart !== undefined) {
       this.initialUrlSynced = true;
       const defaultTypeForPath =
         path === '/games'
@@ -2603,7 +2764,25 @@ export class PackageService {
     this.metaService?.updateTag({ name: 'description', content: pkg.short_desc });
   }
 
-  private syncQueryParamsToUrl(): void {
+  private buildCanonicalUrlString(targetPath: string, queryParams: Record<string, string | null>): string {
+    const searchParams = new URLSearchParams();
+    for (const [key, val] of Object.entries(queryParams)) {
+      if (val !== null && val !== undefined && val !== '') {
+        searchParams.set(key, val);
+      }
+    }
+    const qs = searchParams.toString();
+    return qs ? `${targetPath}?${qs}` : targetPath;
+  }
+
+  private getCurrentBrowserUrl(): string {
+    if (typeof window !== 'undefined' && window.location) {
+      return (window.location.pathname || '/') + (window.location.search || '');
+    }
+    return this.router?.url || '/';
+  }
+
+  private syncQueryParamsToUrl(replaceUrl = false): void {
     if (!this.router) return;
     if (
       !this._activePackage() &&
@@ -2614,9 +2793,11 @@ export class PackageService {
     ) {
       const targetPath = this.getPrimaryCategoryRoutePath();
       const queryParams = this.buildActiveQueryParams(targetPath);
+      const nextUrl = this.buildCanonicalUrlString(targetPath, queryParams);
+      const currentUrl = this.getCurrentBrowserUrl();
       this.router.navigate([targetPath], {
         queryParams,
-        replaceUrl: true
+        replaceUrl: replaceUrl || nextUrl === currentUrl
       });
       return;
     }
@@ -2686,6 +2867,8 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v18');
         sessionStorage.removeItem('lh_boot_cache_v19');
         sessionStorage.removeItem('lh_boot_cache_v20');
+        sessionStorage.removeItem('lh_boot_cache_v21');
+        sessionStorage.removeItem('lh_boot_cache_v22');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -2701,6 +2884,7 @@ export class PackageService {
       tags?: any[];
       top10Week?: any[];
       top10Today?: any[];
+      recentlyAdded?: any[];
       promotions?: HeroPromotion[];
       latestBlogPost?: LuantiBlogPost | null;
       recentReviews?: any[];
@@ -2883,6 +3067,30 @@ export class PackageService {
     if (Array.isArray(payload.top10Today) && payload.top10Today.length > 0) {
       this._serverTop10Today.set(payload.top10Today.map(normalizeTop10Entry));
     }
+    if (Array.isArray(payload.recentlyAdded) && payload.recentlyAdded.length > 0) {
+      const normalizedRecent = payload.recentlyAdded.map((item: any) => {
+        const norm = normalizeTop10Entry(item);
+        return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
+      });
+      this._serverRecentlyAdded.set(normalizedRecent);
+      const recentCreatedById = new Map<string, string>();
+      for (const r of normalizedRecent) {
+        if (r.id && r.created_at) {
+          recentCreatedById.set(r.id.toLowerCase(), r.created_at);
+        }
+      }
+      if (recentCreatedById.size > 0) {
+        this._packages.update(curr =>
+          curr.map(p => {
+            if (p.created_at) return p;
+            const c = recentCreatedById.get(p.id.toLowerCase());
+            return c ? { ...p, created_at: c } : p;
+          })
+        );
+      }
+    } else if (this._serverRecentlyAdded().length === 0) {
+      this.ensureRecentlyAddedLoaded();
+    }
 
     const isUnitTestEnv =
       typeof (globalThis as any).__karma__ !== 'undefined' ||
@@ -2899,6 +3107,188 @@ export class PackageService {
       // Proactively hydrate visible Hero, Top 10, filtered grid, and swimlane packages so star ratings, downloads, licenses & tags appear immediately
       this.queueInitialVisibleHydration();
     }
+  }
+
+  private recentlyAddedInFlight: Promise<void> | null = null;
+
+  /**
+   * Client-side fallback for populating `_serverRecentlyAdded` when `/api/packages/?boot=1`
+   * is served from an older deployment or cache that did not include `recentlyAdded`
+   * (for example on `localhost:4200` before redeploying the Cloudflare Worker).
+   */
+  private ensureRecentlyAddedLoaded(forceInTest = false): void {
+    if (this._serverRecentlyAdded().length > 0 || this.recentlyAddedInFlight) return;
+    const isUnitTestEnv =
+      typeof (globalThis as any).__karma__ !== 'undefined' ||
+      typeof (globalThis as any).jasmine !== 'undefined' ||
+      typeof (globalThis as any).vi !== 'undefined' ||
+      typeof (globalThis as any).__vitest_worker__ !== 'undefined';
+    if (
+      (!forceInTest && isUnitTestEnv) ||
+      typeof window === 'undefined' ||
+      typeof fetch !== 'function'
+    ) {
+      return;
+    }
+
+    const isLocalhost =
+      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+    const candidateUrls = isLocalhost
+      ? [
+          '/cdb-api/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs&ngsw-bypass=true',
+          'https://content.luanti.org/api/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs'
+        ]
+      : [
+          'https://content.luanti.org/api/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs'
+        ];
+
+    this.recentlyAddedInFlight = (async () => {
+      try {
+        let recentUpstreamList: any[] | null = null;
+        for (const url of candidateUrls) {
+          try {
+            const res = await fetch(url, {
+              headers: { Accept: 'application/json', 'ngsw-bypass': 'true' }
+            });
+            if (!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
+              continue;
+            }
+            const json = await res.json();
+            if (Array.isArray(json) && json.length > 0 && json.length <= 100) {
+              recentUpstreamList = json.slice(0, 24);
+              break;
+            }
+          } catch {
+            // Try next candidate URL
+          }
+        }
+        if (!Array.isArray(recentUpstreamList) || recentUpstreamList.length === 0) return;
+
+        const catalogByLowerId = new Map<string, LuantiPackage>();
+        for (const p of this._packages()) {
+          catalogByLowerId.set(p.id.toLowerCase(), p);
+        }
+
+        const cdbRecentItems: LuantiPackage[] = [];
+        const cdbRankById = new Map<string, number>();
+        for (const [idx, raw] of recentUpstreamList.entries()) {
+          if (!raw?.author || !raw?.name) continue;
+          const lowerId = `${raw.author}/${raw.name}`.toLowerCase();
+          cdbRankById.set(lowerId, idx);
+          const existing = catalogByLowerId.get(lowerId);
+          const item = existing ? { ...existing } : this.normalizePackage(raw);
+          if (!this.isPackageDeprecated(item)) {
+            cdbRecentItems.push(item);
+          }
+        }
+
+        if (isLocalhost && cdbRecentItems.length > 0) {
+          await Promise.all(
+            cdbRecentItems.slice(0, 8).map(async pkg => {
+              try {
+                const detailRes = await fetch(
+                  `/cdb-api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/?ngsw-bypass=true`,
+                  { headers: { Accept: 'application/json', 'ngsw-bypass': 'true' } }
+                ).catch(() => null);
+                if (!detailRes || !detailRes.ok || !(detailRes.headers.get('content-type') || '').includes('application/json')) {
+                  return;
+                }
+                const detail = await detailRes.json().catch(() => null);
+                if (!detail || typeof detail !== 'object') return;
+                if (detail.created_at || detail.approved_at) {
+                  pkg.created_at = detail.created_at || detail.approved_at;
+                }
+                if (detail.license || detail.media_license) {
+                  pkg.license = detail.license || detail.media_license || pkg.license;
+                  pkg.media_license = detail.media_license || detail.license || pkg.media_license;
+                }
+                if (typeof detail.downloads === 'number') {
+                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detail.downloads);
+                  pkg.downloads = Math.max(pkg.downloads || 0, pkg.contentdb_downloads + (pkg.luantihub_downloads || 0));
+                }
+                if (Array.isArray(detail.screenshots) && detail.screenshots.length > 0) {
+                  const mergedShots = this.mergePackageScreenshots([pkg.banner, pkg.thumbnail], detail.screenshots, pkg.screenshots);
+                  if (mergedShots.length > 0) {
+                    pkg.screenshots = mergedShots;
+                    pkg.banner = selectSharpPackageBanner(undefined, mergedShots, pkg.banner, pkg.thumbnail) || pkg.banner;
+                  }
+                }
+              } catch {
+                // Ignore individual detail fetch error
+              }
+            })
+          );
+        }
+
+        let maxRecentCdbMs = 0;
+        for (const pkg of cdbRecentItems) {
+          const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+          if (Number.isFinite(parsedMs) && parsedMs > maxRecentCdbMs) {
+            maxRecentCdbMs = parsedMs;
+          }
+        }
+        let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : Date.now()) + 60_000;
+        for (const pkg of cdbRecentItems) {
+          const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+          if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs < anchorMs) {
+            anchorMs = parsedMs;
+          } else {
+            anchorMs -= 60_000;
+            pkg.created_at = new Date(anchorMs).toISOString();
+          }
+        }
+
+        const mergedById = new Map<string, LuantiPackage>();
+        for (const pkg of cdbRecentItems) {
+          mergedById.set(pkg.id.toLowerCase(), pkg);
+        }
+        for (const pkg of this._packages()) {
+          const isPureGit = pkg.source === 'git' && !pkg.sources?.includes('official');
+          if (isPureGit && pkg.created_at && !this.isPackageDeprecated(pkg)) {
+            mergedById.set(pkg.id.toLowerCase(), pkg);
+          }
+        }
+
+        const sortedRecent = Array.from(mergedById.values())
+          .sort((a, b) => {
+            const ta = a.created_at ? Date.parse(String(a.created_at)) || 0 : 0;
+            const tb = b.created_at ? Date.parse(String(b.created_at)) || 0 : 0;
+            if (tb !== ta) return tb - ta;
+            const rankA = cdbRankById.get(a.id.toLowerCase()) ?? 9999;
+            const rankB = cdbRankById.get(b.id.toLowerCase()) ?? 9999;
+            return rankA - rankB;
+          })
+          .slice(0, CAROUSEL_CAP);
+
+        if (sortedRecent.length > 0) {
+          this._serverRecentlyAdded.set(sortedRecent);
+          const createdById = new Map<string, LuantiPackage>();
+          for (const item of sortedRecent) {
+            createdById.set(item.id.toLowerCase(), item);
+          }
+          this._packages.update(curr =>
+            curr.map(p => {
+              const r = createdById.get(p.id.toLowerCase());
+              if (!r) return p;
+              return {
+                ...p,
+                created_at: r.created_at || p.created_at,
+                license: r.license || p.license,
+                media_license: r.media_license || p.media_license,
+                downloads: Math.max(p.downloads || 0, r.downloads || 0),
+                contentdb_downloads: Math.max(p.contentdb_downloads || 0, r.contentdb_downloads || 0),
+                banner: r.banner && r.banner !== 'logo.svg' ? r.banner : p.banner,
+                screenshots: r.screenshots?.length ? r.screenshots : p.screenshots
+              };
+            })
+          );
+          this.prioritizePackagesForHydration(sortedRecent.slice(0, 12));
+          this.scheduleBootCachePersist();
+        }
+      } finally {
+        this.recentlyAddedInFlight = null;
+      }
+    })();
   }
 
   private async fetchAndEnrichBlogArticlePage(
@@ -3185,6 +3575,7 @@ export class PackageService {
       : [
           ...heroSlides,
           ...promoRowPkgs,
+          ...this.recentlyAddedPackages().slice(0, 12),
           ...this.trendingPackages().slice(0, 12),
           ...this.top10TodayPackages(),
           ...this.standaloneGames().slice(0, 12),
@@ -3235,6 +3626,7 @@ export class PackageService {
     tags?: any[];
     top10Week?: any[];
     top10Today?: any[];
+    recentlyAdded?: any[];
     promotions?: HeroPromotion[];
     latestBlogPost?: LuantiBlogPost | null;
   } | null {
@@ -3264,12 +3656,13 @@ export class PackageService {
         tags: this._availableTags(),
         top10Week: this.top10WeekPackages().map(stripHeavyFields),
         top10Today: this.top10TodayPackages().map(stripHeavyFields),
+        recentlyAdded: this.recentlyAddedPackages().map(stripHeavyFields),
         promotions: this._promotions(),
         latestBlogPost: this._latestBlogPost()
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v20');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v22');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -3342,7 +3735,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v20',
+          'lh_boot_cache_v22',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -3507,7 +3900,9 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v16') ||
               sessionStorage.getItem('lh_boot_cache_v17') ||
               sessionStorage.getItem('lh_boot_cache_v18') ||
-              sessionStorage.getItem('lh_boot_cache_v19')
+              sessionStorage.getItem('lh_boot_cache_v19') ||
+              sessionStorage.getItem('lh_boot_cache_v20') ||
+              sessionStorage.getItem('lh_boot_cache_v21')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -3516,8 +3911,10 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v17');
               sessionStorage.removeItem('lh_boot_cache_v18');
               sessionStorage.removeItem('lh_boot_cache_v19');
+              sessionStorage.removeItem('lh_boot_cache_v20');
+              sessionStorage.removeItem('lh_boot_cache_v21');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v20');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v22');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -3789,6 +4186,7 @@ export class PackageService {
       });
     this._serverTop10Today.update(syncTop10);
     this._serverTop10Week.update(syncTop10);
+    this._serverRecentlyAdded.update(syncTop10);
   }
 
   private queueCatalogPatch(targetIdLower: string, patch: Partial<LuantiPackage>, flushImmediately = false): void {
@@ -3906,6 +4304,9 @@ export class PackageService {
                         if (!h.license && (cdbDetail.license || cdbDetail.media_license)) {
                           h.license = cdbDetail.license || cdbDetail.media_license;
                           h.media_license = cdbDetail.media_license || cdbDetail.license;
+                        }
+                        if (!h.created_at && (cdbDetail.created_at || cdbDetail.approved_at)) {
+                          h.created_at = cdbDetail.created_at || cdbDetail.approved_at;
                         }
                         if (typeof cdbDetail.downloads === 'number') {
                           h.contentdb_downloads = Math.max(Number(h.contentdb_downloads || 0), cdbDetail.downloads);
@@ -4043,6 +4444,7 @@ export class PackageService {
           const patch: Partial<LuantiPackage> = {
             ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
             ...(resolvedDevState ? { dev_state: resolvedDevState } : {}),
+            ...(h.created_at ? { created_at: h.created_at } : {}),
             license: lic,
             media_license: mediaLic,
             contentdb_downloads: cdbDl,
@@ -4106,6 +4508,7 @@ export class PackageService {
             });
           this._serverTop10Today.update(patchTopList);
           this._serverTop10Week.update(patchTopList);
+          this._serverRecentlyAdded.update(patchTopList);
           this.scheduleHydratedMetaPersist();
           this.scheduleBootCachePersist();
         }
@@ -4122,6 +4525,7 @@ export class PackageService {
   }
 
   setSearchQuery(query: string): void {
+    const wasSearching = Boolean(this._searchQuery().trim());
     this._searchInput.set(query);
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
@@ -4130,14 +4534,15 @@ export class PackageService {
     if (!query.trim()) {
       this._searchQuery.set('');
       this._visibleCount.set(PAGE_SIZE);
-      this.syncQueryParamsToUrl();
+      this.syncQueryParamsToUrl(!wasSearching);
       return;
     }
 
     this.searchDebounceTimer = setTimeout(() => {
+      const alreadySearching = Boolean(this._searchQuery().trim());
       this._searchQuery.set(query);
       this._visibleCount.set(PAGE_SIZE);
-      this.syncQueryParamsToUrl();
+      this.syncQueryParamsToUrl(alreadySearching);
     }, 150);
   }
 
@@ -4151,6 +4556,7 @@ export class PackageService {
       this._selectedType.set('all');
       this._selectedSource.set('all');
       this._selectedTag.set('all');
+      this._sortBy.set('downloads');
       this._showFavoritesOnly.set(false);
     } else if (tab === 'game' || tab === 'mod' || tab === 'txp') {
       this._selectedType.set(tab);
@@ -4195,6 +4601,7 @@ export class PackageService {
       clearTimeout(this.searchDebounceTimer);
     }
     this.modalOpenRequestSeq++;
+    this.inAppModalHistoryDepth = 0;
     this.pendingRoutePackage = null;
     this.returnToPackageAfterModal = null;
     this.returnToPackageAfterAuthorDrawer = null;
@@ -4230,6 +4637,7 @@ export class PackageService {
       clearTimeout(this.searchDebounceTimer);
     }
     this.modalOpenRequestSeq++;
+    this.inAppModalHistoryDepth = 0;
     this.pendingRoutePackage = null;
     this.returnToPackageAfterModal = null;
     this.returnToPackageAfterAuthorDrawer = null;
@@ -4274,7 +4682,25 @@ export class PackageService {
     }
   }
 
-  resetFilters(navigateToRoot = false): void {
+  viewAllRecentlyAdded(): void {
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+    }
+    this._searchInput.set('');
+    this._searchQuery.set('');
+    this._selectedType.set('all');
+    this._selectedSource.set('all');
+    this._selectedTag.set('all');
+    this._showFavoritesOnly.set(false);
+    this._sortBy.set('created');
+    this._visibleCount.set(PAGE_SIZE);
+    this.syncQueryParamsToUrl();
+    if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  resetFilters(navigateToRoot = false, replaceUrl = false): void {
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
@@ -4289,6 +4715,7 @@ export class PackageService {
 
     if (navigateToRoot) {
       this.modalOpenRequestSeq++;
+      this.inAppModalHistoryDepth = 0;
       this.pendingRoutePackage = null;
       this.pendingRouteBlogModal = false;
       this.returnToPackageAfterModal = null;
@@ -4303,6 +4730,7 @@ export class PackageService {
       this._isLegalModalOpen.set(false);
       this.seoService?.resetToHome();
       if (this.router) {
+        const currentUrl = this.getCurrentBrowserUrl();
         this.router.navigate(['/'], {
           queryParams: {
             q: null,
@@ -4312,13 +4740,13 @@ export class PackageService {
             sort: null,
             favs: null
           },
-          replaceUrl: true
+          replaceUrl: replaceUrl || currentUrl === '/'
         });
       }
       return;
     }
 
-    this.syncQueryParamsToUrl();
+    this.syncQueryParamsToUrl(replaceUrl);
   }
 
   loadMore(): void {
@@ -7414,13 +7842,25 @@ export class PackageService {
     if (!this.router) return;
     const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
     const firstCmd = typeof commands?.[0] === 'string' ? commands[0] : '/';
-    this.router.navigate(commands, {
-      queryParams: this.buildActiveQueryParams(firstCmd)
-    }).then(() => {
-      if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
-        window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
-      }
-    });
+    const rawTargetPath =
+      Array.isArray(commands) && commands.length > 0
+        ? commands.map(seg => String(seg ?? '')).join('/').replace(/^\/+/, '/')
+        : '/';
+    const targetPath = rawTargetPath.startsWith('/') ? rawTargetPath : `/${rawTargetPath}`;
+    const queryParams = this.buildActiveQueryParams(firstCmd);
+    const nextUrl = this.buildCanonicalUrlString(targetPath, queryParams);
+    const currentUrl = this.getCurrentBrowserUrl();
+
+    this.router
+      .navigate(commands, {
+        queryParams,
+        replaceUrl: nextUrl === currentUrl
+      })
+      .then(() => {
+        if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+        }
+      });
   }
 
   readonly startInEditTagsMode = signal(false);
@@ -8047,6 +8487,9 @@ export class PackageService {
 
   closeAllModals(updateUrl = true): void {
     this.modalOpenRequestSeq++;
+    if (!updateUrl) {
+      this.inAppModalHistoryDepth = 0;
+    }
     this.pendingRoutePackage = null;
     this.pendingRouteBlogModal = false;
     this.returnToPackageAfterModal = null;

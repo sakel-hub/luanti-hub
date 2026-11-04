@@ -70,6 +70,7 @@ export interface TranslationDictionary {
     learnMore: string;
   };
   carousel: {
+    recentlyAdded: string;
     trending: string;
     freshGit: string;
     standaloneGames: string;
@@ -84,6 +85,7 @@ export interface TranslationDictionary {
     viewAll: string;
     infoHero: string;
     infoTags: string;
+    infoRecentlyAdded: string;
     infoTrending: string;
     infoTop10Today: string;
     infoGames: string;
@@ -112,6 +114,7 @@ export interface TranslationDictionary {
     sortDownloads: string;
     sortRating: string;
     sortScore: string;
+    sortCreated: string;
     sortUpdated: string;
     sortTitle: string;
     loadMore: string;
