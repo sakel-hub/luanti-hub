@@ -1,0 +1,17 @@
+services:
+  luanti_sandbox:
+    build:
+      context: ./sandbox-worker
+      dockerfile: Dockerfile
+    container_name: luanti-hub-sandbox
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8089:8089"
+      - "127.0.0.1:6080:6080"
+    environment:
+      - DISPLAY=:99
+      - PORT=8089
+      - NOVNC_PORT=6080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+

@@ -2507,6 +2507,7 @@ import {
             [pkg]="package"
             (close)="closeSandboxModal()"
             (downloadRequested)="onDownloadClick()"
+            (click)="$event.stopPropagation()"
           ></app-pwa-sandbox-modal>
         }
 
@@ -2526,9 +2527,17 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private readonly ngZone = inject(NgZone);
 
   readonly isSandboxOpen = signal<boolean>(false);
-  readonly isSandboxEnabled = computed<boolean>(() =>
-    this.sandboxGuard.isSandboxFeatureEnabled() && !this.isPackageDelisted()
-  );
+  readonly sandboxManifestCompatible = signal<boolean>(true);
+  readonly isSandboxEnabled = computed<boolean>(() => {
+    if (!this.sandboxGuard.isSandboxFeatureEnabled() || this.isPackageDelisted()) {
+      return false;
+    }
+    const pkg = this.packageService.activePackage() || this.package;
+    return (
+      this.sandboxManifestCompatible() &&
+      this.sandboxGuard.isPackageEligibleForSandbox(pkg, this.releases())
+    );
+  });
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
@@ -3251,6 +3260,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   ngOnInit(): void {
     this.packageService.registerModalSubOverlayCloser(() => {
+      if (this.isSandboxOpen()) {
+        this.closeSandboxModal();
+        return true;
+      }
       if (this.lightboxImageUrl()) {
         this.closeLightbox();
         return true;
@@ -3540,6 +3553,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isLoadingReadme.set(false);
     this.dependenciesManualOverride.set(null);
     this.reverseDepsManualOverride.set(null);
+    this.sandboxManifestCompatible.set(true);
+    this.verifySandboxEligibilityInBackground(resolvedAuthor, this.package.name, key);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
     if (initialCachedReviews !== undefined && initialCachedReviews.length > 0) {
@@ -4176,6 +4191,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onBackdropClick(_event: MouseEvent): void {
+    if (this.isSandboxOpen()) return;
     this.packageService.closePackageModal();
   }
 
@@ -4192,6 +4208,24 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   closeSandboxModal(): void {
     this.isSandboxOpen.set(false);
+  }
+
+  private verifySandboxEligibilityInBackground(author: string, name: string, expectedKey: string): void {
+    if (typeof fetch === 'undefined' || !this.sandboxGuard.isSandboxFeatureEnabled()) return;
+    if (!author || !name) return;
+    const url = `/api/sandbox/manifest?author=${encodeURIComponent(author)}&name=${encodeURIComponent(name)}`;
+    fetch(url, { headers: { Accept: 'application/json', 'X-Purpose': 'preview' } })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!data || this.loadedPackageKey !== expectedKey) return;
+        if (data.quota) {
+          this.sandboxGuard.updateQuotaStatus(data.quota);
+        }
+        if (data.quotaExhausted === true) {
+          this.sandboxManifestCompatible.set(false);
+        }
+      })
+      .catch(() => {});
   }
 
   openSignInForReview(): void {

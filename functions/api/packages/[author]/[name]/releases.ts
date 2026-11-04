@@ -52,25 +52,29 @@ export async function onRequestGet(context: { request: Request; params: { author
 
   // 1. Check D1 Kill Switch & local D1 releases
   if (context.env.DB) {
-    await ensureExtendedPackageColumns(context.env.DB);
-    d1Pkg = await context.env.DB.prepare(
-      `SELECT id, status, repo_url, provider, default_branch, min_minetest_version, updated_at, latest_commit_sha
-       FROM packages
-       WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
-       LIMIT 1`
-    ).bind(packageId, author, name).first();
+    try {
+      await ensureExtendedPackageColumns(context.env.DB);
+      d1Pkg = await context.env.DB.prepare(
+        `SELECT id, status, repo_url, provider, default_branch, min_minetest_version, updated_at, latest_commit_sha
+         FROM packages
+         WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?))
+         LIMIT 1`
+      ).bind(packageId, author, name).first().catch(() => null);
 
-    if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
-      return Response.json({ error: 'Package is delisted or suspended.' }, { status: 451 });
-    }
+      if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
+        return Response.json({ error: 'Package is delisted or suspended.' }, { status: 451 });
+      }
 
-    if (!isNotesQuery) {
-      const effectivePkgId = d1Pkg?.id || packageId;
-      const releases = await context.env.DB.prepare(
-        `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
-      ).bind(effectivePkgId).all();
+      if (!isNotesQuery) {
+        const effectivePkgId = d1Pkg?.id || packageId;
+        const releases = await context.env.DB.prepare(
+          `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
+        ).bind(effectivePkgId).all().catch(() => ({ results: [] }));
 
-      d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
+        d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
+      }
+    } catch {
+      // Fallback to upstream when local D1 schema is uninitialized
     }
   }
 

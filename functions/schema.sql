@@ -253,6 +253,17 @@ CREATE TABLE IF NOT EXISTS moderation_reports (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 14. Sandbox Monthly Quota Circuit Breaker Ledger (Tracks Cloudflare Container $5/mo included quota per billing cycle)
+CREATE TABLE IF NOT EXISTS sandbox_quota_usage (
+    billing_cycle TEXT PRIMARY KEY,      -- e.g. "2026-11-02" (resets on the 2nd of each month)
+    awake_seconds INTEGER NOT NULL DEFAULT 0,
+    memory_gib_seconds REAL NOT NULL DEFAULT 0,
+    disk_gb_seconds REAL NOT NULL DEFAULT 0,
+    cpu_vcpu_seconds REAL NOT NULL DEFAULT 0,
+    sessions_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indices for rapid querying by Luanti game engine, web search, moderation, and Top 10 rollups
 CREATE INDEX IF NOT EXISTS idx_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_identities_provider ON user_identities(provider, provider_username);

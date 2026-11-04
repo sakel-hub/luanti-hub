@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 
 export type SandboxMemoryTier = 'constrained' | 'standard' | 'desktop';
 
@@ -14,24 +14,17 @@ export interface SandboxMemoryProfile {
   safeModeViewingRange: number;
 }
 
-export interface ExtractedVfsFile {
-  path: string;
-  bytes: Uint8Array;
-}
-
-export interface ZipExtractionResult {
-  files: ExtractedVfsFile[];
-  totalCompressedBytes: number;
-  totalUncompressedBytes: number;
+export interface SandboxQuotaClientState {
+  exhausted: boolean;
+  billingCycle: string;
+  resetsAt: string;
+  usagePercent: number;
 }
 
 export type SandboxGuardErrorCode =
   | 'SANDBOX_ARCHIVE_TOO_LARGE'
-  | 'SANDBOX_UNCOMPRESSED_SIZE_EXCEEDED'
-  | 'SANDBOX_FILE_COUNT_EXCEEDED'
-  | 'SANDBOX_ZIP_BOMB_DETECTED'
-  | 'SANDBOX_INVALID_ZIP'
-  | 'WEBGL2_UNSUPPORTED';
+  | 'SANDBOX_QUOTA_EXHAUSTED'
+  | 'SANDBOX_CONTAINER_UNAVAILABLE';
 
 export class SandboxMemoryGuardError extends Error {
   constructor(
@@ -67,9 +60,12 @@ export interface HeartbeatHealthStatus {
   providedIn: 'root'
 })
 export class SandboxMemoryGuardService {
-  private static readonly HEARTBEAT_TIMEOUT_MS = 4500;
+  public static readonly MAX_ARCHIVE_BYTES = 512 * 1024 * 1024; // 512 MB container disk archive ceiling
+  private static readonly HEARTBEAT_TIMEOUT_MS = 10000;
   private static readonly OOM_TRIPWIRE_RATIO = 0.9;
   private static readonly ELEVATED_MEMORY_RATIO = 0.75;
+
+  readonly quotaState = signal<SandboxQuotaClientState | null>(null);
 
   /**
    * Determines whether the "Try in Browser" PWA Sandbox feature is enabled
@@ -87,7 +83,9 @@ export class SandboxMemoryGuardService {
     let localToggle = storageFlag;
     if (localToggle === undefined && typeof localStorage !== 'undefined') {
       try {
-        localToggle = localStorage.getItem('lh_enable_sandbox');
+        localToggle =
+          localStorage.getItem('lh_enable_sandbox') ||
+          localStorage.getItem('lh_enable_pwa_sandbox');
       } catch {
         localToggle = null;
       }
@@ -122,7 +120,80 @@ export class SandboxMemoryGuardService {
   }
 
   /**
-   * Layer 1: Detects device RAM & mobile constraints to assign strict memory ceilings.
+   * Updates the cached monthly Cloudflare Container quota status.
+   */
+  updateQuotaStatus(quota: Partial<SandboxQuotaClientState> | null | undefined): void {
+    if (!quota) return;
+    this.quotaState.set({
+      exhausted: Boolean(quota.exhausted),
+      billingCycle: String(quota.billingCycle || ''),
+      resetsAt: String(quota.resetsAt || ''),
+      usagePercent: Number(quota.usagePercent || 0)
+    });
+  }
+
+  /**
+   * Returns true if the monthly $5 Cloudflare Container quota circuit breaker (>=90%) has tripped,
+   * and automatically resets to false as soon as the billing period reset timestamp (`resetsAt`) is reached.
+   */
+  isQuotaExhausted(nowMs = Date.now()): boolean {
+    const state = this.quotaState();
+    if (!state || !state.exhausted) return false;
+
+    if (state.resetsAt) {
+      const resetTime = Date.parse(state.resetsAt);
+      if (Number.isFinite(resetTime) && nowMs >= resetTime) {
+        this.quotaState.set({
+          ...state,
+          exhausted: false,
+          usagePercent: 0
+        });
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Parses human-readable byte strings (e.g. "93.1 MB", "420 KB", "1.2 GB") into raw bytes.
+   */
+  parseByteString(raw?: string | number | null): number {
+    if (typeof raw === 'number') {
+      return Number.isFinite(raw) && raw > 0 ? raw : 0;
+    }
+    if (typeof raw !== 'string' || !raw.trim()) return 0;
+    const match = raw.trim().match(/^([\d.]+)\s*(B|KB|KIB|MB|MIB|GB|GIB)?$/i);
+    if (!match) return 0;
+    const val = parseFloat(match[1]);
+    if (!Number.isFinite(val) || val <= 0) return 0;
+    const unit = (match[2] || 'B').toUpperCase();
+    if (unit === 'GB' || unit === 'GIB') return Math.round(val * 1024 * 1024 * 1024);
+    if (unit === 'MB' || unit === 'MIB') return Math.round(val * 1024 * 1024);
+    if (unit === 'KB' || unit === 'KIB') return Math.round(val * 1024);
+    return Math.round(val);
+  }
+
+  /**
+   * Pre-Flight Eligibility Check: determines whether the "Try in Browser" button should be shown
+   * for a given package based on feature flag, moderation status, and monthly $5 quota circuit breaker.
+   * Since packages are downloaded and unpacked inside the isolated Luanti container (4 GB disk),
+   * large packages (e.g. 93 MB texture packs or games) are supported without browser RAM limits.
+   */
+  isPackageEligibleForSandbox(
+    pkg: { status?: string; download_size?: number; file_size?: string } | null | undefined,
+    _releases?: Array<{ size?: number | string }> | null,
+    nowMs = Date.now()
+  ): boolean {
+    if (!pkg) return false;
+    if (pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+    if (this.isQuotaExhausted(nowMs)) return false;
+
+    return true;
+  }
+
+  /**
+   * Detects device RAM & mobile constraints to assign sandbox limits.
    */
   detectMemoryProfile(
     overrideDeviceMemoryGb?: number,
@@ -130,8 +201,8 @@ export class SandboxMemoryGuardService {
     safeMode = false
   ): SandboxMemoryProfile {
     const nav = typeof navigator !== 'undefined' ? (navigator as any) : {};
-    const rawMem = Number(overrideDeviceMemoryGb ?? nav.deviceMemory ?? 4);
-    const deviceMemoryGb = Number.isFinite(rawMem) && rawMem > 0 ? rawMem : 4;
+    const rawMem = Number(overrideDeviceMemoryGb ?? nav.deviceMemory ?? 8);
+    const deviceMemoryGb = Number.isFinite(rawMem) && rawMem > 0 ? rawMem : 8;
     const ua = String(overrideUserAgent ?? nav.userAgent ?? '');
     const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
 
@@ -141,9 +212,9 @@ export class SandboxMemoryGuardService {
         label: safeMode ? 'Safe Mode (Low RAM)' : 'Constrained RAM Profile',
         deviceMemoryGb,
         maxWasmHeapMb: 384,
-        maxArchiveBytes: 12 * 1024 * 1024, // 12 MB
-        maxUncompressedBytes: 32 * 1024 * 1024, // 32 MB
-        maxFileCount: 2000,
+        maxArchiveBytes: 512 * 1024 * 1024,
+        maxUncompressedBytes: 1024 * 1024 * 1024,
+        maxFileCount: 20000,
         viewingRange: safeMode ? 25 : 30,
         safeModeViewingRange: 20
       };
@@ -155,9 +226,9 @@ export class SandboxMemoryGuardService {
         label: 'Standard PWA Profile (512 MB Cap)',
         deviceMemoryGb,
         maxWasmHeapMb: 512,
-        maxArchiveBytes: 20 * 1024 * 1024, // 20 MB
-        maxUncompressedBytes: 48 * 1024 * 1024, // 48 MB
-        maxFileCount: 3000,
+        maxArchiveBytes: 512 * 1024 * 1024,
+        maxUncompressedBytes: 1024 * 1024 * 1024,
+        maxFileCount: 20000,
         viewingRange: 45,
         safeModeViewingRange: 25
       };
@@ -165,19 +236,19 @@ export class SandboxMemoryGuardService {
 
     return {
       tier: 'desktop',
-      label: 'Desktop High-Safety Profile (768 MB Cap)',
+      label: 'Desktop Container Profile (1 GiB Cap)',
       deviceMemoryGb,
-      maxWasmHeapMb: 768,
-      maxArchiveBytes: 25 * 1024 * 1024, // 25 MB
-      maxUncompressedBytes: 64 * 1024 * 1024, // 64 MB
-      maxFileCount: 4000,
+      maxWasmHeapMb: 1024,
+      maxArchiveBytes: 512 * 1024 * 1024,
+      maxUncompressedBytes: 1024 * 1024 * 1024,
+      maxFileCount: 20000,
       viewingRange: 65,
       safeModeViewingRange: 30
     };
   }
 
   /**
-   * Validates that estimated or downloaded archive bytes fit within the Layer 1 profile budget.
+   * Validates that estimated or downloaded archive bytes fit within the pre-flight budget.
    */
   validatePreFlightArchiveSize(bytes: number, profile: SandboxMemoryProfile): void {
     if (bytes > profile.maxArchiveBytes) {
@@ -185,7 +256,7 @@ export class SandboxMemoryGuardService {
       const limitMb = (profile.maxArchiveBytes / (1024 * 1024)).toFixed(0);
       throw new SandboxMemoryGuardError(
         'SANDBOX_ARCHIVE_TOO_LARGE',
-        `Package archive (${measuredMb} MB) exceeds the ${limitMb} MB in-browser sandbox memory budget for your device profile.`,
+        `Package archive (${measuredMb} MB) exceeds the ${limitMb} MB sandbox limit.`,
         bytes,
         profile.maxArchiveBytes
       );
@@ -193,265 +264,7 @@ export class SandboxMemoryGuardService {
   }
 
   /**
-   * Layer 1 Dual-Stage Zip-Bomb & Memory-Guarded ZIP Extractor.
-   * 1. Inspects Central Directory headers BEFORE decompressing any bytes to verify file counts & declared sizes.
-   * 2. Streams decompression with a strict byte counter so forged headers / zip bombs abort immediately.
-   */
-  async extractZipWithMemoryGuard(
-    zipBytes: Uint8Array,
-    mountPrefix: string,
-    profile: SandboxMemoryProfile,
-    runningUncompressedTotal = 0,
-    runningFileCount = 0
-  ): Promise<ZipExtractionResult> {
-    this.validatePreFlightArchiveSize(zipBytes.byteLength, profile);
-
-    if (!zipBytes || zipBytes.byteLength < 22 || zipBytes[0] !== 0x50 || zipBytes[1] !== 0x4b) {
-      throw new SandboxMemoryGuardError(
-        'SANDBOX_INVALID_ZIP',
-        'Invalid or corrupted package archive (missing PK zip signature).'
-      );
-    }
-
-    const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
-
-    // Locate End of Central Directory (0x06054b50)
-    let eocdPos = -1;
-    const minEocdPos = Math.max(0, zipBytes.byteLength - 65557);
-    for (let pos = zipBytes.byteLength - 22; pos >= minEocdPos; pos--) {
-      if (view.getUint32(pos, true) === 0x06054b50) {
-        eocdPos = pos;
-        break;
-      }
-    }
-
-    if (eocdPos < 0) {
-      throw new SandboxMemoryGuardError(
-        'SANDBOX_INVALID_ZIP',
-        'Unable to locate ZIP Central Directory in package archive.'
-      );
-    }
-
-    const totalEntries = view.getUint16(eocdPos + 10, true);
-    const cdSize = view.getUint32(eocdPos + 12, true);
-    const cdOffset = view.getUint32(eocdPos + 16, true);
-
-    if (totalEntries === 0xffff || cdOffset === 0xffffffff || cdOffset + cdSize > eocdPos) {
-      throw new SandboxMemoryGuardError(
-        'SANDBOX_INVALID_ZIP',
-        'ZIP64 or malformed Central Directory offsets are not permitted in the sandbox.'
-      );
-    }
-
-    if (runningFileCount + totalEntries > profile.maxFileCount) {
-      throw new SandboxMemoryGuardError(
-        'SANDBOX_FILE_COUNT_EXCEEDED',
-        `Archive contains ${runningFileCount + totalEntries} files, exceeding the ${profile.maxFileCount}-file sandbox safety limit.`,
-        runningFileCount + totalEntries,
-        profile.maxFileCount
-      );
-    }
-
-    interface CdEntry {
-      normalizedPath: string;
-      compressionMethod: number;
-      compressedSize: number;
-      uncompressedSize: number;
-      compressedData: Uint8Array;
-    }
-
-    const parsedEntries: CdEntry[] = [];
-    const decoder = new TextDecoder();
-    let ptr = cdOffset;
-    let declaredUncompressedSum = runningUncompressedTotal;
-
-    for (let i = 0; i < totalEntries; i++) {
-      if (ptr + 46 > eocdPos || view.getUint32(ptr, true) !== 0x02014b50) {
-        throw new SandboxMemoryGuardError(
-          'SANDBOX_INVALID_ZIP',
-          'Corrupted Central Directory entry header in package archive.'
-        );
-      }
-
-      const compressionMethod = view.getUint16(ptr + 10, true);
-      const compressedSize = view.getUint32(ptr + 20, true);
-      const uncompressedSize = view.getUint32(ptr + 24, true);
-      const fileNameLen = view.getUint16(ptr + 28, true);
-      const extraLen = view.getUint16(ptr + 30, true);
-      const commentLen = view.getUint16(ptr + 32, true);
-      const localHeaderOffset = view.getUint32(ptr + 42, true);
-
-      const rawName = decoder.decode(zipBytes.subarray(ptr + 46, ptr + 46 + fileNameLen));
-      ptr += 46 + fileNameLen + extraLen + commentLen;
-
-      const cleanRelPath = rawName
-        .replace(/\\/g, '/')
-        .split('/')
-        .filter(seg => seg && seg !== '.' && seg !== '..')
-        .join('/');
-
-      if (!cleanRelPath || rawName.endsWith('/')) {
-        continue;
-      }
-
-      declaredUncompressedSum += uncompressedSize;
-      if (declaredUncompressedSum > profile.maxUncompressedBytes) {
-        const mb = (declaredUncompressedSum / (1024 * 1024)).toFixed(1);
-        const maxMb = (profile.maxUncompressedBytes / (1024 * 1024)).toFixed(0);
-        throw new SandboxMemoryGuardError(
-          'SANDBOX_UNCOMPRESSED_SIZE_EXCEEDED',
-          `Uncompressed package size (${mb} MB) exceeds the ${maxMb} MB VFS memory safety ceiling.`,
-          declaredUncompressedSum,
-          profile.maxUncompressedBytes
-        );
-      }
-
-      if (localHeaderOffset + 30 > cdOffset || view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
-        throw new SandboxMemoryGuardError('SANDBOX_INVALID_ZIP', 'Invalid local file header in ZIP.');
-      }
-
-      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
-      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
-      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
-      const dataEnd = dataStart + compressedSize;
-      if (dataEnd > cdOffset) {
-        throw new SandboxMemoryGuardError('SANDBOX_INVALID_ZIP', 'ZIP entry data extends past Central Directory.');
-      }
-
-      parsedEntries.push({
-        normalizedPath: cleanRelPath,
-        compressionMethod,
-        compressedSize,
-        uncompressedSize,
-        compressedData: zipBytes.subarray(dataStart, dataEnd)
-      });
-    }
-
-    // Strip single common top-level directory if present so files mount cleanly under mountPrefix
-    const topFolders = new Set<string>();
-    let hasRootFiles = false;
-    for (const entry of parsedEntries) {
-      const slashIdx = entry.normalizedPath.indexOf('/');
-      if (slashIdx > 0) {
-        topFolders.add(entry.normalizedPath.slice(0, slashIdx + 1));
-      } else {
-        hasRootFiles = true;
-      }
-    }
-    const stripPrefix = !hasRootFiles && topFolders.size === 1 ? Array.from(topFolders)[0] : '';
-    const cleanMount = '/' + mountPrefix.replace(/^\/+|\/+$/g, '');
-
-    const files: ExtractedVfsFile[] = [];
-    let actualUncompressedTotal = runningUncompressedTotal;
-
-    for (const entry of parsedEntries) {
-      const subPath = stripPrefix && entry.normalizedPath.startsWith(stripPrefix)
-        ? entry.normalizedPath.slice(stripPrefix.length)
-        : entry.normalizedPath;
-      if (!subPath) continue;
-
-      const remainingBudget = profile.maxUncompressedBytes - actualUncompressedTotal;
-      if (remainingBudget <= 0) {
-        throw new SandboxMemoryGuardError(
-          'SANDBOX_ZIP_BOMB_DETECTED',
-          'Decompression aborted: VFS memory safety ceiling reached.',
-          actualUncompressedTotal,
-          profile.maxUncompressedBytes
-        );
-      }
-
-      let fileBytes: Uint8Array;
-      if (entry.compressionMethod === 0) {
-        if (entry.compressedData.byteLength > remainingBudget) {
-          throw new SandboxMemoryGuardError(
-            'SANDBOX_ZIP_BOMB_DETECTED',
-            'Stored ZIP entry exceeded remaining VFS memory budget.',
-            actualUncompressedTotal + entry.compressedData.byteLength,
-            profile.maxUncompressedBytes
-          );
-        }
-        fileBytes = new Uint8Array(entry.compressedData);
-      } else if (entry.compressionMethod === 8) {
-        fileBytes = await this.inflateRawWithByteCap(entry.compressedData, remainingBudget, profile.maxUncompressedBytes);
-      } else {
-        continue;
-      }
-
-      actualUncompressedTotal += fileBytes.byteLength;
-      files.push({
-        path: `${cleanMount}/${subPath}`,
-        bytes: fileBytes
-      });
-    }
-
-    return {
-      files,
-      totalCompressedBytes: zipBytes.byteLength,
-      totalUncompressedBytes: actualUncompressedTotal - runningUncompressedTotal
-    };
-  }
-
-  /**
-   * Streams raw DEFLATE decompression with a strict byte ceiling to defeat zip bombs
-   * that forge smaller `uncompressedSize` values in Central Directory headers.
-   */
-  private async inflateRawWithByteCap(
-    compressed: Uint8Array,
-    maxRemainingBytes: number,
-    profileCeilingBytes: number
-  ): Promise<Uint8Array> {
-    if (typeof DecompressionStream === 'undefined') {
-      throw new SandboxMemoryGuardError(
-        'SANDBOX_INVALID_ZIP',
-        'Browser DecompressionStream API is required for in-PWA archive unpacking.'
-      );
-    }
-
-    const ds = new DecompressionStream('deflate-raw');
-    const writer = ds.writable.getWriter();
-    const reader = ds.readable.getReader();
-
-    const writePromise = writer
-      .write(new Uint8Array(compressed))
-      .then(() => writer.close())
-      .catch(() => {});
-
-    const chunks: Uint8Array[] = [];
-    let totalRead = 0;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          totalRead += value.byteLength;
-          if (totalRead > maxRemainingBytes) {
-            await reader.cancel('Zip bomb ceiling exceeded').catch(() => {});
-            throw new SandboxMemoryGuardError(
-              'SANDBOX_ZIP_BOMB_DETECTED',
-              'Decompression halted: actual decompressed stream exceeded VFS memory ceiling (potential zip bomb).',
-              totalRead,
-              profileCeilingBytes
-            );
-          }
-          chunks.push(value);
-        }
-      }
-    } finally {
-      await writePromise;
-    }
-
-    const out = new Uint8Array(totalRead);
-    let offset = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return out;
-  }
-
-  /**
-   * Layer 3: Evaluates live heartbeat & WASM heap telemetry from the sandbox runner.
+   * Evaluates live heartbeat & memory telemetry from the sandbox session.
    */
   evaluateHeartbeatHealth(
     lastHeartbeat: HeartbeatTelemetry | null,
@@ -470,7 +283,7 @@ export class SandboxMemoryGuardService {
       };
     }
 
-    const maxMb = Math.max(1, lastHeartbeat.maxWasmHeapMb || 512);
+    const maxMb = Math.max(1, lastHeartbeat.maxWasmHeapMb || 1024);
     const usedMb = Math.max(0, lastHeartbeat.wasmHeapMb || 0);
     const ratio = usedMb / maxMb;
     const usagePercent = Math.min(100, Math.round(ratio * 100));
@@ -492,16 +305,14 @@ export class SandboxMemoryGuardService {
   }
 
   /**
-   * Layer 4: Deterministic Zero-Leak Teardown of the Sandbox Iframe.
-   * Releases Pointer/Keyboard locks, sends SANDBOX_DISPOSE, navigates to about:blank,
-   * and detaches the iframe element so browser GC immediately reclaims WASM & WebGL memory.
+   * Deterministic Zero-Leak Teardown of the Sandbox Iframe.
    */
   teardownSandboxIframe(iframe: HTMLIFrameElement | null | undefined): void {
     if (typeof document !== 'undefined' && document.pointerLockElement) {
       try {
         document.exitPointerLock();
       } catch {
-        // Ignore if already unlocked
+        // Ignore
       }
     }
 
@@ -518,10 +329,11 @@ export class SandboxMemoryGuardService {
     try {
       iframe.contentWindow?.postMessage({ type: 'SANDBOX_DISPOSE' }, '*');
     } catch {
-      // Ignore cross-frame error if already detached
+      // Ignore
     }
 
     try {
+      iframe.removeAttribute?.('srcdoc');
       iframe.src = 'about:blank';
     } catch {
       // Ignore

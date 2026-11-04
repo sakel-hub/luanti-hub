@@ -1,13 +1,17 @@
 import {
   fetchUpstreamJsonCached,
+  fetchWithAnubisSupport,
   safeDecodeParam,
   parseJsonArray,
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../lib/upstream';
+import { getSandboxQuotaStatus, SandboxQuotaStatus } from './quota';
 
 interface Env {
   DB?: any;
+  SANDBOX_BILLING_RESET_DAY?: string;
+  SANDBOX_FORCE_QUOTA_EXHAUSTED?: string;
 }
 
 export interface SandboxBundleItem {
@@ -32,6 +36,9 @@ export interface SandboxManifestResponse {
   estimatedTotalBytes: number;
   maxAllowedArchiveBytes: number;
   maxAllowedUncompressedBytes: number;
+  compatible: boolean;
+  quotaExhausted: boolean;
+  quota: SandboxQuotaStatus;
   engineConfig: Record<string, string | number | boolean>;
   bundles: SandboxBundleItem[];
 }
@@ -60,7 +67,7 @@ const BUILTIN_BASE_MODS = new Set([
   'creative',
   'dungeon_loot',
   'env_sounds',
-  ' fireflies',
+  'fireflies',
   'game_commands',
   'give_initial_stuff',
   'keys',
@@ -76,8 +83,8 @@ const BUILTIN_BASE_MODS = new Set([
 ]);
 
 const MAX_HARD_DEPENDENCIES = 6;
-const MAX_ALLOWED_ARCHIVE_BYTES = 25 * 1024 * 1024; // 25 MB compressed ceiling
-const MAX_ALLOWED_UNCOMPRESSED_BYTES = 64 * 1024 * 1024; // 64 MB VFS ceiling
+const MAX_ALLOWED_ARCHIVE_BYTES = 512 * 1024 * 1024; // 512 MB container disk archive ceiling
+const MAX_ALLOWED_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024; // 1 GB container VFS ceiling
 
 function normalizePackageType(raw?: string): 'mod' | 'game' | 'txp' | 'modpack' {
   const lower = String(raw || 'mod').trim().toLowerCase();
@@ -85,6 +92,77 @@ function normalizePackageType(raw?: string): 'mod' | 'game' | 'txp' | 'modpack' 
   if (lower === 'txp' || lower === 'texture_pack') return 'txp';
   if (lower === 'modpack') return 'modpack';
   return 'mod';
+}
+
+async function resolveStandaloneModCandidate(
+  depModName: string,
+  candidateIds: string[],
+  env?: Env
+): Promise<{ author: string; name: string } | null> {
+  // 1. Check candidate package IDs ("author/name") reported by ContentDB dependencies API
+  for (const rawId of candidateIds) {
+    const cleanId = String(rawId || '').trim();
+    const slashIdx = cleanId.indexOf('/');
+    if (slashIdx <= 0) continue;
+    const candAuthor = cleanId.slice(0, slashIdx);
+    const candName = cleanId.slice(slashIdx + 1);
+
+    // Check D1 package record first for package type
+    if (env?.DB) {
+      try {
+        const d1Row = await env.DB.prepare(
+          `SELECT author_name, name, type FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+        )
+          .bind(cleanId)
+          .first();
+        if (d1Row?.type) {
+          const pkgType = normalizePackageType(d1Row.type);
+          if (pkgType === 'mod' || pkgType === 'modpack') {
+            return { author: d1Row.author_name || candAuthor, name: d1Row.name || candName };
+          }
+          // Candidate is a 'game' or 'txp' — skip it
+          continue;
+        }
+      } catch {
+        // Fall through to upstream lookup
+      }
+    }
+
+    // Check upstream ContentDB package metadata for package type
+    const upstreamCand = await fetchUpstreamJsonCached<any>(
+      `/packages/${encodeURIComponent(candAuthor)}/${encodeURIComponent(candName)}/`,
+      3600
+    ).catch(() => null);
+    if (upstreamCand?.type) {
+      const pkgType = normalizePackageType(upstreamCand.type);
+      if (pkgType === 'mod' || pkgType === 'modpack') {
+        return {
+          author: upstreamCand.author || candAuthor,
+          name: upstreamCand.name || candName
+        };
+      }
+      // Candidate is a 'game' or 'txp' — skip it
+      continue;
+    }
+  }
+
+  // 2. Fallback: look up standalone mod/modpack by technical mod name in D1
+  if (env?.DB) {
+    try {
+      const row = await env.DB.prepare(
+        `SELECT author_name, name, type FROM packages WHERE status = 'active' AND LOWER(type) IN ('mod', 'modpack') AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
+      )
+        .bind(depModName)
+        .first();
+      if (row?.author_name && row?.name) {
+        return { author: row.author_name, name: row.name };
+      }
+    } catch {
+      // Ignore D1 lookup error
+    }
+  }
+
+  return null;
 }
 
 export async function onRequestGet(context: {
@@ -109,16 +187,30 @@ export async function onRequestGet(context: {
   const encName = encodeURIComponent(name);
   const pkgId = `${author}/${name}`;
 
-  const edgeCacheKey = `https://cache.luantihub.internal/__sandbox_manifest_v1/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(rawRelease || 'latest')}`;
+  const quota = await getSandboxQuotaStatus(context.env);
+
+  const edgeCacheKey = `https://cache.luantihub.internal/__sandbox_manifest_v4/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(rawRelease || 'latest')}`;
   const cachedManifest = await readEdgeCacheJson<SandboxManifestResponse>(edgeCacheKey);
   if (cachedManifest) {
-    return Response.json(cachedManifest, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=180, s-maxage=300',
-        'X-LuantiHub-Cache': 'HIT-EDGE'
+    const compatible =
+      !quota.exhausted &&
+      (cachedManifest.estimatedTotalBytes === 0 ||
+        cachedManifest.estimatedTotalBytes <= MAX_ALLOWED_ARCHIVE_BYTES);
+    return Response.json(
+      {
+        ...cachedManifest,
+        compatible,
+        quotaExhausted: quota.exhausted,
+        quota
+      },
+      {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+          'X-LuantiHub-Cache': 'HIT-EDGE'
+        }
       }
-    });
+    );
   }
 
   let d1Pkg: any = null;
@@ -161,7 +253,37 @@ export async function onRequestGet(context: {
   const effectiveName = d1Pkg?.name || upstreamPkg?.name || name;
   const effectiveTitle = d1Pkg?.title || upstreamPkg?.title || effectiveName;
   const effectiveType = normalizePackageType(d1Pkg?.type || upstreamPkg?.type);
-  const primaryBytes = Number(d1Pkg?.download_size || upstreamPkg?.download_size || 0);
+  let primaryBytes = Number(d1Pkg?.download_size || upstreamPkg?.download_size || 0);
+
+  // If archive size is unknown in D1 & ContentDB JSON, probe Content-Length via fast HEAD request
+  if (primaryBytes <= 0) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2200);
+    try {
+      const probeUrl = `https://content.luanti.org/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/download/`;
+      const headRes = await fetchWithAnubisSupport(probeUrl, {
+        method: 'HEAD',
+        redirect: 'follow',
+        signal: ctrl.signal,
+        headers: { 'User-Agent': 'Luanti/5.11.0 (LuantiHub; +https://luantihub.org)' }
+      });
+      clearTimeout(timer);
+      const cl = Number(headRes.headers.get('content-length') || 0);
+      if (cl > 0) {
+        primaryBytes = cl;
+        if (context.env?.DB) {
+          context.env.DB.prepare(
+            `UPDATE packages SET download_size = ? WHERE LOWER(id) = LOWER(?) AND COALESCE(download_size, 0) = 0`
+          )
+            .bind(cl, `${effectiveAuthor}/${effectiveName}`)
+            .run()
+            .catch(() => {});
+        }
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
 
   const safeModDir = effectiveName
     .toLowerCase()
@@ -201,7 +323,7 @@ export async function onRequestGet(context: {
       }
     }
 
-    const resolvedPackages = new Map<string, { author: string; name: string }>();
+    const candidatePackagesByDep = new Map<string, string[]>();
     if (upstreamDeps && typeof upstreamDeps === 'object') {
       const rootKey =
         Object.keys(upstreamDeps).find(
@@ -218,14 +340,10 @@ export async function onRequestGet(context: {
             continue;
           }
           if (Array.isArray(entry.packages) && entry.packages.length > 0) {
-            const firstCandidate = String(entry.packages[0] || '');
-            const slashIdx = firstCandidate.indexOf('/');
-            if (slashIdx > 0) {
-              resolvedPackages.set(depModName, {
-                author: firstCandidate.slice(0, slashIdx),
-                name: firstCandidate.slice(slashIdx + 1)
-              });
-            }
+            candidatePackagesByDep.set(
+              depModName,
+              entry.packages.map(p => String(p || '').trim()).filter(Boolean)
+            );
           }
         }
       }
@@ -238,39 +356,35 @@ export async function onRequestGet(context: {
       }
       if (bundles.length - 1 >= MAX_HARD_DEPENDENCIES) break;
 
-      let candidate = resolvedPackages.get(depName);
-      if (!candidate && context.env?.DB) {
-        try {
-          const row = await context.env.DB.prepare(
-            `SELECT author_name, name, download_size FROM packages WHERE status = 'active' AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
-          ).bind(depName).first();
-          if (row?.author_name && row?.name) {
-            candidate = { author: row.author_name, name: row.name };
-          }
-        } catch {
-          // Ignore D1 lookup error
-        }
+      const candidate = await resolveStandaloneModCandidate(
+        depName,
+        candidatePackagesByDep.get(depName) || [],
+        context.env
+      );
+
+      if (!candidate) {
+        // Provided by a game (e.g., Mineclonia / VoxeLibre / Repixture) rather than a standalone mod
+        needsMtgBase = true;
+        continue;
       }
 
-      if (candidate) {
-        const depId = `${candidate.author}/${candidate.name}`;
-        if (!bundles.some(b => b.id.toLowerCase() === depId.toLowerCase())) {
-          const safeDepDir = candidate.name
-            .toLowerCase()
-            .replace(/[^a-z0-9_]/g, '_')
-            .replace(/^_+|_+$/g, '') || depName;
-          bundles.push({
-            id: depId,
-            author: candidate.author,
-            name: candidate.name,
-            title: candidate.name,
-            type: 'mod',
-            isPrimary: false,
-            downloadUrl: `/api/packages/${encodeURIComponent(candidate.author)}/${encodeURIComponent(candidate.name)}/download?sandbox=1`,
-            mountPath: `/mods/${safeDepDir}`,
-            estimatedBytes: 0
-          });
-        }
+      const depId = `${candidate.author}/${candidate.name}`;
+      if (!bundles.some(b => b.id.toLowerCase() === depId.toLowerCase())) {
+        const safeDepDir = candidate.name
+          .toLowerCase()
+          .replace(/[^a-z0-9_]/g, '_')
+          .replace(/^_+|_+$/g, '') || depName;
+        bundles.push({
+          id: depId,
+          author: candidate.author,
+          name: candidate.name,
+          title: candidate.name,
+          type: 'mod',
+          isPrimary: false,
+          downloadUrl: `/api/packages/${encodeURIComponent(candidate.author)}/${encodeURIComponent(candidate.name)}/download?sandbox=1`,
+          mountPath: `/mods/${safeDepDir}`,
+          estimatedBytes: 0
+        });
       }
     }
   }
@@ -285,6 +399,8 @@ export async function onRequestGet(context: {
           : 'devtest';
 
   const estimatedTotalBytes = bundles.reduce((sum, b) => sum + (b.estimatedBytes || 0), 0);
+  const compatible =
+    !quota.exhausted && (estimatedTotalBytes === 0 || estimatedTotalBytes <= MAX_ALLOWED_ARCHIVE_BYTES);
 
   const manifest: SandboxManifestResponse = {
     packageId: `${effectiveAuthor}/${effectiveName}`,
@@ -296,16 +412,19 @@ export async function onRequestGet(context: {
     estimatedTotalBytes,
     maxAllowedArchiveBytes: MAX_ALLOWED_ARCHIVE_BYTES,
     maxAllowedUncompressedBytes: MAX_ALLOWED_UNCOMPRESSED_BYTES,
+    compatible,
+    quotaExhausted: quota.exhausted,
+    quota,
     engineConfig: {
       creative_mode: true,
       enable_damage: false,
-      default_privs: 'interact,shout,fly,fast,noclip,teleport,give',
-      viewing_range: 45,
-      max_block_generate_distance: 3,
+      default_privs: 'interact,shout,fly,fast,noclip,teleport,give,creative,bring,settime',
+      viewing_range: 60,
+      max_block_generate_distance: 4,
       client_unload_unused_data_timeout: 5,
       client_mapblock_limit: 250,
       enable_shaders: false,
-      enable_particles: false,
+      enable_particles: true,
       fps_max: 60
     },
     bundles
@@ -316,7 +435,7 @@ export async function onRequestGet(context: {
   return Response.json(manifest, {
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=180, s-maxage=300'
+      'Cache-Control': 'no-store'
     }
   });
 }

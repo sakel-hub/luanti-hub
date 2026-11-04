@@ -29,14 +29,4 @@
   Access-Control-Allow-Origin: *
   Cache-Control: public, max-age=3600
 
-/wasm/sandbox-runner.html
-  Cache-Control: no-cache, must-revalidate
-  Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Embedder-Policy: credentialless
-  Cross-Origin-Resource-Policy: same-origin
-
-/wasm/*
-  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
-  Cross-Origin-Resource-Policy: same-origin
-
 

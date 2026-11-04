@@ -1,6 +1,6 @@
 import {
-  Component,
   ChangeDetectionStrategy,
+  Component,
   ElementRef,
   OnDestroy,
   OnInit,
@@ -13,25 +13,22 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import {
-  LucideX,
-  LucidePlay,
-  LucideShieldCheck,
-  LucideShieldAlert,
-  LucideRefreshCw,
   LucideDownload,
   LucideMaximize2,
-  LucideTerminal
+  LucidePlay,
+  LucideRefreshCw,
+  LucideShieldAlert,
+  LucideShieldCheck,
+  LucideX
 } from '@lucide/angular';
 import { LuantiPackage } from '../../core/models/package.model';
 import {
-  ExtractedVfsFile,
-  HeartbeatTelemetry,
   SandboxMemoryGuardError,
   SandboxMemoryGuardService,
   SandboxMemoryProfile
 } from '../../core/services/sandbox-memory-guard.service';
 
-interface SandboxBundleItem {
+export interface SandboxBundleDescriptor {
   id: string;
   author: string;
   name: string;
@@ -43,15 +40,23 @@ interface SandboxBundleItem {
   estimatedBytes: number;
 }
 
-interface SandboxManifest {
+export interface SandboxManifest {
   packageId: string;
   author: string;
   name: string;
   title: string;
   type: 'mod' | 'game' | 'txp' | 'modpack';
-  baseEnvironment: string;
+  baseEnvironment: 'devtest' | 'minetest_game_lite' | 'native_game' | 'texture_showcase';
   estimatedTotalBytes: number;
-  bundles: SandboxBundleItem[];
+  compatible?: boolean;
+  quotaExhausted?: boolean;
+  quota?: {
+    exhausted: boolean;
+    billingCycle: string;
+    resetsAt: string;
+    usagePercent: number;
+  };
+  bundles: SandboxBundleDescriptor[];
 }
 
 export interface SandboxFaultState {
@@ -59,9 +64,6 @@ export interface SandboxFaultState {
   title: string;
   message: string;
   detail?: string;
-  wasmHeapMb?: number;
-  maxWasmHeapMb?: number;
-  canRetrySafeMode: boolean;
 }
 
 @Component({
@@ -70,27 +72,36 @@ export interface SandboxFaultState {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
-    LucideX,
     LucidePlay,
-    LucideShieldCheck,
-    LucideShieldAlert,
+    LucideX,
     LucideRefreshCw,
+    LucideShieldAlert,
+    LucideShieldCheck,
     LucideDownload,
-    LucideMaximize2,
-    LucideTerminal
+    LucideMaximize2
   ],
   template: `
     <div
-      class="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-2 sm:p-5 animate-fade-in"
+      class="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/85 backdrop-blur-md animate-fade-in"
+      [style.padding]="isMaximized() ? '0' : '1rem'"
       role="dialog"
       aria-modal="true"
-      [attr.aria-label]="'Try ' + pkg().title + ' in Browser Sandbox'"
+      [attr.aria-label]="'Try ' + pkg().title + ' in Luanti Sandbox'"
+      (click)="$event.stopPropagation()"
     >
       <div
         #modalContainer
-        class="relative flex flex-col w-full max-w-6xl h-[88vh] max-h-[860px] rounded-2xl border border-slate-700/70 bg-slate-900 shadow-2xl overflow-hidden"
+        class="relative flex flex-col w-full bg-slate-900 shadow-2xl overflow-hidden transition-all duration-150 border-slate-700/70"
+        [style.width]="isMaximized() ? '100vw' : '100%'"
+        [style.max-width]="isMaximized() ? 'none' : '72rem'"
+        [style.height]="isMaximized() ? '100vh' : '88vh'"
+        [style.max-height]="isMaximized() ? 'none' : '860px'"
+        [style.min-height]="isMaximized() ? '100vh' : '540px'"
+        [style.border-radius]="isMaximized() ? '0' : '1rem'"
+        [style.border-width]="isMaximized() ? '0' : '1px'"
+        (click)="$event.stopPropagation()"
       >
-        <!-- Top Control & Memory Telemetry Bar -->
+        <!-- Top Control & Container Telemetry Bar -->
         <header
           class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-slate-900/95 border-b border-slate-800"
         >
@@ -99,7 +110,7 @@ export interface SandboxFaultState {
               class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-sky-500/15 text-sky-300 border border-sky-500/30"
             >
               <svg lucidePlay class="w-3.5 h-3.5 text-sky-400"></svg>
-              PWA Sandbox
+              Luanti Sandbox
             </span>
             <h3 class="text-sm sm:text-base font-bold text-white truncate">
               {{ pkg().title }}
@@ -109,7 +120,7 @@ export interface SandboxFaultState {
             </span>
           </div>
 
-          <!-- Live Layer 1–3 RAM & FPS Telemetry Pill -->
+          <!-- Live Container Memory & Monthly Quota Telemetry Pill -->
           <div class="flex items-center gap-2 flex-wrap">
             <div
               class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border transition-colors"
@@ -122,41 +133,35 @@ export interface SandboxFaultState {
               [class.bg-rose-950/70]="memoryWarningLevel() === 'critical'"
               [class.border-rose-500/50]="memoryWarningLevel() === 'critical'"
               [class.text-rose-300]="memoryWarningLevel() === 'critical'"
-              title="Layer 3 Real-Time WebAssembly Linear Memory & FPS Watchdog"
+              title="Container Memory & Monthly Quota Telemetry"
             >
               <svg lucideShieldCheck class="w-3.5 h-3.5 shrink-0"></svg>
               <span>
-                RAM: {{ currentWasmMb() }} / {{ memoryProfile().maxWasmHeapMb }} MB ({{ memoryUsagePercent() }}%)
+                RAM: {{ currentMemoryMb() }} / {{ maxMemoryMb() }} MB ({{ memoryUsagePercent() }}%)
               </span>
               @if (status() === 'running') {
-                <span class="text-slate-500">•</span>
-                <span>{{ currentFps() }} FPS</span>
                 <span class="hidden sm:inline text-slate-500">•</span>
-                <span class="hidden sm:inline">VFS: {{ mountedFileCount() }} files</span>
+                <span class="hidden sm:inline">Mods: {{ loadedModCount() }}</span>
+                <span class="hidden md:inline text-slate-500">•</span>
+                <span class="hidden md:inline">Quota: {{ quotaUsagePercent() }}%</span>
               }
             </div>
 
-            @if (safeModeActive()) {
-              <span
-                class="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30"
-              >
-                Safe Mode (Range: {{ memoryProfile().viewingRange }})
-              </span>
-            }
-
             <button
               type="button"
-              (click)="toggleFullscreen()"
+              (click)="toggleFullscreen($event)"
               class="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
-              title="Toggle Fullscreen"
-              aria-label="Toggle Fullscreen"
+              [class.bg-slate-800]="isMaximized()"
+              [class.text-sky-300]="isMaximized()"
+              [attr.title]="isMaximized() ? 'Restore Window Size' : 'Maximize Window'"
+              [attr.aria-label]="isMaximized() ? 'Restore Window Size' : 'Maximize Window'"
             >
               <svg lucideMaximize2 class="w-4 h-4"></svg>
             </button>
 
             <button
               type="button"
-              (click)="closeSandbox()"
+              (click)="closeSandbox($event)"
               class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-rose-600/80 border border-slate-700 transition-colors"
               aria-label="Close Sandbox"
             >
@@ -167,96 +172,98 @@ export interface SandboxFaultState {
         </header>
 
         <!-- Main Sandbox Viewport Stage -->
-        <div class="relative flex-1 bg-slate-950 overflow-hidden flex items-center justify-center">
-          <!-- Loading / Unpacking Stepper -->
+        <div
+          class="relative flex-1 w-full min-h-[420px] bg-slate-950 overflow-hidden flex items-center justify-center"
+          style="display: flex; align-items: center; justify-content: center; min-height: 420px;"
+        >
+          <!-- Loading / Container Boot Stepper (Centered in Window) -->
           @if (status() === 'loading') {
-            <div class="z-20 max-w-md w-full mx-4 p-6 rounded-2xl bg-slate-900/95 border border-slate-800 shadow-xl text-center">
-              <div class="w-12 h-12 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center mx-auto mb-4">
-                <svg lucideRefreshCw class="w-6 h-6 text-sky-400 animate-spin"></svg>
-              </div>
-              <h4 class="text-base font-bold text-white mb-1">{{ loadingStepLabel() }}</h4>
-              <p class="text-xs text-slate-400 mb-4">{{ loadingSubLabel() }}</p>
+            <div
+              class="absolute inset-0 z-20 flex items-center justify-center p-4 pointer-events-auto"
+              style="display: flex; align-items: center; justify-content: center;"
+            >
+              <div class="max-w-md w-full p-6 rounded-2xl bg-slate-900/95 border border-slate-800 shadow-xl text-center">
+                <div class="w-12 h-12 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center mx-auto mb-4">
+                  <svg lucideRefreshCw class="w-6 h-6 text-sky-400 animate-spin"></svg>
+                </div>
+                <h4 class="text-base font-bold text-white mb-1">{{ loadingStepLabel() }}</h4>
+                <p class="text-xs text-slate-400 mb-4">{{ loadingSubLabel() }}</p>
 
-              <div class="w-full h-2 rounded-full bg-slate-800 overflow-hidden mb-3">
-                <div
-                  class="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
-                  [style.width.%]="loadingProgress()"
-                ></div>
-              </div>
+                <div class="w-full h-2 rounded-full bg-slate-800 overflow-hidden mb-3">
+                  <div
+                    class="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
+                    [style.width.%]="loadingProgress()"
+                  ></div>
+                </div>
 
-              <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                <span>Profile: {{ memoryProfile().label }}</span>
-                <span>{{ loadingProgress() }}%</span>
+                <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                  <span>Engine: Official Luanti Container</span>
+                  <span>{{ loadingProgress() }}%</span>
+                </div>
               </div>
             </div>
           }
 
-          <!-- Layer 3 Crash / Segfault / OOM Contained Recovery View -->
+          <!-- Fault / Container Unavailable / Quota View (Centered in Window) -->
           @if (status() === 'fault' && faultState(); as fault) {
             <div
-              class="z-30 max-w-lg w-full mx-4 p-6 rounded-2xl bg-slate-900/95 border border-rose-500/40 shadow-2xl"
-              data-testid="sandbox-fault-recovery"
+              class="absolute inset-0 z-30 flex items-center justify-center p-4 pointer-events-auto"
+              style="display: flex; align-items: center; justify-content: center;"
             >
-              <div class="flex items-start gap-3.5 mb-4">
-                <div class="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 shrink-0">
-                  <svg lucideShieldAlert class="w-6 h-6"></svg>
+              <div
+                class="max-w-lg w-full p-6 rounded-2xl bg-slate-900/95 border border-rose-500/40 shadow-2xl"
+                data-testid="sandbox-fault-recovery"
+              >
+                <div class="flex items-start gap-3.5 mb-4">
+                  <div class="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 shrink-0">
+                    <svg lucideShieldAlert class="w-6 h-6"></svg>
+                  </div>
+                  <div>
+                    <span class="inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 mb-1">
+                      {{ fault.code }} • Sandbox Guard
+                    </span>
+                    <h4 class="text-base font-bold text-white">{{ fault.title }}</h4>
+                    <p class="text-xs text-slate-300 mt-1 leading-relaxed">{{ fault.message }}</p>
+                  </div>
                 </div>
-                <div>
-                  <span class="inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 mb-1">
-                    {{ fault.code }} • Contained by Sandbox Guard
-                  </span>
-                  <h4 class="text-base font-bold text-white">{{ fault.title }}</h4>
-                  <p class="text-xs text-slate-300 mt-1 leading-relaxed">{{ fault.message }}</p>
-                </div>
-              </div>
 
-              @if (fault.detail) {
-                <pre
-                  class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-rose-300/90 font-mono overflow-x-auto max-h-28 mb-4"
-                >{{ fault.detail }}</pre>
-              }
+                @if (fault.detail) {
+                  <pre
+                    class="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-sky-300 font-mono overflow-x-auto mb-4"
+                  >{{ fault.detail }}</pre>
+                }
 
-              <div class="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/25 text-xs text-emerald-200 mb-5 flex items-center gap-2">
-                <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 shrink-0"></svg>
-                <span>
-                  Your LuantiHub PWA session was protected. All WebGL &amp; WASM buffers were cleanly reclaimed.
-                </span>
-              </div>
-
-              <div class="flex flex-wrap items-center justify-end gap-2.5">
-                @if (fault.canRetrySafeMode) {
+                <div class="flex flex-wrap items-center justify-end gap-2.5">
                   <button
                     type="button"
-                    (click)="relaunchInSafeMode()"
-                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 transition-colors"
-                    data-testid="sandbox-retry-safe-mode"
+                    (click)="$event.stopPropagation(); retryBoot()"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 transition-colors"
                   >
                     <svg lucideRefreshCw class="w-3.5 h-3.5"></svg>
-                    Relaunch in Safe Mode (Low RAM)
+                    Retry Connection
                   </button>
-                }
-                <button
-                  type="button"
-                  (click)="triggerDownloadAndClose()"
-                  class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 transition-colors"
-                >
-                  <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                  Download for Native Luanti
-                </button>
+                  <button
+                    type="button"
+                    (click)="$event.stopPropagation(); triggerDownloadAndClose()"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 transition-colors"
+                  >
+                    <svg lucideDownload class="w-3.5 h-3.5"></svg>
+                    Download for Native Luanti
+                  </button>
+                </div>
               </div>
             </div>
           }
 
-          <!-- Layer 2 Disposable Same-Origin Sandboxed Iframe -->
+          <!-- Interactive Container Stream Iframe -->
           @if (iframeVisible()) {
             <iframe
               #sandboxIframe
-              src="/wasm/sandbox-runner.html"
-              sandbox="allow-scripts allow-same-origin allow-pointer-lock"
-              class="w-full h-full border-0"
+              allow="pointer-lock; fullscreen; autoplay; clipboard-read; clipboard-write"
+              class="absolute inset-0 w-full h-full border-0 transition-opacity duration-200"
               [class.opacity-0]="status() !== 'running'"
-              title="Isolated Luanti WebAssembly Sandbox"
-              (load)="onIframeLoaded()"
+              [class.pointer-events-none]="status() !== 'running'"
+              title="Isolated Luanti Container Session"
             ></iframe>
           }
         </div>
@@ -266,138 +273,62 @@ export interface SandboxFaultState {
           class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-slate-900 border-t border-slate-800 text-xs"
         >
           <div class="flex flex-wrap items-center gap-1.5">
-            <span class="text-slate-400 font-semibold mr-1">Environment:</span>
+            <span class="text-slate-400 font-semibold mr-1">Luanti Controls:</span>
             <button
               type="button"
-              (click)="setTimeOfDay('noon')"
-              class="px-2.5 py-1 rounded-lg border transition-colors"
-              [class.bg-sky-500/20]="timeOfDay() === 'noon'"
-              [class.border-sky-500/40]="timeOfDay() === 'noon'"
-              [class.text-sky-200]="timeOfDay() === 'noon'"
-              [class.bg-slate-800]="timeOfDay() !== 'noon'"
-              [class.border-slate-700]="timeOfDay() !== 'noon'"
-              [class.text-slate-300]="timeOfDay() !== 'noon'"
+              (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_MOUSE_LOCK')"
+              class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 font-semibold transition-colors"
+              title="Toggle 3D Mouse Lock / Unlock (Shortcut: L)"
             >
-              ☀️ Noon
-            </button>
-            <button
-              type="button"
-              (click)="setTimeOfDay('sunset')"
-              class="px-2.5 py-1 rounded-lg border transition-colors"
-              [class.bg-amber-500/20]="timeOfDay() === 'sunset'"
-              [class.border-amber-500/40]="timeOfDay() === 'sunset'"
-              [class.text-amber-200]="timeOfDay() === 'sunset'"
-              [class.bg-slate-800]="timeOfDay() !== 'sunset'"
-              [class.border-slate-700]="timeOfDay() !== 'sunset'"
-              [class.text-slate-300]="timeOfDay() !== 'sunset'"
-            >
-              🌅 Sunset
-            </button>
-            <button
-              type="button"
-              (click)="setTimeOfDay('midnight')"
-              class="px-2.5 py-1 rounded-lg border transition-colors"
-              [class.bg-indigo-500/20]="timeOfDay() === 'midnight'"
-              [class.border-indigo-500/40]="timeOfDay() === 'midnight'"
-              [class.text-indigo-200]="timeOfDay() === 'midnight'"
-              [class.bg-slate-800]="timeOfDay() !== 'midnight'"
-              [class.border-slate-700]="timeOfDay() !== 'midnight'"
-              [class.text-slate-300]="timeOfDay() !== 'midnight'"
-            >
-              🌙 Night
-            </button>
-
-            <span class="text-slate-700 mx-1">|</span>
-
-            <button
-              type="button"
-              (click)="toggleFlyMode()"
-              class="px-2.5 py-1 rounded-lg border transition-colors"
-              [class.bg-emerald-500/20]="flyMode()"
-              [class.border-emerald-500/40]="flyMode()"
-              [class.text-emerald-200]="flyMode()"
-              [class.bg-slate-800]="!flyMode()"
-              [class.border-slate-700]="!flyMode()"
-              [class.text-slate-300]="!flyMode()"
-            >
-              🪽 Fly (K): {{ flyMode() ? 'ON' : 'OFF' }}
+              🔒 Lock / Unlock Mouse (L)
             </button>
 
             <button
               type="button"
-              (click)="toggleFastMode()"
-              class="px-2.5 py-1 rounded-lg border transition-colors"
-              [class.bg-emerald-500/20]="fastMode()"
-              [class.border-emerald-500/40]="fastMode()"
-              [class.text-emerald-200]="fastMode()"
-              [class.bg-slate-800]="!fastMode()"
-              [class.border-slate-700]="!fastMode()"
-              [class.text-slate-300]="!fastMode()"
+              (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_INVENTORY')"
+              class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 font-semibold transition-colors"
+              title="Open Creative Inventory (I) to browse blocks, vehicles & mobs"
             >
-              ⚡ Fast (J): {{ fastMode() ? 'ON' : 'OFF' }}
+              🎒 Creative Inventory (I)
             </button>
 
             <button
               type="button"
-              (click)="respawnWorld()"
+              (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_FLY')"
               class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
             >
-              🔄 Reset World
+              🪽 Fly (K)
+            </button>
+
+            <button
+              type="button"
+              (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_FAST')"
+              class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+            >
+              ⚡ Fast (J)
+            </button>
+
+            <button
+              type="button"
+              (click)="$event.stopPropagation(); sendKeyCommand('ESCAPE')"
+              class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+            >
+              ⏸️ Menu (Esc)
+            </button>
+
+            <button
+              type="button"
+              (click)="$event.stopPropagation(); retryBoot()"
+              class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+            >
+              🔄 Restart World
             </button>
           </div>
 
           <div class="flex items-center gap-2">
-            <!-- Developer Fault & Memory Guard Verification Menu -->
-            <div class="relative">
-              <button
-                type="button"
-                (click)="showGuardMenu.set(!showGuardMenu())"
-                class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 font-mono text-[11px] transition-colors"
-                data-testid="sandbox-guard-test-menu-btn"
-                title="Verify RAM, OOM & C++ Segfault Containment"
-              >
-                <svg lucideTerminal class="w-3.5 h-3.5 text-amber-400"></svg>
-                <span>Test Crash Guard</span>
-              </button>
-
-              @if (showGuardMenu()) {
-                <div
-                  class="absolute bottom-full right-0 mb-2 w-64 p-2 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-40 flex flex-col gap-1"
-                >
-                  <div class="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-800">
-                    Layer 3 Fault Containment Tests
-                  </div>
-                  <button
-                    type="button"
-                    (click)="simulateFault('WASM_SEGFAULT')"
-                    class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-rose-500/15 text-rose-300 text-xs transition-colors"
-                    data-testid="simulate-wasm-segfault-btn"
-                  >
-                    💥 Trigger WASM C++ Segfault
-                  </button>
-                  <button
-                    type="button"
-                    (click)="simulateFault('WASM_OOM')"
-                    class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-amber-500/15 text-amber-300 text-xs transition-colors"
-                    data-testid="simulate-wasm-oom-btn"
-                  >
-                    📈 Trigger WASM Out-of-Memory Cap
-                  </button>
-                  <button
-                    type="button"
-                    (click)="simulateFault('WEBGL_CONTEXT_LOST')"
-                    class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-sky-500/15 text-sky-300 text-xs transition-colors"
-                    data-testid="simulate-webgl-loss-btn"
-                  >
-                    🖥️ Trigger WebGL GPU Context Loss
-                  </button>
-                </div>
-              }
-            </div>
-
             <button
               type="button"
-              (click)="triggerDownloadAndClose()"
+              (click)="$event.stopPropagation(); triggerDownloadAndClose()"
               class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition-colors shadow-sm"
             >
               <svg lucideDownload class="w-3.5 h-3.5"></svg>
@@ -415,34 +346,41 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   readonly close = output<void>();
   readonly downloadRequested = output<void>();
 
-  @ViewChild('sandboxIframe') sandboxIframeRef?: ElementRef<HTMLIFrameElement>;
+  private _sandboxIframeRef?: ElementRef<HTMLIFrameElement>;
+  @ViewChild('sandboxIframe')
+  set sandboxIframeRef(ref: ElementRef<HTMLIFrameElement> | undefined) {
+    this._sandboxIframeRef = ref;
+    const url = this.activeStreamUrl();
+    if (ref?.nativeElement && url && ref.nativeElement.src !== url) {
+      ref.nativeElement.src = url;
+    }
+  }
+  get sandboxIframeRef(): ElementRef<HTMLIFrameElement> | undefined {
+    return this._sandboxIframeRef;
+  }
   @ViewChild('modalContainer') modalContainerRef?: ElementRef<HTMLElement>;
 
   private readonly memoryGuard = inject(SandboxMemoryGuardService);
 
-  readonly safeModeActive = signal(false);
+  readonly isMaximized = signal(false);
   readonly memoryProfile = signal<SandboxMemoryProfile>(this.memoryGuard.detectMemoryProfile());
   readonly status = signal<'loading' | 'running' | 'fault'>('loading');
   readonly iframeVisible = signal(true);
+  readonly activeStreamUrl = signal<string>('');
 
-  readonly loadingStepLabel = signal('Checking Device RAM & WebGL 2.0 Budget...');
-  readonly loadingSubLabel = signal('Initializing 4-layer memory guard');
-  readonly loadingProgress = signal(12);
+  readonly loadingStepLabel = signal('Resolving Package & Dependency Closure...');
+  readonly loadingSubLabel = signal('Checking monthly quota & archive limits');
+  readonly loadingProgress = signal(15);
 
-  readonly currentWasmMb = signal(64);
-  readonly currentFps = signal(60);
-  readonly mountedFileCount = signal(0);
-  readonly lastHeartbeat = signal<HeartbeatTelemetry | null>(null);
-
-  readonly flyMode = signal(true);
-  readonly fastMode = signal(false);
-  readonly timeOfDay = signal<'noon' | 'sunset' | 'midnight'>('noon');
-  readonly showGuardMenu = signal(false);
+  readonly currentMemoryMb = signal(180);
+  readonly maxMemoryMb = signal(1024);
+  readonly loadedModCount = signal(1);
+  readonly quotaUsagePercent = signal(0);
   readonly faultState = signal<SandboxFaultState | null>(null);
 
   readonly memoryUsagePercent = computed(() => {
-    const max = Math.max(1, this.memoryProfile().maxWasmHeapMb);
-    return Math.min(100, Math.round((this.currentWasmMb() / max) * 100));
+    const max = Math.max(1, this.maxMemoryMb());
+    return Math.min(100, Math.round((this.currentMemoryMb() / max) * 100));
   });
 
   readonly memoryWarningLevel = computed<'normal' | 'elevated' | 'critical'>(() => {
@@ -452,48 +390,56 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     return 'normal';
   });
 
-  private extractedVfsFiles: ExtractedVfsFile[] = [];
-  private iframeLoaded = false;
-  private vfsReady = false;
-  private watchdogIntervalId: ReturnType<typeof setInterval> | null = null;
+  private statusPollIntervalId: ReturnType<typeof setInterval> | null = null;
   private abortController: AbortController | null = null;
 
-  private readonly boundMessageListener = (event: MessageEvent) => this.handleRunnerMessage(event);
+  private readonly boundMessageListener = (event: MessageEvent) => {
+    if (event.data?.source === 'luanti-sandbox-container' && event.data?.type === 'SANDBOX_STREAM_CONNECTED') {
+      this.status.set('running');
+      this.loadingProgress.set(100);
+    }
+  };
+
+  private readonly boundKeyDownListener = (event: KeyboardEvent) => {
+    if (this.status() !== 'running') return;
+    if (event.code === 'KeyL' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.sendKeyCommand('TOGGLE_MOUSE_LOCK');
+    }
+  };
 
   ngOnInit(): void {
     if (typeof window !== 'undefined') {
       window.addEventListener('message', this.boundMessageListener);
+      window.addEventListener('keydown', this.boundKeyDownListener);
     }
-    this.startSandboxBootSequence(false);
+    this.startSandboxBootSequence();
   }
 
   ngOnDestroy(): void {
     if (typeof window !== 'undefined') {
       window.removeEventListener('message', this.boundMessageListener);
+      window.removeEventListener('keydown', this.boundKeyDownListener);
     }
-    this.performDeterministicTeardown();
+    this.performDeterministicTeardown(true);
   }
 
-  onIframeLoaded(): void {
-    this.iframeLoaded = true;
-    this.trySendBootPayloadToRunner();
+  retryBoot(): void {
+    this.startSandboxBootSequence();
   }
 
-  async startSandboxBootSequence(useSafeMode: boolean): Promise<void> {
+  async startSandboxBootSequence(): Promise<void> {
     this.performDeterministicTeardown(false);
 
-    this.safeModeActive.set(useSafeMode);
-    const profile = this.memoryGuard.detectMemoryProfile(undefined, undefined, useSafeMode);
+    const profile = this.memoryGuard.detectMemoryProfile();
     this.memoryProfile.set(profile);
-
     this.status.set('loading');
     this.faultState.set(null);
-    this.iframeLoaded = false;
-    this.vfsReady = false;
     this.iframeVisible.set(true);
-    this.loadingProgress.set(15);
+    this.loadingProgress.set(20);
     this.loadingStepLabel.set('Resolving Package & Dependency Closure...');
-    this.loadingSubLabel.set(`${profile.label} • Max VFS: ${(profile.maxUncompressedBytes / (1024 * 1024)).toFixed(0)} MB`);
+    this.loadingSubLabel.set('Verifying archive size & monthly container quota...');
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -503,49 +449,106 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
       const rel = this.releaseTag();
       const manifest = await this.fetchSandboxManifest(p, rel, signal);
 
-      if (manifest.estimatedTotalBytes > 0) {
-        this.memoryGuard.validatePreFlightArchiveSize(manifest.estimatedTotalBytes, profile);
+      if (manifest.quota) {
+        this.memoryGuard.updateQuotaStatus(manifest.quota);
+        this.quotaUsagePercent.set(Number(manifest.quota.usagePercent || 0));
       }
 
-      this.loadingProgress.set(38);
-      this.loadingStepLabel.set('Downloading & Unpacking Archive into Memory...');
+      if (manifest.quotaExhausted || this.memoryGuard.isQuotaExhausted()) {
+        throw new SandboxMemoryGuardError(
+          'SANDBOX_QUOTA_EXHAUSTED',
+          'The monthly Cloudflare Container quota has reached its 90% safety limit and will automatically reset on the 2nd of next month.'
+        );
+      }
 
-      const allFiles: ExtractedVfsFile[] = [];
-      let runningUncompressed = 0;
-      let runningFiles = 0;
+      const estimatedBytes = Math.max(Number(manifest.estimatedTotalBytes || 0), Number(p.download_size || 0));
+      if (estimatedBytes > 0) {
+        this.memoryGuard.validatePreFlightArchiveSize(estimatedBytes, profile);
+      }
 
-      for (let i = 0; i < manifest.bundles.length; i++) {
-        const bundle = manifest.bundles[i];
-        this.loadingSubLabel.set(`Unpacking ${bundle.id} (${i + 1}/${manifest.bundles.length})...`);
+      this.loadingProgress.set(55);
+      this.loadingStepLabel.set('Booting Official Luanti Container...');
+      this.loadingSubLabel.set(
+        `Mounting ${manifest.bundles.length} package bundle(s) into /worlds/sandbox/worldmods...`
+      );
 
-        const zipBytes = await this.fetchBundleZipBytes(bundle.downloadUrl, signal);
-        if (zipBytes && zipBytes.byteLength > 0) {
-          const result = await this.memoryGuard.extractZipWithMemoryGuard(
-            zipBytes,
-            bundle.mountPath,
-            profile,
-            runningUncompressed,
-            runningFiles
-          );
-          allFiles.push(...result.files);
-          runningUncompressed += result.totalUncompressedBytes;
-          runningFiles += result.files.length;
+      const isTouchDevice = this.detectTouchDevice();
+
+      const bootRes = await fetch('/api/sandbox/session', {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'boot',
+          packageId: manifest.packageId,
+          author: manifest.author,
+          name: manifest.name,
+          title: manifest.title,
+          type: manifest.type,
+          baseEnvironment: manifest.baseEnvironment,
+          touchMode: isTouchDevice,
+          bundles: manifest.bundles
+        })
+      });
+
+      const bootData = await bootRes.json().catch(() => ({} as any));
+      if (bootData?.quota) {
+        this.memoryGuard.updateQuotaStatus(bootData.quota);
+        this.quotaUsagePercent.set(Number(bootData.quota.usagePercent || 0));
+      }
+
+      if (!bootRes.ok || bootData?.ok === false) {
+        this.triggerContainedFault({
+          code: String(bootData?.code || 'SANDBOX_CONTAINER_UNAVAILABLE'),
+          title: 'Luanti Sandbox Container Not Running',
+          message:
+            bootData?.message ||
+            'Start the local Luanti Docker container to test packages in-browser.',
+          detail: 'npm run sandbox:docker:up'
+        });
+        return;
+      }
+
+      this.currentMemoryMb.set(Number(bootData.memoryMb || 180));
+      this.maxMemoryMb.set(Number(bootData.maxMemoryMb || 1024));
+      this.loadedModCount.set(
+        Array.isArray(bootData.session?.loadedMods) ? bootData.session.loadedMods.length : manifest.bundles.length
+      );
+
+      const streamUrl = String(bootData.streamUrl || 'http://localhost:6080/sandbox.html');
+      const touchParam = isTouchDevice ? '&touch=1' : '';
+      const cacheBustedUrl = `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}t=${Date.now()}${touchParam}`;
+      this.activeStreamUrl.set(cacheBustedUrl);
+
+      const iframe = this.sandboxIframeRef?.nativeElement;
+      if (iframe) {
+        iframe.src = cacheBustedUrl;
+      }
+
+      this.loadingProgress.set(95);
+      this.loadingStepLabel.set('Connecting to Luanti Display Stream...');
+      this.loadingSubLabel.set('Press I inside the game to open the Creative Inventory');
+
+      setTimeout(() => {
+        if (this.status() === 'loading') {
+          this.status.set('running');
+          this.loadingProgress.set(100);
         }
-        this.loadingProgress.set(38 + Math.round(((i + 1) / manifest.bundles.length) * 45));
-      }
+      }, 900);
 
-      this.extractedVfsFiles = allFiles;
-      this.mountedFileCount.set(allFiles.length);
-      this.vfsReady = true;
-      this.loadingProgress.set(92);
-      this.loadingStepLabel.set('Booting Isolated WebGL 2.0 Voxel Engine...');
-      this.loadingSubLabel.set(`Mounted ${allFiles.length} files (${(runningUncompressed / 1024).toFixed(1)} KB)`);
-
-      this.trySendBootPayloadToRunner();
+      this.startStatusPolling();
     } catch (err: any) {
       if (signal.aborted) return;
       this.handleBootOrGuardError(err);
     }
+  }
+
+  private detectTouchDevice(): boolean {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+    const coarsePointer =
+      typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    const mobileUa = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent || '');
+    return Boolean(coarsePointer || (navigator.maxTouchPoints > 0 && mobileUa));
   }
 
   private async fetchSandboxManifest(
@@ -569,7 +572,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
         }
       }
     } catch {
-      // Fallback to direct single-package bundle below
+      // Fallback to direct single-package bundle
     }
 
     const pkgType = p.type === 'game' ? 'game' : p.type === 'txp' ? 'txp' : 'mod';
@@ -598,233 +601,77 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     };
   }
 
-  private async fetchBundleZipBytes(url: string, signal: AbortSignal): Promise<Uint8Array | null> {
-    try {
-      const res = await fetch(url, {
-        signal,
-        headers: { 'X-Purpose': 'preview' }
-      });
-      if (!res.ok) return null;
-      const buf = await res.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      if (bytes.byteLength >= 22 && bytes[0] === 0x50 && bytes[1] === 0x4b) {
-        return bytes;
-      }
-      return null;
-    } catch {
-      return null;
+  private startStatusPolling(): void {
+    if (this.statusPollIntervalId) {
+      clearInterval(this.statusPollIntervalId);
     }
-  }
-
-  private trySendBootPayloadToRunner(): void {
-    if (!this.iframeLoaded || !this.vfsReady) return;
-    const iframe = this.sandboxIframeRef?.nativeElement;
-    if (!iframe?.contentWindow) return;
-
-    const profile = this.memoryProfile();
-    const p = this.pkg();
-
-    iframe.contentWindow.postMessage(
-      {
-        type: 'SANDBOX_BOOT',
-        maxWasmHeapMb: profile.maxWasmHeapMb,
-        viewingRange: profile.viewingRange,
-        packageMeta: {
-          id: p.id,
-          author: p.author,
-          name: p.name,
-          title: p.title,
-          type: p.type
-        },
-        files: this.extractedVfsFiles
-      },
-      '*'
-    );
-  }
-
-  private handleRunnerMessage(event: MessageEvent): void {
-    const data = event.data;
-    if (!data || data.source !== 'luanti-sandbox-runner') return;
-
-    switch (data.type) {
-      case 'SANDBOX_HOST_LOADED': {
-        this.iframeLoaded = true;
-        this.trySendBootPayloadToRunner();
-        break;
-      }
-
-      case 'SANDBOX_READY': {
-        this.status.set('running');
-        this.loadingProgress.set(100);
-        this.currentWasmMb.set(Number(data.wasmHeapMb || 96));
-        this.mountedFileCount.set(Number(data.mountedFiles || this.extractedVfsFiles.length));
-        const now = Date.now();
-        this.lastHeartbeat.set({
-          fps: 60,
-          wasmHeapMb: Number(data.wasmHeapMb || 96),
-          maxWasmHeapMb: this.memoryProfile().maxWasmHeapMb,
-          jsHeapMb: Number(data.wasmHeapMb || 96),
-          vfsBytes: Number(data.vfsBytes || 0),
-          mountedFiles: Number(data.mountedFiles || 0),
-          voxelCount: 0,
-          timestamp: now
-        });
-        this.startHeartbeatWatchdog();
-        break;
-      }
-
-      case 'SANDBOX_HEARTBEAT': {
-        const telemetry: HeartbeatTelemetry = {
-          fps: Number(data.fps || 60),
-          wasmHeapMb: Number(data.wasmHeapMb || this.currentWasmMb()),
-          maxWasmHeapMb: Number(data.maxWasmHeapMb || this.memoryProfile().maxWasmHeapMb),
-          jsHeapMb: Number(data.jsHeapMb || 0),
-          vfsBytes: Number(data.vfsBytes || 0),
-          mountedFiles: Number(data.mountedFiles || 0),
-          voxelCount: Number(data.voxelCount || 0),
-          timestamp: Date.now()
-        };
-        this.currentFps.set(telemetry.fps);
-        this.currentWasmMb.set(telemetry.wasmHeapMb);
-        this.lastHeartbeat.set(telemetry);
-
-        const health = this.memoryGuard.evaluateHeartbeatHealth(telemetry);
-        if (!health.healthy && health.reason === 'PROACTIVE_OOM_TRIPWIRE') {
-          this.triggerContainedFault({
-            code: 'PROACTIVE_OOM_TRIPWIRE',
-            title: 'Proactive Memory Ceiling Reached (90% Heap Cap)',
-            message: `Sandbox memory usage reached ${telemetry.wasmHeapMb} MB of ${telemetry.maxWasmHeapMb} MB. The watchdog halted execution before the browser tab could run out of memory.`,
-            wasmHeapMb: telemetry.wasmHeapMb,
-            maxWasmHeapMb: telemetry.maxWasmHeapMb,
-            canRetrySafeMode: !this.safeModeActive()
-          });
-        }
-        break;
-      }
-
-      case 'SANDBOX_STATE_UPDATE': {
-        if (typeof data.flyMode === 'boolean') this.flyMode.set(data.flyMode);
-        if (typeof data.fastMode === 'boolean') this.fastMode.set(data.fastMode);
-        if (data.timeOfDay) this.timeOfDay.set(data.timeOfDay);
-        break;
-      }
-
-      case 'SANDBOX_FAULT': {
-        this.triggerContainedFault({
-          code: String(data.code || 'WASM_FAULT'),
-          title:
-            data.code === 'WASM_SEGFAULT'
-              ? 'C++ / WebAssembly Segmentation Fault Contained'
-              : data.code === 'WASM_OOM'
-                ? 'WebAssembly Out-of-Memory Limit Contained'
-                : 'Sandbox Graphics / Engine Fault Contained',
-          message: String(
-            data.message || 'An unexpected runtime fault occurred inside the isolated sandbox container.'
-          ),
-          detail: data.detail ? String(data.detail) : undefined,
-          wasmHeapMb: Number(data.wasmHeapMb || this.currentWasmMb()),
-          maxWasmHeapMb: Number(data.maxWasmHeapMb || this.memoryProfile().maxWasmHeapMb),
-          canRetrySafeMode: !this.safeModeActive()
-        });
-        break;
-      }
-    }
-  }
-
-  private startHeartbeatWatchdog(): void {
-    if (this.watchdogIntervalId) {
-      clearInterval(this.watchdogIntervalId);
-    }
-    this.watchdogIntervalId = setInterval(() => {
+    this.statusPollIntervalId = setInterval(() => {
       if (this.status() !== 'running') return;
-      const health = this.memoryGuard.evaluateHeartbeatHealth(this.lastHeartbeat(), Date.now());
-      if (!health.healthy && health.reason === 'HEARTBEAT_STALLED') {
-        this.triggerContainedFault({
-          code: 'HEARTBEAT_STALLED',
-          title: 'Unresponsive Sandbox Thread Terminated',
-          message:
-            'The sandbox engine stopped responding for over 4.5 seconds (possible infinite Lua loop). The watchdog terminated the isolated frame to keep your PWA responsive.',
-          canRetrySafeMode: !this.safeModeActive()
-        });
-      }
-    }, 1500);
+      fetch('/api/sandbox/session')
+        .then(res => (res.ok ? res.json() : null))
+        .then(data => {
+          if (!data) return;
+          if (data.memoryMb) this.currentMemoryMb.set(Number(data.memoryMb));
+          if (data.maxMemoryMb) this.maxMemoryMb.set(Number(data.maxMemoryMb));
+          if (data.quota) {
+            this.memoryGuard.updateQuotaStatus(data.quota);
+            this.quotaUsagePercent.set(Number(data.quota.usagePercent || 0));
+          }
+        })
+        .catch(() => {});
+    }, 4000);
   }
 
   private handleBootOrGuardError(err: any): void {
     if (err instanceof SandboxMemoryGuardError) {
       this.triggerContainedFault({
         code: err.code,
-        title: 'Blocked by Pre-Flight Memory & Zip Guard',
-        message: err.message,
-        canRetrySafeMode: false
+        title: 'Blocked by Pre-Flight Sandbox Guard',
+        message: err.message
       });
       return;
     }
 
     this.triggerContainedFault({
-      code: 'SANDBOX_BOOT_ERROR',
-      title: 'Unable to Initialize Sandbox Preview',
-      message: err?.message || 'Failed to prepare package archive for in-browser preview.',
-      canRetrySafeMode: !this.safeModeActive()
+      code: 'SANDBOX_CONTAINER_UNAVAILABLE',
+      title: 'Unable to Connect to Luanti Sandbox Container',
+      message: err?.message || 'Start the local Luanti Docker container to test packages in-browser.',
+      detail: 'npm run sandbox:docker:up'
     });
   }
 
   private triggerContainedFault(fault: SandboxFaultState): void {
-    this.performDeterministicTeardown(true);
+    this.performDeterministicTeardown(false);
     this.faultState.set(fault);
     this.status.set('fault');
   }
 
-  setTimeOfDay(tod: 'noon' | 'sunset' | 'midnight'): void {
-    this.timeOfDay.set(tod);
-    this.sendCommandToRunner('SET_TIME', tod);
-  }
-
-  toggleFlyMode(): void {
-    this.sendCommandToRunner('TOGGLE_FLY');
-  }
-
-  toggleFastMode(): void {
-    this.sendCommandToRunner('TOGGLE_FAST');
-  }
-
-  respawnWorld(): void {
-    this.sendCommandToRunner('RESPAWN');
-  }
-
-  simulateFault(faultType: 'WASM_SEGFAULT' | 'WASM_OOM' | 'WEBGL_CONTEXT_LOST'): void {
-    this.showGuardMenu.set(false);
-    const iframe = this.sandboxIframeRef?.nativeElement;
-    if (iframe?.contentWindow && this.status() === 'running') {
-      iframe.contentWindow.postMessage({ type: 'SANDBOX_SIMULATE_FAULT', faultType }, '*');
-    } else {
-      this.triggerContainedFault({
-        code: faultType,
-        title:
-          faultType === 'WASM_SEGFAULT'
-            ? 'C++ / WebAssembly Segmentation Fault Contained'
-            : faultType === 'WASM_OOM'
-              ? 'WebAssembly Out-of-Memory Limit Contained'
-              : 'WebGL 2.0 GPU Context Loss Contained',
-        message: `Simulated ${faultType} trapped by Layer 3 guard.`,
-        detail: `RuntimeError: Simulated ${faultType} trap verified`,
-        canRetrySafeMode: !this.safeModeActive()
-      });
+  sendKeyCommand(
+    command: 'TOGGLE_MOUSE_LOCK' | 'TOGGLE_INVENTORY' | 'TOGGLE_FLY' | 'TOGGLE_FAST' | 'ESCAPE'
+  ): void {
+    if (this.status() !== 'running') return;
+    try {
+      const iframe = this.sandboxIframeRef?.nativeElement;
+      iframe?.focus();
+      iframe?.contentWindow?.postMessage(
+        { type: 'SANDBOX_HUD_COMMAND', command },
+        '*'
+      );
+    } catch {
+      // Ignore cross-origin postMessage errors
     }
+    if (command === 'TOGGLE_MOUSE_LOCK') return;
+    fetch('/api/sandbox/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'command', command })
+    }).catch(() => {});
   }
 
-  relaunchInSafeMode(): void {
-    this.startSandboxBootSequence(true);
-  }
-
-  toggleFullscreen(): void {
-    const el = this.modalContainerRef?.nativeElement;
-    if (!el || typeof document === 'undefined') return;
-    if (!document.fullscreenElement) {
-      el.requestFullscreen?.().catch(() => {});
-    } else {
-      document.exitFullscreen?.().catch(() => {});
-    }
+  toggleFullscreen(event?: Event): void {
+    event?.stopPropagation();
+    event?.preventDefault();
+    this.isMaximized.set(!this.isMaximized());
   }
 
   triggerDownloadAndClose(): void {
@@ -832,30 +679,29 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     this.closeSandbox();
   }
 
-  closeSandbox(): void {
+  closeSandbox(event?: Event): void {
+    event?.stopPropagation();
     this.performDeterministicTeardown(true);
     this.close.emit();
   }
 
-  private sendCommandToRunner(command: string, value?: any): void {
-    const iframe = this.sandboxIframeRef?.nativeElement;
-    if (!iframe?.contentWindow || this.status() !== 'running') return;
-    iframe.contentWindow.postMessage({ type: 'SANDBOX_COMMAND', command, value }, '*');
-  }
-
-  private performDeterministicTeardown(hideIframe = true): void {
+  private performDeterministicTeardown(stopContainer = true): void {
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
     }
-    if (this.watchdogIntervalId) {
-      clearInterval(this.watchdogIntervalId);
-      this.watchdogIntervalId = null;
+    if (this.statusPollIntervalId) {
+      clearInterval(this.statusPollIntervalId);
+      this.statusPollIntervalId = null;
     }
-    this.extractedVfsFiles = [];
-    this.memoryGuard.teardownSandboxIframe(this.sandboxIframeRef?.nativeElement);
-    if (hideIframe) {
+    if (stopContainer) {
+      const iframe = this.sandboxIframeRef?.nativeElement;
+      this.memoryGuard.teardownSandboxIframe(iframe);
       this.iframeVisible.set(false);
+      this.activeStreamUrl.set('');
+      if (typeof fetch !== 'undefined') {
+        fetch('/api/sandbox/session', { method: 'DELETE', keepalive: true }).catch(() => {});
+      }
     }
   }
 }

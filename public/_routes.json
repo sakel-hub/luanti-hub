@@ -22,7 +22,6 @@
   ],
   "exclude": [
     "/assets/*",
-    "/wasm/*",
     "/icons/*",
     "/favicon.ico",
     "/logo.svg",

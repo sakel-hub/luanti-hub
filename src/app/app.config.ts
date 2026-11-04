@@ -19,13 +19,38 @@ export class CatalogRouteReuseStrategy extends BaseRouteReuseStrategy {
   }
 }
 
+const isLocalhostBrowser = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const host = window.location?.hostname || '';
+  if (host === 'localhost' || host === '127.0.0.1') {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        for (const reg of regs) {
+          reg.unregister().catch(() => {});
+        }
+      }).catch(() => {});
+    }
+    if ('caches' in window) {
+      window.caches.keys().then(keys => {
+        for (const key of keys) {
+          if (key.startsWith('ngsw:')) {
+            window.caches.delete(key).catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }
+    return true;
+  }
+  return false;
+};
+
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
     provideRouter(routes, withComponentInputBinding()),
     { provide: RouteReuseStrategy, useClass: CatalogRouteReuseStrategy },
     provideServiceWorker('ngsw-worker.js', {
-      enabled: !isDevMode(),
+      enabled: !isDevMode() && !isLocalhostBrowser(),
       registrationStrategy: 'registerImmediately'
     })
   ]

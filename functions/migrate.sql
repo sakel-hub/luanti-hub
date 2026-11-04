@@ -172,4 +172,16 @@ CREATE TABLE IF NOT EXISTS promo_tag_packages (
 );
 CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name));
 
+-- 11. Sandbox Monthly Quota Circuit Breaker Ledger (Idempotent)
+CREATE TABLE IF NOT EXISTS sandbox_quota_usage (
+    billing_cycle TEXT PRIMARY KEY,
+    awake_seconds INTEGER NOT NULL DEFAULT 0,
+    memory_gib_seconds REAL NOT NULL DEFAULT 0,
+    disk_gb_seconds REAL NOT NULL DEFAULT 0,
+    cpu_vcpu_seconds REAL NOT NULL DEFAULT 0,
+    sessions_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+
 

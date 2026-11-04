@@ -3663,7 +3663,8 @@ export class PackageService {
     this.lastRecentReviewsCheckAt = now;
 
     const isLocalhost =
-      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+      (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+      window.location?.port !== '8788';
     if (!forceInTest && !isLocalhost && this.edgeApiAvailable) {
       return;
     }
@@ -3747,7 +3748,7 @@ export class PackageService {
   }
 
   /**
-   * Merges newly discovered recent reviews into `reviewsCache`
+   * Merges newly discovered recent reviews into `reviewsCache` (and into `_activePackage` if open)
    * so that opening or viewing the package detail modal immediately displays the new review
    * without waiting for the per-package review cache to expire.
    */
@@ -3768,16 +3769,30 @@ export class PackageService {
       byPkgKey.set(key, list);
     }
 
+    const activePkg = this._activePackage();
+    const activeKey = activePkg ? (activePkg.id || `${activePkg.author}/${activePkg.name}`).toLowerCase() : '';
+
     for (const [pkgKey, incoming] of byPkgKey.entries()) {
       const existing = this.reviewsCache.get(pkgKey);
       if (existing) {
-        const seenIds = new Set(existing.map((r: CommunityReview) => String(r.id)));
-        const newOnes = incoming.filter((r: CommunityReview) => !seenIds.has(String(r.id)));
+        const seenIds = new Set(existing.map(r => String(r.id)));
+        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
         if (newOnes.length > 0) {
           const merged = [...newOnes, ...existing].sort(
             (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
           );
           this.reviewsCache.set(pkgKey, merged);
+        }
+      }
+      if (activeKey && activeKey === pkgKey && activePkg) {
+        const currentList = Array.isArray(activePkg.reviews_list) ? activePkg.reviews_list : [];
+        const seenIds = new Set(currentList.map(r => String(r.id)));
+        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
+        if (newOnes.length > 0) {
+          const merged = [...newOnes, ...currentList].sort(
+            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+          this._activePackage.update(curr => (curr ? { ...curr, reviews_list: merged } : curr));
         }
       }
     }
@@ -3804,7 +3819,8 @@ export class PackageService {
     }
 
     const isLocalhost =
-      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+      (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+      window.location?.port !== '8788';
     const candidateUrls = isLocalhost
       ? [
           '/cdb-api/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs&ngsw-bypass=true',
@@ -4967,6 +4983,7 @@ export class PackageService {
         const isDevServerLocalhost =
           typeof window !== 'undefined' &&
           (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788' &&
           typeof (globalThis as any).__karma__ === 'undefined' &&
           typeof (globalThis as any).jasmine === 'undefined' &&
           typeof (globalThis as any).vi === 'undefined' &&
@@ -7154,6 +7171,7 @@ export class PackageService {
         const isDevServerLocalhost =
           typeof window !== 'undefined' &&
           (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788' &&
           typeof (globalThis as any).__karma__ === 'undefined' &&
           typeof (globalThis as any).jasmine === 'undefined' &&
           typeof (globalThis as any).vi === 'undefined' &&
@@ -9971,7 +9989,8 @@ export class PackageService {
       if (!hasOfficialInEdge && isOfficialPkg && this.contentDbOnline) {
         const isLocalhost =
           typeof window !== 'undefined' &&
-          (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
+          (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788';
         let upstreamReviews: any = null;
 
         if (isLocalhost && this.edgeApiAvailable) {

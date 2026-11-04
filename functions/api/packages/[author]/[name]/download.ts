@@ -574,6 +574,7 @@ export async function onRequest(context: {
     .replace(/^_+|_+$/g, '') || 'mod';
 
   const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB threshold for in-memory ZIP normalization
+  const isSandboxRequest = reqUrl.searchParams.get('sandbox') === '1';
 
   for (const candidateUrl of candidateUrls) {
     const ctrl = new AbortController();
@@ -593,12 +594,15 @@ export async function onRequest(context: {
       if (!res.ok) continue;
 
       const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
+      if (ct.includes('text/html') || ct.includes('text/plain')) {
         continue;
       }
 
       const contentLength = Number(res.headers.get('content-length') || 0);
       if (contentLength > MAX_BUFFER_BYTES) {
+        if (!requestedTag && contentLength > 0) {
+          await scheduleBackground(healPackageDownloadSizeIfChanged(contentLength));
+        }
         return Response.redirect(res.url || candidateUrl, 302);
       }
 
