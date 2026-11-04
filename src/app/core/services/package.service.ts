@@ -3747,7 +3747,7 @@ export class PackageService {
   }
 
   /**
-   * Merges newly discovered recent reviews into `reviewsCache` (and into `_activePackage` if open)
+   * Merges newly discovered recent reviews into `reviewsCache`
    * so that opening or viewing the package detail modal immediately displays the new review
    * without waiting for the per-package review cache to expire.
    */
@@ -3768,30 +3768,16 @@ export class PackageService {
       byPkgKey.set(key, list);
     }
 
-    const activePkg = this._activePackage();
-    const activeKey = activePkg ? (activePkg.id || `${activePkg.author}/${activePkg.name}`).toLowerCase() : '';
-
     for (const [pkgKey, incoming] of byPkgKey.entries()) {
       const existing = this.reviewsCache.get(pkgKey);
       if (existing) {
-        const seenIds = new Set(existing.map(r => String(r.id)));
-        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
+        const seenIds = new Set(existing.map((r: CommunityReview) => String(r.id)));
+        const newOnes = incoming.filter((r: CommunityReview) => !seenIds.has(String(r.id)));
         if (newOnes.length > 0) {
           const merged = [...newOnes, ...existing].sort(
             (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
           );
           this.reviewsCache.set(pkgKey, merged);
-        }
-      }
-      if (activeKey && activeKey === pkgKey && activePkg) {
-        const currentList = Array.isArray(activePkg.reviews_list) ? activePkg.reviews_list : [];
-        const seenIds = new Set(currentList.map(r => String(r.id)));
-        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
-        if (newOnes.length > 0) {
-          const merged = [...newOnes, ...currentList].sort(
-            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
-          );
-          this._activePackage.update(curr => (curr ? { ...curr, reviews_list: merged } : curr));
         }
       }
     }
