@@ -28,6 +28,8 @@ import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
+import { SandboxMemoryGuardService } from '../../core/services/sandbox-memory-guard.service';
+import { PwaSandboxModalComponent } from '../sandbox/pwa-sandbox-modal.component';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -86,6 +88,7 @@ import {
     BackToTopComponent,
     TranslatePipe,
     ThemeIconComponent,
+    PwaSandboxModalComponent,
     LucideX,
     LucideShare2,
     LucideHeart,
@@ -219,6 +222,18 @@ import {
                     <span class="text-slate-200 font-bold text-xs">({{ package.file_size }})</span>
                   }
                 </button>
+
+                <!-- Try in Browser (In-PWA WebAssembly Sandbox) Button -->
+                @if (isSandboxEnabled()) {
+                  <button
+                    type="button"
+                    (click)="openSandboxModal()"
+                    data-testid="try-in-browser-btn"
+                    class="h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 hover:text-white font-bold text-xs sm:text-sm flex items-center gap-2 transition hover:scale-[1.03] whitespace-nowrap cursor-pointer">
+                    <svg lucidePlay class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+                    <span>Try in Browser</span>
+                  </button>
+                }
 
                 <!-- In-Game Setup Guide Button -->
                 <button
@@ -2487,6 +2502,14 @@ import {
           </div>
         }
 
+        @if (isSandboxOpen()) {
+          <app-pwa-sandbox-modal
+            [pkg]="package"
+            (close)="closeSandboxModal()"
+            (downloadRequested)="onDownloadClick()"
+          ></app-pwa-sandbox-modal>
+        }
+
       </div>
     }
   `
@@ -2498,8 +2521,14 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
+  readonly sandboxGuard = inject(SandboxMemoryGuardService);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly ngZone = inject(NgZone);
+
+  readonly isSandboxOpen = signal<boolean>(false);
+  readonly isSandboxEnabled = computed<boolean>(() =>
+    this.sandboxGuard.isSandboxFeatureEnabled() && !this.isPackageDelisted()
+  );
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
@@ -4154,6 +4183,15 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     this.packageService.closePackageModal(false);
     this.packageService.openSetupModal(true, pkg);
+  }
+
+  openSandboxModal(): void {
+    if (!this.isSandboxEnabled()) return;
+    this.isSandboxOpen.set(true);
+  }
+
+  closeSandboxModal(): void {
+    this.isSandboxOpen.set(false);
   }
 
   openSignInForReview(): void {

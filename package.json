@@ -9,6 +9,8 @@
     "test": "ng test",
     "pages:dev": "wrangler pages dev dist/luanti-hub/browser --remote",
     "dev:cloudflare": "wrangler pages dev --proxy 4200 --remote",
+    "dev:sandbox": "wrangler pages dev --proxy 4200 --local",
+    "test:pwa-sandbox": "npm run build && wrangler pages dev dist/luanti-hub/browser --local",
     "deploy": "npm run build && wrangler pages deploy dist/luanti-hub/browser --project-name=luanti-hub",
     "db:schema:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/schema.sql",
     "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql",

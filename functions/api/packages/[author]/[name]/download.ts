@@ -32,6 +32,17 @@ async function shouldRecordDownloadWrite(request: Request, packageId: string): P
     return false;
   }
 
+  try {
+    const reqUrl = new URL(request.url, 'https://luantihub.local');
+    const reason = (reqUrl.searchParams.get('reason') || '').trim().toLowerCase();
+    const sandboxFlag = (reqUrl.searchParams.get('sandbox') || '').trim().toLowerCase();
+    if (reason === 'sandbox' || reason === 'preview' || sandboxFlag === '1' || sandboxFlag === 'true') {
+      return false;
+    }
+  } catch {
+    // Proceed with header checks
+  }
+
   const purpose = (
     request.headers.get('Sec-Purpose') ||
     request.headers.get('Purpose') ||
