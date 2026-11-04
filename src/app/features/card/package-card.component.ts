@@ -15,6 +15,7 @@ import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { LuantiPackage } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
+import { isContentDbThumbnailUrl } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -349,12 +350,28 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   get cardBannerUrl(): string {
     const failed = this.failedBannerUrls();
-    const candidates = [
+    const gitCandidates = [
       this.package?.banner,
+      ...(this.package?.screenshots ?? []),
+      this.package?.thumbnail
+    ].filter(u => Boolean(u) && this.packageService.isGitScreenshotUrl(u));
+    const nonThumbBanner =
+      this.package?.banner && !isContentDbThumbnailUrl(this.package.banner)
+        ? this.package.banner
+        : undefined;
+    const nonThumbScreenshots = (this.package?.screenshots ?? []).filter(
+      u => Boolean(u) && !isContentDbThumbnailUrl(u)
+    );
+    const rawCandidates = [
+      ...gitCandidates,
+      nonThumbBanner,
+      ...nonThumbScreenshots,
       this.package?.video_thumbnail_url,
-      this.package?.thumbnail,
-      ...(this.package?.screenshots ?? [])
-    ]
+      this.package?.banner,
+      ...(this.package?.screenshots ?? []),
+      this.package?.thumbnail
+    ];
+    const candidates = rawCandidates
       .map(u => (typeof u === 'string' && u.trim() ? (this.packageService.toProxiedGitImageIfNeeded(u) ?? u) : undefined))
       .filter((u): u is string => Boolean(u) && u !== 'logo.svg');
     return (
@@ -506,39 +523,29 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     if (!this.isDesktopHoverViewport()) return;
     this.isPointerHovering = true;
 
+    const rawUrl = this.package?.video_url;
+    if (!rawUrl) return;
+
+    const rawThumbUrl = this.package?.video_thumbnail_url;
     // Pre-warm existing video preview URL if already present on the package object (zero D1/API cost)
-    if (this.package?.video_url) {
-      this.packageService.warmUpVideoPreview(this.package.video_url, this.package.video_thumbnail_url, true);
-    }
+    this.packageService.warmUpVideoPreview(rawUrl, rawThumbUrl, true);
 
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
     }
-    this.hoverIntentTimer = setTimeout(async () => {
+    this.hoverIntentTimer = setTimeout(() => {
       this.hoverIntentTimer = null;
       if (!this.isPointerHovering || !this.package) return;
 
-      this.packageService.ensurePackageHydrated(this.package, true);
+      const activeVideoUrl = this.package?.video_url;
+      if (!activeVideoUrl) return;
 
-      let rawUrl = this.package?.video_url;
-      let rawThumbUrl = this.package?.video_thumbnail_url;
-      if (!rawUrl) {
-        await this.packageService.loadPackageDetails(this.package, false);
-        if (!this.isPointerHovering) return;
-        const hydrated = this.packageService.packages().find(
-          p => p.id.toLowerCase() === this.package.id.toLowerCase()
-        );
-        rawUrl = hydrated?.video_url || this.package?.video_url;
-        rawThumbUrl = hydrated?.video_thumbnail_url || this.package?.video_thumbnail_url;
-      }
-      if (!rawUrl || !this.isPointerHovering) return;
-
-      this.packageService.warmUpVideoPreview(rawUrl, rawThumbUrl, true);
+      this.packageService.warmUpVideoPreview(activeVideoUrl, this.package?.video_thumbnail_url, true);
       this.currentHoverSeconds = 0;
       this.isHoverMuted.set(true);
       this.isEmbedVideoReady.set(false);
-      if (!this.isDirectVideo(rawUrl)) {
-        const embed = this.buildHoverEmbedUrl(rawUrl);
+      if (!this.isDirectVideo(activeVideoUrl)) {
+        const embed = this.buildHoverEmbedUrl(activeVideoUrl);
         if (!embed) return;
         this.hoverEmbedSafeUrl.set(this.sanitizer.bypassSecurityTrustResourceUrl(embed));
         this.attachHoverMessageListener();

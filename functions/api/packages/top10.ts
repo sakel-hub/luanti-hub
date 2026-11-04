@@ -1,10 +1,15 @@
 import {
   fetchUpstreamJsonCached,
   computeGenuineStarRating,
+  computeStarRatingFromData,
+  computeDependencyPrioritizationMultiplier,
+  isPrimarilyDependencyPackage,
+  readSharedEdgeRatingsMap,
   ensureExtendedPackageColumns,
   isPackageDeprecated,
   parseJsonArray,
   sanitizePackageImageUrl,
+  selectSharpPackageBanner,
   toProxiedGitImageIfNeeded
 } from '../lib/upstream';
 
@@ -82,6 +87,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.short_desc,
           p.thumbnail_url,
           p.banner_url,
+          p.screenshots,
           p.score,
           p.license,
           p.provider,
@@ -101,8 +107,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       `;
 
       const res = await env.DB.prepare(query).all();
+      const sharedEdgeRatings = await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, any>));
       if (res.results && res.results.length > 0) {
-        const candidates: Array<{ item: any; compositeScore: number; periodDownloads: number }> = [];
+        const candidates: Array<{ item: any; compositeScore: number; periodDownloads: number; isPureDep: boolean }> = [];
         for (const r of res.results) {
           const pkgKey = String(r.package_id || '').toLowerCase();
           if (!pkgKey || blockedIds.has(pkgKey)) continue;
@@ -122,23 +129,43 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             (Number(r.r_web) || 0) +
             (Number(r.r_upd) || 0) +
             (Number(r.r_dep) || 0);
+          const depRatio =
+            reasonSum > 0 ? Math.min(1, Math.max(0, (Number(r.r_dep) || 0) / reasonSum)) : 0;
+          const depWeight = depRatio >= 0.65 ? 0 : 0.02;
           const intentDl =
             reasonSum > 0
               ? (Number(r.r_new) || 0) * 1.0 +
                 (Number(r.r_web) || 0) * 1.0 +
                 (Number(r.r_upd) || 0) * 0.6 +
-                (Number(r.r_dep) || 0) * 0.2
-              : periodDl;
+                (Number(r.r_dep) || 0) * depWeight
+              : periodDl * (1 - depRatio * 0.85);
           const conversionRate = Number(
             Math.min(1.0, (intentDl + 1.5) / (Math.max(intentDl, periodViews) + 10)).toFixed(3)
           );
           const favCnt = d1Favorites.get(pkgKey) || 0;
-          const resolvedScore = d1Ratings.get(pkgKey) ?? computeGenuineStarRating(null, r.score);
+          const sharedRating = sharedEdgeRatings[pkgKey];
+          const resolvedScore =
+            d1Ratings.get(pkgKey) ??
+            (computeGenuineStarRating(null, r.score) || sharedRating?.score || 0);
           const starMultiplier = resolvedScore >= 1 ? 0.85 + (resolvedScore / 5) * 0.35 : 1.0;
+
+          const candidatePkg = {
+            id: `${author}/${name}`,
+            author,
+            name,
+            title: r.title || name,
+            type: r.type || 'mod',
+            short_desc: r.short_desc || '',
+            tags: rowTags,
+            dependency_ratio: depRatio > 0 ? Number(depRatio.toFixed(3)) : undefined
+          };
+          const depMultiplier = computeDependencyPrioritizationMultiplier(candidatePkg, depRatio);
+          const isPureDep = isPrimarilyDependencyPackage(candidatePkg, depRatio);
 
           const compositeScore =
             (intentDl * (1 + conversionRate * 0.5) + periodViews * 0.18 + Math.min(6, favCnt * 0.6)) *
-            starMultiplier;
+            starMultiplier *
+            depMultiplier;
 
           const cdbDl = Number(r.contentdb_downloads || 0);
           const lhDl = Math.max(Number(r.luantihub_downloads || 0), periodDl);
@@ -148,20 +175,23 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             periodDl || 1
           );
 
+          const rowScreenshots = parseJsonArray(r.screenshots);
+          const cleanRowThumb = sanitizePackageImageUrl(r.thumbnail_url) || '';
+          const cleanRowBanner =
+            selectSharpPackageBanner(undefined, rowScreenshots, r.banner_url, cleanRowThumb) || cleanRowThumb;
+
           candidates.push({
             periodDownloads: periodDl,
             compositeScore,
+            isPureDep,
             item: {
-              id: `${author}/${name}`,
-              author,
-              name,
-              title: r.title || name,
-              type: r.type || 'mod',
-              short_desc: r.short_desc || '',
-              thumbnail: toProxiedGitImageIfNeeded(r.thumbnail_url || ''),
-              banner: toProxiedGitImageIfNeeded(r.banner_url || r.thumbnail_url || ''),
+              ...candidatePkg,
+              thumbnail: cleanRowThumb,
+              banner: cleanRowBanner,
+              ...(rowScreenshots.length > 0 ? { screenshots: rowScreenshots } : {}),
               dev_state: r.dev_state || undefined,
               score: resolvedScore,
+              review_thread_counts: sharedRating?.review_thread_counts,
               contentdb_downloads: cdbDl,
               luantihub_downloads: lhDl,
               downloads: totalDl,
@@ -180,6 +210,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         candidates.sort((a, b) => b.compositeScore - a.compositeScore || b.periodDownloads - a.periodDownloads);
         for (const c of candidates) {
           if (top10List.length >= 10) break;
+          if (c.isPureDep) continue;
           if (!canTakeAuthor(c.item.author, 2)) continue;
           markAuthor(c.item.author);
           top10List.push(c.item);
@@ -218,9 +249,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 sanitizePackageImageUrl(match.thumbnail) ||
                 'logo.svg';
               const banner =
-                sanitizePackageImageUrl(entry.banner) ||
-                sanitizePackageImageUrl(match.banner) ||
-                thumb;
+                selectSharpPackageBanner(
+                  undefined,
+                  entry.screenshots || match.screenshots,
+                  entry.banner,
+                  match.banner,
+                  thumb
+                ) || thumb;
               return {
                 ...entry,
                 title: entry.title !== entry.name ? entry.title : (match.title || entry.name),
@@ -234,28 +269,37 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               };
             }
             const cleanThumb = sanitizePackageImageUrl(entry.thumbnail) || 'logo.svg';
-            const cleanBanner = sanitizePackageImageUrl(entry.banner) || cleanThumb;
+            const cleanBanner =
+              selectSharpPackageBanner(undefined, entry.screenshots, entry.banner, cleanThumb) || cleanThumb;
             return {
               ...entry,
               thumbnail: cleanThumb,
               banner: cleanBanner
             };
           })
-          .filter(entry => !isPackageDeprecated(entry));
+          .filter(entry => !isPackageDeprecated(entry) && !isPrimarilyDependencyPackage(entry));
 
-        // Sort upstream candidates by real downloads / score for remaining slots
+        const sharedEdgeRatings = await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, any>));
+
+        // Sort upstream candidates by real downloads / score (with dependency dampening) for remaining slots
         const sortedUpstream = [...upstreamData].sort((a, b) => {
+          const multA = computeDependencyPrioritizationMultiplier(a);
+          const multB = computeDependencyPrioritizationMultiplier(b);
           if (timeframe === 'today') {
-            const scoreA = (Number(a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50;
-            const scoreB = (Number(b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50;
+            const scoreA =
+              ((Number(a.score) || 0) * 10 + Math.log10((Number(a.downloads) || 1) + 1) * 50) *
+              multA;
+            const scoreB =
+              ((Number(b.score) || 0) * 10 + Math.log10((Number(b.downloads) || 1) + 1) * 50) *
+              multB;
             return scoreB - scoreA;
           }
-          return (Number(b.downloads) || 0) - (Number(a.downloads) || 0);
+          return (Number(b.downloads) || 0) * multB - (Number(a.downloads) || 0) * multA;
         });
 
         for (const item of sortedUpstream) {
           if (top10List.length >= 10) break;
-          if (isPackageDeprecated(item)) continue;
+          if (isPackageDeprecated(item) || isPrimarilyDependencyPackage(item)) continue;
           const pkgId = `${item.author}/${item.name}`;
           const lowerId = pkgId.toLowerCase();
           if (blockedIds.has(lowerId)) continue;
@@ -266,7 +310,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const thumbnail =
             sanitizePackageImageUrl(item.thumbnail || item.thumbnail_url) || 'logo.svg';
           const banner =
-            sanitizePackageImageUrl(item.banner || item.banner_url) || thumbnail;
+            selectSharpPackageBanner(
+              undefined,
+              item.screenshots,
+              item.banner,
+              item.banner_url,
+              thumbnail
+            ) || thumbnail;
+          const sharedRating = sharedEdgeRatings[lowerId];
+          const computedScore =
+            d1Ratings.get(lowerId) ??
+            (computeStarRatingFromData(item, 0) || sharedRating?.score || 0);
 
           top10List.push({
             id: pkgId,
@@ -277,7 +331,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             short_desc: item.short_desc || item.short_description || '',
             thumbnail,
             banner: banner || thumbnail,
-            score: d1Ratings.get(lowerId) ?? computeGenuineStarRating(null, item.reviews),
+            score: computedScore,
+            review_thread_counts: sharedRating?.review_thread_counts,
             downloads: typeof item.downloads === 'number' ? item.downloads : 0,
             license: item.license || '',
             source: 'official'

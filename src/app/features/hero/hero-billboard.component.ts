@@ -13,6 +13,7 @@ import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
 import { LuantiPackage } from '../../core/models/package.model';
+import { selectSharpPackageBanner } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -56,7 +57,7 @@ import {
           class="hidden sm:block pointer-events-none select-none absolute -inset-x-10 sm:-inset-x-20 -top-12 -bottom-20 z-0 overflow-visible blur-[80px] sm:blur-[110px] saturate-[1.85]">
           @for (glowPkg of showcase(); track glowPkg.id; let idx = $index) {
             <img
-              [src]="glowPkg.banner || glowPkg.thumbnail"
+              [src]="getSlideBanner(glowPkg)"
               [fallbackThumbnail]="glowPkg.thumbnail"
               appImgFallback
               alt=""
@@ -93,7 +94,7 @@ import {
                 <!-- Slide Background Image with Subtle Ken-Burns Scale Transition -->
                 <div class="absolute inset-0">
                   <img
-                    [src]="slidePkg.banner || slidePkg.thumbnail"
+                    [src]="getSlideBanner(slidePkg)"
                     [fallbackThumbnail]="slidePkg.thumbnail"
                     appImgFallback
                     [alt]="slidePkg.title"
@@ -398,13 +399,29 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
     return false;
   }
 
+  getSlideBanner(pkg: LuantiPackage): string {
+    if (pkg?._promo?.banner_url) {
+      return pkg._promo.banner_url;
+    }
+    const preferredGit = this.packageService.isGitScreenshotUrl(pkg?.banner)
+      ? pkg.banner
+      : (this.packageService.isGitScreenshotUrl(pkg?.thumbnail) ? pkg.thumbnail : undefined);
+    return (
+      selectSharpPackageBanner(preferredGit, pkg?.screenshots, pkg?.banner, pkg?.thumbnail) ||
+      pkg?.banner ||
+      pkg?.thumbnail ||
+      'logo.svg'
+    );
+  }
+
   onPromoCtaClick(url?: string | null, event?: Event): void {
     if (event) event.stopPropagation();
     const raw = (url || '').trim();
     const activePromo = this.currentPkg()?._promo;
     const activePromoId = activePromo?.id || '';
     if (raw === '/blog/latest' || activePromoId.startsWith('blog:')) {
-      const slideBanner = activePromo?.banner_url || this.currentPkg()?.banner || this.currentPkg()?.thumbnail;
+      const current = this.currentPkg();
+      const slideBanner = activePromo?.banner_url || (current ? this.getSlideBanner(current) : undefined);
       this.packageService.openBlogArticleModal(undefined, slideBanner);
       return;
     }

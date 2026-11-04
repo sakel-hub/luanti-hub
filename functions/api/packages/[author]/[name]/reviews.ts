@@ -1,11 +1,15 @@
 import {
   fetchUpstreamJsonCached,
   safeDecodeParam,
+  readEdgeCacheJson,
+  writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   normalizeContentDbReviewItem,
+  deriveReviewThreadCountsFromList,
   computeStarRatingFromData,
+  mergeSharedEdgeRatingsMap,
   sanitizePublicErrorMessage
 } from '../../../lib/upstream';
 import {
@@ -22,110 +26,201 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
-// GET: Mixed Reviews (ContentDB + LuantiHub Native)
-export async function onRequestGet(context: { params: { author: string; name: string }; env: Env }) {
+// GET: Mixed Reviews (ContentDB + LuantiHub Native) with Multi-Tier Edge Caching & Optional Pagination
+export async function onRequestGet(context: {
+  request?: Request;
+  params: { author: string; name: string };
+  env: Env;
+}) {
   const author = safeDecodeParam(context.params.author);
   const name = safeDecodeParam(context.params.name);
   const packageId = `${author}/${name}`;
+  const lowerPkgId = packageId.toLowerCase();
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
 
-  // 1. Fetch Official ContentDB Reviews (with Edge Cache + failover + canonical author/name resolution for dual-source packages)
-  const officialPromise = (async () => {
+  let pageParam = 0;
+  let limitParam = 5;
+  let noCache = false;
+  if (context.request?.url) {
     try {
-      const direct = await fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300);
-      if (Array.isArray(direct)) {
-        return direct;
+      const reqUrl = new URL(context.request.url);
+      const rawPage = Number(reqUrl.searchParams.get('page'));
+      const rawLimit = Number(reqUrl.searchParams.get('limit'));
+      if (Number.isFinite(rawPage) && rawPage >= 1) {
+        pageParam = Math.floor(rawPage);
       }
-      const strippedAuthor = author.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      if (strippedAuthor && strippedAuthor.toLowerCase() !== author.toLowerCase()) {
-        const strippedRes = await fetchUpstreamJsonCached<any[]>(
-          `/packages/${encodeURIComponent(strippedAuthor)}/${encName}/reviews/`,
-          300
-        );
-        if (Array.isArray(strippedRes)) {
-          return strippedRes;
-        }
+      if (Number.isFinite(rawLimit) && rawLimit >= 1) {
+        limitParam = Math.min(50, Math.max(1, Math.floor(rawLimit)));
       }
-      const catalogList = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 300).catch(() => null);
-      if (Array.isArray(catalogList)) {
-        const lowerName = name.toLowerCase();
-        const lowerBaseAuthor = (strippedAuthor || author).toLowerCase();
-        const exactBaseMatch = catalogList.find(
-          (item) =>
-            item?.author &&
-            item?.name &&
-            String(item.name).toLowerCase() === lowerName &&
-            String(item.author).toLowerCase() === lowerBaseAuthor
-        );
-        const nameMatches = catalogList.filter(
-          (item) => item?.author && item?.name && String(item.name).toLowerCase() === lowerName
-        );
-        const matched = exactBaseMatch || (nameMatches.length === 1 ? nameMatches[0] : null);
-        if (matched && (matched.author !== author || matched.name !== name)) {
-          const fallbackRes = await fetchUpstreamJsonCached<any[]>(
-            `/packages/${encodeURIComponent(matched.author)}/${encodeURIComponent(matched.name)}/reviews/`,
-            300
-          );
-          if (Array.isArray(fallbackRes)) {
-            return fallbackRes;
-          }
-        }
-      }
-      return [];
+      noCache = reqUrl.searchParams.get('nocache') === '1';
     } catch {
-      return [];
+      // Ignore malformed request URL
     }
-  })();
-
-  // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1 (case-insensitive package_id match)
-  let localPromise = Promise.resolve([]);
-  if (context.env.DB) {
-    localPromise = context.env.DB.prepare(`
-      SELECT r.id, r.user_id, r.rating, r.title, r.comment, r.created_at,
-             u.username, u.display_name, u.avatar_url
-      FROM reviews r
-      LEFT JOIN users u ON r.user_id = u.id
-      WHERE LOWER(r.package_id) = LOWER(?)
-      ORDER BY r.created_at DESC
-    `).bind(packageId).all()
-      .then((res: any) => res.results || [])
-      .catch(() => []);
   }
 
-  const [officialReviews, localReviews] = await Promise.all([officialPromise, localPromise]);
+  const edgeReviewsCacheKey = `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  let allReviews: any[] | null = !noCache ? await readEdgeCacheJson<any[]>(edgeReviewsCacheKey) : null;
 
-  // 3. Normalize ContentDB Reviews (`PackageReview.as_dict()`)
-  const normalizedOfficial = (Array.isArray(officialReviews) ? officialReviews : []).map((r: any, idx: number) =>
-    normalizeContentDbReviewItem(r, idx, packageId)
-  );
+  if (!Array.isArray(allReviews)) {
+    // 1. Fetch Official ContentDB Reviews (with Edge Cache + failover + canonical author/name resolution for dual-source packages)
+    const officialPromise = (async () => {
+      try {
+        const direct = await fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300);
+        if (Array.isArray(direct)) {
+          return direct;
+        }
+        const strippedAuthor = author.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+        if (strippedAuthor && strippedAuthor.toLowerCase() !== author.toLowerCase()) {
+          const strippedRes = await fetchUpstreamJsonCached<any[]>(
+            `/packages/${encodeURIComponent(strippedAuthor)}/${encName}/reviews/`,
+            300
+          );
+          if (Array.isArray(strippedRes)) {
+            return strippedRes;
+          }
+        }
+        const catalogList = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 300).catch(() => null);
+        if (Array.isArray(catalogList)) {
+          const lowerName = name.toLowerCase();
+          const lowerBaseAuthor = (strippedAuthor || author).toLowerCase();
+          const exactBaseMatch = catalogList.find(
+            (item) =>
+              item?.author &&
+              item?.name &&
+              String(item.name).toLowerCase() === lowerName &&
+              String(item.author).toLowerCase() === lowerBaseAuthor
+          );
+          const nameMatches = catalogList.filter(
+            (item) => item?.author && item?.name && String(item.name).toLowerCase() === lowerName
+          );
+          const matched = exactBaseMatch || (nameMatches.length === 1 ? nameMatches[0] : null);
+          if (matched && (matched.author !== author || matched.name !== name)) {
+            const fallbackRes = await fetchUpstreamJsonCached<any[]>(
+              `/packages/${encodeURIComponent(matched.author)}/${encodeURIComponent(matched.name)}/reviews/`,
+              300
+            );
+            if (Array.isArray(fallbackRes)) {
+              return fallbackRes;
+            }
+          }
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    })();
 
-  // 4. Normalize LuantiHub Local Reviews
-  const normalizedLocal = localReviews.map((r: any) => ({
-    id: `lh_${r.id}`,
-    package_id: packageId,
-    source: 'luantihub',
-    rating: r.rating || 5,
-    title: r.title,
-    comment: r.comment,
-    created_at: r.created_at,
-    author: {
-      username: r.username || 'community_user',
-      display_name: r.display_name || r.username || 'Community Member',
-      avatar_url: r.avatar_url || `https://github.com/${r.username || 'octocat'}.png`
+    // 2. Fetch Native LuantiHub Community Comments from Cloudflare D1 (case-insensitive package_id match)
+    let localPromise = Promise.resolve<any[]>([]);
+    if (context.env.DB) {
+      localPromise = context.env.DB.prepare(`
+        SELECT r.id, r.user_id, r.rating, r.title, r.comment, r.created_at,
+               u.username, u.display_name, u.avatar_url
+        FROM reviews r
+        LEFT JOIN users u ON r.user_id = u.id
+        WHERE LOWER(r.package_id) = LOWER(?)
+        ORDER BY r.created_at DESC
+      `).bind(packageId).all()
+        .then((res: any) => res.results || [])
+        .catch(() => []);
     }
-  }));
 
-  // 5. Merge and sort chronologically (newest first)
-  const allReviews = [...normalizedLocal, ...normalizedOfficial].sort(
-    (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
-  );
+    const [officialReviews, localReviews] = await Promise.all([officialPromise, localPromise]);
+
+    // 3. Normalize ContentDB Reviews (`PackageReview.as_dict()`)
+    const normalizedOfficial = (Array.isArray(officialReviews) ? officialReviews : []).map((r: any, idx: number) =>
+      normalizeContentDbReviewItem(r, idx, packageId)
+    );
+
+    // 4. Normalize LuantiHub Local Reviews
+    const normalizedLocal = localReviews.map((r: any) => ({
+      id: `lh_${r.id}`,
+      package_id: packageId,
+      source: 'luantihub',
+      rating: r.rating || 5,
+      title: r.title,
+      comment: r.comment,
+      created_at: r.created_at,
+      author: {
+        username: r.username || 'community_user',
+        display_name: r.display_name || r.username || 'Community Member',
+        avatar_url: r.avatar_url || `https://github.com/${r.username || 'octocat'}.png`
+      }
+    }));
+
+    // 5. Merge and sort chronologically (newest first)
+    allReviews = [...normalizedLocal, ...normalizedOfficial].sort(
+      (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+    );
+
+    // Persist derived star rating & review thread counts into shared Edge Cache (and D1 if row exists)
+    const derivedCounts = deriveReviewThreadCountsFromList(allReviews);
+    const derivedScore = computeStarRatingFromData({
+      reviews_list: allReviews,
+      review_thread_counts: derivedCounts
+    });
+    await mergeSharedEdgeRatingsMap({
+      [lowerPkgId]: {
+        score: derivedScore,
+        ...(derivedCounts ? { review_thread_counts: derivedCounts } : {}),
+        checked: true
+      }
+    }).catch(() => {});
+
+    if (context.env.DB && (derivedScore > 0 || derivedCounts)) {
+      context.env.DB.prepare(`
+        UPDATE packages
+        SET score = CASE WHEN ? > 0 THEN ? ELSE score END,
+            review_thread_counts = CASE
+              WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+              ELSE review_thread_counts
+            END
+        WHERE LOWER(id) = LOWER(?)
+      `).bind(
+        derivedScore,
+        derivedScore,
+        derivedCounts ? JSON.stringify(derivedCounts) : null,
+        packageId
+      ).run().catch(() => {});
+    }
+
+    await writeEdgeCacheJson(edgeReviewsCacheKey, allReviews, allReviews.length > 0 ? 300 : 120);
+  }
+
+  const cacheControlHeader =
+    allReviews.length > 0
+      ? 'public, max-age=60, s-maxage=300, stale-while-revalidate=600'
+      : 'public, max-age=30, s-maxage=120, stale-while-revalidate=300';
+
+  if (pageParam >= 1) {
+    const start = (pageParam - 1) * limitParam;
+    const items = allReviews.slice(start, start + limitParam);
+    return new Response(
+      JSON.stringify({
+        items,
+        total: allReviews.length,
+        page: pageParam,
+        limit: limitParam,
+        hasMore: start + limitParam < allReviews.length
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'X-Total-Count': String(allReviews.length),
+          'Cache-Control': cacheControlHeader
+        }
+      }
+    );
+  }
 
   return new Response(JSON.stringify(allReviews), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-store, no-cache, must-revalidate'
+      'X-Total-Count': String(allReviews.length),
+      'Cache-Control': cacheControlHeader
     }
   });
 }
@@ -309,8 +404,15 @@ export async function onRequestPost(context: { request: Request; params: { autho
       '/__api_packages_v2?boot=1',
       '/__api_boot_catalog_bundle_v4',
       '/__api_boot_catalog_bundle_v5',
-      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
+      `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
     ]);
+    await mergeSharedEdgeRatingsMap({
+      [packageId.toLowerCase()]: {
+        score: newScore,
+        checked: true
+      }
+    }).catch(() => {});
 
     return Response.json({
       success: true,
@@ -414,7 +516,13 @@ export async function onRequestPost(context: { request: Request; params: { autho
     }
 
     // Recalculate Average Package Score
-    await recalculateAndPersistPackageScore(context.env.DB, effectivePkgId);
+    const updatedScore = await recalculateAndPersistPackageScore(context.env.DB, effectivePkgId);
+    await mergeSharedEdgeRatingsMap({
+      [packageId.toLowerCase()]: {
+        score: updatedScore || numericRating,
+        checked: true
+      }
+    }).catch(() => {});
   }
 
   await invalidateEdgeCacheKeys([
@@ -422,7 +530,8 @@ export async function onRequestPost(context: { request: Request; params: { autho
     '/__api_packages_v2?boot=1',
     '/__api_boot_catalog_bundle_v4',
     '/__api_boot_catalog_bundle_v5',
-    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
+    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
+    `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
   ]);
 
     return Response.json({

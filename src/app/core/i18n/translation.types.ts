@@ -242,6 +242,7 @@ export interface TranslationDictionary {
     similarPackagesSubtitle: string;
     latestRelease: string;
     showingLatestReleases: string;
+    reviewsShowingRange: string;
     tabAnalytics: string;
     viewAnalyticsTooltip: string;
     viewReleaseNotes: string;

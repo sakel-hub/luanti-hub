@@ -19,6 +19,7 @@ import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { LuantiPackage, CommunityReview, PackageRelease, ReleaseNotesPayload } from '../../core/models/package.model';
+import { isContentDbThumbnailUrl, upgradeContentDbThumbnailUrl } from '../../core/config/git-providers.config';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -1358,14 +1359,14 @@ import {
             </section>
 
             <!-- Tabbed Navigation: Reviews, Releases & Legal License -->
-            <div class="pt-4 border-t border-white/10">
+            <div #reviewsSectionSentinel class="pt-4 border-t border-white/10">
               <div class="flex items-center gap-5 border-b border-white/10 text-xs font-semibold overflow-x-auto no-scrollbar">
                 <button
                   type="button"
-                  (click)="activeTab.set('reviews')"
+                  (click)="onSelectReviewsTab()"
                   [class]="activeTab() === 'reviews' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap'"
                   class="cursor-pointer">
-                  {{ 'modal.tabReviews' | translate }}@if (!isLoadingReviews() || reviews().length > 0) { ({{ reviews().length }}) }
+                  {{ 'modal.tabReviews' | translate }}@if (!isLoadingReviews() || totalReviewCount() > 0) { ({{ totalReviewCount() }}) }
                 </button>
                 <button
                   type="button"
@@ -1513,7 +1514,11 @@ import {
                     <!-- Reviews Source Summary Bar (Luanti Hub vs. ContentDB) -->
                     <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/40 border border-white/10 text-[11px]">
                       <span class="text-slate-400 font-semibold">
-                        Showing <span class="text-white font-bold">{{ reviews().length }}</span> community {{ reviews().length === 1 ? 'review' : 'reviews' }}
+                        @if (totalReviewPages() > 1) {
+                          Showing <span class="text-white font-bold">{{ reviewsRangeStart() }}–{{ reviewsRangeEnd() }}</span> of <span class="text-white font-bold">{{ reviews().length }}</span> community {{ reviews().length === 1 ? 'review' : 'reviews' }}
+                        } @else {
+                          Showing <span class="text-white font-bold">{{ reviews().length }}</span> community {{ reviews().length === 1 ? 'review' : 'reviews' }}
+                        }
                       </span>
                       <div class="flex items-center gap-2 flex-wrap">
                         <span
@@ -1532,7 +1537,7 @@ import {
                     </div>
 
                     <div class="space-y-3">
-                      @for (rev of reviews(); track rev.id) {
+                      @for (rev of paginatedReviews(); track rev.id) {
                         <div
                           [class]="rev.source === 'contentdb' ? 'border-l-2 border-l-sky-400/60' : 'border-l-2 border-l-emerald-400/60'"
                           class="p-3.5 rounded-2xl glass-panel space-y-2 text-xs">
@@ -1681,6 +1686,37 @@ import {
                         </div>
                       }
                     </div>
+
+                    @if (totalReviewPages() > 1) {
+                      <div class="pt-2 flex items-center justify-between gap-3 flex-wrap text-xs" data-testid="reviews-pagination-bar">
+                        <span class="text-[11px] text-slate-400 font-medium">
+                          {{ 'modal.reviewsShowingRange' | translate:{ start: reviewsRangeStart(), end: reviewsRangeEnd(), total: reviews().length } }}
+                        </span>
+                        <div class="flex items-center gap-2 ml-auto">
+                          <button
+                            type="button"
+                            (click)="prevReviewsPage()"
+                            [disabled]="reviewsPage() <= 1"
+                            aria-label="Previous reviews page"
+                            class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 disabled:pointer-events-none font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                            <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
+                            <span>{{ 'profile.prevPage' | translate }}</span>
+                          </button>
+                          <span class="px-2.5 py-1 rounded-lg bg-slate-950/60 border border-white/10 text-[11px] font-mono text-slate-300">
+                            {{ 'profile.pageLabel' | translate }} {{ reviewsPage() }} / {{ totalReviewPages() }}
+                          </span>
+                          <button
+                            type="button"
+                            (click)="nextReviewsPage()"
+                            [disabled]="reviewsPage() >= totalReviewPages()"
+                            aria-label="Next reviews page"
+                            class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 disabled:pointer-events-none font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
+                            <span>{{ 'profile.nextPage' | translate }}</span>
+                            <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
+                          </button>
+                        </div>
+                      </div>
+                    }
                   }
                 </div>
               }
@@ -2206,11 +2242,48 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return list.slice(start, start + this.RELEASES_PAGE_SIZE);
   });
 
-  // Lazy-Loaded "Similar Packages" state (triggered when within 240px of viewport)
+  // Paginated & Lazy-Loaded "Community Reviews" state (5 per page, triggered within 280px of viewport)
+  readonly REVIEWS_PAGE_SIZE = 5;
+  readonly reviewsPage = signal<number>(1);
+  readonly totalReviewPages = computed<number>(() =>
+    Math.max(1, Math.ceil(this.reviews().length / this.REVIEWS_PAGE_SIZE))
+  );
+  readonly paginatedReviews = computed<CommunityReview[]>(() => {
+    const list = this.reviews();
+    const page = Math.min(Math.max(1, this.reviewsPage()), this.totalReviewPages());
+    const start = (page - 1) * this.REVIEWS_PAGE_SIZE;
+    return list.slice(start, start + this.REVIEWS_PAGE_SIZE);
+  });
+  readonly reviewsRangeStart = computed<number>(() => {
+    const total = this.reviews().length;
+    if (total === 0) return 0;
+    const page = Math.min(Math.max(1, this.reviewsPage()), this.totalReviewPages());
+    return (page - 1) * this.REVIEWS_PAGE_SIZE + 1;
+  });
+  readonly reviewsRangeEnd = computed<number>(() => {
+    const total = this.reviews().length;
+    if (total === 0) return 0;
+    return Math.min(total, this.reviewsRangeStart() + this.REVIEWS_PAGE_SIZE - 1);
+  });
+  readonly totalReviewCount = computed<number>(() => {
+    const loaded = this.reviews().length;
+    const pkg = this.packageService.activePackage() || this.package;
+    const tc = pkg?.review_thread_counts;
+    const threadSum = tc
+      ? Number(tc.positive || 0) + Number(tc.neutral || 0) + Number(tc.negative || 0)
+      : 0;
+    return Math.max(loaded, threadSum);
+  });
+
+  // Lazy-Loaded "Similar Packages" & "Community Reviews" sentinels
   @ViewChild('modalScrollContainer') modalScrollContainerRef?: ElementRef<HTMLDivElement>;
   @ViewChild('similarSectionSentinel') similarSentinelRef?: ElementRef<HTMLElement>;
+  @ViewChild('reviewsSectionSentinel') reviewsSentinelRef?: ElementRef<HTMLElement>;
   readonly isSimilarNearViewport = signal<boolean>(false);
+  readonly isReviewsNearViewport = signal<boolean>(false);
   private similarObserver: IntersectionObserver | null = null;
+  private reviewsObserver: IntersectionObserver | null = null;
+  private reviewsFetchTriggeredForKey = '';
   readonly similarPackages = computed<LuantiPackage[]>(() => {
     if (!this.isSimilarNearViewport()) return [];
     const pkg = this.packageService.activePackage() || this.package;
@@ -2620,31 +2693,34 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         candidateBanner &&
         candidateBanner !== 'logo.svg' &&
         !candidateBanner.includes('/storage/screenshots/') &&
+        !isContentDbThumbnailUrl(candidateBanner) &&
         !failed.has(candidateBanner)
       ) {
         return candidateBanner;
       }
     }
-    for (const rawThumb of [pkg?.thumbnail, this.package?.thumbnail]) {
-      const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb);
+    for (const rawCandidate of [pkg?.banner, this.package?.banner, pkg?.thumbnail, this.package?.thumbnail]) {
+      const candidate = this.packageService.toProxiedGitImageIfNeeded(rawCandidate);
+      const upgraded = upgradeContentDbThumbnailUrl(candidate) || candidate;
       if (
-        candidateThumb &&
-        candidateThumb !== 'logo.svg' &&
-        !candidateThumb.includes('/storage/screenshots/') &&
-        !failed.has(candidateThumb)
+        upgraded &&
+        upgraded !== 'logo.svg' &&
+        !upgraded.includes('/storage/screenshots/') &&
+        !failed.has(upgraded)
       ) {
-        return candidateThumb;
+        return upgraded;
       }
     }
     for (const rawThumb of [pkg?.thumbnail, this.package?.thumbnail]) {
       const candidateThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb);
+      const upgradedThumb = upgradeContentDbThumbnailUrl(candidateThumb) || candidateThumb;
       if (
-        candidateThumb &&
-        candidateThumb !== 'logo.svg' &&
-        !candidateThumb.includes('/storage/screenshots/') &&
-        !this.packageService.isGitScreenshotUrl(candidateThumb)
+        upgradedThumb &&
+        upgradedThumb !== 'logo.svg' &&
+        !upgradedThumb.includes('/storage/screenshots/') &&
+        !this.packageService.isGitScreenshotUrl(upgradedThumb)
       ) {
-        return candidateThumb;
+        return upgradedThumb;
       }
     }
     return 'logo.svg';
@@ -2670,8 +2746,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private static readonly savedViewStateByPkg = new Map<string, {
     scrollTop: number;
     isSimilarNearViewport: boolean;
+    isReviewsNearViewport: boolean;
     activeTab: 'reviews' | 'releases' | 'compliance' | 'analytics';
     releasesPage: number;
+    reviewsPage: number;
   }>();
 
   private loadedPackageKey = '';
@@ -2684,8 +2762,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     PackageDetailModalComponent.savedViewStateByPkg.set(this.loadedPackageKey, {
       scrollTop: this.lastKnownScrollTop,
       isSimilarNearViewport: this.isSimilarNearViewport(),
+      isReviewsNearViewport: this.isReviewsNearViewport(),
       activeTab: this.activeTab(),
-      releasesPage: this.releasesPage()
+      releasesPage: this.releasesPage(),
+      reviewsPage: this.reviewsPage()
     });
   }
 
@@ -2741,13 +2821,31 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
     this.setupPassiveScrollListener();
     this.setupSimilarIntersectionObserver();
+    this.setupReviewsIntersectionObserver();
   }
 
   ngOnDestroy(): void {
     this.teardownPassiveScrollListener();
     this.persistCurrentViewState();
     this.disconnectSimilarObserver();
+    this.disconnectReviewsObserver();
     this.packageService.registerModalSubOverlayCloser(null);
+  }
+
+  onSelectReviewsTab(): void {
+    this.activeTab.set('reviews');
+    this.persistCurrentViewState();
+    this.triggerReviewsLoad();
+  }
+
+  prevReviewsPage(): void {
+    this.reviewsPage.update(p => Math.max(1, p - 1));
+    this.persistCurrentViewState();
+  }
+
+  nextReviewsPage(): void {
+    this.reviewsPage.update(p => Math.min(this.totalReviewPages(), p + 1));
+    this.persistCurrentViewState();
   }
 
   prevReleasesPage(): void {
@@ -2849,6 +2947,96 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
   }
 
+  private disconnectReviewsObserver(): void {
+    if (this.reviewsObserver) {
+      this.reviewsObserver.disconnect();
+      this.reviewsObserver = null;
+    }
+  }
+
+  private setupReviewsIntersectionObserver(): void {
+    this.disconnectReviewsObserver();
+    if (this.isReviewsNearViewport()) {
+      this.triggerReviewsLoad();
+      return;
+    }
+
+    const sentinel = this.reviewsSentinelRef?.nativeElement;
+    if (!sentinel) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      this.triggerReviewsLoad();
+      return;
+    }
+
+    const rootEl = this.modalScrollContainerRef?.nativeElement || null;
+    try {
+      const sentinelRect = sentinel.getBoundingClientRect();
+      const rootRect = rootEl ? rootEl.getBoundingClientRect() : null;
+      const isLayoutlessTestEnv = sentinelRect.height === 0 && (!rootRect || rootRect.height === 0);
+      const isAlreadyWithinMargin =
+        rootRect && rootRect.height > 0 && sentinelRect.top <= rootRect.bottom + 280;
+      if (isLayoutlessTestEnv || isAlreadyWithinMargin) {
+        this.triggerReviewsLoad();
+        return;
+      }
+    } catch {
+      // Fall through to IntersectionObserver
+    }
+
+    this.reviewsObserver = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting || e.intersectionRatio > 0)) {
+          this.triggerReviewsLoad();
+        }
+      },
+      {
+        root: rootEl,
+        rootMargin: '280px 0px',
+        threshold: 0.01
+      }
+    );
+    this.reviewsObserver.observe(sentinel);
+  }
+
+  triggerReviewsLoad(): void {
+    if (!this.isReviewsNearViewport()) {
+      this.isReviewsNearViewport.set(true);
+      this.persistCurrentViewState();
+    }
+    this.disconnectReviewsObserver();
+
+    const key = this.loadedPackageKey;
+    if (!key || this.reviewsFetchTriggeredForKey === key) return;
+    this.reviewsFetchTriggeredForKey = key;
+
+    const latestPkg = this.packageService.activePackage() || this.package;
+    if (!latestPkg) return;
+
+    const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
+    if (this.reviews().length === 0) {
+      this.isLoadingReviews.set(true);
+    }
+
+    this.packageService
+      .fetchReviews(latestPkg, false)
+      .then(res => {
+        if (this.loadedPackageKey !== key) return;
+        if (res.length > 0 || this.reviews().length === 0) {
+          this.reviews.set(res);
+        }
+        this.isLoadingReviews.set(false);
+        if (savedState && savedState.scrollTop > 0) {
+          this.restoreSavedScrollPosition(savedState.scrollTop);
+        }
+      })
+      .catch(() => {
+        if (this.loadedPackageKey === key) {
+          this.isLoadingReviews.set(false);
+        }
+      });
+  }
+
   @HostListener('window:keydown', ['$event'])
   handleWindowKeyDown(event: KeyboardEvent): void {
     if (!this.lightboxImageUrl()) return;
@@ -2910,16 +3098,21 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
 
     const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
+    this.reviewsFetchTriggeredForKey = '';
     if (savedState) {
       this.isSimilarNearViewport.set(savedState.isSimilarNearViewport);
+      this.isReviewsNearViewport.set(savedState.isReviewsNearViewport);
       this.activeTab.set(savedState.activeTab);
       this.releasesPage.set(savedState.releasesPage);
+      this.reviewsPage.set(savedState.reviewsPage || 1);
       this.restoreSavedScrollPosition(savedState.scrollTop);
     } else if (isSwitchingPackage) {
       this.lastKnownScrollTop = 0;
       this.isSimilarNearViewport.set(false);
+      this.isReviewsNearViewport.set(false);
       this.activeTab.set('reviews');
       this.releasesPage.set(1);
+      this.reviewsPage.set(1);
       const scrollEl = this.modalScrollContainerRef?.nativeElement;
       if (scrollEl) {
         if (typeof scrollEl.scrollTo === 'function') {
@@ -2928,7 +3121,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
           scrollEl.scrollTop = 0;
         }
       }
-      setTimeout(() => this.setupSimilarIntersectionObserver(), 0);
+      setTimeout(() => {
+        this.setupSimilarIntersectionObserver();
+        this.setupReviewsIntersectionObserver();
+      }, 0);
+    } else {
+      this.reviewsPage.set(1);
     }
 
     // Wait for bundled package details first (which populates reviewsCache & releasesCache in 1 request)
@@ -2948,23 +3146,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.isLoadingReleases.set(false);
     }
 
-    this.packageService
-      .fetchReviews(latestPkg, false)
-      .then(res => {
-        if (this.loadedPackageKey !== key) return;
-        if (res.length > 0 || this.reviews().length === 0 || isSwitchingPackage) {
-          this.reviews.set(res);
-        }
-        this.isLoadingReviews.set(false);
-        if (savedState && savedState.scrollTop > 0) {
-          this.restoreSavedScrollPosition(savedState.scrollTop);
-        }
-      })
-      .catch(() => {
-        if (this.loadedPackageKey === key) {
-          this.isLoadingReviews.set(false);
-        }
-      });
+    if (this.isReviewsNearViewport() || !this.reviewsSentinelRef?.nativeElement) {
+      this.triggerReviewsLoad();
+    } else {
+      this.setupReviewsIntersectionObserver();
+    }
+
     this.packageService
       .fetchPackageReleases(this.package)
       .then(res => {
@@ -3452,6 +3639,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       );
       const updatedList = [newReview, ...existingFiltered];
       this.reviews.set(updatedList);
+      this.reviewsPage.set(1);
+      this.persistCurrentViewState();
       this.packageService.applyReviewAverageToPackage(this.package, updatedList);
       this.reviewTitle = '';
       this.reviewComment = '';
@@ -3508,6 +3697,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (res.success) {
       const updatedList = this.reviews().filter(r => r.id !== rev.id);
       this.reviews.set(updatedList);
+      if (this.reviewsPage() > this.totalReviewPages()) {
+        this.reviewsPage.set(this.totalReviewPages());
+      }
+      this.persistCurrentViewState();
       this.packageService.applyReviewAverageToPackage(this.package, updatedList);
       this.pwaService.showToast(res.message || 'Review removed.');
     } else if (res.message) {

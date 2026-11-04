@@ -5,14 +5,20 @@ import {
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
   parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   computeStarRatingFromData,
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  isContentDbThumbnailUrl,
+  selectSharpPackageBanner,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  readSharedEdgeRatingsMap,
+  mergeSharedEdgeRatingsMap,
+  SharedEdgeRatingEntry
 } from '../lib/upstream';
 
 interface Env {
@@ -38,7 +44,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v5_${encodeURIComponent(
+      ? `/__api_hydrate_v7_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -98,6 +104,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             [gitShotD1, sanitizedRowBanner, sanitizedRowThumb],
             parseJsonArray(row.screenshots).filter((s: string) => !isDeadMirrorScreenshotUrl(s))
           );
+          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
 
           hydratedMap[lowerKey] = {
             id: row.id,
@@ -110,6 +117,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             downloads: totalDl,
             score: rowScore > 0 ? rowScore : undefined,
             review_thread_counts: parsedRowRevCounts,
+            rating_checked: Boolean(parsedRowRevCounts || rowScore > 0 || !isOfficialD1Row) || undefined,
             tags: parsedTags.length > 0 ? parsedTags : undefined,
             dev_state: row.dev_state || undefined,
             file_size: row.file_size || undefined,
@@ -123,16 +131,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               rowScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
               gitShotD1 ||
               sanitizedRowThumb,
-            banner: gitShotD1 || sanitizedRowBanner || rowScreenshots[0] || sanitizedRowThumb,
+            banner: selectSharpPackageBanner(
+              gitShotD1,
+              rowScreenshots,
+              sanitizedRowBanner,
+              sanitizedRowThumb
+            ),
             screenshots: rowScreenshots.length > 0 ? rowScreenshots : undefined
           };
 
-          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
+          const hasSharpRowBanner =
+            Boolean(hydratedMap[lowerKey].banner) && !isContentDbThumbnailUrl(hydratedMap[lowerKey].banner);
           if (
             row.license &&
             (cdbDl > 0 || row.provider !== 'contentdb') &&
             hasRealTags &&
             Boolean(hydratedMap[lowerKey].thumbnail) &&
+            hasSharpRowBanner &&
             (!isOfficialD1Row || Boolean(parsedRowRevCounts))
           ) {
             missingIds.delete(lowerKey);
@@ -248,7 +263,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     if (toFetchUpstream.length > 0) {
       const persistStatements: any[] = [];
       let repoScanBudget = 6; // Cap server-side Git repo scans per batch (6h Edge-cached) to preserve Worker subrequest quota
-      const scoresList = await fetchUpstreamJsonCached<any[]>('/scores/', 1800).catch(() => null);
+      let reviewFetchBudget = 24; // Cap upstream /reviews/ fetches per batch (1h Edge-cached)
+      const [scoresList, sharedEdgeRatings] = await Promise.all([
+        fetchUpstreamJsonCached<any[]>('/scores/', 1800).catch(() => null),
+        readSharedEdgeRatingsMap().catch(() => ({} as Record<string, SharedEdgeRatingEntry>))
+      ]);
       const scoresByKey = new Map<string, any>();
       if (Array.isArray(scoresList)) {
         for (const s of scoresList) {
@@ -265,6 +284,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const existing = hydratedMap[lowerKey] || {};
           const existingD1Row = d1ById.get(lowerKey);
           const scoreEntry = scoresByKey.get(lowerKey);
+          const sharedRating = sharedEdgeRatings[lowerKey];
           const detail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
             3600
@@ -276,15 +296,34 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
           let detailTags = Array.from(new Set([...(existing.tags || []), ...rawUpstreamTags])).filter(Boolean);
-          const detailRevCounts =
+          let detailRevCounts =
             parseNonZeroReviewThreadCounts(detail?.reviews) ||
             parseNonZeroReviewThreadCounts(scoreEntry?.reviews) ||
-            parseNonZeroReviewThreadCounts(existing.review_thread_counts);
-          const resolvedScore = computeStarRatingFromData({
-            ...(detail || {}),
-            review_thread_counts: detailRevCounts,
-            score: existing.score
-          });
+            parseNonZeroReviewThreadCounts(existing.review_thread_counts) ||
+            sharedRating?.review_thread_counts;
+          let cdbRevList: any[] | null = null;
+          let ratingChecked = Boolean(detailRevCounts || sharedRating?.checked || (existing.score >= 1 && existing.score <= 5));
+          const isNativeGitOnly = Boolean(existingD1Row && existingD1Row.provider !== 'contentdb' && !detail);
+          if (!detailRevCounts && !sharedRating?.checked && !isNativeGitOnly && reviewFetchBudget > 0) {
+            reviewFetchBudget--;
+            cdbRevList = await fetchUpstreamJsonCached<any[]>(
+              `/packages/${encodeURIComponent(detail?.author || author)}/${encodeURIComponent(detail?.name || name)}/reviews/`,
+              3600
+            ).catch(() => null);
+            if (Array.isArray(cdbRevList)) {
+              detailRevCounts = deriveReviewThreadCountsFromList(cdbRevList);
+              ratingChecked = true;
+            }
+          }
+          const resolvedScore =
+            computeStarRatingFromData({
+              ...(detail || {}),
+              review_thread_counts: detailRevCounts,
+              reviews_list: cdbRevList,
+              score: existing.score
+            }) ||
+            sharedRating?.score ||
+            0;
           const cdbDl = Math.max(
             Number(existing.contentdb_downloads || 0),
             Number(detail?.downloads || 0),
@@ -359,12 +398,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const resolvedHydrateThumb =
             sanitizePackageImageUrl(nonGitHydrateThumb || primaryGitShot || existing.thumbnail) || null;
           const resolvedHydrateBanner =
-            sanitizePackageImageUrl(
-              primaryGitShot ||
-                mergedHydrateScreenshots[0] ||
-                (typeof detail?.screenshots?.[0]?.url === 'string' ? detail.screenshots[0].url : detail?.screenshots?.[0]) ||
-                existing.banner ||
-                resolvedHydrateThumb
+            selectSharpPackageBanner(
+              primaryGitShot,
+              mergedHydrateScreenshots,
+              typeof detail?.screenshots?.[0]?.url === 'string'
+                ? detail.screenshots[0].url
+                : detail?.screenshots?.[0],
+              existing.banner,
+              resolvedHydrateThumb
             ) || null;
           hydratedMap[lowerKey] = {
             id: canonicalId,
@@ -376,6 +417,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             downloads: totalDl,
             score: resolvedScore > 0 ? resolvedScore : undefined,
             review_thread_counts: detailRevCounts,
+            rating_checked: ratingChecked || undefined,
             tags: detailTags.length > 0 ? detailTags : undefined,
             dev_state: devState || undefined,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
@@ -410,6 +452,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 : null;
             const newBanner =
               (!sanitizePackageImageUrl(existingD1Row.banner_url) ||
+                (isContentDbThumbnailUrl(existingD1Row.banner_url) && !isContentDbThumbnailUrl(resolvedHydrateBanner)) ||
                 (!isGitRepositoryAssetUrl(existingD1Row.banner_url) && Boolean(primaryGitShot))) &&
               resolvedHydrateBanner
                 ? resolvedHydrateBanner
@@ -423,7 +466,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                         ELSE thumbnail_url
                       END,
                       banner_url = CASE
-                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' OR banner_url LIKE '%/thumbnails/%' THEN COALESCE(?, banner_url)
                         ELSE COALESCE(?, banner_url)
                       END,
                       screenshots = CASE
@@ -479,8 +522,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     }
   }
 
-  if (hydrateCacheKey && Object.keys(hydratedMap).length > 0) {
-    await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 3600);
+  if (Object.keys(hydratedMap).length > 0) {
+    const edgeRatingUpdates: Record<string, SharedEdgeRatingEntry> = {};
+    for (const [pkgId, meta] of Object.entries(hydratedMap)) {
+      if ((typeof meta?.score === 'number' && meta.score > 0) || meta?.review_thread_counts || meta?.rating_checked) {
+        edgeRatingUpdates[pkgId.toLowerCase()] = {
+          score: typeof meta.score === 'number' ? meta.score : 0,
+          ...(meta.review_thread_counts ? { review_thread_counts: meta.review_thread_counts } : {}),
+          checked: Boolean(meta.rating_checked || meta.score > 0 || meta.review_thread_counts)
+        };
+      }
+    }
+    if (Object.keys(edgeRatingUpdates).length > 0) {
+      await mergeSharedEdgeRatingsMap(edgeRatingUpdates).catch(() => {});
+    }
+    if (hydrateCacheKey) {
+      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 3600);
+    }
   }
 
   return Response.json({

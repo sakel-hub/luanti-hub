@@ -14,6 +14,7 @@ import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { LuantiPackage } from '../../core/models/package.model';
+import { selectSharpPackageBanner } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -295,7 +296,15 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
   ];
 
   getHighResImage(pkg: LuantiPackage): string {
-    return pkg.banner || pkg.thumbnail || 'logo.svg';
+    const preferredGit = this.packageService.isGitScreenshotUrl(pkg.banner)
+      ? pkg.banner
+      : (this.packageService.isGitScreenshotUrl(pkg.thumbnail) ? pkg.thumbnail : undefined);
+    return (
+      selectSharpPackageBanner(preferredGit, pkg.screenshots, pkg.banner, pkg.thumbnail) ||
+      pkg.banner ||
+      pkg.thumbnail ||
+      'logo.svg'
+    );
   }
 
   private readonly resizeHandler = () => this.updateScrollState();

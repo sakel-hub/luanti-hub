@@ -16,10 +16,20 @@ import {
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
   parseNonZeroReviewThreadCounts,
+  deriveReviewThreadCountsFromList,
   computeStarRatingFromData,
+  buildReverseDependencyCountMap,
+  computeDependencyPrioritizationMultiplier,
+  isPrimarilyDependencyPackage,
+  readSharedEdgeRatingsMap,
+  mergeSharedEdgeRatingsMap,
+  SharedEdgeRatingEntry,
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl,
+  selectSharpPackageBanner,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
   isPackageDeprecated,
@@ -326,6 +336,7 @@ interface PackageVelocityMetrics {
   todayViews: number;
   weekViews: number;
   conversionRate: number;
+  dependencyRatio: number;
 }
 
 function buildTop10FromCatalog(
@@ -357,9 +368,16 @@ function buildTop10FromCatalog(
 
   const top10: any[] = [];
   const deferredSameAuthor: any[] = [];
+  const deferredDependencyOnly: any[] = [];
   const nowMs = Date.now();
 
-  const scoredTelemetry: Array<{ lowerId: string; item: any; periodDl: number; compositeScore: number }> = [];
+  const scoredTelemetry: Array<{
+    lowerId: string;
+    item: any;
+    periodDl: number;
+    compositeScore: number;
+    isPureDep: boolean;
+  }> = [];
   for (const [lowerId, m] of telemetryMap.entries()) {
     const match = catalogByLowerId.get(lowerId);
     if (!match) continue;
@@ -367,6 +385,17 @@ function buildTop10FromCatalog(
     const periodIntentDl = timeframe === 'today' ? m.todayIntentDl : m.weekIntentDl;
     const periodViews = timeframe === 'today' ? m.todayViews : m.weekViews;
     if (periodDl <= 0 && periodViews <= 0) continue;
+
+    const depMultiplier = computeDependencyPrioritizationMultiplier(
+      match,
+      m.dependencyRatio,
+      match.reverse_dep_count
+    );
+    const isPureDep = isPrimarilyDependencyPackage(
+      match,
+      m.dependencyRatio,
+      match.reverse_dep_count
+    );
 
     const favs = favoritesMap.get(lowerId) || Number(match.favorites_count || 0);
     const starMultiplier = match.score >= 1 ? 0.85 + (Number(match.score) / 5) * 0.35 : 1.0;
@@ -383,10 +412,11 @@ function buildTop10FromCatalog(
         periodViews * 0.18 +
         Math.min(6, favs * 0.6) +
         freshnessBonus) *
-      starMultiplier;
+      starMultiplier *
+      depMultiplier;
 
     if (compositeScore > 0) {
-      scoredTelemetry.push({ lowerId, item: match, periodDl, compositeScore });
+      scoredTelemetry.push({ lowerId, item: match, periodDl, compositeScore, isPureDep });
     }
   }
 
@@ -398,6 +428,10 @@ function buildTop10FromCatalog(
       ...entry.item,
       downloads: Math.max(Number(entry.item.downloads || 0), entry.periodDl)
     };
+    if (entry.isPureDep) {
+      deferredDependencyOnly.push(enrichedItem);
+      continue;
+    }
     if (!canTakeAuthor(enrichedItem.author, 2)) {
       deferredSameAuthor.push(enrichedItem);
       continue;
@@ -412,33 +446,47 @@ function buildTop10FromCatalog(
       const favB = favoritesMap.get(String(b.id || '').toLowerCase()) || 0;
       const convA = Number(a.conversion_rate || 0);
       const convB = Number(b.conversion_rate || 0);
+      const depMultA = computeDependencyPrioritizationMultiplier(
+        a,
+        a.dependency_ratio,
+        a.reverse_dep_count
+      );
+      const depMultB = computeDependencyPrioritizationMultiplier(
+        b,
+        b.dependency_ratio,
+        b.reverse_dep_count
+      );
       if (timeframe === 'today') {
         const updA = Date.parse(String(a.updated_at || '')) || 0;
         const updB = Date.parse(String(b.updated_at || '')) || 0;
         const recencyA = updA > 0 && nowMs - updA <= 30 * 86400000 ? 180 : 0;
         const recencyB = updB > 0 && nowMs - updB <= 30 * 86400000 ? 180 : 0;
         const scoreA =
-          (Number(a.contentdb_score ?? a.score) || 0) * 10 +
-          Math.log10((Number(a.downloads) || 1) + 1) * 50 +
-          convA * 120 +
-          favA * 25 +
-          recencyA;
+          ((Number(a.contentdb_score ?? a.score) || 0) * 10 +
+            Math.log10((Number(a.downloads) || 1) + 1) * 50 +
+            convA * 120 +
+            favA * 25 +
+            recencyA) *
+          depMultA;
         const scoreB =
-          (Number(b.contentdb_score ?? b.score) || 0) * 10 +
-          Math.log10((Number(b.downloads) || 1) + 1) * 50 +
-          convB * 120 +
-          favB * 25 +
-          recencyB;
+          ((Number(b.contentdb_score ?? b.score) || 0) * 10 +
+            Math.log10((Number(b.downloads) || 1) + 1) * 50 +
+            convB * 120 +
+            favB * 25 +
+            recencyB) *
+          depMultB;
         return scoreB - scoreA;
       }
       const scoreA =
-        (Number(a.downloads) || 0) * (1 + convA * 0.25) +
-        (Number(a.contentdb_score) || 0) * 3 +
-        favA * 150;
+        ((Number(a.downloads) || 0) * (1 + convA * 0.25) +
+          (Number(a.contentdb_score) || 0) * 3 +
+          favA * 150) *
+        depMultA;
       const scoreB =
-        (Number(b.downloads) || 0) * (1 + convB * 0.25) +
-        (Number(b.contentdb_score) || 0) * 3 +
-        favB * 150;
+        ((Number(b.downloads) || 0) * (1 + convB * 0.25) +
+          (Number(b.contentdb_score) || 0) * 3 +
+          favB * 150) *
+        depMultB;
       return scoreB - scoreA;
     });
 
@@ -446,6 +494,10 @@ function buildTop10FromCatalog(
       if (top10.length >= 10) break;
       const lowerId = String(item.id || `${item.author}/${item.name}`).toLowerCase();
       if (top10.some(p => String(p.id).toLowerCase() === lowerId)) continue;
+      if (isPrimarilyDependencyPackage(item, item.dependency_ratio, item.reverse_dep_count)) {
+        deferredDependencyOnly.push(item);
+        continue;
+      }
       if (!canTakeAuthor(item.author, 2)) {
         deferredSameAuthor.push(item);
         continue;
@@ -455,7 +507,7 @@ function buildTop10FromCatalog(
     }
   }
 
-  for (const fallback of deferredSameAuthor) {
+  for (const fallback of [...deferredSameAuthor, ...deferredDependencyOnly]) {
     if (top10.length >= 10) break;
     const lowerId = String(fallback.id || `${fallback.author}/${fallback.name}`).toLowerCase();
     if (!top10.some(p => String(p.id).toLowerCase() === lowerId)) {
@@ -659,11 +711,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v15';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v7_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v8_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -676,26 +728,58 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       let edgeBody = cachedCatalog;
       if (isBootBundle) {
         const nowMs = Date.now();
-        const cachedActivePromos = await readEdgeCacheJson<any[]>('/__active_promotions_v1');
+        const [cachedActivePromos, sharedRatings] = await Promise.all([
+          readEdgeCacheJson<any[]>('/__active_promotions_v1'),
+          readSharedEdgeRatingsMap()
+        ]);
         const rawPromos =
           Array.isArray(cachedActivePromos)
             ? cachedActivePromos
             : Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0
               ? cachedCatalog.promotions
               : getLastKnownActivePromotions(nowMs);
+        let overlaidPackages = Array.isArray(cachedCatalog.packages) ? cachedCatalog.packages : [];
         if (Array.isArray(rawPromos)) {
           const validEdgePromos = rawPromos
             .filter((r: any) => isValidActivePromotionRow(r, nowMs))
             .map((r: any) => normalizePromotionRow(r));
           const promoDelta = await syncActivePromotionRowPackages(validEdgePromos, env.DB, false);
-          const overlaidPackages =
-            promoDelta && Array.isArray(cachedCatalog.packages)
-              ? overlayPromotionRowDeltaOnCatalog(cachedCatalog.packages, promoDelta)
-              : cachedCatalog.packages;
+          if (promoDelta && overlaidPackages.length > 0) {
+            overlaidPackages = overlayPromotionRowDeltaOnCatalog(overlaidPackages, promoDelta);
+          }
           edgeBody = {
             ...cachedCatalog,
             packages: overlaidPackages,
             promotions: validEdgePromos
+          };
+        }
+        if (sharedRatings && Object.keys(sharedRatings).length > 0 && Array.isArray(edgeBody.packages)) {
+          const applySharedRating = (pkg: any) => {
+            if (!pkg?.id) return pkg;
+            const entry = sharedRatings[String(pkg.id).toLowerCase()];
+            if (!entry) return pkg;
+            const nextScore = entry.score > 0 && !(pkg.score > 0) ? entry.score : pkg.score;
+            const nextCounts = entry.review_thread_counts && !pkg.review_thread_counts
+              ? entry.review_thread_counts
+              : pkg.review_thread_counts;
+            if (nextScore !== pkg.score || nextCounts !== pkg.review_thread_counts) {
+              return {
+                ...pkg,
+                score: nextScore,
+                ...(nextCounts ? { review_thread_counts: nextCounts, rating_checked: true } : {})
+              };
+            }
+            return pkg;
+          };
+          edgeBody = {
+            ...edgeBody,
+            packages: edgeBody.packages.map(applySharedRating),
+            ...(Array.isArray(edgeBody.top10Today)
+              ? { top10Today: edgeBody.top10Today.map(applySharedRating) }
+              : {}),
+            ...(Array.isArray(edgeBody.top10Week)
+              ? { top10Week: edgeBody.top10Week.map(applySharedRating) }
+              : {})
           };
         }
       }
@@ -852,19 +936,21 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         SELECT
           LOWER(package_id) as pkg_id,
           SUM(CASE WHEN download_date = DATE('now') THEN downloads_count ELSE 0 END) as today_dl,
-          SUM(downloads_count) as week_dl,
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN downloads_count ELSE 0 END) as week_dl,
           SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_new, 0) ELSE 0 END) as today_new,
           SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_web, 0) ELSE 0 END) as today_web,
           SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_update, 0) ELSE 0 END) as today_upd,
           SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(reason_dependency, 0) ELSE 0 END) as today_dep,
-          SUM(COALESCE(reason_new, 0)) as week_new,
-          SUM(COALESCE(reason_web, 0)) as week_web,
-          SUM(COALESCE(reason_update, 0)) as week_upd,
-          SUM(COALESCE(reason_dependency, 0)) as week_dep,
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN COALESCE(reason_new, 0) ELSE 0 END) as week_new,
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN COALESCE(reason_web, 0) ELSE 0 END) as week_web,
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN COALESCE(reason_update, 0) ELSE 0 END) as week_upd,
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN COALESCE(reason_dependency, 0) ELSE 0 END) as week_dep,
+          SUM(COALESCE(reason_new, 0) + COALESCE(reason_web, 0) + COALESCE(reason_update, 0) + COALESCE(reason_dependency, 0)) as month_reason_total,
+          SUM(COALESCE(reason_dependency, 0)) as month_dep,
           SUM(CASE WHEN download_date = DATE('now') THEN COALESCE(views_luanti, 0) + COALESCE(views_web, 0) ELSE 0 END) as today_views,
-          SUM(COALESCE(views_luanti, 0) + COALESCE(views_web, 0)) as week_views
+          SUM(CASE WHEN download_date >= DATE('now', '-7 days') THEN COALESCE(views_luanti, 0) + COALESCE(views_web, 0) ELSE 0 END) as week_views
         FROM package_daily_downloads
-        WHERE download_date >= DATE('now', '-7 days')
+        WHERE download_date >= DATE('now', '-30 days')
         GROUP BY LOWER(package_id)
       `).all()
         .then((res: any) => {
@@ -884,20 +970,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               (Number(row.week_web) || 0) +
               (Number(row.week_upd) || 0) +
               (Number(row.week_dep) || 0);
+            const monthReasonTotal = Number(row.month_reason_total) || weekReasonSum || todayReasonSum || 0;
+            const monthDep = Number(row.month_dep) || Number(row.week_dep) || Number(row.today_dep) || 0;
+            const dependencyRatio =
+              monthReasonTotal > 0 ? Number(Math.min(1, Math.max(0, monthDep / monthReasonTotal)).toFixed(3)) : 0;
+            const depWeight = dependencyRatio >= 0.65 ? 0 : 0.02;
             const todayIntentDl =
               todayReasonSum > 0
                 ? (Number(row.today_new) || 0) * 1.0 +
                   (Number(row.today_web) || 0) * 1.0 +
                   (Number(row.today_upd) || 0) * 0.6 +
-                  (Number(row.today_dep) || 0) * 0.2
-                : todayDl;
+                  (Number(row.today_dep) || 0) * depWeight
+                : todayDl * (1 - dependencyRatio * 0.85);
             const weekIntentDl =
               weekReasonSum > 0
                 ? (Number(row.week_new) || 0) * 1.0 +
                   (Number(row.week_web) || 0) * 1.0 +
                   (Number(row.week_upd) || 0) * 0.6 +
-                  (Number(row.week_dep) || 0) * 0.2
-                : weekDl;
+                  (Number(row.week_dep) || 0) * depWeight
+                : weekDl * (1 - dependencyRatio * 0.85);
             const todayViews = Number(row.today_views) || 0;
             const weekViews = Number(row.week_views) || 0;
             const conversionRate = Number(
@@ -910,7 +1001,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               weekIntentDl,
               todayViews,
               weekViews,
-              conversionRate
+              conversionRate,
+              dependencyRatio
             });
           }
           return map;
@@ -1154,10 +1246,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       '';
     const rawThumbCandidate = nonGitThumbCandidate || gitShotD1 || sanitizedD1Banner || '';
     const resolvedThumb = sanitizePackageImageUrl(rawThumbCandidate) || null;
-    const rawBannerCandidate = gitShotD1
-      ? gitShotD1
-      : (sanitizedD1Banner || mergedCatalogScreenshots[0] || sanitizedUpstreamThumb || resolvedThumb || '');
-    const resolvedBanner = sanitizePackageImageUrl(rawBannerCandidate) || '';
+    const resolvedBanner =
+      selectSharpPackageBanner(
+        gitShotD1,
+        mergedCatalogScreenshots,
+        sanitizedD1Banner,
+        sanitizedUpstreamThumb,
+        resolvedThumb
+      ) || '';
 
     const cdbDownloads = Math.max(
       typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
@@ -1233,12 +1329,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       weekly_downloads: velocity.get(canonicalKey)?.weekDl ?? velocity.get(d1Key)?.weekDl,
       weekly_views: velocity.get(canonicalKey)?.weekViews ?? velocity.get(d1Key)?.weekViews,
       conversion_rate: velocity.get(canonicalKey)?.conversionRate ?? velocity.get(d1Key)?.conversionRate,
+      dependency_ratio:
+        (velocity.get(canonicalKey)?.dependencyRatio ?? velocity.get(d1Key)?.dependencyRatio) || undefined,
+      rating_checked: Boolean(effectiveReviewThreadCounts || d1StarAvg > 0),
       favorites_count: favoritesMap.get(canonicalKey) ?? favoritesMap.get(d1Key),
       url: `/api/packages/${canonicalAuthor}/${canonicalName}/`,
       source: isGitSource ? 'git' : 'official',
       sources
     });
   }
+
+  const sharedEdgeRatings = await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, SharedEdgeRatingEntry>));
 
   // 5. Append Upstream ContentDB packages (excluding duplicates and D1 Kill-Switch delisted items)
   for (const item of upstreamList) {
@@ -1248,14 +1349,36 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     seenKeys.add(key);
 
     const d1StarAvg = d1Ratings.get(key);
+    const sharedRating = sharedEdgeRatings[key];
+    const upstreamRevCounts =
+      parseNonZeroReviewThreadCounts(item.reviews) ||
+      parseNonZeroReviewThreadCounts(item.review_thread_counts) ||
+      sharedRating?.review_thread_counts;
     const cdbDl = Number(item.downloads || 0);
     const vel = velocity.get(key);
     const lhDl = lhDownloadsMap.get(key) || vel?.weekDl || 0;
     const favCnt = favoritesMap.get(key);
+    const computedScore = computeCatalogStarRating(
+      { ...item, review_thread_counts: upstreamRevCounts },
+      d1StarAvg
+    );
+    const resolvedScore = computedScore > 0 ? computedScore : (sharedRating?.score || 0);
+    const sanitizedItemThumb = sanitizePackageImageUrl(item.thumbnail || item.thumbnail_url);
+    const resolvedUpstreamBanner =
+      selectSharpPackageBanner(
+        undefined,
+        item.screenshots,
+        item.banner,
+        item.banner_url,
+        sanitizedItemThumb
+      ) || sanitizedItemThumb;
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
-      score: computeCatalogStarRating(item, d1StarAvg),
+      ...(sanitizedItemThumb ? { thumbnail: sanitizedItemThumb } : {}),
+      ...(resolvedUpstreamBanner ? { banner: resolvedUpstreamBanner } : {}),
+      ...(upstreamRevCounts ? { review_thread_counts: upstreamRevCounts, rating_checked: true } : {}),
+      score: resolvedScore,
       contentdb_score: Number(item.score || 0),
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
@@ -1264,6 +1387,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       weekly_downloads: vel?.weekDl,
       weekly_views: vel?.weekViews,
       conversion_rate: vel?.conversionRate,
+      dependency_ratio: vel?.dependencyRatio || undefined,
       favorites_count: favCnt,
       min_minetest_version: item.min_minetest_version || '5.0.0',
       provider: 'contentdb',
@@ -1272,9 +1396,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     });
   }
 
+  // Compute reverse-dependency counts across the catalog for dependency-aware Home/Top 10 prioritization
+  const reverseDepCountMap = buildReverseDependencyCountMap(merged);
+  for (const pkg of merged) {
+    const revCnt = reverseDepCountMap.get(String(pkg.name || '').trim().toLowerCase()) || 0;
+    if (revCnt > 0) {
+      pkg.reverse_dep_count = revCnt;
+    }
+    const lowerKey = String(pkg.id || '').toLowerCase();
+    const sharedEntry = sharedEdgeRatings[lowerKey];
+    if (sharedEntry) {
+      if (!(pkg.score > 0) && sharedEntry.score > 0) {
+        pkg.score = sharedEntry.score;
+      }
+      if (!pkg.review_thread_counts && sharedEntry.review_thread_counts) {
+        pkg.review_thread_counts = sharedEntry.review_thread_counts;
+        pkg.rating_checked = true;
+      }
+    }
+  }
+
   // Promote Top 10 trending packages as featured for in-game Luanti Content tab (renders gold star badge in dlg_contentdb.lua:355)
-  const top10Week = buildTop10FromCatalog(merged, velocity, favoritesMap, 'week');
-  const top10Today = buildTop10FromCatalog(merged, velocity, favoritesMap, 'today');
+  let top10Week = buildTop10FromCatalog(merged, velocity, favoritesMap, 'week');
+  let top10Today = buildTop10FromCatalog(merged, velocity, favoritesMap, 'today');
   const featuredIds = new Set<string>(
     [...top10Today.slice(0, 5), ...top10Week.slice(0, 10)].map(p => String(p.id || '').toLowerCase())
   );
@@ -1311,6 +1455,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         const needsGitScreenshotScan =
           Boolean(it?.sources?.includes('git')) &&
           (!it?.banner || it?.banner === 'logo.svg' || !isGitRepositoryAssetUrl(it?.banner));
+        const needsOfficialFullResBanner =
+          Boolean(it?.sources?.includes('official')) &&
+          (!it?.banner || it?.banner === 'logo.svg' || isContentDbThumbnailUrl(it?.banner));
         if (
           it &&
           it.author &&
@@ -1318,14 +1465,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           (!it.license ||
             (it.sources?.includes('official') &&
               (!(Number(it.contentdb_downloads || 0) > 0) || !it.review_thread_counts)) ||
-            needsGitScreenshotScan) &&
+            needsGitScreenshotScan ||
+            needsOfficialFullResBanner) &&
           !carouselPool.some(x => x.id === it.id)
         ) {
           carouselPool.push(it);
         }
       }
     };
-    const byDownloadsDesc = [...merged].sort((a, b) => (Number(b.downloads) || 0) - (Number(a.downloads) || 0));
+    const byDownloadsDesc = [...merged].sort(
+      (a, b) =>
+        (Number(b.downloads) || 0) * computeDependencyPrioritizationMultiplier(b) -
+        (Number(a.downloads) || 0) * computeDependencyPrioritizationMultiplier(a)
+    );
     if (promoDelta && Object.keys(promoDelta.tagMap || {}).length > 0) {
       const promoPkgKeys = new Set(Object.keys(promoDelta.tagMap));
       pushPool(merged.filter(p => promoPkgKeys.has(String(p.id || '').toLowerCase())).slice(0, 8));
@@ -1337,12 +1489,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 12));
     pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 12));
 
-    const batchToHydrate = carouselPool.slice(0, 12);
+    const batchToHydrate = carouselPool.slice(0, 16);
     if (batchToHydrate.length > 0) {
       let bootRepoScanBudget = 6;
+      let bootReviewFetchBudget = 12;
       const bootHydrateStmts: any[] = [];
+      const newEdgeRatings: Record<string, SharedEdgeRatingEntry> = {};
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
+          const lowerPkgKey = String(pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
           const detail = await fetchUpstreamJsonCached<any>(
             `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`,
             3600
@@ -1363,9 +1518,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
           }
-          const parsedDetailRevCounts = parseNonZeroReviewThreadCounts(detail?.reviews);
+          let parsedDetailRevCounts =
+            parseNonZeroReviewThreadCounts(detail?.reviews) ||
+            parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
+          let cdbRevList: any[] | null = null;
+          if (
+            !parsedDetailRevCounts &&
+            pkg.sources?.includes('official') &&
+            !sharedEdgeRatings[lowerPkgKey]?.checked &&
+            bootReviewFetchBudget > 0
+          ) {
+            bootReviewFetchBudget--;
+            cdbRevList = await fetchUpstreamJsonCached<any[]>(
+              `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews/`,
+              3600
+            ).catch(() => null);
+            if (Array.isArray(cdbRevList)) {
+              parsedDetailRevCounts = deriveReviewThreadCountsFromList(cdbRevList);
+              pkg.rating_checked = true;
+            }
+          }
           if (parsedDetailRevCounts) {
             pkg.review_thread_counts = parsedDetailRevCounts;
+            pkg.rating_checked = true;
           }
           const detailThumbSanitized = sanitizePackageImageUrl(detail?.thumbnail);
           if (detailThumbSanitized && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.thumbnail))) {
@@ -1379,18 +1554,45 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             );
             if (mergedDetailShots.length > 0) {
               pkg.screenshots = mergedDetailShots;
-              if (!pkg.banner || pkg.banner === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.banner)) {
-                pkg.banner = mergedDetailShots[0];
-              }
+              const preferredGitExisting = isGitRepositoryAssetUrl(pkg.banner) ? pkg.banner : undefined;
+              pkg.banner =
+                selectSharpPackageBanner(
+                  preferredGitExisting,
+                  mergedDetailShots,
+                  pkg.banner,
+                  detailThumbSanitized,
+                  pkg.thumbnail
+                ) || mergedDetailShots[0];
             }
+          } else {
+            const preferredGitExisting = isGitRepositoryAssetUrl(pkg.banner) ? pkg.banner : undefined;
+            pkg.banner =
+              selectSharpPackageBanner(
+                preferredGitExisting,
+                pkg.screenshots,
+                pkg.banner,
+                detailThumbSanitized,
+                pkg.thumbnail
+              ) || pkg.banner;
           }
-          const lowerPkgKey = String(pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
           const hydratedScore = computeCatalogStarRating(
-            { ...detail, review_thread_counts: pkg.review_thread_counts, score: pkg.score },
+            {
+              ...detail,
+              review_thread_counts: pkg.review_thread_counts,
+              reviews_list: cdbRevList,
+              score: pkg.score
+            },
             d1Ratings.get(lowerPkgKey)
           );
           if (hydratedScore > 0) {
             pkg.score = hydratedScore;
+          }
+          if (pkg.score > 0 || pkg.review_thread_counts || pkg.rating_checked) {
+            newEdgeRatings[lowerPkgKey] = {
+              score: pkg.score || 0,
+              ...(pkg.review_thread_counts ? { review_thread_counts: pkg.review_thread_counts } : {}),
+              checked: true
+            };
           }
           if (typeof detail?.downloads === 'number' && detail.downloads > 0) {
             pkg.contentdb_downloads = Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads);
@@ -1467,6 +1669,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 : null;
             const newShot =
               (!sanitizePackageImageUrl(existingD1.banner_url) ||
+                (isContentDbThumbnailUrl(existingD1.banner_url) && !isContentDbThumbnailUrl(pkg.banner)) ||
                 (!isGitRepositoryAssetUrl(existingD1.banner_url) && isGitRepositoryAssetUrl(pkg.banner))) &&
               sanitizePackageImageUrl(pkg.banner)
                 ? sanitizePackageImageUrl(pkg.banner)!
@@ -1480,8 +1683,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                         ELSE thumbnail_url
                       END,
                       banner_url = CASE
-                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' OR banner_url LIKE '%/thumbnails/%' THEN COALESCE(?, banner_url)
                         ELSE COALESCE(?, banner_url)
+                      END,
+                      screenshots = CASE
+                        WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
+                        ELSE COALESCE(screenshots, ?)
                       END,
                       license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
                       video_url = COALESCE(video_url, ?),
@@ -1496,6 +1703,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                   sanitizePackageImageUrl(pkg.thumbnail) || newShot,
                   newShot,
                   newShot,
+                  Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
+                  Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
                   newLic,
                   newVid,
                   pkg.video_thumbnail_url || null,
@@ -1509,6 +1718,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           }
         })
       );
+      if (Object.keys(newEdgeRatings).length > 0) {
+        await mergeSharedEdgeRatingsMap(newEdgeRatings).catch(() => {});
+      }
       if (env.DB && bootHydrateStmts.length > 0) {
         if (typeof env.DB.batch === 'function') {
           await env.DB.batch(bootHydrateStmts).catch(() => {});
@@ -1518,6 +1730,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           }
         }
       }
+
+      // Sync pre-hydrated fields (sharp banner, screenshots, license, score, review_thread_counts) into top10Today & top10Week
+      const mergedByLowerId = new Map<string, any>();
+      for (const p of merged) {
+        if (p?.id) mergedByLowerId.set(String(p.id).toLowerCase(), p);
+      }
+      const syncPreHydratedToTop10 = (list: any[]) =>
+        list.map(item => {
+          const updated = item?.id ? mergedByLowerId.get(String(item.id).toLowerCase()) : undefined;
+          return updated ? { ...item, ...updated } : item;
+        });
+      top10Today = syncPreHydratedToTop10(top10Today);
+      top10Week = syncPreHydratedToTop10(top10Week);
     }
 
     responsePayload = {

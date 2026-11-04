@@ -7936,4 +7936,244 @@ supported_games = minetest_game, voxelibre
       globalThis.fetch = origFetch;
     }
   });
+
+  it('should deprioritize pure dependency/API packages from Top 10 & Hero rows, hydrate tile star ratings across multi-tier cache, and paginate/lazy-load community reviews', async () => {
+    const {
+      buildReverseDependencyCountMap,
+      isApiOrLibraryPackage,
+      computeDependencyPrioritizationMultiplier,
+      isPrimarilyDependencyPackage
+    } = await import('./core/config/package-utils.config');
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. Verify dependency & API detection and prioritization multiplier
+    const mobsApiPkg = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs',
+      author: 'TenPlus1',
+      name: 'mobs',
+      title: 'Mobs Redo API',
+      short_desc: 'Simple and feature rich API to quickly add mobs into your world.',
+      desc: 'You need to install some other mods! This mod contains a simple and feature rich API to add mobs.',
+      type: 'mod',
+      tags: ['mobs', 'library'],
+      downloads: 521400,
+      downloads_today: 420,
+      downloads_week: 2800,
+      dependency_ratio: 0.94,
+      score: 4.8
+    });
+
+    const dependentMods = Array.from({ length: 12 }, (_, i) =>
+      (pkgService as any).normalizePackage({
+        id: `Author${i}/mob_pack_${i}`,
+        author: `Author${i}`,
+        name: `mob_pack_${i}`,
+        title: `Mob Pack ${i + 1}`,
+        short_desc: `Adds exciting dragons and monsters #${i + 1} to your world.`,
+        type: 'mod',
+        tags: ['mobs', 'survival', 'adventure_rpg'],
+        dependencies: ['default', 'mobs'],
+        downloads: 45000 - i * 1000,
+        downloads_today: 85 - i * 3,
+        downloads_week: 550 - i * 15,
+        dependency_ratio: 0.05,
+        score: 4.7
+      })
+    );
+
+    const catalogList = [mobsApiPkg, ...dependentMods];
+    const revDepMap = buildReverseDependencyCountMap(catalogList);
+    expect(revDepMap.get('mobs')).toBe(12);
+
+    mobsApiPkg.reverse_dep_count = revDepMap.get('mobs');
+    expect(isApiOrLibraryPackage(mobsApiPkg)).toBe(true);
+    expect(isPrimarilyDependencyPackage(mobsApiPkg)).toBe(true);
+    expect(computeDependencyPrioritizationMultiplier(mobsApiPkg)).toBeLessThanOrEqual(0.2);
+
+    expect(isApiOrLibraryPackage(dependentMods[0])).toBe(false);
+    expect(isPrimarilyDependencyPackage(dependentMods[0])).toBe(false);
+    expect(computeDependencyPrioritizationMultiplier(dependentMods[0])).toBe(1.0);
+
+    // Seed catalog and verify Top 10, Hero Showcase, and % Match exclude/dampen Mobs Redo API
+    (pkgService as any)._packages.set(catalogList);
+    (pkgService as any)._serverTop10Today.set([mobsApiPkg, ...dependentMods.slice(0, 9)]);
+    (pkgService as any)._serverTop10Week.set([mobsApiPkg, ...dependentMods.slice(0, 9)]);
+
+    const top10Today = pkgService.top10TodayPackages();
+    expect(top10Today.length).toBe(10);
+    expect(top10Today.some(p => p.id === 'TenPlus1/mobs')).toBe(false);
+    expect(pkgService.getTop10Rank(mobsApiPkg)).toBeNull();
+
+    const heroList = pkgService.heroShowcasePackages();
+    expect(heroList.some(p => p.id === 'TenPlus1/mobs')).toBe(false);
+
+    const mobsMatchScore = pkgService.getMatchScore(mobsApiPkg);
+    const gameplayModMatchScore = pkgService.getMatchScore(dependentMods[0]);
+    expect(mobsMatchScore).toBeLessThanOrEqual(79);
+    expect(gameplayModMatchScore).toBeGreaterThan(mobsMatchScore);
+
+    // 2. Verify multi-tier tile star rating hydration (needsTileHydration does NOT require contentdb_score > 0)
+    const unratedCdbTile = (pkgService as any).normalizePackage({
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      thumbnail: 'https://content.luanti.org/thumbnails/1/draconis.png',
+      downloads: 164000,
+      score: 0,
+      contentdb_score: 0
+    });
+    expect((pkgService as any).needsTileHydration(unratedCdbTile)).toBe(true);
+
+    const checkedZeroReviewTile = (pkgService as any).normalizePackage({
+      id: 'SomeAuthor/no_reviews_mod',
+      author: 'SomeAuthor',
+      name: 'no_reviews_mod',
+      title: 'No Reviews Mod',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      thumbnail: 'https://content.luanti.org/thumbnails/1/no_reviews.png',
+      downloads: 1200,
+      score: 0,
+      rating_checked: true
+    });
+    expect((pkgService as any).needsTileHydration(checkedZeroReviewTile)).toBe(false);
+
+    // 3. Verify Community Reviews pagination (5 per page) and lazy-loading in PackageDetailModalComponent
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    const pkgWith12Reviews = (pkgService as any).normalizePackage({
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      source: 'official',
+      review_thread_counts: { positive: 10, neutral: 1, negative: 1 },
+      score: 4.6
+    });
+    modalComp.package = pkgWith12Reviews;
+
+    const twelveReviews = Array.from({ length: 12 }, (_, idx) => ({
+      id: `rev_${idx + 1}`,
+      package_id: 'ElCeejo/draconis',
+      source: (idx % 2 === 0 ? 'contentdb' : 'luantihub') as 'contentdb' | 'luantihub',
+      rating: 5,
+      is_positive: true,
+      title: `Review Title #${idx + 1}`,
+      comment: `Detailed community review comment number ${idx + 1}`,
+      created_at: `2026-10-${String(28 - idx).padStart(2, '0')}T10:00:00Z`,
+      author: {
+        username: `reviewer_${idx + 1}`,
+        display_name: `Reviewer ${idx + 1}`,
+        avatar_url: 'logo.svg'
+      }
+    }));
+
+    modalComp.reviews.set(twelveReviews);
+    modalComp.isLoadingReviews.set(false);
+    modalFixture.detectChanges();
+
+    expect(modalComp.REVIEWS_PAGE_SIZE).toBe(5);
+    expect(modalComp.totalReviewCount()).toBe(12);
+    expect(modalComp.totalReviewPages()).toBe(3);
+    expect(modalComp.reviewsPage()).toBe(1);
+    expect(modalComp.reviewsRangeStart()).toBe(1);
+    expect(modalComp.reviewsRangeEnd()).toBe(5);
+    expect(modalComp.paginatedReviews().map(r => r.id)).toEqual(['rev_1', 'rev_2', 'rev_3', 'rev_4', 'rev_5']);
+
+    // Navigate to Page 2
+    modalComp.nextReviewsPage();
+    modalFixture.detectChanges();
+    expect(modalComp.reviewsPage()).toBe(2);
+    expect(modalComp.reviewsRangeStart()).toBe(6);
+    expect(modalComp.reviewsRangeEnd()).toBe(10);
+    expect(modalComp.paginatedReviews().map(r => r.id)).toEqual(['rev_6', 'rev_7', 'rev_8', 'rev_9', 'rev_10']);
+
+    // Navigate to Page 3
+    modalComp.nextReviewsPage();
+    modalFixture.detectChanges();
+    expect(modalComp.reviewsPage()).toBe(3);
+    expect(modalComp.reviewsRangeStart()).toBe(11);
+    expect(modalComp.reviewsRangeEnd()).toBe(12);
+    expect(modalComp.paginatedReviews().map(r => r.id)).toEqual(['rev_11', 'rev_12']);
+
+    // Navigate back to Page 2
+    modalComp.prevReviewsPage();
+    modalFixture.detectChanges();
+    expect(modalComp.reviewsPage()).toBe(2);
+
+    const paginationBar = (modalFixture.nativeElement as HTMLElement).querySelector(
+      '[data-testid="reviews-pagination-bar"]'
+    );
+    expect(paginationBar).toBeTruthy();
+    expect(paginationBar?.textContent).toContain('2 / 3');
+  });
+
+  it('should prioritize full-resolution /uploads/ screenshots on tiles and Hero Billboard without hover network fetches', async () => {
+    const { isContentDbThumbnailUrl, sanitizePackageImageUrl, selectSharpPackageBanner } = await import(
+      './core/config/git-providers.config'
+    );
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. ContentDB /thumbnails/ URLs are distinguished from full-resolution /uploads/ URLs
+    const cdbLevel1 = 'https://content.luanti.org/thumbnails/1/8f7c4f97f4.png';
+    const cdbLevel3 = 'https://content.luanti.org/thumbnails/3/8f7c4f97f4.png';
+    const cdbUpload = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg';
+    expect(isContentDbThumbnailUrl(cdbLevel1)).toBe(true);
+    expect(isContentDbThumbnailUrl(cdbUpload)).toBe(false);
+    expect(sanitizePackageImageUrl(cdbLevel3)).toBe(cdbLevel1);
+    expect(selectSharpPackageBanner(undefined, [cdbUpload], cdbLevel1)).toBe(cdbUpload);
+
+    // 2. normalizePackage selects full-resolution /uploads/ screenshot over /thumbnails/1/
+    const mobsAnimal = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs_animal',
+      author: 'TenPlus1',
+      name: 'mobs_animal',
+      title: 'Mobs Animal',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      thumbnail: cdbLevel1,
+      screenshots: [cdbUpload],
+      downloads: 216200,
+      score: 4.8
+    });
+    expect(mobsAnimal.thumbnail).toBe(cdbLevel1);
+    expect(mobsAnimal.banner).toBe(cdbUpload);
+
+    // 3. PackageCardComponent uses full-res /uploads/ image and does NOT trigger network fetches on hover
+    const cardFixture = TestBed.createComponent(PackageCardComponent);
+    const cardComp = cardFixture.componentInstance;
+    cardComp.package = mobsAnimal;
+    cardFixture.detectChanges();
+
+    expect(cardComp.cardBannerUrl).toBe(cdbUpload);
+
+    (pkgService as any).hydrationQueue.length = 0;
+    const loadDetailsSpy = vi.spyOn(pkgService, 'loadPackageDetails');
+    const ensureHydratedSpy = vi.spyOn(pkgService, 'ensurePackageHydrated');
+
+    cardComp.onCardMouseEnter();
+    await new Promise(resolve => setTimeout(resolve, 260));
+    expect(loadDetailsSpy).not.toHaveBeenCalled();
+    expect(ensureHydratedSpy).not.toHaveBeenCalled();
+    expect(cardComp.cardBannerUrl).toBe(cdbUpload);
+
+    // 4. HeroBillboardComponent uses full-res /uploads/ screenshot when available
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    const heroComp = heroFixture.componentInstance;
+    expect(heroComp.getSlideBanner(mobsAnimal)).toBe(cdbUpload);
+    expect(
+      heroComp.getSlideBanner({
+        ...mobsAnimal,
+        banner: cdbLevel1,
+        screenshots: [cdbUpload]
+      })
+    ).toBe(cdbUpload);
+  });
 });

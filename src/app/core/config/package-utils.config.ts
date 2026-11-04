@@ -298,3 +298,151 @@ export function extractEmbeddedVideo(
     video_thumbnail_url: resolvedThumb
   };
 }
+
+/**
+ * Builds a map of technical package name (`lowercase`) -> count of other catalog packages
+ * that list it as a hard dependency in `dependencies`.
+ */
+export function buildReverseDependencyCountMap(packages: Iterable<any>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const pkg of packages) {
+    if (!pkg || typeof pkg !== 'object') continue;
+    const selfName = String(pkg.name || '').trim().toLowerCase();
+    const rawDeps = Array.isArray(pkg.dependencies)
+      ? pkg.dependencies
+      : parseJsonArray(pkg.dependencies);
+    if (rawDeps.length === 0) continue;
+    const seenInPkg = new Set<string>();
+    for (const rawDep of rawDeps) {
+      const depStr = String(rawDep || '').trim().toLowerCase();
+      if (!depStr) continue;
+      const depTechName = depStr.includes('/') ? depStr.split('/').pop()!.trim() : depStr;
+      if (!depTechName || depTechName === selfName || seenInPkg.has(depTechName)) continue;
+      seenInPkg.add(depTechName);
+      counts.set(depTechName, (counts.get(depTechName) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Detects whether a package's tags, title, or description identify it as a developer API,
+ * shared library, or pure dependency mod that does not add standalone gameplay on its own
+ * (e.g. `TenPlus1/mobs` "Mobs Redo API", `modlib`, `futil`, `signs_lib`, `biome_lib`).
+ */
+export function isApiOrLibraryPackage(pkg: any): boolean {
+  if (!pkg || typeof pkg !== 'object') return false;
+  const type = String(pkg.type || 'mod').toLowerCase();
+  if (type === 'game' || type === 'txp') return false;
+
+  const rawTags = Array.isArray(pkg.tags) ? pkg.tags : parseJsonArray(pkg.tags);
+  for (const t of rawTags) {
+    const tagLower = String(t || '').trim().toLowerCase();
+    if (tagLower === 'library' || tagLower === 'api' || tagLower === 'dev_tools') {
+      return true;
+    }
+  }
+
+  const title = String(pkg.title || '').trim();
+  const shortDesc = String(pkg.short_desc || pkg.short_description || '').trim();
+  const desc = String(pkg.desc || pkg.long_description || '').trim();
+  const combinedDesc = `${shortDesc}\n${desc.slice(0, 600)}`;
+
+  // Title explicitly ends with or features standalone API / Library / Lib indicator
+  if (/\b(?:api|library|modlib|futil)\b/i.test(title)) {
+    return true;
+  }
+  if (/(?:^|[\s_-])lib(?:$|[\s_-])/i.test(title) || /(?:^|_)(?:api|lib)$/i.test(String(pkg.name || ''))) {
+    return true;
+  }
+
+  // Description explicitly states the mod is an API/library or requires other mods to do anything
+  if (
+    /\byou\s+need\s+to\s+install\s+some\s+other\s+mods\b/i.test(combinedDesc) ||
+    /\bdoes\s+nothing\s+(?:on\s+its\s+own|by\s+itself)\b/i.test(combinedDesc) ||
+    /\b(?:simple\s+and\s+feature[- ]rich|lightweight|shared|helper|utility|modding)\s+(?:api|library)\b/i.test(combinedDesc) ||
+    /\bapi\s+(?:to\s+add|for\s+adding|for\s+other\s+mods|used\s+by\s+other\s+mods)\b/i.test(combinedDesc) ||
+    /\b(?:library|framework)\s+(?:for|used\s+by)\s+(?:other\s+)?mods\b/i.test(combinedDesc)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Computes a prioritization multiplier (`0.08` .. `1.0`) for Home package swimlanes,
+ * Hero Showcase, and Top 10 rankings.
+ *
+ * Packages downloaded mostly or purely as dependencies (`dependency_ratio >= 0.5`) or
+ * identified as underlying API/library mods receive a dampened multiplier so player-facing
+ * games, mods, and texture packs take priority on the Home screen and Top 10.
+ */
+export function computeDependencyPrioritizationMultiplier(
+  pkg: any,
+  overrideDepRatio?: number,
+  overrideReverseDepCount?: number
+): number {
+  if (!pkg || typeof pkg !== 'object') return 1.0;
+
+  const depRatioRaw =
+    typeof overrideDepRatio === 'number' && Number.isFinite(overrideDepRatio)
+      ? overrideDepRatio
+      : Number(pkg.dependency_ratio);
+  const depRatio =
+    Number.isFinite(depRatioRaw) && depRatioRaw > 0 ? Math.min(1, Math.max(0, depRatioRaw)) : 0;
+
+  const reverseDepsRaw =
+    typeof overrideReverseDepCount === 'number' && Number.isFinite(overrideReverseDepCount)
+      ? overrideReverseDepCount
+      : Number(pkg.reverse_dep_count);
+  const reverseDeps =
+    Number.isFinite(reverseDepsRaw) && reverseDepsRaw > 0 ? Math.floor(reverseDepsRaw) : 0;
+
+  let multiplier = 1.0;
+
+  // 1. Download-reason telemetry signal (package_daily_downloads.reason_dependency share)
+  if (depRatio >= 0.75) {
+    multiplier = Math.min(multiplier, 0.12);
+  } else if (depRatio >= 0.5) {
+    // Smoothly interpolate from 0.55 at depRatio=0.50 down to 0.15 at depRatio=0.75
+    const t = (depRatio - 0.5) / 0.25;
+    multiplier = Math.min(multiplier, Number((0.55 - t * 0.4).toFixed(3)));
+  } else if (depRatio >= 0.3) {
+    // Mild dampening from 0.90 at depRatio=0.30 down to 0.55 at depRatio=0.50
+    const t = (depRatio - 0.3) / 0.2;
+    multiplier = Math.min(multiplier, Number((0.9 - t * 0.35).toFixed(3)));
+  }
+
+  // 2. API / Library metadata & tag signal
+  const isApiLib = isApiOrLibraryPackage(pkg);
+  if (isApiLib) {
+    if (reverseDeps >= 3 || depRatio >= 0.4) {
+      multiplier = Math.min(multiplier, 0.1);
+    } else {
+      multiplier = Math.min(multiplier, 0.18);
+    }
+  } else if (reverseDeps >= 30 && String(pkg.type || 'mod').toLowerCase() === 'mod') {
+    // High reverse-dependency foundational mod (e.g. basic_materials)
+    multiplier = Math.min(multiplier, 0.45);
+  }
+
+  return multiplier;
+}
+
+/**
+ * Returns `true` when a package is primarily a dependency or API/library mod
+ * (`multiplier <= 0.25`) that should not occupy Hero Showcase or Top 10 slots
+ * when standalone player-facing packages are available.
+ */
+export function isPrimarilyDependencyPackage(
+  pkg: any,
+  overrideDepRatio?: number,
+  overrideReverseDepCount?: number
+): boolean {
+  return (
+    computeDependencyPrioritizationMultiplier(pkg, overrideDepRatio, overrideReverseDepCount) <=
+    0.25
+  );
+}
+

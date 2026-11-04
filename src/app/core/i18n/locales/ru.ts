@@ -227,6 +227,7 @@ export const ru: TranslationDictionary = {
     similarPackagesSubtitle: 'Рекомендации по тегам, категории и зависимостям',
     latestRelease: 'Последний',
     showingLatestReleases: 'Показаны последние {count} релизов',
+    reviewsShowingRange: 'Показаны {start}–{end} из {total} отзывов',
     tabAnalytics: 'Аналитика',
     viewAnalyticsTooltip: 'Открыть аналитику загрузок пакета',
     viewReleaseNotes: 'Примечания к релизу и коммиты',

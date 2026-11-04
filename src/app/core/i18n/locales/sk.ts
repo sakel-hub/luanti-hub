@@ -227,6 +227,7 @@ export const sk: TranslationDictionary = {
     similarPackagesSubtitle: 'Odporúčané podľa značiek, kategórie a závislostí',
     latestRelease: 'Najnovšie',
     showingLatestReleases: 'Zobrazených posledných {count} vydaní',
+    reviewsShowingRange: 'Zobrazených {start}–{end} z {total} recenzií',
     tabAnalytics: 'Analytika',
     viewAnalyticsTooltip: 'Zobraziť analytiku stiahnutí balíčka',
     viewReleaseNotes: 'Poznámky k vydaniu a commity',

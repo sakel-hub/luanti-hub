@@ -286,7 +286,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v14'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -467,7 +468,11 @@ import {
   deriveReviewThreadCountsFromList,
   computeGenuineStarRating,
   computeStarRatingFromData,
-  extractEmbeddedVideo
+  extractEmbeddedVideo,
+  buildReverseDependencyCountMap,
+  isApiOrLibraryPackage,
+  computeDependencyPrioritizationMultiplier,
+  isPrimarilyDependencyPackage
 } from '../../../src/app/core/config/package-utils.config';
 import {
   normalizeRepoComparisonKey,
@@ -483,9 +488,75 @@ export {
   computeGenuineStarRating,
   computeStarRatingFromData,
   extractEmbeddedVideo,
+  buildReverseDependencyCountMap,
+  isApiOrLibraryPackage,
+  computeDependencyPrioritizationMultiplier,
+  isPrimarilyDependencyPackage,
   normalizeRepoComparisonKey,
   normalizeRepoKey
 };
+
+export interface SharedEdgeRatingEntry {
+  score: number;
+  review_thread_counts?: {
+    positive: number;
+    neutral: number;
+    negative: number;
+  };
+  checked?: boolean;
+}
+
+const SHARED_EDGE_RATINGS_CACHE_KEY = '/__pkg_ratings_map_v1';
+
+/**
+ * Reads the shared Edge Cache map of hydrated package star ratings & review thread counts (`/__pkg_ratings_map_v1`).
+ * Enables upstream ContentDB packages (which may not have a full row in D1 `packages`) to retain their
+ * hydrated star ratings across catalog boots with zero D1 row reads.
+ */
+export async function readSharedEdgeRatingsMap(): Promise<Record<string, SharedEdgeRatingEntry>> {
+  const cached = await readEdgeCacheJson<Record<string, SharedEdgeRatingEntry>>(SHARED_EDGE_RATINGS_CACHE_KEY);
+  return cached && typeof cached === 'object' && !Array.isArray(cached) ? cached : {};
+}
+
+/**
+ * Merges newly hydrated package star ratings and review thread counts into `/__pkg_ratings_map_v1`
+ * in Isolate Memory + Cloudflare Edge Cache (24h TTL).
+ */
+export async function mergeSharedEdgeRatingsMap(
+  updates: Record<string, SharedEdgeRatingEntry>
+): Promise<void> {
+  if (!updates || Object.keys(updates).length === 0) return;
+  const current = await readSharedEdgeRatingsMap();
+  let changed = false;
+  for (const [rawKey, entry] of Object.entries(updates)) {
+    const k = String(rawKey || '').trim().toLowerCase();
+    if (!k || !entry) continue;
+    const validScore = typeof entry.score === 'number' && entry.score >= 1 && entry.score <= 5 ? entry.score : 0;
+    const validCounts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
+    const isChecked = Boolean(entry.checked || validScore > 0 || validCounts);
+    if (validScore <= 0 && !validCounts && !isChecked) continue;
+    const prev = current[k];
+    const nextScore = validScore > 0 ? validScore : (prev?.score || 0);
+    const nextCounts = validCounts || prev?.review_thread_counts;
+    const nextChecked = isChecked || Boolean(prev?.checked);
+    if (
+      !prev ||
+      prev.score !== nextScore ||
+      prev.checked !== nextChecked ||
+      JSON.stringify(prev.review_thread_counts) !== JSON.stringify(nextCounts)
+    ) {
+      current[k] = {
+        score: nextScore,
+        ...(nextCounts ? { review_thread_counts: nextCounts } : {}),
+        ...(nextChecked ? { checked: true } : {})
+      };
+      changed = true;
+    }
+  }
+  if (changed) {
+    await writeEdgeCacheJson(SHARED_EDGE_RATINGS_CACHE_KEY, current, 86400);
+  }
+}
 
 /**
  * Heuristic SPDX license identifier detection from LICENSE or README text
@@ -3032,6 +3103,9 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl,
+  selectSharpPackageBanner,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,
@@ -3051,6 +3125,9 @@ export {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl,
+  selectSharpPackageBanner,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,

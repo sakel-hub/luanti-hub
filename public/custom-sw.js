@@ -677,12 +677,10 @@
             if (Number.isFinite(headerTs) && headerTs > cachedSyncedAt) {
               cachedSyncedAt = headerTs;
             }
-            if (!forceNetwork && cachedSyncedAt > 0 && now - cachedSyncedAt < MIN_BG_CATALOG_SYNC_INTERVAL_MS) {
-              const prevText = await prevRes.text();
-              if (prevText) {
-                const parsedPrev = JSON.parse(prevText);
-                cachedBootPayload = Array.isArray(parsedPrev) ? { packages: parsedPrev } : parsedPrev;
-              }
+            const prevText = await prevRes.text();
+            if (prevText) {
+              const parsedPrev = JSON.parse(prevText);
+              cachedBootPayload = Array.isArray(parsedPrev) ? { packages: parsedPrev } : parsedPrev;
             }
           }
         } catch {
@@ -734,11 +732,47 @@
         (parsed && typeof parsed === 'object' && Array.isArray(parsed.packages));
       if (!isValidPayload) return;
 
+      const bootPayload = Array.isArray(parsed) ? { packages: parsed } : parsed;
+
+      // Preserve any previously hydrated star ratings and review_thread_counts from the cached boot snapshot
+      if (Array.isArray(cachedBootPayload?.packages) && Array.isArray(bootPayload?.packages)) {
+        const prevRatingById = new Map();
+        for (const p of cachedBootPayload.packages) {
+          if (p && p.id && (Number(p.score) > 0 || p.review_thread_counts)) {
+            prevRatingById.set(String(p.id).toLowerCase(), {
+              score: Number(p.score) || 0,
+              review_thread_counts: p.review_thread_counts,
+              rating_checked: Boolean(p.rating_checked || Number(p.score) > 0 || p.review_thread_counts)
+            });
+          }
+        }
+        if (prevRatingById.size > 0) {
+          const applyPrevRating = (pkg) => {
+            if (!pkg || !pkg.id) return pkg;
+            const prev = prevRatingById.get(String(pkg.id).toLowerCase());
+            if (!prev) return pkg;
+            if (!(Number(pkg.score) > 0) && prev.score > 0) {
+              pkg.score = prev.score;
+            }
+            if (!pkg.review_thread_counts && prev.review_thread_counts) {
+              pkg.review_thread_counts = prev.review_thread_counts;
+            }
+            if (prev.rating_checked) {
+              pkg.rating_checked = true;
+            }
+            return pkg;
+          };
+          bootPayload.packages.forEach(applyPrevRating);
+          if (Array.isArray(bootPayload.top10Today)) bootPayload.top10Today.forEach(applyPrevRating);
+          if (Array.isArray(bootPayload.top10Week)) bootPayload.top10Week.forEach(applyPrevRating);
+        }
+      }
+
       const syncedAt = Date.now();
       lastSwBootFetchAt = syncedAt;
       if (typeof caches !== 'undefined') {
         const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
-        const cachedResponse = new Response(rawText, {
+        const cachedResponse = new Response(JSON.stringify(bootPayload), {
           status: 200,
           headers: {
             'Content-Type': 'application/json',
@@ -747,8 +781,6 @@
         });
         await cache.put(BOOT_SYNC_CACHE_URL, cachedResponse);
       }
-
-      const bootPayload = Array.isArray(parsed) ? { packages: parsed } : parsed;
 
       let hasFocusedClient = false;
       try {
@@ -875,6 +907,56 @@
         (async () => {
           await writeNotifStateFromSw({ unreadBadgeCount: 0 });
           await setSwAppBadge(0);
+        })()
+      );
+    } else if (data && data.type === 'LH_UPDATE_SW_RATINGS' && data.ratings && typeof data.ratings === 'object') {
+      event.waitUntil(
+        (async () => {
+          if (typeof caches === 'undefined') return;
+          try {
+            const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
+            const prevRes = await cache.match(BOOT_SYNC_CACHE_URL);
+            if (!prevRes) return;
+            const prevTs = prevRes.headers.get('X-LuantiHub-Synced-At') || String(Date.now());
+            const prevJson = await prevRes.json();
+            const payload = Array.isArray(prevJson) ? { packages: prevJson } : prevJson;
+            if (!payload || !Array.isArray(payload.packages)) return;
+            let updated = false;
+            const applyRating = (pkg) => {
+              if (!pkg || !pkg.id) return;
+              const entry = data.ratings[String(pkg.id).toLowerCase()];
+              if (!entry) return;
+              if (Number(entry.score) > 0 && pkg.score !== Number(entry.score)) {
+                pkg.score = Number(entry.score);
+                updated = true;
+              }
+              if (entry.review_thread_counts && !pkg.review_thread_counts) {
+                pkg.review_thread_counts = entry.review_thread_counts;
+                updated = true;
+              }
+              if (entry.rating_checked && !pkg.rating_checked) {
+                pkg.rating_checked = true;
+                updated = true;
+              }
+            };
+            payload.packages.forEach(applyRating);
+            if (Array.isArray(payload.top10Today)) payload.top10Today.forEach(applyRating);
+            if (Array.isArray(payload.top10Week)) payload.top10Week.forEach(applyRating);
+            if (updated) {
+              await cache.put(
+                BOOT_SYNC_CACHE_URL,
+                new Response(JSON.stringify(payload), {
+                  status: 200,
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-LuantiHub-Synced-At': prevTs
+                  }
+                })
+              );
+            }
+          } catch {
+            // Ignore SW cache update errors
+          }
         })()
       );
     }

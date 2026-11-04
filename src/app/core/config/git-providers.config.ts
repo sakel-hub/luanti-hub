@@ -555,7 +555,77 @@ export function sanitizePackageImageUrl(rawUrl?: string | null): string | undefi
       'https://content.luanti.org/'
     );
   }
+  if (/^https?:\/\/(?:cdn\.)?content\.luanti\.org\/thumbnails\/3\//i.test(normalized)) {
+    normalized = normalized.replace(/(\/thumbnails\/)3\//i, '$11/');
+  }
   return normalized;
+}
+
+/**
+ * Checks whether an image URL is a ContentDB `/thumbnails/<level>/<filename>` URL.
+ * ContentDB `/api/packages/` returns `/thumbnails/1/<filename>` (140×93 px), whereas
+ * `/uploads/<filename>` (from `screenshots[0]`) is full original resolution.
+ */
+export function isContentDbThumbnailUrl(rawUrl?: string | null): boolean {
+  const sanitized = sanitizePackageImageUrl(rawUrl);
+  if (!sanitized) return false;
+  const lower = sanitized.toLowerCase();
+  return isContentDbHost(lower) && lower.includes('/thumbnails/');
+}
+
+/**
+ * Sanitizes a ContentDB thumbnail URL without rewriting `/thumbnails/1/` to `/thumbnails/3/`
+ * (since full-resolution ContentDB artwork is served from `/uploads/...` via `screenshots[0]`).
+ */
+export function upgradeContentDbThumbnailUrl(rawUrl?: string | null): string | undefined {
+  return sanitizePackageImageUrl(rawUrl);
+}
+
+/**
+ * Single source of truth for selecting the sharpest valid banner image across backend and frontend:
+ * 1. Verified Git repository screenshot (`preferredGitShot`, e.g. `screenshot.png` / `.cdb.json`)
+ * 2. First full-resolution screenshot from `screenshots` (`https://cdn.content.luanti.org/uploads/...` or Git screenshot)
+ * 3. Any candidate in `bannerAndThumbCandidates` that is NOT a `/thumbnails/` URL (e.g. custom promo or `/uploads/` banner)
+ * 4. First valid fallback candidate in `bannerAndThumbCandidates`
+ */
+export function selectSharpPackageBanner(
+  preferredGitShot?: string | null,
+  screenshots?: ReadonlyArray<string | { url?: string } | null | undefined> | null,
+  ...bannerAndThumbCandidates: Array<string | null | undefined>
+): string | undefined {
+  const cleanGit = sanitizePackageImageUrl(preferredGitShot);
+  if (cleanGit) {
+    return cleanGit;
+  }
+
+  if (Array.isArray(screenshots)) {
+    for (const entry of screenshots) {
+      const raw = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? entry.url : undefined);
+      const cleanShot = sanitizePackageImageUrl(raw);
+      if (cleanShot && !isContentDbThumbnailUrl(cleanShot)) {
+        return cleanShot;
+      }
+    }
+  }
+
+  const sanitizedCandidates: string[] = [];
+  for (const raw of bannerAndThumbCandidates) {
+    const clean = sanitizePackageImageUrl(raw);
+    if (clean) {
+      sanitizedCandidates.push(clean);
+    }
+  }
+
+  const nonThumbnailBanner = sanitizedCandidates.find(u => !isContentDbThumbnailUrl(u));
+  if (nonThumbnailBanner) {
+    return nonThumbnailBanner;
+  }
+
+  if (sanitizedCandidates.length > 0) {
+    return sanitizedCandidates[0];
+  }
+
+  return undefined;
 }
 
 /**

@@ -39,6 +39,7 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  selectSharpPackageBanner,
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags
@@ -1667,12 +1668,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     screenshots.find(s => !isGitRepositoryAssetUrl(s));
   const resolvedThumbRaw = nonGitDetailThumb || gitScreenshot || (!gitProbeVerified ? nonLogoD1Thumb : null) || null;
   const resolvedThumb = sanitizePackageImageUrl(resolvedThumbRaw) || null;
-  const resolvedBannerRaw =
-    gitScreenshot ||
-    screenshots[0] ||
-    (!gitProbeVerified ? nonLogoD1Banner : null) ||
-    resolvedThumb;
-  const resolvedBanner = sanitizePackageImageUrl(resolvedBannerRaw) || null;
+  const resolvedBanner =
+    selectSharpPackageBanner(
+      gitScreenshot,
+      screenshots,
+      !gitProbeVerified ? nonLogoD1Banner : null,
+      resolvedThumb
+    ) || null;
 
   // Resolve download_size & file_size from /for-client/, /packages/:author/:name/, latest release, or Content-Length HEAD check
   const rawSizeSource =

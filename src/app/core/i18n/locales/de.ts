@@ -227,6 +227,7 @@ export const de: TranslationDictionary = {
     similarPackagesSubtitle: 'Empfohlen basierend auf Tags, Kategorie und Abhängigkeiten',
     latestRelease: 'Aktuell',
     showingLatestReleases: 'Die neuesten {count} Versionen werden angezeigt',
+    reviewsShowingRange: 'Zeige {start}–{end} von {total} Bewertungen',
     tabAnalytics: 'Statistiken',
     viewAnalyticsTooltip: 'Paket-Download-Statistiken anzeigen',
     viewReleaseNotes: 'Versionshinweise & Commits',

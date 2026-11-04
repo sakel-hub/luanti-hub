@@ -100,6 +100,9 @@ export interface LuantiPackage {
   weekly_downloads?: number; // 7-day download velocity (in-game + web)
   weekly_views?: number; // 7-day package views (in-game + web)
   conversion_rate?: number; // Smoothed view-to-download conversion rate (0.0 - 1.0)
+  dependency_ratio?: number; // Share of tracked downloads triggered as a dependency (0.0 - 1.0)
+  reverse_dep_count?: number; // Number of other catalog packages listing this package as a hard dependency
+  rating_checked?: boolean; // True when star rating / review thread counts have been verified
   favorites_count?: number; // Community favorites count in D1
   license: string;
   media_license?: string;
