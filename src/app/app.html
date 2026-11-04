@@ -55,6 +55,15 @@
     </div>
   }
 
+  <!-- Global Unobtrusive Frosted-Glass Back-to-Top Button (Visible past 100vh on all pages) -->
+  <app-back-to-top
+    position="fixed"
+    testId="page-back-to-top-btn"
+    [visible]="showPageBackToTop()"
+    [offsetBottomClass]="pwaService.updateAvailable() ? 'bottom-24 sm:bottom-24' : ''"
+    (scrollToTop)="scrollToTopOfPage()">
+  </app-back-to-top>
+
   <!-- Modals & Drawers (With Unified Enter & Exit Motion) -->
   @if (displayedPackage(); as pkg) {
     <app-package-detail-modal

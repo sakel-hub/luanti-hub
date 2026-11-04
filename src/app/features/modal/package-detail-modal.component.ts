@@ -34,6 +34,7 @@ import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { DownloadAnalyticsChartComponent } from '../../shared/components/download-analytics-chart.component';
 import { PackageCardComponent } from '../card/package-card.component';
+import { BackToTopComponent } from '../../shared/components/back-to-top.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
@@ -82,6 +83,7 @@ import {
     PackageBadgesComponent,
     DownloadAnalyticsChartComponent,
     PackageCardComponent,
+    BackToTopComponent,
     TranslatePipe,
     ThemeIconComponent,
     LucideX,
@@ -379,7 +381,7 @@ import {
           }
 
           <!-- 2-Column Details Body -->
-          <div class="p-6 sm:p-8 lg:p-10 space-y-7">
+          <div class="p-6 sm:p-8 lg:p-10 pb-16 sm:pb-20 lg:pb-20 space-y-7">
 
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-10">
 
@@ -938,7 +940,10 @@ import {
               </div>
 
               <!-- Right Column: Author, Downloads, Score, Tags, License & External Links -->
-              <div class="space-y-4 text-xs text-slate-300 border-t lg:border-t-0 lg:border-l border-white/10 lg:pl-6 pt-4 lg:pt-0">
+              <div class="border-t lg:border-t-0 lg:border-l border-white/10 lg:pl-6 pt-4 lg:pt-0">
+                <div
+                  data-testid="modal-sticky-sidebar"
+                  class="lg:sticky lg:top-6 space-y-4 text-xs text-slate-300">
 
                 <!-- Author & Maintainers -->
                 <div class="space-y-2">
@@ -1314,6 +1319,7 @@ import {
                   </div>
                 }
 
+                </div>
               </div>
 
             </div>
@@ -2093,6 +2099,14 @@ import {
 
           </div>
 
+          <!-- Unobtrusive Frosted-Glass Back-to-Top Button inside Package Detail Dialog (Visible past 100vh) -->
+          <app-back-to-top
+            position="absolute"
+            testId="modal-back-to-top-btn"
+            [visible]="showModalBackToTop()"
+            (scrollToTop)="scrollModalToTop()">
+          </app-back-to-top>
+
         </div>
 
         <!-- Fullscreen Screenshot Zoom Lightbox (z-[70]) -->
@@ -2782,6 +2796,40 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private lastKnownScrollTop = 0;
   private scrollRafId: number | null = null;
   private cleanupScrollListener: (() => void) | null = null;
+  readonly showModalBackToTop = signal<boolean>(false);
+
+  private computeModalScrollThreshold(container?: HTMLElement | null): number {
+    if (container && container.clientHeight > 0) {
+      return container.clientHeight;
+    }
+    if (typeof window !== 'undefined' && window.innerHeight > 0) {
+      return window.innerHeight;
+    }
+    return 800;
+  }
+
+  private updateModalBackToTopState(scrollTop: number, container?: HTMLElement | null): void {
+    const nextVisible = scrollTop > this.computeModalScrollThreshold(container);
+    if (this.showModalBackToTop() !== nextVisible) {
+      this.ngZone.run(() => {
+        this.showModalBackToTop.set(nextVisible);
+      });
+    }
+  }
+
+  scrollModalToTop(): void {
+    const scrollEl = this.modalScrollContainerRef?.nativeElement;
+    this.lastKnownScrollTop = 0;
+    this.showModalBackToTop.set(false);
+    this.persistCurrentViewState();
+    if (scrollEl) {
+      if (typeof scrollEl.scrollTo === 'function') {
+        scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        scrollEl.scrollTop = 0;
+      }
+    }
+  }
 
   private persistCurrentViewState(): void {
     if (!this.loadedPackageKey) return;
@@ -2802,6 +2850,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       if (scrollEl && targetScrollTop > 0) {
         scrollEl.scrollTop = targetScrollTop;
       }
+      this.updateModalBackToTopState(targetScrollTop, scrollEl);
     };
     applyScroll();
     if (typeof requestAnimationFrame === 'function') {
@@ -2923,6 +2972,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const container = this.modalScrollContainerRef?.nativeElement;
     if (container) {
       this.lastKnownScrollTop = container.scrollTop;
+      this.updateModalBackToTopState(container.scrollTop, container);
       this.persistCurrentViewState();
     }
   }
@@ -3134,6 +3184,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.restoreSavedScrollPosition(savedState.scrollTop);
     } else if (isSwitchingPackage) {
       this.lastKnownScrollTop = 0;
+      this.showModalBackToTop.set(false);
       this.isSimilarNearViewport.set(false);
       this.isReviewsNearViewport.set(false);
       this.activeTab.set('reviews');

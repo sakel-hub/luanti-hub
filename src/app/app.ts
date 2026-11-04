@@ -10,6 +10,7 @@ import { AuthModalComponent } from './features/auth/auth-modal.component';
 import { ProfileDrawerComponent } from './features/profile/profile-drawer.component';
 import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { FrostedPreloaderComponent } from './shared/components/frosted-preloader.component';
+import { BackToTopComponent } from './shared/components/back-to-top.component';
 import { ImgFallbackDirective } from './shared/directives/img-fallback.directive';
 import { PackageService } from './core/services/package.service';
 import { PwaService } from './core/services/pwa.service';
@@ -34,6 +35,7 @@ import { LucideX, LucideShieldCheck, LucideCheck, LucideDownload, LucideInfo, Lu
     ProfileDrawerComponent,
     AuthorDrawerComponent,
     FrostedPreloaderComponent,
+    BackToTopComponent,
     ImgFallbackDirective,
     LucideX,
     LucideShieldCheck,
@@ -129,6 +131,25 @@ export class App {
   private videoTheaterCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private savedScrollY = 0;
   private wasModalOpen = false;
+  readonly isPageScrolledPastViewport = signal(false);
+
+  readonly anyOverlayOpen = computed(() =>
+    Boolean(
+      this.packageService.activePackage() ||
+      this.packageService.activeVideoTheater() ||
+      this.packageService.activeBlogArticle() ||
+      this.packageService.activeAuthorUsername() ||
+      this.packageService.isSubmitModalOpen() ||
+      this.packageService.isSetupModalOpen() ||
+      this.packageService.isLegalModalOpen() ||
+      this.authService.isAuthModalOpen() ||
+      (this.authService.isProfileDrawerOpen() && this.authService.currentUser())
+    )
+  );
+
+  readonly showPageBackToTop = computed(
+    () => this.isPageScrolledPastViewport() && !this.anyOverlayOpen()
+  );
 
   constructor() {
     // Smooth enter + exit transitions for Package Detail Modal
@@ -191,17 +212,7 @@ export class App {
     // Lock background scroll whenever a modal or drawer is open while preserving scroll position
     effect(() => {
       if (typeof document === 'undefined' || typeof window === 'undefined') return;
-      const anyModalOpen = Boolean(
-        this.packageService.activePackage() ||
-        this.packageService.activeVideoTheater() ||
-        this.packageService.activeBlogArticle() ||
-        this.packageService.activeAuthorUsername() ||
-        this.packageService.isSubmitModalOpen() ||
-        this.packageService.isSetupModalOpen() ||
-        this.packageService.isLegalModalOpen() ||
-        this.authService.isAuthModalOpen() ||
-        (this.authService.isProfileDrawerOpen() && this.authService.currentUser())
-      );
+      const anyModalOpen = this.anyOverlayOpen();
       if (anyModalOpen && !this.wasModalOpen) {
         this.savedScrollY = window.scrollY || document.documentElement.scrollTop || 0;
         this.wasModalOpen = true;
@@ -218,8 +229,27 @@ export class App {
         if (restoreY > 0 && window.scrollY !== restoreY) {
           window.scrollTo({ top: restoreY, behavior: 'instant' as ScrollBehavior });
         }
+        this.updatePageScrollState();
       }
     });
+  }
+
+  @HostListener('window:scroll')
+  @HostListener('window:resize')
+  updatePageScrollState(): void {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 800;
+    const isPast = scrollY > viewportHeight;
+    if (this.isPageScrolledPastViewport() !== isPast) {
+      this.isPageScrolledPastViewport.set(isPast);
+    }
+  }
+
+  scrollToTopOfPage(): void {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   }
 
   private bindAnimatedOverlay(

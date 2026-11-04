@@ -8213,4 +8213,106 @@ supported_games = minetest_game, voxelibre
     expect(modalComp.getSlideDisplayUrl(cdbUpload)).toBe(cdbUploadGallery);
     expect(modalComp.getLightboxDisplayUrl(cdbUploadBanner)).toBe(cdbUpload);
   });
+
+  it('should render sticky right-hand metadata sidebar and 100vh frosted-glass Back to Top buttons on pages and Package Detail Dialog', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const appFixture = TestBed.createComponent(App);
+    const appComp = appFixture.componentInstance;
+    appFixture.detectChanges();
+
+    // 1. Page-level Back to Top button visibility past 100vh
+    const pageBackToTopBtn = (appFixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>(
+      '[data-testid="page-back-to-top-btn"]'
+    );
+    expect(pageBackToTopBtn).toBeTruthy();
+    expect(appComp.showPageBackToTop()).toBe(false);
+    expect(pageBackToTopBtn?.className).toContain('pointer-events-none');
+    expect(pageBackToTopBtn?.className).toContain('opacity-0');
+    expect(pageBackToTopBtn?.hasAttribute('aria-hidden')).toBe(false);
+    expect((pageBackToTopBtn as any)?.inert).toBe(true);
+
+    // Simulate scrolling past 100vh on page
+    const vh = window.innerHeight || 800;
+    Object.defineProperty(window, 'scrollY', { value: vh + 120, configurable: true, writable: true });
+    appComp.updatePageScrollState();
+    appFixture.detectChanges();
+
+    expect(appComp.showPageBackToTop()).toBe(true);
+    expect(pageBackToTopBtn?.className).toContain('opacity-60');
+    expect(pageBackToTopBtn?.className).toContain('pointer-events-auto');
+    expect((pageBackToTopBtn as any)?.inert).toBe(false);
+
+    const windowScrollSpy = vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    pageBackToTopBtn?.click();
+    expect(windowScrollSpy).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+
+    // Opening a modal hides the background page Back to Top button
+    const testPkg: LuantiPackage = {
+      id: 'Warr1024/nodecoreimproved',
+      author: 'Warr1024',
+      name: 'nodecoreimproved',
+      title: 'NodeCore Improved',
+      type: 'txp',
+      short_desc: 'Improved textures for NodeCore',
+      thumbnail: 'logo.svg',
+      score: 5.0,
+      downloads: 3200,
+      license: 'CC-BY-SA-4.0',
+      source: 'official',
+      tags: ['16px']
+    };
+    (pkgService as any)._activePackage.set(testPkg);
+    appFixture.detectChanges();
+    expect(appComp.showPageBackToTop()).toBe(false);
+
+    // Restore window.scrollY
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true, writable: true });
+    (pkgService as any)._activePackage.set(null);
+    appComp.updatePageScrollState();
+    windowScrollSpy.mockRestore();
+
+    // 2. Package Detail Modal: Sticky right-hand metadata sidebar + 100vh modal Back to Top button
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = testPkg;
+    (pkgService as any)._activePackage.set(testPkg);
+    modalFixture.detectChanges();
+
+    const modalEl = modalFixture.nativeElement as HTMLElement;
+    const stickySidebar = modalEl.querySelector<HTMLElement>('[data-testid="modal-sticky-sidebar"]');
+    expect(stickySidebar).toBeTruthy();
+    expect(stickySidebar?.className).toContain('lg:sticky');
+    expect(stickySidebar?.className).toContain('lg:top-6');
+
+    const modalBackToTopBtn = modalEl.querySelector<HTMLButtonElement>('[data-testid="modal-back-to-top-btn"]');
+    expect(modalBackToTopBtn).toBeTruthy();
+    expect(modalComp.showModalBackToTop()).toBe(false);
+    expect(modalBackToTopBtn?.className).toContain('pointer-events-none');
+
+    // Simulate scrolling inside #modalScrollContainer past 100vh (container.clientHeight)
+    const scrollContainer = modalComp.modalScrollContainerRef?.nativeElement;
+    expect(scrollContainer).toBeTruthy();
+    if (scrollContainer) {
+      Object.defineProperty(scrollContainer, 'clientHeight', { value: 600, configurable: true });
+      scrollContainer.scrollTop = 450;
+      modalComp.onModalContainerScroll();
+      modalFixture.detectChanges();
+      expect(modalComp.showModalBackToTop()).toBe(false);
+
+      scrollContainer.scrollTop = 650;
+      modalComp.onModalContainerScroll();
+      modalFixture.detectChanges();
+      expect(modalComp.showModalBackToTop()).toBe(true);
+      expect(modalBackToTopBtn?.className).toContain('opacity-60');
+      expect(modalBackToTopBtn?.className).toContain('pointer-events-auto');
+
+      const containerScrollSpy = vi.fn();
+      (scrollContainer as any).scrollTo = containerScrollSpy;
+      modalBackToTopBtn?.click();
+      modalFixture.detectChanges();
+      expect(containerScrollSpy).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+      expect(modalComp.showModalBackToTop()).toBe(false);
+    }
+    (pkgService as any)._activePackage.set(null);
+  });
 });

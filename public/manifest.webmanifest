@@ -13,11 +13,11 @@
   "prefer_related_applications": false,
   "related_applications": [],
   "scope_extensions": [
-    { "origin": "https://luantihub.org" },
-    { "origin": "https://www.luantihub.org" },
-    { "origin": "https://luanti-hub.pages.dev" },
-    { "origin": "https://content.luanti.org" },
-    { "origin": "https://contentdb.milcho.org" }
+    { "type": "origin", "origin": "https://luantihub.org" },
+    { "type": "origin", "origin": "https://www.luantihub.org" },
+    { "type": "origin", "origin": "https://luanti-hub.pages.dev" },
+    { "type": "origin", "origin": "https://content.luanti.org" },
+    { "type": "origin", "origin": "https://contentdb.milcho.org" }
   ],
   "edge_side_panel": {
     "preferred_width": 420
@@ -32,6 +32,7 @@
   "share_target": {
     "action": "/submit",
     "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
     "params": {
       "title": "title",
       "text": "text",
