@@ -15,7 +15,7 @@ import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { LuantiPackage } from '../../core/models/package.model';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
-import { isContentDbThumbnailUrl } from '../../core/config/git-providers.config';
+import { formatContentDbCdnUrl, isContentDbThumbnailUrl } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -372,7 +372,12 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       this.package?.thumbnail
     ];
     const candidates = rawCandidates
-      .map(u => (typeof u === 'string' && u.trim() ? (this.packageService.toProxiedGitImageIfNeeded(u) ?? u) : undefined))
+      .map(u => {
+        if (typeof u !== 'string' || !u.trim()) return undefined;
+        const proxied = this.packageService.toProxiedGitImageIfNeeded(u) ?? u;
+        if (this.packageService.isGitScreenshotUrl(proxied)) return proxied;
+        return formatContentDbCdnUrl(proxied, 'tile') || proxied;
+      })
       .filter((u): u is string => Boolean(u) && u !== 'logo.svg');
     return (
       candidates.find(u => !failed.has(u)) ||
@@ -385,12 +390,21 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     const primary = this.cardBannerUrl;
     const failed = this.failedBannerUrls();
     const rawThumb = this.package?.thumbnail;
-    const proxiedThumb = this.packageService.toProxiedGitImageIfNeeded(rawThumb) ?? rawThumb;
+    const proxiedThumbRaw = this.packageService.toProxiedGitImageIfNeeded(rawThumb) ?? rawThumb;
+    const proxiedThumb =
+      proxiedThumbRaw && !this.packageService.isGitScreenshotUrl(proxiedThumbRaw)
+        ? formatContentDbCdnUrl(proxiedThumbRaw, 'tile') || proxiedThumbRaw
+        : proxiedThumbRaw;
     if (proxiedThumb && proxiedThumb !== 'logo.svg' && proxiedThumb !== primary && !failed.has(proxiedThumb)) {
       return proxiedThumb;
     }
     const distinctShot = (this.package?.screenshots ?? [])
-      .map(url => this.packageService.toProxiedGitImageIfNeeded(url) ?? url)
+      .map(url => {
+        const p = this.packageService.toProxiedGitImageIfNeeded(url) ?? url;
+        return p && !this.packageService.isGitScreenshotUrl(p)
+          ? formatContentDbCdnUrl(p, 'tile') || p
+          : p;
+      })
       .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary && !failed.has(url));
     if (distinctShot) {
       return distinctShot;

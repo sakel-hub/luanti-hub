@@ -39,6 +39,9 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  formatContentDbCdnUrl,
+  isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
@@ -426,7 +429,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v18/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v19/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -545,13 +548,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const liteGitShot = liteGitShotRaw ? toProxiedGitImageIfNeeded(liteGitShotRaw) : undefined;
       const nonGitLiteThumb =
         d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
-          ? String(d1Pkg.thumbnail_url)
+          ? upgradeContentDbThumbnailUrl(String(d1Pkg.thumbnail_url))
           : undefined;
       const liteScreenshots = mergeScreenshotsPreferringGit(
         [liteGitShot, nonGitLiteThumb],
         liteGitScan?.screenshots,
         parseJsonArray(d1Pkg.screenshots)
       );
+      const nonGitLiteThumbFormatted =
+        (liteScreenshots.find(s => !isGitRepositoryAssetUrl(s))
+          ? formatContentDbCdnUrl(liteScreenshots.find(s => !isGitRepositoryAssetUrl(s)), 'tile')
+          : undefined) ||
+        (nonGitLiteThumb ? formatContentDbCdnUrl(nonGitLiteThumb, 'tile') || nonGitLiteThumb : undefined);
       if (
         d1Pkg.provider !== 'contentdb' &&
         ((!d1Pkg.video_url && liteVideo.video_url) || (!hasStoredGitShotLite && liteGitShot))
@@ -602,16 +610,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         type: d1Pkg.type || 'mod',
         short_desc: d1Pkg.short_desc || '',
         thumbnail: toProxiedGitImageIfNeeded(
-          nonGitLiteThumb ||
+          nonGitLiteThumbFormatted ||
           liteGitShot ||
-          (d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? d1Pkg.thumbnail_url : undefined)
+          (d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? upgradeContentDbThumbnailUrl(d1Pkg.thumbnail_url) : undefined)
         ) || undefined,
-        banner: toProxiedGitImageIfNeeded(
-          liteGitShot ||
-          liteScreenshots[0] ||
-          (d1Pkg.banner_url && d1Pkg.banner_url !== 'logo.svg' ? d1Pkg.banner_url : undefined) ||
-          nonGitLiteThumb ||
-          (d1Pkg.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? d1Pkg.thumbnail_url : undefined)
+        banner: selectSharpPackageBanner(
+          liteGitShot,
+          liteScreenshots,
+          d1Pkg.banner_url,
+          nonGitLiteThumbFormatted,
+          d1Pkg.thumbnail_url
         ) || undefined,
         screenshots: liteScreenshots.length > 0 ? liteScreenshots : undefined,
         license: d1Pkg.license,
@@ -1651,21 +1659,29 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     : d1ParsedShots;
   const nonGitD1Thumb =
     d1Pkg?.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
-      ? sanitizePackageImageUrl(d1Pkg.thumbnail_url)
+      ? upgradeContentDbThumbnailUrl(d1Pkg.thumbnail_url)
       : undefined;
-  const nonLogoD1Thumb = sanitizePackageImageUrl(d1Pkg?.thumbnail_url);
+  const nonLogoD1Thumb = upgradeContentDbThumbnailUrl(d1Pkg?.thumbnail_url);
   const nonLogoD1Banner = sanitizePackageImageUrl(d1Pkg?.banner_url);
-  const sanitizedUpstreamThumb = sanitizePackageImageUrl(upstreamData.thumbnail);
+  const sanitizedUpstreamThumb = upgradeContentDbThumbnailUrl(upstreamData.thumbnail);
   const screenshots: string[] = mergeScreenshotsPreferringGit(
     [gitScreenshot, sanitizedUpstreamThumb, gitProbeVerified ? nonGitD1Thumb : nonLogoD1Thumb],
     gitProbeScan?.screenshots,
     filteredD1Shots,
     rawScreenshotsSource
   );
-  const nonGitDetailThumb =
-    sanitizedUpstreamThumb ||
-    nonGitD1Thumb ||
+  const upgradedUpstreamThumb = upgradeContentDbThumbnailUrl(upstreamData.thumbnail, screenshots);
+  const upgradedD1Thumb =
+    d1Pkg?.thumbnail_url && !isGitRepositoryAssetUrl(d1Pkg.thumbnail_url)
+      ? upgradeContentDbThumbnailUrl(d1Pkg.thumbnail_url, screenshots)
+      : undefined;
+  const nonGitDetailThumbRaw =
+    upgradedUpstreamThumb ||
+    upgradedD1Thumb ||
     screenshots.find(s => !isGitRepositoryAssetUrl(s));
+  const nonGitDetailThumb = nonGitDetailThumbRaw
+    ? (formatContentDbCdnUrl(nonGitDetailThumbRaw, 'tile') || nonGitDetailThumbRaw)
+    : undefined;
   const resolvedThumbRaw = nonGitDetailThumb || gitScreenshot || (!gitProbeVerified ? nonLogoD1Thumb : null) || null;
   const resolvedThumb = sanitizePackageImageUrl(resolvedThumbRaw) || null;
   const resolvedBanner =
@@ -1876,8 +1892,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
-      (!d1Pkg.thumbnail_url && resolvedThumb) ||
-      ((!d1Pkg.banner_url || d1Pkg.banner_url === 'logo.svg' || (!isGitRepositoryAssetUrl(d1Pkg.banner_url) && isGitRepositoryAssetUrl(resolvedBanner))) &&
+      ((!d1Pkg.thumbnail_url || String(d1Pkg.thumbnail_url).includes('/thumbnails/')) && resolvedThumb) ||
+      ((!d1Pkg.banner_url || d1Pkg.banner_url === 'logo.svg' || isContentDbThumbnailUrl(d1Pkg.banner_url) || (!isGitRepositoryAssetUrl(d1Pkg.banner_url) && isGitRepositoryAssetUrl(resolvedBanner))) &&
         resolvedBanner &&
         resolvedBanner !== 'logo.svg') ||
       (!d1Pkg.screenshots && screenshots.length > 0) ||
@@ -1892,11 +1908,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         SET short_desc = COALESCE(short_desc, ?),
             long_desc = COALESCE(long_desc, ?),
             thumbnail_url = CASE
-              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
+              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
               ELSE thumbnail_url
             END,
             banner_url = CASE
-              WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+              WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' OR banner_url LIKE '%/thumbnails/%' THEN COALESCE(?, banner_url)
               ELSE COALESCE(?, banner_url)
             END,
             license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,

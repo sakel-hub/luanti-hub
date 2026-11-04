@@ -410,6 +410,13 @@ export function getCanonicalScreenshotKey(rawUrl?: string | null): string {
     pathname = pathname.replace(/\/+/g, '/').replace(/\/+(\.\/+)+/g, '/');
 
     if (isContentDbHost(host)) {
+      const thumbMatch = pathname.match(/^\/thumbnails\/[^/]+\/([^/?#]+)$/i);
+      if (thumbMatch?.[1]) {
+        const unhacked = removeContentDbPngHack(thumbMatch[1]);
+        if (unhacked !== thumbMatch[1]) {
+          return `cdb:/uploads/${unhacked.toLowerCase()}`;
+        }
+      }
       return `cdb:${pathname.toLowerCase()}`;
     }
 
@@ -562,31 +569,146 @@ export function sanitizePackageImageUrl(rawUrl?: string | null): string | undefi
 }
 
 /**
- * Checks whether an image URL is a ContentDB `/thumbnails/<level>/<filename>` URL.
- * ContentDB `/api/packages/` returns `/thumbnails/1/<filename>` (140×93 px), whereas
- * `/uploads/<filename>` (from `screenshots[0]`) is full original resolution.
+ * Mirrors `luanti-org/contentdb` `app/blueprints/thumbnails/__init__.py:remove_png_hack`:
+ * ContentDB's `get_legacy_thumbnail_url` appends `.png` to the uploaded filename
+ * (e.g. `/thumbnails/1/1486fdc7a4.jpg.png` or `/thumbnails/1/1a204531fe.png.png`).
+ * Stripping the trailing `.png` when the prefix already has an image extension yields the real
+ * BunnyCDN `/uploads/<filename>` key.
+ */
+export function removeContentDbPngHack(filename: string): string {
+  const trimmed = String(filename || '').trim();
+  const lastDot = trimmed.lastIndexOf('.');
+  if (lastDot <= 0) return trimmed;
+  const start = trimmed.slice(0, lastDot);
+  const ext = trimmed.slice(lastDot + 1).toLowerCase();
+  if (ext === 'png' && /\.(?:png|jpe?g|webp)$/i.test(start)) {
+    return start;
+  }
+  return trimmed;
+}
+
+/**
+ * Resolves any ContentDB `/uploads/<filename>` URL or legacy `/thumbnails/<level>/<filename>.<ext>.png`
+ * URL to its canonical BunnyCDN upload URL (`https://cdn.content.luanti.org/uploads/<real_filename>`)
+ * without query parameters.
+ */
+export function toCanonicalContentDbUploadUrl(rawUrl?: string | null): string | undefined {
+  const sanitized = sanitizePackageImageUrl(rawUrl);
+  if (!sanitized || sanitized.startsWith('/api/packages?proxy_image=')) return undefined;
+  try {
+    const u = new URL(sanitized);
+    if (!isContentDbHost(u.hostname.toLowerCase())) return undefined;
+    const uploadMatch = u.pathname.match(/^\/uploads\/([^/?#]+)$/i);
+    if (uploadMatch?.[1]) {
+      const realFile = removeContentDbPngHack(decodeURIComponent(uploadMatch[1]));
+      if (realFile && realFile.toLowerCase() !== 'shot-0.png') {
+        return `https://cdn.content.luanti.org/uploads/${realFile}`;
+      }
+    }
+    const thumbMatch = u.pathname.match(/^\/thumbnails\/[^/]+\/([^/?#]+)$/i);
+    if (thumbMatch?.[1]) {
+      const decoded = decodeURIComponent(thumbMatch[1]);
+      const realFile = removeContentDbPngHack(decoded);
+      // Convert legacy `/thumbnails/<level>/<name>.<ext>.png` double-extension URLs deterministically
+      if (realFile && realFile !== decoded && realFile.toLowerCase() !== 'shot-0.png') {
+        return `https://cdn.content.luanti.org/uploads/${realFile}`;
+      }
+    }
+  } catch {
+    // Ignore malformed URLs
+  }
+  return undefined;
+}
+
+/**
+ * Formats a ContentDB image URL using ContentDB's BunnyCDN Optimizer query parameters
+ * (`luanti-org/contentdb` `app/uploads/bunny.py:get_Thumbnail_url` & `app/blueprints/thumbnails/__init__.py`):
+ * - `'tile'`: `?width=500&aspect_ratio=3:2&format=png` (500×333 px sharp 2x Retina card/Top 10 tile)
+ * - `'banner'`: `?width=1100&aspect_ratio=16:9&format=png` (1100×619 px widescreen Hero & Modal header)
+ * - `'gallery'`: `?width=720&aspect_ratio=16:9&format=png` (720×405 px inline modal screenshot slide)
+ * - `'original'`: uncropped `https://cdn.content.luanti.org/uploads/<filename>` (for Lightbox full-screen zoom)
+ *
+ * Non-ContentDB URLs (e.g. Git repository screenshots) are returned sanitized without modification.
+ */
+export function formatContentDbCdnUrl(
+  rawUrl?: string | null,
+  preset: 'tile' | 'banner' | 'gallery' | 'original' = 'tile'
+): string | undefined {
+  const canonical = toCanonicalContentDbUploadUrl(rawUrl);
+  if (!canonical) {
+    return sanitizePackageImageUrl(rawUrl);
+  }
+  switch (preset) {
+    case 'tile':
+      return `${canonical}?width=500&aspect_ratio=3:2&format=png`;
+    case 'banner':
+      return `${canonical}?width=1100&aspect_ratio=16:9&format=png`;
+    case 'gallery':
+      return `${canonical}?width=720&aspect_ratio=16:9&format=png`;
+    case 'original':
+    default:
+      return canonical;
+  }
+}
+
+/**
+ * Checks whether an image URL is a legacy ContentDB `/thumbnails/<level>/<filename>` URL or a
+ * small `< 500px` thumbnail (`width=100|270|350`).
  */
 export function isContentDbThumbnailUrl(rawUrl?: string | null): boolean {
   const sanitized = sanitizePackageImageUrl(rawUrl);
   if (!sanitized) return false;
   const lower = sanitized.toLowerCase();
-  return isContentDbHost(lower) && lower.includes('/thumbnails/');
+  if (!isContentDbHost(lower)) return false;
+  if (lower.includes('/thumbnails/')) return true;
+  return /[?&]width=(?:100|270|350)\b/i.test(lower);
+}
+
+function extractContentDbAssetStem(url?: string | null): string | undefined {
+  if (!url) return undefined;
+  const m = url.match(/\/(?:thumbnails\/[^/]+|uploads)\/([^/?#.]+)/i);
+  return m?.[1] ? m[1].toLowerCase() : undefined;
 }
 
 /**
- * Sanitizes a ContentDB thumbnail URL without rewriting `/thumbnails/1/` to `/thumbnails/3/`
- * (since full-resolution ContentDB artwork is served from `/uploads/...` via `screenshots[0]`).
+ * Upgrades ContentDB legacy `/thumbnails/<level>/<hash>.<ext>.png` URLs directly to the
+ * canonical `https://cdn.content.luanti.org/uploads/<filename>` URL (with zero HTTP 302 redirects),
+ * or matches a single-dot `/thumbnails/<level>/<stem>.png` against `screenshots` when provided.
  */
-export function upgradeContentDbThumbnailUrl(rawUrl?: string | null): string | undefined {
-  return sanitizePackageImageUrl(rawUrl);
+export function upgradeContentDbThumbnailUrl(
+  rawUrl?: string | null,
+  screenshots?: ReadonlyArray<string | { url?: string } | null | undefined> | null
+): string | undefined {
+  const sanitized = sanitizePackageImageUrl(rawUrl);
+  if (!sanitized) return undefined;
+  if (sanitized.toLowerCase().includes('/thumbnails/')) {
+    const directCanonical = toCanonicalContentDbUploadUrl(sanitized);
+    if (directCanonical) {
+      return directCanonical;
+    }
+    if (Array.isArray(screenshots) && screenshots.length > 0) {
+      const thumbStem = extractContentDbAssetStem(sanitized);
+      if (thumbStem) {
+        for (const entry of screenshots) {
+          const raw = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? entry.url : undefined);
+          const canonicalShot = toCanonicalContentDbUploadUrl(raw);
+          if (canonicalShot && extractContentDbAssetStem(canonicalShot) === thumbStem) {
+            return canonicalShot;
+          }
+        }
+      }
+    }
+  }
+  return sanitized;
 }
 
 /**
  * Single source of truth for selecting the sharpest valid banner image across backend and frontend:
  * 1. Verified Git repository screenshot (`preferredGitShot`, e.g. `screenshot.png` / `.cdb.json`)
- * 2. First full-resolution screenshot from `screenshots` (`https://cdn.content.luanti.org/uploads/...` or Git screenshot)
- * 3. Any candidate in `bannerAndThumbCandidates` that is NOT a `/thumbnails/` URL (e.g. custom promo or `/uploads/` banner)
- * 4. First valid fallback candidate in `bannerAndThumbCandidates`
+ * 2. First full-resolution screenshot from `screenshots` (`https://cdn.content.luanti.org/uploads/...?width=1100&aspect_ratio=16:9&format=png` or Git screenshot)
+ * 3. Any candidate in `bannerAndThumbCandidates` that is NOT a thumbnail URL (formatted to 1100×619 16:9 if ContentDB `/uploads/`)
+ * 4. Any ContentDB candidate in `bannerAndThumbCandidates` that can be resolved to a canonical `/uploads/` URL (formatted to 1100×619 16:9)
+ * 5. First valid fallback candidate in `bannerAndThumbCandidates`
  */
 export function selectSharpPackageBanner(
   preferredGitShot?: string | null,
@@ -603,7 +725,7 @@ export function selectSharpPackageBanner(
       const raw = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? entry.url : undefined);
       const cleanShot = sanitizePackageImageUrl(raw);
       if (cleanShot && !isContentDbThumbnailUrl(cleanShot)) {
-        return cleanShot;
+        return formatContentDbCdnUrl(cleanShot, 'banner') || cleanShot;
       }
     }
   }
@@ -618,7 +740,12 @@ export function selectSharpPackageBanner(
 
   const nonThumbnailBanner = sanitizedCandidates.find(u => !isContentDbThumbnailUrl(u));
   if (nonThumbnailBanner) {
-    return nonThumbnailBanner;
+    return formatContentDbCdnUrl(nonThumbnailBanner, 'banner') || nonThumbnailBanner;
+  }
+
+  const convertibleBanner = sanitizedCandidates.find(u => Boolean(toCanonicalContentDbUploadUrl(u)));
+  if (convertibleBanner) {
+    return formatContentDbCdnUrl(convertibleBanner, 'banner') || convertibleBanner;
   }
 
   if (sanitizedCandidates.length > 0) {
@@ -633,6 +760,8 @@ export function selectSharpPackageBanner(
  * - Always places Git repository screenshots (`screenshot.png` / `.cdb.json`) first (`gitUrls`),
  *   followed by complementary ContentDB gallery screenshots (`otherUrls`).
  * - Normalizes MeseHub & Codeberg proxy URLs (`&ngsw-bypass=true`) and ContentDB mirror hosts (`content.luanti.org`).
+ * - Strips resize query parameters (`?width=...&aspect_ratio=...`) from ContentDB `/uploads/` gallery entries so
+ *   `screenshots[]` always stores clean uncropped image URLs.
  * - Rejects dead mirror `/storage/screenshots/...` and synthetic `/shot-0.png` URLs.
  * - Deduplicates Git raw URLs across branch/API variants (`/main/`, `/HEAD/`, `/raw/branch/`, `/api/v1/repos/.../raw/`)
  *   using `getCanonicalScreenshotKey`.
@@ -653,17 +782,31 @@ export function mergeScreenshotsPreferringGit(
   };
 
   const normalizeCandidateUrl = (rawExtracted: string): string => {
-    return sanitizePackageImageUrl(rawExtracted) || '';
+    const sanitized = sanitizePackageImageUrl(rawExtracted) || '';
+    if (!sanitized) return '';
+    if (isContentDbHost(sanitized) && sanitized.includes('/uploads/') && sanitized.includes('?')) {
+      return sanitized.split('?')[0];
+    }
+    return sanitized;
   };
 
   const inspectForThumbnailHash = (raw: any) => {
     const rawUrl = extractUrl(raw);
     if (!rawUrl || isDeadMirrorScreenshotUrl(rawUrl)) return;
     const lower = rawUrl.toLowerCase();
-    if (isContentDbHost(lower) && lower.includes('/thumbnails/')) {
-      const m = lower.match(/\/thumbnails\/[^/]+\/([^/?#]+)/);
-      if (m?.[1]) {
-        cdbThumbnailFileNames.add(m[1]);
+    if (isContentDbHost(lower)) {
+      if (lower.includes('/thumbnails/')) {
+        const m = lower.match(/\/thumbnails\/[^/]+\/([^/?#]+)/);
+        if (m?.[1]) {
+          cdbThumbnailFileNames.add(m[1]);
+          cdbThumbnailFileNames.add(removeContentDbPngHack(m[1]));
+        }
+      } else if (isContentDbThumbnailUrl(lower) && lower.includes('/uploads/')) {
+        const m = lower.match(/\/uploads\/([^/?#]+)/);
+        if (m?.[1]) {
+          cdbThumbnailFileNames.add(m[1]);
+          cdbThumbnailFileNames.add(removeContentDbPngHack(m[1]));
+        }
       }
     }
   };

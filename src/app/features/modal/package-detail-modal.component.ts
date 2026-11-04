@@ -19,7 +19,11 @@ import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { LuantiPackage, CommunityReview, PackageRelease, ReleaseNotesPayload } from '../../core/models/package.model';
-import { isContentDbThumbnailUrl, upgradeContentDbThumbnailUrl } from '../../core/config/git-providers.config';
+import {
+  formatContentDbCdnUrl,
+  isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl
+} from '../../core/config/git-providers.config';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -164,7 +168,7 @@ import {
           <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio for HD Screenshots, Netflix-Matched Proportions) -->
           <div class="relative w-full aspect-video min-h-[260px] sm:min-h-[380px] lg:min-h-[480px] max-h-[630px] bg-slate-950 flex-shrink-0 overflow-hidden">
             <img
-              [src]="activeBannerUrl() || bannerImage"
+              [src]="modalHeaderBannerUrl"
               [fallbackThumbnail]="fallbackBannerThumbnail"
               (load)="onScreenshotLoad($event)"
               (error)="onScreenshotError(undefined, $event)"
@@ -510,7 +514,7 @@ import {
                                 (click)="openLightbox(slide.url)"
                                 class="relative w-full h-full cursor-zoom-in group">
                                 <img
-                                  [src]="slide.url"
+                                  [src]="getSlideDisplayUrl(slide.url)"
                                   (load)="onScreenshotLoad($event, slide.url)"
                                   (error)="onScreenshotError(slide.url)"
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
@@ -2136,7 +2140,7 @@ import {
               (click)="$event.stopPropagation()"
               class="relative max-w-6xl max-h-[86vh] w-full h-full flex items-center justify-center overflow-auto">
               <img
-                [src]="zoomImg"
+                [src]="getLightboxDisplayUrl(zoomImg)"
                 [alt]="package.title + ' full resolution screenshot'"
                 (click)="toggleLightboxZoom($event)"
                 [class]="isLightboxZoomed() ? 'max-w-none w-[165%] sm:w-[150%] h-auto object-contain cursor-zoom-out transition-transform duration-300' : 'max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl cursor-zoom-in transition-transform duration-300'"
@@ -2377,7 +2381,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       slides.push({
         type: 'image',
         url: shot,
-        thumbnail: shot
+        thumbnail: formatContentDbCdnUrl(shot, 'tile') || shot
       });
     }
     return slides;
@@ -2724,6 +2728,28 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       }
     }
     return 'logo.svg';
+  }
+
+  get modalHeaderBannerUrl(): string {
+    const raw = this.activeBannerUrl() || this.bannerImage;
+    if (!raw || raw === 'logo.svg' || this.packageService.isGitScreenshotUrl(raw)) {
+      return raw || 'logo.svg';
+    }
+    return formatContentDbCdnUrl(raw, 'banner') || raw;
+  }
+
+  getSlideDisplayUrl(url: string): string {
+    if (!url || url === 'logo.svg' || this.packageService.isGitScreenshotUrl(url)) {
+      return url || 'logo.svg';
+    }
+    return formatContentDbCdnUrl(url, 'gallery') || url;
+  }
+
+  getLightboxDisplayUrl(url: string): string {
+    if (!url || url === 'logo.svg' || this.packageService.isGitScreenshotUrl(url)) {
+      return url || 'logo.svg';
+    }
+    return formatContentDbCdnUrl(url, 'original') || url;
   }
 
   get fallbackBannerThumbnail(): string | undefined {

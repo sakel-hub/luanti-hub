@@ -27,6 +27,7 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
@@ -711,11 +712,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v15';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v8_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v9_${encodeURIComponent(normalizedCatalogKey)}`;
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -1227,8 +1228,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
 
     const sanitizedD1Banner = sanitizePackageImageUrl(p.banner_url);
-    const sanitizedD1Thumb = sanitizePackageImageUrl(p.thumbnail_url);
-    const sanitizedUpstreamThumb = sanitizePackageImageUrl(matchedUpstream?.thumbnail);
+    const sanitizedD1Thumb = upgradeContentDbThumbnailUrl(p.thumbnail_url);
+    const sanitizedUpstreamThumb = upgradeContentDbThumbnailUrl(matchedUpstream?.thumbnail);
     const gitShotD1 = isGitRepositoryAssetUrl(sanitizedD1Banner)
       ? sanitizedD1Banner
       : (isGitRepositoryAssetUrl(sanitizedD1Thumb) ? sanitizedD1Thumb : undefined);
@@ -1244,7 +1245,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         : '') ||
       mergedCatalogScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
       '';
-    const rawThumbCandidate = nonGitThumbCandidate || gitShotD1 || sanitizedD1Banner || '';
+    const formattedNonGitThumb = nonGitThumbCandidate
+      ? (formatContentDbCdnUrl(nonGitThumbCandidate, 'tile') || nonGitThumbCandidate)
+      : '';
+    const rawThumbCandidate = formattedNonGitThumb || gitShotD1 || sanitizedD1Banner || '';
     const resolvedThumb = sanitizePackageImageUrl(rawThumbCandidate) || null;
     const resolvedBanner =
       selectSharpPackageBanner(
@@ -1363,7 +1367,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       d1StarAvg
     );
     const resolvedScore = computedScore > 0 ? computedScore : (sharedRating?.score || 0);
-    const sanitizedItemThumb = sanitizePackageImageUrl(item.thumbnail || item.thumbnail_url);
+    const sanitizedItemThumb = upgradeContentDbThumbnailUrl(item.thumbnail || item.thumbnail_url);
     const resolvedUpstreamBanner =
       selectSharpPackageBanner(
         undefined,
@@ -1542,8 +1546,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             pkg.review_thread_counts = parsedDetailRevCounts;
             pkg.rating_checked = true;
           }
-          const detailThumbSanitized = sanitizePackageImageUrl(detail?.thumbnail);
-          if (detailThumbSanitized && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.thumbnail))) {
+          const detailThumbSanitized = upgradeContentDbThumbnailUrl(detail?.thumbnail);
+          if (detailThumbSanitized && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || isDeadMirrorScreenshotUrl(pkg.thumbnail) || String(pkg.thumbnail).includes('/thumbnails/'))) {
             pkg.thumbnail = detailThumbSanitized;
           }
           if (Array.isArray(detail?.screenshots) && detail.screenshots.length > 0) {
@@ -1554,6 +1558,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             );
             if (mergedDetailShots.length > 0) {
               pkg.screenshots = mergedDetailShots;
+              const firstCdbShot = mergedDetailShots.find(s => !isGitRepositoryAssetUrl(s));
+              if (firstCdbShot && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg' || String(pkg.thumbnail).includes('/thumbnails/'))) {
+                pkg.thumbnail = formatContentDbCdnUrl(firstCdbShot, 'tile') || pkg.thumbnail;
+              }
               const preferredGitExisting = isGitRepositoryAssetUrl(pkg.banner) ? pkg.banner : undefined;
               pkg.banner =
                 selectSharpPackageBanner(
@@ -1674,12 +1682,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               sanitizePackageImageUrl(pkg.banner)
                 ? sanitizePackageImageUrl(pkg.banner)!
                 : null;
-            if (newLic || newVid || newShot || newRevCounts || newScore !== null) {
+            const newThumb =
+              (!sanitizePackageImageUrl(existingD1.thumbnail_url) ||
+                String(existingD1.thumbnail_url || '').includes('/thumbnails/')) &&
+              sanitizePackageImageUrl(pkg.thumbnail)
+                ? sanitizePackageImageUrl(pkg.thumbnail)!
+                : null;
+            if (newLic || newVid || newShot || newThumb || newRevCounts || newScore !== null) {
               bootHydrateStmts.push(
                 env.DB.prepare(`
                   UPDATE packages
                   SET thumbnail_url = CASE
-                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
                         ELSE thumbnail_url
                       END,
                       banner_url = CASE

@@ -7925,7 +7925,9 @@ supported_games = minetest_game, voxelibre
       await pkgService.loadPackageDetails(mobsTile, true);
       const afterDetail = pkgService.packages().find(p => p.id === 'TenPlus1/mobs')!;
       expect(afterDetail.thumbnail).toBe('https://content.luanti.org/thumbnails/1/dc6e96f2d4.png');
-      expect(afterDetail.banner).toBe('https://cdn.content.luanti.org/uploads/dc6e96f2d4.png');
+      expect(afterDetail.banner).toBe(
+        'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png?width=1100&aspect_ratio=16:9&format=png'
+      );
 
       // Ensure fetchReviews is NOT blocked by `{positive:0,neutral:0,negative:0}` and fetches `/api/packages/TenPlus1/mobs/reviews`
       const fetchedRevs = await pkgService.fetchReviews(afterDetail);
@@ -8114,22 +8116,46 @@ supported_games = minetest_game, voxelibre
     expect(paginationBar?.textContent).toContain('2 / 3');
   });
 
-  it('should prioritize full-resolution /uploads/ screenshots on tiles and Hero Billboard without hover network fetches', async () => {
-    const { isContentDbThumbnailUrl, sanitizePackageImageUrl, selectSharpPackageBanner } = await import(
-      './core/config/git-providers.config'
-    );
+  it('should convert ContentDB images to BunnyCDN transformation presets (tile 500px 3:2, banner 1100px 16:9, gallery 720px 16:9) without hover network fetches', async () => {
+    const {
+      isContentDbThumbnailUrl,
+      sanitizePackageImageUrl,
+      selectSharpPackageBanner,
+      removeContentDbPngHack,
+      toCanonicalContentDbUploadUrl,
+      formatContentDbCdnUrl,
+      upgradeContentDbThumbnailUrl
+    } = await import('./core/config/git-providers.config');
     const pkgService = TestBed.inject(PackageService);
 
-    // 1. ContentDB /thumbnails/ URLs are distinguished from full-resolution /uploads/ URLs
+    // 1. ContentDB /thumbnails/ URLs and BunnyCDN transformation presets
     const cdbLevel1 = 'https://content.luanti.org/thumbnails/1/8f7c4f97f4.png';
     const cdbLevel3 = 'https://content.luanti.org/thumbnails/3/8f7c4f97f4.png';
+    const cdbDoubleExt = 'https://content.luanti.org/thumbnails/1/1486fdc7a4.jpg.png';
     const cdbUpload = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg';
+    const cdbUploadTile = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=500&aspect_ratio=3:2&format=png';
+    const cdbUploadBanner = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=1100&aspect_ratio=16:9&format=png';
+    const cdbUploadGallery = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=720&aspect_ratio=16:9&format=png';
+
+    expect(removeContentDbPngHack('1486fdc7a4.jpg.png')).toBe('1486fdc7a4.jpg');
+    expect(removeContentDbPngHack('1a204531fe.png.png')).toBe('1a204531fe.png');
+    expect(toCanonicalContentDbUploadUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
+    expect(upgradeContentDbThumbnailUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
+    expect(formatContentDbCdnUrl(cdbDoubleExt, 'tile')).toBe(
+      'https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg?width=500&aspect_ratio=3:2&format=png'
+    );
+    expect(formatContentDbCdnUrl(cdbUpload, 'tile')).toBe(cdbUploadTile);
+    expect(formatContentDbCdnUrl(cdbUpload, 'banner')).toBe(cdbUploadBanner);
+    expect(formatContentDbCdnUrl(cdbUpload, 'gallery')).toBe(cdbUploadGallery);
+    expect(formatContentDbCdnUrl(cdbUploadBanner, 'original')).toBe(cdbUpload);
+
     expect(isContentDbThumbnailUrl(cdbLevel1)).toBe(true);
     expect(isContentDbThumbnailUrl(cdbUpload)).toBe(false);
+    expect(isContentDbThumbnailUrl(cdbUploadTile)).toBe(false);
     expect(sanitizePackageImageUrl(cdbLevel3)).toBe(cdbLevel1);
-    expect(selectSharpPackageBanner(undefined, [cdbUpload], cdbLevel1)).toBe(cdbUpload);
+    expect(selectSharpPackageBanner(undefined, [cdbUpload], cdbLevel1)).toBe(cdbUploadBanner);
 
-    // 2. normalizePackage selects full-resolution /uploads/ screenshot over /thumbnails/1/
+    // 2. normalizePackage upgrades ContentDB thumbnail to 'tile' preset and banner to 'banner' preset
     const mobsAnimal = (pkgService as any).normalizePackage({
       id: 'TenPlus1/mobs_animal',
       author: 'TenPlus1',
@@ -8143,16 +8169,16 @@ supported_games = minetest_game, voxelibre
       downloads: 216200,
       score: 4.8
     });
-    expect(mobsAnimal.thumbnail).toBe(cdbLevel1);
-    expect(mobsAnimal.banner).toBe(cdbUpload);
+    expect(mobsAnimal.thumbnail).toBe(cdbUploadTile);
+    expect(mobsAnimal.banner).toBe(cdbUploadBanner);
 
-    // 3. PackageCardComponent uses full-res /uploads/ image and does NOT trigger network fetches on hover
+    // 3. PackageCardComponent uses 500x333 'tile' preset and does NOT trigger network fetches on hover
     const cardFixture = TestBed.createComponent(PackageCardComponent);
     const cardComp = cardFixture.componentInstance;
     cardComp.package = mobsAnimal;
     cardFixture.detectChanges();
 
-    expect(cardComp.cardBannerUrl).toBe(cdbUpload);
+    expect(cardComp.cardBannerUrl).toBe(cdbUploadTile);
 
     (pkgService as any).hydrationQueue.length = 0;
     const loadDetailsSpy = vi.spyOn(pkgService, 'loadPackageDetails');
@@ -8162,18 +8188,29 @@ supported_games = minetest_game, voxelibre
     await new Promise(resolve => setTimeout(resolve, 260));
     expect(loadDetailsSpy).not.toHaveBeenCalled();
     expect(ensureHydratedSpy).not.toHaveBeenCalled();
-    expect(cardComp.cardBannerUrl).toBe(cdbUpload);
+    expect(cardComp.cardBannerUrl).toBe(cdbUploadTile);
 
-    // 4. HeroBillboardComponent uses full-res /uploads/ screenshot when available
+    // 4. HeroBillboardComponent uses 1100px 16:9 'banner' preset
     const heroFixture = TestBed.createComponent(HeroBillboardComponent);
     const heroComp = heroFixture.componentInstance;
-    expect(heroComp.getSlideBanner(mobsAnimal)).toBe(cdbUpload);
+    expect(heroComp.getSlideBanner(mobsAnimal)).toBe(cdbUploadBanner);
     expect(
       heroComp.getSlideBanner({
         ...mobsAnimal,
         banner: cdbLevel1,
         screenshots: [cdbUpload]
       })
-    ).toBe(cdbUpload);
+    ).toBe(cdbUploadBanner);
+
+    // 5. PackageDetailModalComponent uses 'banner' for header, 'gallery' for carousel slide, and 'original' for Lightbox
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = mobsAnimal;
+    (pkgService as any)._activePackage.set(mobsAnimal);
+    modalFixture.detectChanges();
+
+    expect(modalComp.modalHeaderBannerUrl).toBe(cdbUploadBanner);
+    expect(modalComp.getSlideDisplayUrl(cdbUpload)).toBe(cdbUploadGallery);
+    expect(modalComp.getLightboxDisplayUrl(cdbUploadBanner)).toBe(cdbUpload);
   });
 });

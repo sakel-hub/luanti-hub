@@ -10,7 +10,9 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
+  upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
@@ -44,7 +46,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v7_${encodeURIComponent(
+      ? `/__api_hydrate_v8_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -96,7 +98,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             score: row.score
           });
           const sanitizedRowBanner = sanitizePackageImageUrl(row.banner_url);
-          const sanitizedRowThumb = sanitizePackageImageUrl(row.thumbnail_url);
+          const sanitizedRowThumb = upgradeContentDbThumbnailUrl(row.thumbnail_url);
           const gitShotD1 = isGitRepositoryAssetUrl(sanitizedRowBanner)
             ? sanitizedRowBanner
             : (isGitRepositoryAssetUrl(sanitizedRowThumb) ? sanitizedRowThumb : undefined);
@@ -105,6 +107,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             parseJsonArray(row.screenshots).filter((s: string) => !isDeadMirrorScreenshotUrl(s))
           );
           const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
+          const rawNonGitRowThumb =
+            (sanitizedRowThumb && !isGitRepositoryAssetUrl(sanitizedRowThumb)
+              ? sanitizedRowThumb
+              : undefined) ||
+            rowScreenshots.find(s => !isGitRepositoryAssetUrl(s));
+          const formattedRowThumb = rawNonGitRowThumb
+            ? (formatContentDbCdnUrl(rawNonGitRowThumb, 'tile') || rawNonGitRowThumb)
+            : (gitShotD1 || sanitizedRowThumb);
 
           hydratedMap[lowerKey] = {
             id: row.id,
@@ -124,13 +134,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
             repo_url: row.repo_url || undefined,
-            thumbnail:
-              (sanitizedRowThumb && !isGitRepositoryAssetUrl(sanitizedRowThumb)
-                ? sanitizedRowThumb
-                : undefined) ||
-              rowScreenshots.find(s => !isGitRepositoryAssetUrl(s)) ||
-              gitShotD1 ||
-              sanitizedRowThumb,
+            thumbnail: formattedRowThumb,
             banner: selectSharpPackageBanner(
               gitShotD1,
               rowScreenshots,
@@ -379,7 +383,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
           const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
-          const sanitizedDetailThumb = sanitizePackageImageUrl(detail?.thumbnail);
+          const sanitizedDetailThumb = upgradeContentDbThumbnailUrl(detail?.thumbnail);
           const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
             [gitScanShot, existing.banner, existing.thumbnail, sanitizedDetailThumb],
             gitScanCdbShots,
@@ -389,14 +393,20 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const primaryGitShot =
             sanitizePackageImageUrl(gitScanShot) ||
             (isGitRepositoryAssetUrl(mergedHydrateScreenshots[0]) ? mergedHydrateScreenshots[0] : undefined);
+          const upgradedDetailThumb = upgradeContentDbThumbnailUrl(detail?.thumbnail, mergedHydrateScreenshots);
+          const upgradedExistingThumb =
+            existing.thumbnail && !isGitRepositoryAssetUrl(existing.thumbnail)
+              ? upgradeContentDbThumbnailUrl(existing.thumbnail, mergedHydrateScreenshots)
+              : undefined;
           const nonGitHydrateThumb =
-            sanitizedDetailThumb ||
-            (existing.thumbnail && !isGitRepositoryAssetUrl(existing.thumbnail)
-              ? sanitizePackageImageUrl(existing.thumbnail)
-              : undefined) ||
+            upgradedDetailThumb ||
+            upgradedExistingThumb ||
             mergedHydrateScreenshots.find(s => !isGitRepositoryAssetUrl(s));
+          const formattedNonGitHydrateThumb = nonGitHydrateThumb
+            ? (formatContentDbCdnUrl(nonGitHydrateThumb, 'tile') || nonGitHydrateThumb)
+            : undefined;
           const resolvedHydrateThumb =
-            sanitizePackageImageUrl(nonGitHydrateThumb || primaryGitShot || existing.thumbnail) || null;
+            sanitizePackageImageUrl(formattedNonGitHydrateThumb || primaryGitShot || existing.thumbnail) || null;
           const resolvedHydrateBanner =
             selectSharpPackageBanner(
               primaryGitShot,
@@ -447,7 +457,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             const newTagsJson =
               detailTags.length > existingD1Tags.length ? JSON.stringify(detailTags) : null;
             const newThumb =
-              !sanitizePackageImageUrl(existingD1Row.thumbnail_url) && resolvedHydrateThumb
+              (!sanitizePackageImageUrl(existingD1Row.thumbnail_url) ||
+                String(existingD1Row.thumbnail_url || '').includes('/thumbnails/')) &&
+              resolvedHydrateThumb
                 ? resolvedHydrateThumb
                 : null;
             const newBanner =
@@ -462,7 +474,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 env.DB.prepare(`
                   UPDATE packages
                   SET thumbnail_url = CASE
-                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
                         ELSE thumbnail_url
                       END,
                       banner_url = CASE

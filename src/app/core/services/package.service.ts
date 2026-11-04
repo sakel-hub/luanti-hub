@@ -36,6 +36,9 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  removeContentDbPngHack,
+  toCanonicalContentDbUploadUrl,
+  formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
@@ -1605,13 +1608,15 @@ export class PackageService {
         for (const [k, v] of Object.entries(parsed)) {
           if (k && v && typeof v === 'object') {
             const entry = { ...(v as Partial<LuantiPackage>) };
-            if (typeof entry.thumbnail === 'string') {
-              entry.thumbnail = sanitizePackageImageUrl(entry.thumbnail);
-            }
             if (Array.isArray(entry.screenshots)) {
               entry.screenshots = entry.screenshots
                 .map(s => sanitizePackageImageUrl(s) || '')
                 .filter(Boolean);
+            }
+            if (typeof entry.thumbnail === 'string') {
+              const sanThumb = sanitizePackageImageUrl(entry.thumbnail);
+              const upgThumb = upgradeContentDbThumbnailUrl(sanThumb, entry.screenshots);
+              entry.thumbnail = formatContentDbCdnUrl(upgThumb, 'tile') || upgThumb || sanThumb;
             }
             if (typeof entry.banner === 'string' || (entry.screenshots && entry.screenshots.length > 0)) {
               const preferredGit = this.isGitScreenshotUrl(entry.banner)
@@ -1782,13 +1787,25 @@ export class PackageService {
       cachedMeta?.thumbnail
     ].find(u => this.isGitScreenshotUrl(u));
     const gitShotCandidate = rawGitShotCandidate ? sanitizePackageImageUrl(rawGitShotCandidate) : undefined;
-    const nonGitThumbCandidate = [
+    const rawNonGitThumbCandidate = [
       item.thumbnail,
       item.thumbnail_url,
       cachedMeta?.thumbnail
     ]
       .map(u => sanitizePackageImageUrl(u))
       .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
+
+    const mergedItemScreenshots =
+      Array.isArray(item.screenshots) || Array.isArray(cachedMeta?.screenshots)
+        ? this.mergePackageScreenshots([gitShotCandidate, rawNonGitThumbCandidate], item.screenshots, cachedMeta?.screenshots)
+        : undefined;
+    const screenshots = mergedItemScreenshots && mergedItemScreenshots.length > 0
+      ? mergedItemScreenshots
+      : undefined;
+
+    const upgradedNonGitThumb = upgradeContentDbThumbnailUrl(rawNonGitThumbCandidate, screenshots);
+    const nonGitThumbCandidate =
+      formatContentDbCdnUrl(upgradedNonGitThumb, 'tile') || upgradedNonGitThumb || rawNonGitThumbCandidate;
     const nonLogoThumbCandidate = [
       nonGitThumbCandidate,
       gitShotCandidate,
@@ -1797,14 +1814,6 @@ export class PackageService {
       sanitizePackageImageUrl(cachedMeta?.thumbnail)
     ].find(Boolean);
     const thumbnail = nonLogoThumbCandidate || 'logo.svg';
-
-    const mergedItemScreenshots =
-      Array.isArray(item.screenshots) || Array.isArray(cachedMeta?.screenshots)
-        ? this.mergePackageScreenshots([gitShotCandidate, nonGitThumbCandidate], item.screenshots, cachedMeta?.screenshots)
-        : undefined;
-    const screenshots = mergedItemScreenshots && mergedItemScreenshots.length > 0
-      ? mergedItemScreenshots
-      : undefined;
 
     const banner =
       selectSharpPackageBanner(
@@ -2676,6 +2685,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v17');
         sessionStorage.removeItem('lh_boot_cache_v18');
         sessionStorage.removeItem('lh_boot_cache_v19');
+        sessionStorage.removeItem('lh_boot_cache_v20');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -3259,7 +3269,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v19');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v20');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -3332,7 +3342,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v19',
+          'lh_boot_cache_v20',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -3496,7 +3506,8 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v15') ||
               sessionStorage.getItem('lh_boot_cache_v16') ||
               sessionStorage.getItem('lh_boot_cache_v17') ||
-              sessionStorage.getItem('lh_boot_cache_v18')
+              sessionStorage.getItem('lh_boot_cache_v18') ||
+              sessionStorage.getItem('lh_boot_cache_v19')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -3504,8 +3515,9 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v16');
               sessionStorage.removeItem('lh_boot_cache_v17');
               sessionStorage.removeItem('lh_boot_cache_v18');
+              sessionStorage.removeItem('lh_boot_cache_v19');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v19');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v20');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -3970,14 +3982,17 @@ export class PackageService {
             .map(u => sanitizePackageImageUrl(u))
             .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
           const preferredGitShot = rawPreferredGitShot;
-          const nonGitHydrateThumb = [pkg.thumbnail, h.thumbnail]
+          const rawNonGitHydrateThumb = [pkg.thumbnail, h.thumbnail]
             .map(u => sanitizePackageImageUrl(u))
             .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
           const mergedShots = this.mergePackageScreenshots(
-            [preferredGitShot, nonGitHydrateThumb],
+            [preferredGitShot, rawNonGitHydrateThumb],
             h.screenshots,
             pkg.screenshots
           );
+          const upgradedHydrateThumb = upgradeContentDbThumbnailUrl(rawNonGitHydrateThumb, mergedShots);
+          const nonGitHydrateThumb =
+            formatContentDbCdnUrl(upgradedHydrateThumb, 'tile') || upgradedHydrateThumb || rawNonGitHydrateThumb;
           const nonLogoHydrateThumb = [
             nonGitHydrateThumb,
             preferredGitShot,
@@ -6283,11 +6298,11 @@ export class PackageService {
           .map(u => sanitizePackageImageUrl(u))
           .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
         const preferredGitShot = rawPreferredGitShot;
-        const nonGitDetailThumb = [data.thumbnail, pkg.thumbnail, liveCatalogPkg?.thumbnail]
+        const rawNonGitDetailThumb = [data.thumbnail, pkg.thumbnail, liveCatalogPkg?.thumbnail]
           .map(u => sanitizePackageImageUrl(u))
           .find(u => Boolean(u) && !this.isGitScreenshotUrl(u));
         const mergedScreenshotsList = this.mergePackageScreenshots(
-          [preferredGitShot, nonGitDetailThumb],
+          [preferredGitShot, rawNonGitDetailThumb],
           data.screenshots,
           pkg.screenshots,
           liveCatalogPkg?.screenshots
@@ -6299,8 +6314,13 @@ export class PackageService {
           mergedScreenshotsList.length > 0
             ? mergedScreenshotsList
             : (fallbackExistingShots.length > 0 ? fallbackExistingShots : undefined);
+        const upgradedDetailThumb = upgradeContentDbThumbnailUrl(rawNonGitDetailThumb, screenshots);
+        const nonGitDetailThumb =
+          formatContentDbCdnUrl(upgradedDetailThumb, 'tile') || upgradedDetailThumb || rawNonGitDetailThumb;
         const resolvedNonGitThumb =
-          nonGitDetailThumb || (screenshots || []).find(s => !this.isGitScreenshotUrl(s));
+          nonGitDetailThumb ||
+          formatContentDbCdnUrl((screenshots || []).find(s => !this.isGitScreenshotUrl(s)), 'tile') ||
+          (screenshots || []).find(s => !this.isGitScreenshotUrl(s));
         const nonLogoDetailThumb = [
           resolvedNonGitThumb,
           preferredGitShot,

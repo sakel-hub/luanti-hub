@@ -14,7 +14,7 @@ import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { LuantiPackage } from '../../core/models/package.model';
-import { selectSharpPackageBanner } from '../../core/config/git-providers.config';
+import { formatContentDbCdnUrl, selectSharpPackageBanner } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -299,9 +299,16 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
     const preferredGit = this.packageService.isGitScreenshotUrl(pkg.banner)
       ? pkg.banner
       : (this.packageService.isGitScreenshotUrl(pkg.thumbnail) ? pkg.thumbnail : undefined);
+    if (preferredGit) {
+      return preferredGit;
+    }
+    const sharp = selectSharpPackageBanner(preferredGit, pkg.screenshots, pkg.banner, pkg.thumbnail);
     return (
-      selectSharpPackageBanner(preferredGit, pkg.screenshots, pkg.banner, pkg.thumbnail) ||
+      formatContentDbCdnUrl(sharp, 'tile') ||
+      sharp ||
+      formatContentDbCdnUrl(pkg.banner, 'tile') ||
       pkg.banner ||
+      formatContentDbCdnUrl(pkg.thumbnail, 'tile') ||
       pkg.thumbnail ||
       'logo.svg'
     );

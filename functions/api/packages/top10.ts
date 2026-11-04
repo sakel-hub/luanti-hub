@@ -9,6 +9,8 @@ import {
   isPackageDeprecated,
   parseJsonArray,
   sanitizePackageImageUrl,
+  formatContentDbCdnUrl,
+  upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
   toProxiedGitImageIfNeeded
 } from '../lib/upstream';
@@ -176,7 +178,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           );
 
           const rowScreenshots = parseJsonArray(r.screenshots);
-          const cleanRowThumb = sanitizePackageImageUrl(r.thumbnail_url) || '';
+          const cleanRowThumb =
+            upgradeContentDbThumbnailUrl(r.thumbnail_url) ||
+            (rowScreenshots[0] ? formatContentDbCdnUrl(rowScreenshots[0], 'tile') : '') ||
+            '';
           const cleanRowBanner =
             selectSharpPackageBanner(undefined, rowScreenshots, r.banner_url, cleanRowThumb) || cleanRowThumb;
 
@@ -245,8 +250,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             const match = upstreamMap.get(lowerKey);
             if (match) {
               const thumb =
-                sanitizePackageImageUrl(entry.thumbnail) ||
-                sanitizePackageImageUrl(match.thumbnail) ||
+                upgradeContentDbThumbnailUrl(entry.thumbnail) ||
+                upgradeContentDbThumbnailUrl(match.thumbnail) ||
                 'logo.svg';
               const banner =
                 selectSharpPackageBanner(
@@ -268,7 +273,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 license: match.license || entry.license || ''
               };
             }
-            const cleanThumb = sanitizePackageImageUrl(entry.thumbnail) || 'logo.svg';
+            const cleanThumb = upgradeContentDbThumbnailUrl(entry.thumbnail) || 'logo.svg';
             const cleanBanner =
               selectSharpPackageBanner(undefined, entry.screenshots, entry.banner, cleanThumb) || cleanThumb;
             return {
@@ -308,7 +313,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           markAuthor(item.author);
 
           const thumbnail =
-            sanitizePackageImageUrl(item.thumbnail || item.thumbnail_url) || 'logo.svg';
+            upgradeContentDbThumbnailUrl(item.thumbnail || item.thumbnail_url) || 'logo.svg';
           const banner =
             selectSharpPackageBanner(
               undefined,

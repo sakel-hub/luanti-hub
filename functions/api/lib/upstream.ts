@@ -287,7 +287,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v14'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v14',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v15',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;
@@ -331,6 +333,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${a}/${n}`);
     }
   }
 
@@ -3103,6 +3108,9 @@ import {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  removeContentDbPngHack,
+  toCanonicalContentDbUploadUrl,
+  formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
@@ -3125,6 +3133,9 @@ export {
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
+  removeContentDbPngHack,
+  toCanonicalContentDbUploadUrl,
+  formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
