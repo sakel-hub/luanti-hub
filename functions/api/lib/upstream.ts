@@ -72,13 +72,62 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
 }
 
 /**
+ * Normalizes naive UTC timestamp strings (e.g. Python's `datetime.utcnow().isoformat()` or SQLite's
+ * `YYYY-MM-DD HH:MM:SS` without a timezone suffix) by appending `Z` so `Date.parse()` / `new Date()`
+ * always evaluates them in UTC rather than local time.
+ */
+export function normalizeUtcIsoTimestamp(raw: unknown): string {
+  const str = String(raw ?? '').trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str.replace(' ', 'T')}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str}Z`;
+  }
+  return str;
+}
+
+/**
  * Normalizes a ContentDB `PackageReview.as_dict()` entry from `GET /api/packages/<author>/<name>/reviews/`
- * (see `luanti-org/contentdb` `app/models/threads.py:202-225` and `app/flatpages/help/api.md:382-427`).
+ * or `GET /api/reviews/` (see `luanti-org/contentdb` `app/models/threads.py:202-225` and `app/flatpages/help/api.md:382-427`).
  */
 export function normalizeContentDbReviewItem(r: any, idx = 0, packageId?: string): any {
-  const rawUsername = String(r?.user?.username || r?.author || r?.username || 'contentdb_user').trim();
-  const rawDisplayName = String(r?.user?.display_name || r?.user?.username || r?.author || rawUsername || 'Community Member').trim();
-  const threadId = r?.thread?.id || r?.id || `${rawUsername}_${r?.created_at || idx}`;
+  const rawUsername = String(
+    r?.user?.username ||
+    r?.author?.username ||
+    (typeof r?.author === 'string' ? r.author : '') ||
+    r?.reviewer_username ||
+    r?.username ||
+    'contentdb_user'
+  ).trim();
+  const rawDisplayName = String(
+    r?.user?.display_name ||
+    r?.author?.display_name ||
+    r?.reviewer_display_name ||
+    r?.user?.username ||
+    (typeof r?.author === 'string' ? r.author : '') ||
+    rawUsername ||
+    'Community Member'
+  ).trim();
+  const resolvedPkgId = String(
+    packageId ||
+    r?.package_id ||
+    r?.packageId ||
+    (r?.package?.author && r?.package?.name ? `${r.package.author}/${r.package.name}` : '')
+  ).trim();
+  const explicitId = r?.thread?.id ?? r?.id;
+  const fallbackIdKey = resolvedPkgId
+    ? `${resolvedPkgId.toLowerCase()}_${rawUsername}_${r?.created_at || idx}`
+    : `${rawUsername}_${r?.created_at || idx}`;
+  const rawThreadId =
+    explicitId !== undefined && explicitId !== null && String(explicitId).trim() !== ''
+      ? String(explicitId).trim()
+      : fallbackIdKey;
+  const cleanId =
+    rawThreadId.startsWith('cdb_') || rawThreadId.startsWith('lh_')
+      ? rawThreadId
+      : `cdb_${rawThreadId}`;
   const rawRating = Number(r?.rating);
   const rating = Number.isFinite(rawRating) && rawRating >= 1 && rawRating <= 5
     ? Math.round(rawRating)
@@ -92,27 +141,80 @@ export function normalizeContentDbReviewItem(r: any, idx = 0, packageId?: string
         unhelpful: Math.max(0, Number(r.votes.unhelpful) || 0)
       }
     : undefined;
-  const rawThreadUrl = typeof r?.thread?.url === 'string' && r.thread.url.trim()
-    ? (r.thread.url.startsWith('http') ? r.thread.url.trim() : `https://content.luanti.org${r.thread.url.startsWith('/') ? '' : '/'}${r.thread.url.trim()}`)
-    : (typeof r?.thread?.id === 'number' ? `https://content.luanti.org/threads/${r.thread.id}/` : undefined);
+  const rawThreadUrl = typeof r?.thread_url === 'string' && r.thread_url.trim()
+    ? r.thread_url.trim()
+    : (typeof r?.thread?.url === 'string' && r.thread.url.trim()
+        ? (r.thread.url.startsWith('http') ? r.thread.url.trim() : `https://content.luanti.org${r.thread.url.startsWith('/') ? '' : '/'}${r.thread.url.trim()}`)
+        : (typeof r?.thread?.id === 'number' ? `https://content.luanti.org/threads/${r.thread.id}/` : undefined));
+  const pkgTitle = r?.package_title || r?.package?.title || undefined;
+  const rawPkgType = r?.package_type || r?.package?.type || undefined;
+  const pkgType = rawPkgType
+    ? (String(rawPkgType).toLowerCase() === 'modpack' ? 'mod' : String(rawPkgType).toLowerCase())
+    : undefined;
+  const pkgThumb = r?.package_thumbnail || r?.package?.thumbnail || undefined;
+  const normalizedCreatedAt = normalizeUtcIsoTimestamp(r?.created_at) || new Date().toISOString();
 
   return {
-    id: `cdb_${threadId}`,
-    ...(packageId ? { package_id: packageId } : {}),
-    source: 'contentdb',
+    id: cleanId,
+    ...(resolvedPkgId ? { package_id: resolvedPkgId } : {}),
+    ...(pkgTitle ? { package_title: String(pkgTitle) } : {}),
+    ...(pkgType ? { package_type: pkgType } : {}),
+    ...(pkgThumb ? { package_thumbnail: String(pkgThumb) } : {}),
+    source: r?.source === 'luantihub' ? 'luantihub' : 'contentdb',
     rating,
     is_positive: isPositive,
     title: r?.title || undefined,
     comment: r?.comment || r?.text || '',
-    created_at: r?.created_at || new Date().toISOString(),
+    created_at: normalizedCreatedAt,
     votes,
     thread_url: rawThreadUrl,
+    reviewer_username: rawUsername,
+    reviewer_display_name: rawDisplayName,
     author: {
       username: rawUsername,
       display_name: rawDisplayName,
-      avatar_url: 'logo.svg'
+      avatar_url: r?.source === 'luantihub' && r?.author?.avatar_url ? r.author.avatar_url : 'logo.svg'
     }
   };
+}
+
+/**
+ * Fetches recent global ContentDB reviews (`GET /api/reviews/`) with a 15-minute Edge Cache TTL,
+ * normalizes each review entry, and filters to reviews posted within `maxAgeMs` (default 48 hours).
+ */
+export async function fetchRecentContentDbReviewsCached(
+  ttlSeconds = 900,
+  maxAgeMs = 48 * 3600 * 1000
+): Promise<any[]> {
+  try {
+    const rawPayload = await fetchUpstreamJsonCached<any>('/reviews/', ttlSeconds);
+    const rawItems: any[] = Array.isArray(rawPayload)
+      ? rawPayload
+      : Array.isArray(rawPayload?.items)
+        ? rawPayload.items
+        : Array.isArray(rawPayload?.reviews)
+          ? rawPayload.reviews
+          : [];
+    if (rawItems.length === 0) return [];
+
+    const nowMs = Date.now();
+    const out: any[] = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const norm = normalizeContentDbReviewItem(rawItems[i], i);
+      if (!norm?.package_id || !norm?.id) continue;
+      if (maxAgeMs > 0 && norm.created_at) {
+        const createdMs = Date.parse(String(norm.created_at));
+        if (Number.isFinite(createdMs) && nowMs - createdMs > maxAgeMs) {
+          continue;
+        }
+      }
+      out.push(norm);
+      if (out.length >= 15) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 const isolateJsonCache = new Map<string, { exp: number; data: any }>();
@@ -289,7 +391,12 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v14',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v15',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16'
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v17',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
+    'https://cache.luantihub.internal/__recent_reviews_v1',
+    'https://cache.luantihub.internal/__d1_recent_reviews_v1'
   ]);
   for (const p of cacheKeyPaths) {
     if (!p) continue;

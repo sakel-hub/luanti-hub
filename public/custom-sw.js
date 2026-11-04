@@ -610,24 +610,78 @@
         let revChanged = false;
         const newRevs = [];
         for (const rev of recentReviews) {
-          const revId = String(rev?.id || '').trim().replace(/^lh_/i, '');
-          const pkgId = String(rev?.package_id || rev?.packageId || '').trim();
+          const pkgId = String(
+            rev?.package_id ||
+              rev?.packageId ||
+              (rev?.package?.author && rev?.package?.name ? `${rev.package.author}/${rev.package.name}` : '') ||
+              ''
+          ).trim();
+          const revId = String(
+            rev?.id ||
+              (rev?.thread?.id ? `cdb_${rev.thread.id}` : '') ||
+              (pkgId && (rev?.reviewer_username || rev?.user?.username)
+                ? `cdb_${pkgId.toLowerCase()}_${rev.reviewer_username || rev.user.username}_${rev?.created_at || ''}`
+                : '')
+          )
+            .trim()
+            .replace(/^lh_/i, '');
           if (!revId || !pkgId) continue;
+
+          let isRecent = true;
+          const createdRaw = rev?.created_at || rev?.createdAt;
+          if (createdRaw) {
+            const rawTrimmed = String(createdRaw).trim();
+            const normalizedIso = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(rawTrimmed)
+              ? `${rawTrimmed.replace(' ', 'T')}Z`
+              : rawTrimmed;
+            const timeMs = new Date(normalizedIso).getTime();
+            if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
+              isRecent = false;
+            }
+          }
+
           if (!seenRevSet.has(revId)) {
             seenRevSet.add(revId);
             revChanged = true;
-            newRevs.push({ rev, revId, pkgId });
+            if (isRecent) {
+              newRevs.push({ rev, revId, pkgId });
+            }
           }
         }
         if (revChanged) {
           stateUpdates.seenReviewIds = Array.from(seenRevSet).slice(-500);
         }
         for (const item of newRevs.slice(0, 3)) {
-          const rating = Math.max(1, Math.min(5, Math.round(Number(item.rev.rating) || 5)));
+          const rating = Math.max(
+            1,
+            Math.min(
+              5,
+              Math.round(
+                Number(
+                  item.rev.rating ??
+                    (item.rev.is_positive === false || item.rev.recommends === false ? 1 : 5)
+                ) || 5
+              )
+            )
+          );
           const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
-          const pkgTitle = item.rev.package_title || item.pkgId.split('/')[1] || item.pkgId;
-          const reviewer = item.rev.reviewer_display_name || item.rev.reviewer_username || 'Community Member';
-          const thumb = item.rev.package_thumbnail || '/icons/icon-192x192.png';
+          const pkgTitle =
+            item.rev.package_title ||
+            item.rev.package?.title ||
+            item.pkgId.split('/')[1] ||
+            item.pkgId;
+          const reviewer =
+            item.rev.reviewer_display_name ||
+            item.rev.reviewer_username ||
+            item.rev.user?.display_name ||
+            item.rev.user?.username ||
+            item.rev.author?.display_name ||
+            item.rev.author?.username ||
+            'Community Member';
+          const thumb =
+            item.rev.package_thumbnail ||
+            item.rev.package?.thumbnail ||
+            '/icons/icon-192x192.png';
           await fireSwNotif(`New Review · ${pkgTitle} (${stars})`, {
             body: `${reviewer}: "${String(item.rev.comment || item.rev.title || '').slice(0, 120)}"`,
             icon: thumb,

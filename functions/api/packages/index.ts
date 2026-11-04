@@ -39,7 +39,9 @@ import {
   getLastKnownActivePromotions,
   setLastKnownActivePromotions,
   getUnifiedCatalogTags,
-  isValidActivePromotionRow
+  isValidActivePromotionRow,
+  fetchRecentContentDbReviewsCached,
+  normalizeUtcIsoTimestamp
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
 
@@ -712,11 +714,124 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19';
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
     : `https://cache.luantihub.internal/__catalog_edge_v9_${encodeURIComponent(normalizedCatalogKey)}`;
+
+  const enrichRecentReviewsWithCatalog = (reviews: any[], catalogPackages: any[]): any[] => {
+    if (!Array.isArray(reviews) || reviews.length === 0) return [];
+    const pkgByLowerId = new Map<string, any>();
+    if (Array.isArray(catalogPackages)) {
+      for (const pkg of catalogPackages) {
+        if (!pkg) continue;
+        if (pkg.id) pkgByLowerId.set(String(pkg.id).toLowerCase(), pkg);
+        if (pkg.author && pkg.name) {
+          pkgByLowerId.set(`${pkg.author}/${pkg.name}`.toLowerCase(), pkg);
+        }
+      }
+    }
+    return reviews.map((r: any) => {
+      const rawPkgId =
+        r?.package_id ||
+        r?.packageId ||
+        (r?.package?.author && r?.package?.name ? `${r.package.author}/${r.package.name}` : '');
+      const matched = rawPkgId ? pkgByLowerId.get(String(rawPkgId).toLowerCase()) : undefined;
+      return {
+        ...r,
+        package_id: matched?.id || rawPkgId || r?.package_id,
+        package_title: r?.package_title || matched?.title || rawPkgId,
+        package_type: r?.package_type || matched?.type || 'mod',
+        package_thumbnail: r?.package_thumbnail || matched?.thumbnail || undefined
+      };
+    });
+  };
+
+  const fetchMergedRecentReviews = async (db: any, useCache = true): Promise<any[]> => {
+    if (useCache) {
+      const cached = await readEdgeCacheJson<any[]>('/__recent_reviews_v1');
+      if (Array.isArray(cached)) {
+        return cached;
+      }
+    }
+
+    const d1ReviewsPromise = (async () => {
+      if (!db) return [];
+      if (useCache) {
+        const cachedD1 = await readEdgeCacheJson<any[]>('/__d1_recent_reviews_v1');
+        if (Array.isArray(cachedD1)) {
+          return cachedD1;
+        }
+      }
+      try {
+        const res = await db
+          .prepare(`
+            SELECT
+              r.id,
+              r.package_id,
+              r.rating,
+              r.title,
+              r.comment,
+              r.created_at,
+              u.username AS reviewer_username,
+              u.display_name AS reviewer_display_name,
+              p.title AS package_title,
+              p.type AS package_type,
+              p.thumbnail_url AS package_thumbnail
+            FROM reviews r
+            LEFT JOIN users u ON r.user_id = u.id
+            LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
+            WHERE COALESCE(p.status, 'active') = 'active'
+              AND r.created_at >= datetime('now', '-2 days')
+            ORDER BY r.created_at DESC
+            LIMIT 10
+          `)
+          .all();
+        const rows = (res?.results || []).map((row: any) => {
+          const rawId = String(row?.id || '');
+          return {
+            ...row,
+            id: rawId.startsWith('lh_') || rawId.startsWith('cdb_') ? rawId : `lh_${rawId}`,
+            created_at: normalizeUtcIsoTimestamp(row?.created_at),
+            source: 'luantihub'
+          };
+        });
+        if (useCache) {
+          // Cache D1 recent reviews for 6 hours (evicted immediately on review POST/DELETE in reviews.ts)
+          await writeEdgeCacheJson('/__d1_recent_reviews_v1', rows, 21600);
+        }
+        return rows;
+      } catch {
+        return [];
+      }
+    })();
+
+    const cdbReviewsPromise = fetchRecentContentDbReviewsCached(900).catch(() => []);
+
+    const [d1Rows, cdbRows] = await Promise.all([d1ReviewsPromise, cdbReviewsPromise]);
+    const combinedById = new Map<string, any>();
+    for (const item of [...d1Rows, ...cdbRows]) {
+      if (!item?.id) continue;
+      const key = String(item.id);
+      if (!combinedById.has(key)) {
+        combinedById.set(key, item);
+      }
+    }
+
+    const mergedReviews = Array.from(combinedById.values())
+      .sort((a, b) => {
+        const ta = Date.parse(normalizeUtcIsoTimestamp(a?.created_at)) || 0;
+        const tb = Date.parse(normalizeUtcIsoTimestamp(b?.created_at)) || 0;
+        return tb - ta;
+      })
+      .slice(0, 15);
+
+    if (useCache) {
+      await writeEdgeCacheJson('/__recent_reviews_v1', mergedReviews, 900);
+    }
+    return mergedReviews;
+  };
 
   if (catalogEdgeCacheKey && !noCache) {
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
@@ -729,9 +844,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       let edgeBody = cachedCatalog;
       if (isBootBundle) {
         const nowMs = Date.now();
-        const [cachedActivePromos, sharedRatings] = await Promise.all([
+        // Zero D1 reads and zero upstream subrequests on HIT-EDGE: only read Isolate/Edge Cache overlays
+        const [cachedActivePromos, sharedRatings, cachedRecentReviews] = await Promise.all([
           readEdgeCacheJson<any[]>('/__active_promotions_v1'),
-          readSharedEdgeRatingsMap()
+          readSharedEdgeRatingsMap(),
+          readEdgeCacheJson<any[]>('/__recent_reviews_v1')
         ]);
         const rawPromos =
           Array.isArray(cachedActivePromos)
@@ -786,6 +903,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               : {})
           };
         }
+        if (Array.isArray(cachedRecentReviews)) {
+          edgeBody = {
+            ...edgeBody,
+            recentReviews: enrichRecentReviewsWithCatalog(
+              cachedRecentReviews,
+              Array.isArray(edgeBody.packages) ? edgeBody.packages : []
+            )
+          };
+        }
       }
       return new Response(JSON.stringify(edgeBody), {
         headers: {
@@ -831,7 +957,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let favoritesMapPromise = Promise.resolve<Map<string, number>>(new Map());
   let velocityPromise = Promise.resolve<Map<string, PackageVelocityMetrics>>(new Map());
   let promotionsPromise = Promise.resolve<any[] | undefined>(undefined);
-  let recentReviewsPromise = Promise.resolve<any[]>([]);
+  const recentReviewsPromise = isBootBundle
+    ? fetchMergedRecentReviews(env.DB, !noCache)
+    : Promise.resolve<any[]>([]);
   let authorDisplayMapPromise = Promise.resolve<{
     byUserId: Map<string, string>;
     byHandle: Map<string, { userId: string; displayName: string }>;
@@ -1093,30 +1221,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           return Array.isArray(fallback) ? fallback : undefined;
         }
       })();
-
-      recentReviewsPromise = env.DB.prepare(`
-        SELECT
-          r.id,
-          r.package_id,
-          r.rating,
-          r.title,
-          r.comment,
-          r.created_at,
-          u.username AS reviewer_username,
-          u.display_name AS reviewer_display_name,
-          p.title AS package_title,
-          p.type AS package_type,
-          p.thumbnail_url AS package_thumbnail
-        FROM reviews r
-        LEFT JOIN users u ON r.user_id = u.id
-        LEFT JOIN packages p ON LOWER(p.id) = LOWER(r.package_id)
-        WHERE COALESCE(p.status, 'active') = 'active'
-          AND r.created_at >= datetime('now', '-2 days')
-        ORDER BY r.created_at DESC
-        LIMIT 10
-      `).all()
-        .then((res: any) => res?.results || [])
-        .catch(() => []);
     }
   }
 
@@ -1946,7 +2050,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       recentlyAdded,
       ...(Array.isArray(activePromotions) ? { promotions: activePromotions } : {}),
       latestBlogPost: latestBlogPost || null,
-      recentReviews: Array.isArray(recentReviews) ? recentReviews : []
+      recentReviews: enrichRecentReviewsWithCatalog(
+        Array.isArray(recentReviews) ? recentReviews : [],
+        merged
+      )
     };
 
     if (!noCache && !q && types.length === 0 && !author && Array.isArray(activePromotions)) {

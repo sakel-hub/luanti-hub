@@ -168,6 +168,8 @@ export class PackageService {
   private isBackgroundRefreshing = false;
   private bulkScoresInFlight: Promise<void> | null = null;
   private blogFeedInFlight: Promise<void> | null = null;
+  private recentReviewsInFlight: Promise<void> | null = null;
+  private lastRecentReviewsCheckAt = 0;
   private initialUrlSynced = false;
   private wasOnAnalyticsRoute = false;
   private inAppModalHistoryDepth = 0;
@@ -3003,19 +3005,30 @@ export class PackageService {
         pkgMap.set(`${p.author}/${p.name}`.toLowerCase(), p);
       }
       const enrichedReviews = payload.recentReviews.map((rev: any) => {
-        const pkgId = String(rev?.package_id || rev?.packageId || '').trim();
+        const pkgId = String(
+          rev?.package_id ||
+            rev?.packageId ||
+            (rev?.package?.author && rev?.package?.name ? `${rev.package.author}/${rev.package.name}` : '') ||
+            ''
+        ).trim();
         const match = pkgId ? pkgMap.get(pkgId.toLowerCase()) : undefined;
         return {
           ...rev,
+          package_id: match?.id || pkgId || rev?.package_id,
           package_title: rev?.package_title || match?.title || pkgId.split('/')[1] || pkgId,
           package_type: rev?.package_type || match?.type || 'mod',
           package_thumbnail: rev?.package_thumbnail || match?.thumbnail
         };
       });
+      this.syncRecentReviewsIntoPackageCache(enrichedReviews);
       this.pwaService.checkAndNotifyNewReviews(enrichedReviews, {
         isBaselineSeedAllowed: true,
         excludeAuthorUsername: this.authService.currentUser()?.username
       });
+    }
+
+    if (!fromCache) {
+      this.ensureRecentReviewsLoaded();
     }
 
     // If a package detail modal is currently open during a background refresh, merge live catalog metrics
@@ -3151,6 +3164,169 @@ export class PackageService {
   }
 
   private recentlyAddedInFlight: Promise<void> | null = null;
+
+  /**
+   * Cloudflare-quota-optimized client-side fallback for checking recent ContentDB reviews
+   * when `/api/packages/?boot=1` does not include ContentDB reviews (for example on `localhost:4200`
+   * or when served from an older cached bundle).
+   *
+   * Zero Cloudflare Worker invocations, zero Worker subrequests, and zero D1 reads:
+   * - Fetches `https://content.luanti.org/api/reviews/` directly from the browser (never hits `/api/...`).
+   * - Skips entirely if the user has disabled `notifyNewReviews`.
+   * - Enforces a 15-minute client-side cooldown (`lastRecentReviewsCheckAt`) across catalog syncs.
+   */
+  ensureRecentReviewsLoaded(forceInTest = false): void {
+    if (this.recentReviewsInFlight) return;
+    if (!this.settingsService.notifyNewReviews()) return;
+    const now = Date.now();
+    if (!forceInTest && this.lastRecentReviewsCheckAt > 0 && now - this.lastRecentReviewsCheckAt < 15 * 60 * 1000) {
+      return;
+    }
+    const isUnitTestEnv =
+      typeof (globalThis as any).__karma__ !== 'undefined' ||
+      typeof (globalThis as any).jasmine !== 'undefined' ||
+      typeof (globalThis as any).vi !== 'undefined' ||
+      typeof (globalThis as any).__vitest_worker__ !== 'undefined';
+    if (
+      (!forceInTest && isUnitTestEnv) ||
+      typeof window === 'undefined' ||
+      typeof fetch !== 'function'
+    ) {
+      return;
+    }
+
+    this.lastRecentReviewsCheckAt = now;
+
+    const isLocalhost =
+      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+    const candidateUrls = isLocalhost
+      ? [
+          '/cdb-api/reviews/?ngsw-bypass=true',
+          'https://content.luanti.org/api/reviews/'
+        ]
+      : [
+          'https://content.luanti.org/api/reviews/'
+        ];
+
+    this.recentReviewsInFlight = (async () => {
+      try {
+        let rawItems: any[] | null = null;
+        for (const url of candidateUrls) {
+          try {
+            const res = await fetch(url, {
+              headers: { Accept: 'application/json', 'ngsw-bypass': 'true' }
+            });
+            if (!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
+              continue;
+            }
+            const json = await res.json();
+            const list = Array.isArray(json)
+              ? json
+              : Array.isArray(json?.items)
+                ? json.items
+                : Array.isArray(json?.reviews)
+                  ? json.reviews
+                  : null;
+            if (Array.isArray(list) && list.length > 0) {
+              rawItems = list.slice(0, 20);
+              break;
+            }
+          } catch {
+            // Try next candidate URL
+          }
+        }
+        if (!Array.isArray(rawItems) || rawItems.length === 0) return;
+
+        const normalizedReviews = this.normalizeContentDbReviews(rawItems, '');
+        const nowMs = Date.now();
+        const maxAgeMs = 48 * 3600 * 1000;
+        const recentReviews = normalizedReviews.filter(rev => {
+          const createdMs = rev.created_at ? Date.parse(String(rev.created_at)) : NaN;
+          return Number.isFinite(createdMs) && nowMs - createdMs <= maxAgeMs;
+        });
+        if (recentReviews.length === 0) return;
+
+        const pkgMap = new Map<string, LuantiPackage>();
+        for (const p of this._packages()) {
+          pkgMap.set(p.id.toLowerCase(), p);
+          pkgMap.set(`${p.author}/${p.name}`.toLowerCase(), p);
+        }
+
+        const enriched = recentReviews.map((rev: any) => {
+          const pkgId = String(rev.package_id || '').trim();
+          const match = pkgId ? pkgMap.get(pkgId.toLowerCase()) : undefined;
+          return {
+            ...rev,
+            package_id: match?.id || pkgId,
+            package_title: rev.package_title || match?.title || pkgId.split('/')[1] || pkgId,
+            package_type: rev.package_type || match?.type || 'mod',
+            package_thumbnail: rev.package_thumbnail || match?.thumbnail,
+            reviewer_username: rev.author?.username,
+            reviewer_display_name: rev.author?.display_name
+          };
+        });
+
+        this.syncRecentReviewsIntoPackageCache(enriched);
+        this.pwaService.checkAndNotifyNewReviews(enriched, {
+          isBaselineSeedAllowed: true,
+          excludeAuthorUsername: this.authService.currentUser()?.username
+        });
+      } finally {
+        this.recentReviewsInFlight = null;
+      }
+    })();
+  }
+
+  /**
+   * Merges newly discovered recent reviews into `reviewsCache` (and into `_activePackage` if open)
+   * so that opening or viewing the package detail modal immediately displays the new review
+   * without waiting for the per-package review cache to expire.
+   */
+  private syncRecentReviewsIntoPackageCache(recentReviews: any[]): void {
+    if (!Array.isArray(recentReviews) || recentReviews.length === 0) return;
+    const byPkgKey = new Map<string, CommunityReview[]>();
+    for (const raw of recentReviews) {
+      const pkgId = String(raw?.package_id || raw?.packageId || '').trim();
+      if (!pkgId) continue;
+      const key = pkgId.toLowerCase();
+      const normalizedItem =
+        raw?.author && typeof raw.author === 'object' && raw.id
+          ? (raw as CommunityReview)
+          : this.normalizeContentDbReviews([raw], pkgId)[0];
+      if (!normalizedItem) continue;
+      const list = byPkgKey.get(key) || [];
+      list.push(normalizedItem);
+      byPkgKey.set(key, list);
+    }
+
+    const activePkg = this._activePackage();
+    const activeKey = activePkg ? (activePkg.id || `${activePkg.author}/${activePkg.name}`).toLowerCase() : '';
+
+    for (const [pkgKey, incoming] of byPkgKey.entries()) {
+      const existing = this.reviewsCache.get(pkgKey);
+      if (existing) {
+        const seenIds = new Set(existing.map(r => String(r.id)));
+        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
+        if (newOnes.length > 0) {
+          const merged = [...newOnes, ...existing].sort(
+            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+          this.reviewsCache.set(pkgKey, merged);
+        }
+      }
+      if (activeKey && activeKey === pkgKey && activePkg) {
+        const currentList = Array.isArray(activePkg.reviews_list) ? activePkg.reviews_list : [];
+        const seenIds = new Set(currentList.map(r => String(r.id)));
+        const newOnes = incoming.filter(r => !seenIds.has(String(r.id)));
+        if (newOnes.length > 0) {
+          const merged = [...newOnes, ...currentList].sort(
+            (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+          );
+          this._activePackage.update(curr => (curr ? { ...curr, reviews_list: merged } : curr));
+        }
+      }
+    }
+  }
 
   /**
    * Client-side fallback for populating `_serverRecentlyAdded` when `/api/packages/?boot=1`
@@ -8757,7 +8933,18 @@ export class PackageService {
       const rawDisplayName = String(
         r?.user?.display_name || r?.author?.display_name || r?.user?.username || r?.author || rawUsername || 'Community Member'
       ).trim();
-      const threadId = r?.thread?.id || r?.id || `${rawUsername}_${r?.created_at || idx}`;
+      const resolvedPkgId = String(
+        r?.package_id ||
+          (r?.package?.author && r?.package?.name ? `${r.package.author}/${r.package.name}` : '') ||
+          packageId ||
+          ''
+      ).trim();
+      const threadId =
+        r?.thread?.id ||
+        r?.id ||
+        (resolvedPkgId
+          ? `${resolvedPkgId.toLowerCase()}_${rawUsername}_${r?.created_at || idx}`
+          : `${rawUsername}_${r?.created_at || idx}`);
       const rawRating = Number(r?.rating);
       const rating = Number.isFinite(rawRating) && rawRating >= 1 && rawRating <= 5
         ? Math.round(rawRating)
@@ -8779,15 +8966,19 @@ export class PackageService {
       const cleanId = String(threadId).startsWith('cdb') || String(threadId).startsWith('lh_')
         ? String(threadId)
         : `cdb_${threadId}`;
+      const rawCreatedAt = String(r?.created_at || '').trim();
+      const normalizedCreatedAt = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(rawCreatedAt)
+        ? `${rawCreatedAt.replace(' ', 'T')}Z`
+        : (rawCreatedAt || new Date().toISOString());
       return {
         id: cleanId,
-        package_id: r?.package_id || packageId,
+        package_id: resolvedPkgId,
         source: (r?.source === 'luantihub' ? 'luantihub' : 'contentdb') as 'contentdb' | 'luantihub',
         rating,
         is_positive: isPositive,
         title: r?.title || undefined,
         comment: r?.comment || r?.text || '',
-        created_at: r?.created_at || new Date().toISOString(),
+        created_at: normalizedCreatedAt,
         votes,
         thread_url: rawThreadUrl,
         author: {

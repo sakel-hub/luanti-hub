@@ -38,7 +38,9 @@ import {
   ensureExtendedPackageColumns,
   DEFAULT_CONTENTDB_TAGS,
   getUnifiedCatalogTags,
-  upsertCustomAppTags
+  upsertCustomAppTags,
+  normalizeContentDbReviewItem,
+  normalizeUtcIsoTimestamp
 } from '../../functions/api/lib/upstream';
 import {
   syncActivePromotionRowPackages,
@@ -8659,5 +8661,133 @@ supported_games = minetest_game, voxelibre
     // Even when signed out, deduplicateCatalog cross-pollinates SaKeL onto sakel-hub/x_mobs
     expect(pkgService.getAuthorDisplayName(deduplicated[1])).toBe('SaKeL');
     expect(pkgService.getAuthorPackages('SaKeL').map(p => p.id)).toEqual(['SaKeL/deathstats', 'sakel-hub/x_mobs']);
+  });
+
+  it('normalizes ContentDB /api/reviews/ items and notifies on new ContentDB reviews (e.g. Sumianvoice/age_of_mending)', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    settingsService.notifyNewReviews.set(true);
+
+    // 1. Verify backend normalizeContentDbReviewItem handles global /api/reviews/ shape with nested `package` and naive UTC timestamp
+    const naiveRecentTimestamp = new Date(Date.now() - 15 * 60 * 1000)
+      .toISOString()
+      .replace('Z', '');
+    const normalizedBackendItem = normalizeContentDbReviewItem(
+      {
+        package: {
+          author: 'Sumianvoice',
+          name: 'age_of_mending',
+          type: 'game'
+        },
+        user: {
+          username: 'voxel_explorer',
+          display_name: 'Voxel Explorer'
+        },
+        rating: 5,
+        is_positive: true,
+        title: 'Immersive survival progression',
+        comment: 'Great atmospheric survival mechanics in Age of Mending!',
+        created_at: naiveRecentTimestamp,
+        thread: {
+          id: 98765,
+          url: '/threads/98765/'
+        }
+      },
+      0,
+      ''
+    );
+
+    expect(normalizedBackendItem.id).toBe('cdb_98765');
+    expect(normalizedBackendItem.package_id).toBe('Sumianvoice/age_of_mending');
+    expect(normalizedBackendItem.package_type).toBe('game');
+    expect(normalizedBackendItem.reviewer_username).toBe('voxel_explorer');
+    expect(normalizedBackendItem.reviewer_display_name).toBe('Voxel Explorer');
+    expect(normalizedBackendItem.created_at).toBe(normalizeUtcIsoTimestamp(naiveRecentTimestamp));
+    expect(normalizedBackendItem.created_at.endsWith('Z')).toBe(true);
+
+    // 2. Seed baseline reviews in PwaService and verify a newly arrived ContentDB review on Age of Mending triggers a native notification
+    localStorage.setItem('luantihub_seen_review_ids_v1', JSON.stringify(['cdb_11111']));
+    const sendNotifSpy = vi.spyOn(pwaService, 'sendNativeNotification').mockResolvedValue(true);
+
+    const notifiedCount = pwaService.checkAndNotifyNewReviews([
+      {
+        ...normalizedBackendItem,
+        package_title: 'Age of Mending',
+        package_thumbnail: 'https://content.luanti.org/uploads/age_of_mending.png'
+      }
+    ]);
+
+    expect(notifiedCount).toBe(1);
+    expect(sendNotifSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'New Review · ★★★★★ Age of Mending',
+        tag: 'lh-review-cdb_98765',
+        category: 'new_review',
+        data: { packageId: 'Sumianvoice/age_of_mending' }
+      })
+    );
+
+    // 3. Verify client-side fallback ensureRecentReviewsLoaded() unwraps paginated { items: [...] } from ContentDB /api/reviews/,
+    //    enriches package metadata from catalog, and triggers checkAndNotifyNewReviews()
+    const ageOfMendingPkg = (pkgService as any).normalizePackage({
+      id: 'Sumianvoice/age_of_mending',
+      author: 'Sumianvoice',
+      name: 'age_of_mending',
+      title: 'Age of Mending',
+      type: 'game',
+      short_desc: 'Atmospheric survival game',
+      thumbnail: 'https://content.luanti.org/uploads/age_of_mending.png'
+    });
+    (pkgService as any)._packages.set([ageOfMendingPkg]);
+
+    sendNotifSpy.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          page: 1,
+          items: [
+            {
+              package: {
+                author: 'Sumianvoice',
+                name: 'age_of_mending',
+                type: 'game'
+              },
+              user: {
+                username: 'mending_fan',
+                display_name: 'Mending Fan'
+              },
+              rating: 5,
+              is_positive: true,
+              comment: 'Brand new ContentDB comment on Age of Mending!',
+              created_at: naiveRecentTimestamp,
+              thread: {
+                id: 98766,
+                url: '/threads/98766/'
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      )
+    );
+
+    pkgService.ensureRecentReviewsLoaded(true);
+    await (pkgService as any).recentReviewsInFlight;
+
+    expect(sendNotifSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'New Review · ★★★★★ Age of Mending',
+        tag: 'lh-review-cdb_98766',
+        data: { packageId: 'Sumianvoice/age_of_mending' }
+      })
+    );
+
+    fetchSpy.mockRestore();
+    sendNotifSpy.mockRestore();
   });
 });

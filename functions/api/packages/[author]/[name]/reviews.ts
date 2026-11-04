@@ -404,6 +404,9 @@ export async function onRequestPost(context: { request: Request; params: { autho
       '/__api_packages_v2?boot=1',
       '/__api_boot_catalog_bundle_v4',
       '/__api_boot_catalog_bundle_v5',
+      '/__api_boot_catalog_bundle_v19',
+      '/__recent_reviews_v1',
+      '/__d1_recent_reviews_v1',
       `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
       `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
     ]);
@@ -530,6 +533,9 @@ export async function onRequestPost(context: { request: Request; params: { autho
     '/__api_packages_v2?boot=1',
     '/__api_boot_catalog_bundle_v4',
     '/__api_boot_catalog_bundle_v5',
+    '/__api_boot_catalog_bundle_v19',
+    '/__recent_reviews_v1',
+    '/__d1_recent_reviews_v1',
     `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
     `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
   ]);

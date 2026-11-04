@@ -2070,6 +2070,13 @@ export class PwaService {
       id?: string | number;
       package_id?: string;
       packageId?: string;
+      package?: {
+        author?: string;
+        name?: string;
+        title?: string;
+        type?: string;
+        thumbnail?: string;
+      };
       package_title?: string;
       packageTitle?: string;
       package_type?: string;
@@ -2077,6 +2084,8 @@ export class PwaService {
       package_thumbnail?: string;
       packageThumbnail?: string;
       rating?: number;
+      is_positive?: boolean;
+      recommends?: boolean;
       title?: string;
       comment?: string;
       created_at?: string;
@@ -2089,6 +2098,14 @@ export class PwaService {
         username?: string;
         display_name?: string;
       };
+      user?: {
+        username?: string;
+        display_name?: string;
+      };
+      thread?: {
+        id?: number | string;
+        url?: string;
+      } | null;
     }>,
     options?: {
       forceNotifyIds?: string[];
@@ -2099,6 +2116,32 @@ export class PwaService {
     if (!Array.isArray(reviews) || reviews.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
 
+    const resolveReviewPkgId = (rev: (typeof reviews)[number]): string =>
+      String(
+        rev?.package_id ||
+          rev?.packageId ||
+          (rev?.package?.author && rev?.package?.name ? `${rev.package.author}/${rev.package.name}` : '') ||
+          ''
+      ).trim();
+
+    const resolveReviewCleanId = (rev: (typeof reviews)[number]): string => {
+      if (rev?.id !== undefined && rev?.id !== null && String(rev.id).trim() !== '') {
+        return String(rev.id).trim().replace(/^lh_/i, '');
+      }
+      if (rev?.thread?.id !== undefined && rev?.thread?.id !== null && String(rev.thread.id).trim() !== '') {
+        return `cdb_${String(rev.thread.id).trim()}`;
+      }
+      const pkgId = resolveReviewPkgId(rev);
+      const uname = String(
+        rev?.reviewer_username || rev?.username || rev?.user?.username || rev?.author?.username || ''
+      ).trim();
+      const created = String(rev?.created_at || rev?.createdAt || '').trim();
+      if (pkgId && uname && created) {
+        return `cdb_${pkgId.toLowerCase()}_${uname}_${created}`;
+      }
+      return '';
+    };
+
     const forceSet = new Set(
       (options?.forceNotifyIds || [])
         .map(id => String(id || '').trim().replace(/^lh_/i, ''))
@@ -2107,9 +2150,9 @@ export class PwaService {
     const excludedUser = String(options?.excludeAuthorUsername || '').trim().toLowerCase();
 
     const validReviews = reviews.filter(rev => {
-      if (!rev || rev.id === undefined || rev.id === null) return false;
-      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
-      const pkgId = String(rev.package_id || rev.packageId || '').trim();
+      if (!rev) return false;
+      const cleanId = resolveReviewCleanId(rev);
+      const pkgId = resolveReviewPkgId(rev);
       return Boolean(cleanId && pkgId);
     });
 
@@ -2129,7 +2172,7 @@ export class PwaService {
       }
       try {
         const initialIds = Array.from(
-          new Set(validReviews.map(rev => String(rev.id).trim().replace(/^lh_/i, '')))
+          new Set(validReviews.map(rev => resolveReviewCleanId(rev)))
         ).slice(-500);
         localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(initialIds));
         this.syncNotificationStateToIndexedDb().catch(() => {});
@@ -2156,10 +2199,10 @@ export class PwaService {
     let seenChanged = false;
 
     for (const rev of validReviews) {
-      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
+      const cleanId = resolveReviewCleanId(rev);
       const isForced = forceSet.has(cleanId);
       const reviewerUsername = String(
-        rev.reviewer_username || rev.username || rev.author?.username || ''
+        rev.reviewer_username || rev.username || rev.user?.username || rev.author?.username || ''
       ).trim();
 
       const isSelfReview =
@@ -2170,10 +2213,11 @@ export class PwaService {
       let isRecent = true;
       const createdRaw = rev.created_at || rev.createdAt;
       if (!isForced && createdRaw) {
+        const rawTrimmed = String(createdRaw).trim();
         const normalizedIso =
-          /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(createdRaw).trim())
-            ? `${String(createdRaw).trim().replace(' ', 'T')}Z`
-            : String(createdRaw).trim();
+          /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(rawTrimmed)
+            ? `${rawTrimmed.replace(' ', 'T')}Z`
+            : rawTrimmed;
         const timeMs = new Date(normalizedIso).getTime();
         if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
           isRecent = false;
@@ -2204,21 +2248,25 @@ export class PwaService {
 
     // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
     for (const rev of newlyDiscovered.slice(0, 3)) {
-      const cleanId = String(rev.id).trim().replace(/^lh_/i, '');
-      const pkgId = String(rev.package_id || rev.packageId || '').trim();
+      const cleanId = resolveReviewCleanId(rev);
+      const pkgId = resolveReviewPkgId(rev);
       const pkgTitle = String(
-        rev.package_title || rev.packageTitle || pkgId.split('/')[1] || pkgId
+        rev.package_title || rev.packageTitle || rev.package?.title || pkgId.split('/')[1] || pkgId
       ).trim();
-      const rawRating = Number(rev.rating ?? 5);
+      const rawRating = Number(
+        rev.rating ?? (rev.is_positive === false || rev.recommends === false ? 1 : 5)
+      );
       const rating = Math.max(1, Math.min(5, Number.isFinite(rawRating) ? Math.round(rawRating) : 5));
       const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
       const reviewer =
         String(
           rev.reviewer_username ||
             rev.username ||
+            rev.user?.username ||
             rev.author?.username ||
             rev.reviewer_display_name ||
             rev.display_name ||
+            rev.user?.display_name ||
             rev.author?.display_name ||
             'community'
         ).trim() || 'community';
@@ -2227,7 +2275,7 @@ export class PwaService {
         rawComment.length > 90
           ? `${rawComment.slice(0, 87)}...`
           : rawComment || 'New community review posted on LuantiHub.';
-      const thumb = rev.package_thumbnail || rev.packageThumbnail || undefined;
+      const thumb = rev.package_thumbnail || rev.packageThumbnail || rev.package?.thumbnail || undefined;
 
       this.sendNativeNotification({
         title: `New Review · ${stars} ${pkgTitle}`,
