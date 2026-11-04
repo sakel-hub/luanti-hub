@@ -132,6 +132,7 @@ export interface LuantiPackage {
     neutral: number;
     negative: number;
   };
+  reviews_list?: CommunityReview[];
   supports_all_games?: boolean;
   game_support?: Array<{
     supports: boolean;
