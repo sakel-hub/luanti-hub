@@ -124,6 +124,19 @@ export async function onRequestGet(context: {
       }
     }
 
+    if (!userRow) {
+      const displayMatch = await context.env.DB.prepare(`
+        SELECT id, username, display_name, avatar_url, bio, created_at
+        FROM users
+        WHERE LOWER(TRIM(display_name)) = LOWER(?)
+        ORDER BY created_at ASC
+        LIMIT 1
+      `).bind(rawUsername).first();
+      if (displayMatch) {
+        userRow = displayMatch;
+      }
+    }
+
     const seen = new Set<string>();
     const identities: Array<{
       provider: string;
@@ -156,7 +169,18 @@ export async function onRequestGet(context: {
       }
     }
 
-    const cdbUser = await cdbUserPromise;
+    let cdbUser = await cdbUserPromise;
+    if (
+      !cdbUser &&
+      userRow?.display_name &&
+      String(userRow.display_name).trim().toLowerCase() !== rawUsername.toLowerCase() &&
+      !/\s/.test(String(userRow.display_name).trim())
+    ) {
+      cdbUser = await fetchUpstreamJsonCached<any>(
+        `/users/${encodeURIComponent(String(userRow.display_name).trim())}/`,
+        600
+      ).catch(() => null);
+    }
     if (cdbUser?.connections?.github) {
       const ghHandle = String(cdbUser.connections.github);
       const k = `github:${ghHandle.toLowerCase()}`;

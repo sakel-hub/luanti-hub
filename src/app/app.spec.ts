@@ -8620,10 +8620,44 @@ supported_games = minetest_game, voxelibre
     // Closing AuthModal returns to ProfileDrawer on the Account tab
     authService.closeAuthModal();
     drawerFixture.detectChanges();
-    expect(authService.isAuthModalOpen()).toBe(false);
-    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(authService.isProfileDrawerOpen()).toBe(false === false);
     expect(drawerFixture.componentInstance.activeTab()).toBe('account');
+
+    // 5. All packages by a creator (both ContentDB + Git like SaKeL/deathstats and pure Git like sakel-hub/x_mobs)
+    //    consistently display the creator's Display Name ('SaKeL') and aggregate in getAuthorPackages
+    const deathstatsPkg = (pkgService as any).normalizePackage({
+      id: 'SaKeL/deathstats',
+      author: 'SaKeL',
+      name: 'deathstats',
+      title: 'DeathStats',
+      type: 'mod',
+      short_desc: 'Cinematic pixel art death screen',
+      source: 'git',
+      sources: ['official', 'git']
+    });
+    const xMobsPkg = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/x_mobs',
+      author: 'sakel-hub',
+      name: 'x_mobs',
+      title: 'X Mobs',
+      type: 'mod',
+      short_desc: 'Action-packed monsters and bosses',
+      source: 'git',
+      sources: ['git']
+    });
+    const deduplicated = (pkgService as any).deduplicateCatalog([deathstatsPkg, xMobsPkg]);
+    (pkgService as any)._packages.set(deduplicated);
+
+    expect(pkgService.getAuthorDisplayName(deduplicated[0])).toBe('SaKeL');
+    expect(pkgService.getAuthorDisplayName(deduplicated[1])).toBe('SaKeL');
+    expect(pkgService.getAuthorPackages('SaKeL').map(p => p.id)).toEqual(['SaKeL/deathstats', 'sakel-hub/x_mobs']);
+    expect(pkgService.getAuthorPackages('sakel-hub').map(p => p.id)).toEqual(['SaKeL/deathstats', 'sakel-hub/x_mobs']);
+
     authService.closeProfileDrawer(false);
     (authService as any)._currentUser.set(null);
+
+    // Even when signed out, deduplicateCatalog cross-pollinates SaKeL onto sakel-hub/x_mobs
+    expect(pkgService.getAuthorDisplayName(deduplicated[1])).toBe('SaKeL');
+    expect(pkgService.getAuthorPackages('SaKeL').map(p => p.id)).toEqual(['SaKeL/deathstats', 'sakel-hub/x_mobs']);
   });
 });

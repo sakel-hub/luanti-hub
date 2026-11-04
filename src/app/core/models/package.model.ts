@@ -81,6 +81,7 @@ export interface LuantiBlogPost {
 export interface LuantiPackage {
   id: string; // "author/name"
   author: string;
+  author_display_name?: string; // Creator profile display name when registered or linked across ContentDB/Git handles
   author_id?: string; // Verified D1 user ID when claimed by a registered author
   name: string; // technical name from mod.conf
   title: string; // Display title

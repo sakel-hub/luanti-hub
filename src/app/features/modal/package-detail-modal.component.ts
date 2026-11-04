@@ -954,17 +954,17 @@ import {
                     <div class="flex items-center justify-between gap-2 mt-1">
                       <button
                         type="button"
-                        (click)="filterByTerm(package.author)"
+                        (click)="filterByTerm(packageService.getAuthorDisplayName(package))"
                         class="flex items-center gap-2 group text-left min-w-0 cursor-pointer">
                         <div class="w-6 h-6 rounded-lg bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs flex-shrink-0">
-                          {{ package.author.charAt(0).toUpperCase() }}
+                          {{ packageService.getAuthorDisplayName(package).charAt(0).toUpperCase() }}
                         </div>
-                        <span class="font-bold text-white group-hover:text-sky-400 transition text-sm truncate">{{ package.author }}</span>
+                        <span class="font-bold text-white group-hover:text-sky-400 transition text-sm truncate">{{ packageService.getAuthorDisplayName(package) }}</span>
                       </button>
 
                       <button
                         type="button"
-                        (click)="openAuthorProfile(package.author)"
+                        (click)="openAuthorProfile(packageService.getAuthorDisplayName(package))"
                         [appTooltip]="'author.viewProfile' | translate"
                         [attr.aria-label]="'author.viewProfile' | translate"
                         class="px-2 py-1 rounded-lg glass-btn text-sky-300 hover:text-white text-[11px] font-bold flex items-center gap-1 flex-shrink-0 transition cursor-pointer">

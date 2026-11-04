@@ -1764,6 +1764,7 @@ export class PackageService {
       pkg.title || '',
       pkg.name || '',
       pkg.author || '',
+      pkg.author_display_name || '',
       pkg.short_desc || '',
       pkg.license || '',
       ...(pkg.tags || [])
@@ -2015,10 +2016,13 @@ export class PackageService {
 
     const rawAuthorId = String(item.author_id || cachedMeta?.author_id || '').trim();
     const resolvedAuthorId = rawAuthorId && !rawAuthorId.startsWith('ext_') ? rawAuthorId : undefined;
+    const rawAuthorDisplayName = String(item.author_display_name || cachedMeta?.author_display_name || '').trim();
+    const resolvedAuthorDisplayName = rawAuthorDisplayName || undefined;
 
     const pkg: LuantiPackage = {
       id: pkgId,
       author: resolvedAuthor,
+      ...(resolvedAuthorDisplayName ? { author_display_name: resolvedAuthorDisplayName } : {}),
       ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
       name: item.name,
       title: item.title || item.name,
@@ -2225,12 +2229,17 @@ export class PackageService {
     const resolvedAuthorId =
       (primary.author_id && !String(primary.author_id).startsWith('ext_') ? primary.author_id : undefined) ||
       (secondary.author_id && !String(secondary.author_id).startsWith('ext_') ? secondary.author_id : undefined);
+    const resolvedAuthorDisplayName =
+      primary.author_display_name ||
+      secondary.author_display_name ||
+      (existingIsOfficial ? existing.author : incomingIsOfficial ? incoming.author : undefined);
 
     const merged: LuantiPackage = {
       ...secondary,
       ...primary,
       id: primary.id,
       author: primary.author,
+      ...(resolvedAuthorDisplayName ? { author_display_name: resolvedAuthorDisplayName } : {}),
       ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
       name: primary.name,
       release_id: resolvedReleaseId,
@@ -2309,7 +2318,7 @@ export class PackageService {
     const byNameType = new Map<string, number>();
     const nameTypeCounts = new Map<string, number>();
     const normalizeBaseAuthor = (author: string) =>
-      String(author || '').trim().toLowerCase();
+      String(author || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
 
     for (const pkg of list) {
       const ntKey = `${normalizeBaseAuthor(pkg.author)}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
@@ -2346,6 +2355,38 @@ export class PackageService {
         if (repoKey) byRepo.set(repoKey, idx);
         byNameTitle.set(nameTitleKey, idx);
         byNameType.set(nameTypeKey, idx);
+      }
+    }
+
+    // Cross-pollinate creator display names across linked ContentDB and Git handles (e.g. SaKeL <-> sakel-hub)
+    const displayNameByAuthorId = new Map<string, string>();
+    const displayNameByBaseAuthor = new Map<string, string>();
+    for (const pkg of result) {
+      const base = normalizeBaseAuthor(pkg.author);
+      if (pkg.author_display_name) {
+        if (pkg.author_id) displayNameByAuthorId.set(String(pkg.author_id), pkg.author_display_name);
+        if (base && !displayNameByBaseAuthor.has(base)) {
+          displayNameByBaseAuthor.set(base, pkg.author_display_name);
+        }
+      } else if ((pkg.sources?.includes('official') || pkg.source === 'official') && base && !displayNameByBaseAuthor.has(base)) {
+        displayNameByBaseAuthor.set(base, pkg.author);
+      }
+    }
+
+    for (let i = 0; i < result.length; i++) {
+      const pkg = result[i];
+      if (pkg.author_display_name) continue;
+      const byIdName = pkg.author_id ? displayNameByAuthorId.get(String(pkg.author_id)) : undefined;
+      const isForgeSuffixHandle = /[-_](?:hub|git|dev|lab|mods?)$/i.test(pkg.author || '');
+      const byBaseName = isForgeSuffixHandle ? displayNameByBaseAuthor.get(normalizeBaseAuthor(pkg.author)) : undefined;
+      const resolvedDisplay = byIdName || byBaseName;
+      if (resolvedDisplay && resolvedDisplay !== pkg.author) {
+        const updated: LuantiPackage = {
+          ...pkg,
+          author_display_name: resolvedDisplay
+        };
+        updated._searchBlob = this.buildSearchBlob(updated);
+        result[i] = updated;
       }
     }
 
@@ -8104,25 +8145,105 @@ export class PackageService {
     return this.modalSubOverlayCloser ? this.modalSubOverlayCloser() : false;
   }
 
+  /**
+   * Resolves the user-facing Display Name for a package's creator (e.g. `SaKeL` instead of `sakel-hub`),
+   * while preserving `pkg.author` for canonical route & download URLs.
+   */
+  getAuthorDisplayName(pkg: Partial<LuantiPackage> | null | undefined): string {
+    if (!pkg) return '';
+    const rawAuthor = String(pkg.author || '').trim();
+    const rawDisplay = String(pkg.author_display_name || '').trim();
+    const currentUser = this.authService.currentUser();
+
+    if (currentUser && currentUser.display_name && currentUser.display_name.trim()) {
+      const userDisplay = currentUser.display_name.trim();
+      const lowerAuthor = rawAuthor.toLowerCase();
+      const lowerDisplay = rawDisplay.toLowerCase();
+      const isOwnedByCurrentUser =
+        Boolean(
+          pkg.author_id &&
+          !String(pkg.author_id).startsWith('ext_') &&
+          String(pkg.author_id) === String(currentUser.id)
+        ) ||
+        lowerAuthor === currentUser.username.toLowerCase() ||
+        lowerAuthor === userDisplay.toLowerCase() ||
+        (Boolean(lowerDisplay) && lowerDisplay === userDisplay.toLowerCase()) ||
+        (currentUser.identities || []).some(
+          i =>
+            Boolean(i.verified) &&
+            Boolean(i.username) &&
+            i.username.trim().toLowerCase() === lowerAuthor
+        );
+      if (isOwnedByCurrentUser) {
+        return userDisplay;
+      }
+    }
+
+    if (rawDisplay) {
+      return rawDisplay;
+    }
+
+    if (/[-_](?:hub|git|dev|lab|mods?)$/i.test(rawAuthor)) {
+      const base = rawAuthor.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      if (base) {
+        for (const p of this._packages()) {
+          const pBase = String(p.author || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+          if (pBase !== base) continue;
+          if (p.author_display_name && p.author_display_name.trim()) {
+            return p.author_display_name.trim();
+          }
+          if (p.sources?.includes('official') || p.source === 'official') {
+            return p.author;
+          }
+        }
+      }
+    }
+
+    return rawAuthor;
+  }
+
   getAuthorPackages(username: string): LuantiPackage[] {
     const clean = (username || '').trim().toLowerCase();
     if (!clean) return [];
+    const normalizeBase = (h: string) =>
+      String(h || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const cleanBase = normalizeBase(clean);
+
     const currentUser = this.authService.currentUser();
-    const isSelf =
+    const isSelf = Boolean(
       currentUser &&
       (currentUser.username.toLowerCase() === clean ||
-        (currentUser.identities || []).some(i => Boolean(i.verified) && (i.username || '').toLowerCase() === clean));
+        (currentUser.display_name || '').trim().toLowerCase() === clean ||
+        (currentUser.identities || []).some(i => Boolean(i.verified) && (i.username || '').toLowerCase() === clean))
+    );
     const linkedHandles = new Set<string>([clean]);
+    const linkedAuthorIds = new Set<string>();
     if (isSelf && currentUser) {
       linkedHandles.add(currentUser.username.toLowerCase());
+      if (currentUser.display_name && currentUser.display_name.trim()) {
+        linkedHandles.add(currentUser.display_name.trim().toLowerCase());
+      }
+      if (currentUser.id && !String(currentUser.id).startsWith('ext_')) {
+        linkedAuthorIds.add(String(currentUser.id));
+      }
       for (const id of currentUser.identities || []) {
         if (id.verified && id.username) {
           linkedHandles.add(id.username.toLowerCase());
         }
       }
     }
-    const profileIdentities = this._activeAuthorProfile()?.identities || [];
-    if (this._activeAuthorUsername()?.toLowerCase() === clean) {
+    const activeProf = this._activeAuthorProfile();
+    const profileIdentities = activeProf?.identities || [];
+    if (
+      this._activeAuthorUsername()?.toLowerCase() === clean ||
+      activeProf?.username?.toLowerCase() === clean ||
+      activeProf?.display_name?.toLowerCase() === clean
+    ) {
+      if (activeProf?.username) linkedHandles.add(activeProf.username.toLowerCase());
+      if (activeProf?.display_name) linkedHandles.add(activeProf.display_name.toLowerCase());
       for (const id of profileIdentities) {
         if (id.verified !== false && id.username) {
           linkedHandles.add(id.username.toLowerCase());
@@ -8130,18 +8251,50 @@ export class PackageService {
       }
     }
 
-    return this._packages().filter(pkg => {
+    const catalog = this._packages();
+    for (const pkg of catalog) {
+      const pAuth = (pkg.author || '').toLowerCase();
+      const pDisp = (pkg.author_display_name || '').toLowerCase();
+      if (linkedHandles.has(pAuth) || (pDisp && linkedHandles.has(pDisp))) {
+        if (pAuth) linkedHandles.add(pAuth);
+        if (pDisp) linkedHandles.add(pDisp);
+        if (pkg.author_id && !String(pkg.author_id).startsWith('ext_')) {
+          linkedAuthorIds.add(String(pkg.author_id));
+        }
+      }
+    }
+
+    const hasOfficialForBase = catalog.some(
+      p =>
+        (p.sources?.includes('official') || p.source === 'official') &&
+        normalizeBase(p.author) === cleanBase
+    );
+    const hasForgeSuffixForBase =
+      /[-_](?:hub|git|dev|lab|mods?)$/i.test(clean) ||
+      catalog.some(
+        p =>
+          /[-_](?:hub|git|dev|lab|mods?)$/i.test(p.author || '') &&
+          normalizeBase(p.author) === cleanBase
+      );
+    const linkByBase = Boolean(cleanBase && hasOfficialForBase && hasForgeSuffixForBase);
+
+    return catalog.filter(pkg => {
       if (
-        isSelf &&
-        currentUser?.id &&
         pkg.author_id &&
         !String(pkg.author_id).startsWith('ext_') &&
-        String(pkg.author_id) === String(currentUser.id)
+        linkedAuthorIds.has(String(pkg.author_id))
       ) {
         return true;
       }
       const pkgAuthor = (pkg.author || '').toLowerCase();
-      return linkedHandles.has(pkgAuthor);
+      const pkgDisplay = this.getAuthorDisplayName(pkg).toLowerCase();
+      if (linkedHandles.has(pkgAuthor) || (pkgDisplay && linkedHandles.has(pkgDisplay))) {
+        return true;
+      }
+      if (linkByBase && normalizeBase(pkgAuthor) === cleanBase) {
+        return true;
+      }
+      return false;
     });
   }
 
@@ -8163,6 +8316,7 @@ export class PackageService {
     const isSelf =
       currentUser &&
       (currentUser.username.toLowerCase() === lower ||
+        (currentUser.display_name || '').trim().toLowerCase() === lower ||
         (currentUser.identities || []).some(i => (i.username || '').toLowerCase() === lower));
 
     const authorPkgs = this.getAuthorPackages(clean);

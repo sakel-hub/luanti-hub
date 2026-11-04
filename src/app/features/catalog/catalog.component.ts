@@ -456,7 +456,10 @@ import {
           </section>
         }
 
-        <!-- Swimlane 4: High-Tech Automation & Machinery (Interleaved before Top 10 This Week) -->
+        <!-- Netflix Featured Row 2: Top 10 Packages (This Week) -->
+        <app-top10-row timeframe="week"></app-top10-row>
+
+        <!-- Swimlane 4: Essential Mods & Addons -->
         <app-package-carousel
           icon="cpu"
           [title]="'carousel.automation' | translate"
@@ -464,9 +467,6 @@ import {
           [packages]="packageService.automationMods()"
           (viewAll)="packageService.setTagFilter('technology')">
         </app-package-carousel>
-
-        <!-- Netflix Featured Row 2: Top 10 Packages (This Week) -->
-        <app-top10-row timeframe="week"></app-top10-row>
 
         <!-- Swimlane 5: High-Definition Texture Packs -->
         <app-package-carousel

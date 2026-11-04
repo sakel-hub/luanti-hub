@@ -832,6 +832,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let velocityPromise = Promise.resolve<Map<string, PackageVelocityMetrics>>(new Map());
   let promotionsPromise = Promise.resolve<any[] | undefined>(undefined);
   let recentReviewsPromise = Promise.resolve<any[]>([]);
+  let authorDisplayMapPromise = Promise.resolve<{
+    byUserId: Map<string, string>;
+    byHandle: Map<string, { userId: string; displayName: string }>;
+  }>({
+    byUserId: new Map(),
+    byHandle: new Map()
+  });
 
   if (env.DB) {
     // One-time automatic purge of legacy unowned mirrored ContentDB rows & dead mirror screenshot/review artifacts
@@ -940,6 +947,43 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         return map;
       })
       .catch(() => new Map<string, number>());
+
+    // Registered Creator Display Names & Linked Identities from `users` / `user_identities`
+    authorDisplayMapPromise = env.DB.prepare(`
+      SELECT u.id AS user_id, u.username, u.display_name, ui.provider_username, ui.verified
+      FROM users u
+      LEFT JOIN user_identities ui ON ui.user_id = u.id
+      WHERE u.display_name IS NOT NULL AND TRIM(u.display_name) != ''
+    `).all()
+      .then((res: any) => {
+        const byUserId = new Map<string, string>();
+        const byHandle = new Map<string, { userId: string; displayName: string }>();
+        for (const row of (res.results || [])) {
+          const userId = String(row?.user_id || '').trim();
+          const displayName = String(row?.display_name || '').trim();
+          if (!userId || !displayName) continue;
+          byUserId.set(userId, displayName);
+          const uname = String(row?.username || '').trim().toLowerCase();
+          if (uname) {
+            byHandle.set(uname, { userId, displayName });
+          }
+          const displayLower = displayName.toLowerCase();
+          if (displayLower && !byHandle.has(displayLower)) {
+            byHandle.set(displayLower, { userId, displayName });
+          }
+          if (row?.verified && row?.provider_username) {
+            const provHandle = String(row.provider_username).trim().toLowerCase();
+            if (provHandle) {
+              byHandle.set(provHandle, { userId, displayName });
+            }
+          }
+        }
+        return { byUserId, byHandle };
+      })
+      .catch(() => ({
+        byUserId: new Map<string, string>(),
+        byHandle: new Map<string, { userId: string; displayName: string }>()
+      }));
 
     if (isBootBundle) {
       velocityPromise = env.DB.prepare(`
@@ -1089,7 +1133,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     velocity,
     activePromotions,
     latestBlogPost,
-    recentReviews
+    recentReviews,
+    authorDisplayMap
   ] = await Promise.all([
     upstreamPromise,
     recentUpstreamPromise,
@@ -1103,7 +1148,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     velocityPromise,
     promotionsPromise,
     blogPostPromise,
-    recentReviewsPromise
+    recentReviewsPromise,
+    authorDisplayMapPromise
   ]);
 
   // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
@@ -1137,6 +1183,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const upstreamByNameTitle = new Map<string, any>();
   const upstreamByNameTypeCount = new Map<string, number>();
   const upstreamByNameType = new Map<string, any>();
+  const upstreamCasingByBaseAuthor = new Map<string, string>();
   const normalizeBaseAuthor = (a: string) =>
     String(a || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
 
@@ -1147,12 +1194,58 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const rKey = normalizeRepoKey(item.repo || item.repo_url);
     if (rKey) upstreamByRepo.set(rKey, item);
     const baseAuthor = normalizeBaseAuthor(item.author);
+    if (baseAuthor && !upstreamCasingByBaseAuthor.has(baseAuthor)) {
+      upstreamCasingByBaseAuthor.set(baseAuthor, String(item.author));
+    }
     const ntKey = `${baseAuthor}::${String(item.name).toLowerCase()}::${String(item.title || '').trim().toLowerCase()}`;
     upstreamByNameTitle.set(ntKey, item);
     const nameTypeKey = `${baseAuthor}::${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
     upstreamByNameTypeCount.set(nameTypeKey, (upstreamByNameTypeCount.get(nameTypeKey) || 0) + 1);
     upstreamByNameType.set(nameTypeKey, item);
   }
+
+  const resolveAuthorMeta = (rawAuthorId: unknown, ...handles: Array<string | undefined | null>) => {
+    const cleanId =
+      rawAuthorId && !String(rawAuthorId).startsWith('ext_') ? String(rawAuthorId).trim() : '';
+    let resolvedUserId = cleanId || undefined;
+    let resolvedDisplayName = cleanId ? authorDisplayMap.byUserId.get(cleanId) : undefined;
+
+    for (const h of handles) {
+      const lower = String(h || '').trim().toLowerCase();
+      if (!lower) continue;
+      const match = authorDisplayMap.byHandle.get(lower);
+      if (match) {
+        if (!resolvedUserId && match.userId) resolvedUserId = match.userId;
+        if (!resolvedDisplayName && match.displayName) resolvedDisplayName = match.displayName;
+        if (resolvedUserId && resolvedDisplayName) break;
+      }
+    }
+
+    if (!resolvedDisplayName) {
+      for (const h of handles) {
+        const raw = String(h || '').trim();
+        if (!raw || !/[-_](?:hub|git|dev|lab|mods?)$/i.test(raw)) continue;
+        const base = normalizeBaseAuthor(raw);
+        if (!base) continue;
+        const baseHandleMatch = authorDisplayMap.byHandle.get(base);
+        if (baseHandleMatch?.displayName) {
+          if (!resolvedUserId && baseHandleMatch.userId) resolvedUserId = baseHandleMatch.userId;
+          resolvedDisplayName = baseHandleMatch.displayName;
+          break;
+        }
+        const cdbAuthor = upstreamCasingByBaseAuthor.get(base);
+        if (cdbAuthor) {
+          resolvedDisplayName = cdbAuthor;
+          break;
+        }
+      }
+    }
+
+    return {
+      author_id: resolvedUserId,
+      author_display_name: resolvedDisplayName
+    };
+  };
 
   // 4. Format D1 packages into standard ContentDB-compatible schema (merging with upstream ContentDB if present)
   const seenKeys = new Set<string>();
@@ -1292,11 +1385,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             Math.floor(new Date(p.updated_at || p.created_at || '2026-01-01T00:00:00Z').getTime() / 1000) || 1
           );
 
+    const authorMeta = resolveAuthorMeta(
+      p.author_id,
+      canonicalAuthor,
+      p.author_name,
+      matchedUpstream?.author
+    );
+
     merged.push({
       ...(matchedUpstream || {}),
       id: `${canonicalAuthor}/${canonicalName}`,
       author: canonicalAuthor,
-      author_id: p.author_id && !String(p.author_id).startsWith('ext_') ? String(p.author_id) : undefined,
+      ...(authorMeta.author_display_name ? { author_display_name: authorMeta.author_display_name } : {}),
+      author_id: authorMeta.author_id,
       name: canonicalName,
       aliases: aliases.length > 0 ? aliases : undefined,
       title: matchedUpstream?.title || p.title || canonicalName,
@@ -1387,9 +1488,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         item.banner_url,
         sanitizedItemThumb
       ) || sanitizedItemThumb;
+    const upstreamAuthorMeta = resolveAuthorMeta(undefined, item.author);
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
+      ...(upstreamAuthorMeta.author_display_name
+        ? { author_display_name: upstreamAuthorMeta.author_display_name }
+        : {}),
+      ...(upstreamAuthorMeta.author_id ? { author_id: upstreamAuthorMeta.author_id } : {}),
       ...(sanitizedItemThumb ? { thumbnail: sanitizedItemThumb } : {}),
       ...(resolvedUpstreamBanner ? { banner: resolvedUpstreamBanner } : {}),
       ...(upstreamRevCounts ? { review_thread_counts: upstreamRevCounts, rating_checked: true } : {}),

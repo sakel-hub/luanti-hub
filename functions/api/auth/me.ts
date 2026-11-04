@@ -216,6 +216,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const userPackages = (packagesRes.results || []).map((p: any) => ({
       ...p,
       author: p.author || p.author_name || user.username,
+      author_display_name: user.display_name || user.username,
       score: Number(p.review_score) || 0
     }));
 
@@ -613,13 +614,22 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
     try {
       const uRow = await context.env.DB.prepare(`SELECT username FROM users WHERE id = ?`).bind(userId).first();
       const idRows = await context.env.DB.prepare(`SELECT provider_username FROM user_identities WHERE user_id = ?`).bind(userId).all();
-      const keysToEvict: string[] = [];
+      const keysToEvict: string[] = [
+        '/__api_packages_d1_active_v3',
+        '/__api_packages_catalog_v22/'
+      ];
       if (uRow?.username) {
-        keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(String(uRow.username).toLowerCase())}`);
+        const lowerU = encodeURIComponent(String(uRow.username).toLowerCase());
+        keysToEvict.push(`/__api_author_profile_v1/${lowerU}`, `/__api_author_profile_v2/${lowerU}`);
+      }
+      if (displayName) {
+        const lowerD = encodeURIComponent(displayName.toLowerCase());
+        keysToEvict.push(`/__api_author_profile_v1/${lowerD}`, `/__api_author_profile_v2/${lowerD}`);
       }
       for (const r of (idRows?.results || [])) {
         if (r?.provider_username) {
-          keysToEvict.push(`/__api_author_profile_v1/${encodeURIComponent(String(r.provider_username).toLowerCase())}`);
+          const lowerP = encodeURIComponent(String(r.provider_username).toLowerCase());
+          keysToEvict.push(`/__api_author_profile_v1/${lowerP}`, `/__api_author_profile_v2/${lowerP}`);
         }
       }
       if (keysToEvict.length > 0) {

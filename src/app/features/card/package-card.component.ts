@@ -65,7 +65,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       tabindex="0"
       (keydown.enter)="openDetails()"
       (keydown.space)="openDetails()"
-      [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + package.author"
+      [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + authorDisplayName"
       [class.origin-left]="isFirst"
       [class.origin-right]="isLast"
       [class.origin-center]="!isFirst && !isLast"
@@ -275,18 +275,18 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 }
               }
             } @else {
-              <span class="text-slate-500 truncate">{{ 'card.byAuthor' | translate }} {{ package.author }}</span>
+              <span class="text-slate-500 truncate">{{ 'card.byAuthor' | translate }} {{ authorDisplayName }}</span>
             }
           </div>
 
           <button
             type="button"
             (click)="onAuthorClick($event)"
-            [appTooltip]="('author.viewProfile' | translate) + ' (@' + package.author + ')'"
-            [attr.aria-label]="('author.viewProfile' | translate) + ' ' + package.author"
+            [appTooltip]="('author.viewProfile' | translate) + ' (@' + authorDisplayName + ')'"
+            [attr.aria-label]="('author.viewProfile' | translate) + ' ' + authorDisplayName"
             class="px-1.5 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer">
             <svg lucideUser class="w-2.5 h-2.5 text-sky-400 flex-shrink-0"></svg>
-            <span class="truncate font-medium">{{ package.author }}</span>
+            <span class="truncate font-medium">{{ authorDisplayName }}</span>
           </button>
         </div>
 
@@ -643,6 +643,10 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     return `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
   }
 
+  get authorDisplayName(): string {
+    return this.packageService.getAuthorDisplayName(this.package);
+  }
+
   get seoImageAlt(): string {
     if (!this.package) return 'Luanti Package';
     const typeLabel =
@@ -651,7 +655,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
         : this.package.type === 'txp'
           ? 'Texture Pack'
           : 'Mod';
-    return `${this.package.title} – Luanti ${typeLabel} by ${this.package.author}`;
+    return `${this.package.title} – Luanti ${typeLabel} by ${this.authorDisplayName}`;
   }
 
   onTitleLinkClick(event: MouseEvent): void {
@@ -691,6 +695,6 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onAuthorClick(event: MouseEvent): void {
     event.stopPropagation();
-    this.packageService.openAuthorDrawer(this.package.author, true, this.packageService.activePackage());
+    this.packageService.openAuthorDrawer(this.authorDisplayName || this.package.author, true, this.packageService.activePackage());
   }
 }
