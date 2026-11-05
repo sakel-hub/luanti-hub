@@ -9099,18 +9099,15 @@ supported_games = minetest_game, voxelibre
     expect(d1WaySigns.latest_commit_sha).toBe('3333333333333333');
     expect(d1WaySigns.updated_at).toBe('2026-11-05T14:30:00.000Z');
 
-    // 5. Canonicalize www.luantihub.org -> https://luantihub.org at the Edge Middleware so Service Worker & notification state never split across origins
-    const wwwRedirectRes = await edgeMiddleware({
+    // 5. Serve www.luantihub.org in-place (200 OK) so installed PWAs on www.luantihub.org never trigger Chrome's out-of-scope top URL bar
+    const wwwInPlaceRes = await edgeMiddleware({
       request: new Request('https://www.luantihub.org/packages/SaKeL/waysigns?tab=releases', {
         method: 'GET'
       }),
       next: async () => new Response('OK', { status: 200 }),
       env: {}
     });
-    expect(wwwRedirectRes.status).toBe(301);
-    expect(wwwRedirectRes.headers.get('location')).toBe(
-      'https://luantihub.org/packages/SaKeL/waysigns?tab=releases'
-    );
+    expect(wwwInPlaceRes.status).toBe(200);
   });
 
   it('should render HeroBillboardComponent artwork-derived ambient backlight glow using LCP-safe 32x18 dual-canvas crossfade with zero extra img elements', () => {
