@@ -4,12 +4,6 @@ import {
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage
 } from '../../lib/upstream';
-import {
-  parseCookies,
-  verifySessionToken,
-  checkIsAdmin,
-  reconcileAndMergeUserAccount
-} from '../../auth/lib/session';
 
 interface Env {
   DB?: any;
@@ -70,91 +64,32 @@ export async function onRequestGet(context: {
   }
 
   try {
-    // 1. Authenticate caller and enforce strict Author or Admin visibility
-    const cookies = parseCookies(request);
-    const sessionToken = cookies['lh_session'];
-    const sessionUserId = sessionToken
-      ? await verifySessionToken(sessionToken, env.SESSION_SECRET)
-      : null;
+    await ensureExtendedPackageColumns(env.DB);
 
-    if (!sessionUserId) {
-      return Response.json(
-        { error: 'Authentication required to view author analytics.' },
-        { status: 401, headers: { 'Cache-Control': 'private, no-store' } }
-      );
-    }
-
-    const callerUser = await reconcileAndMergeUserAccount(env.DB, sessionUserId);
-    if (!callerUser) {
-      return Response.json(
-        { error: 'User account not found.' },
-        { status: 401, headers: { 'Cache-Control': 'private, no-store' } }
-      );
-    }
-
-    const callerIdRes = await env.DB.prepare(
-      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
-    ).bind(callerUser.id).all().catch(() => ({ results: [] }));
-    const callerIdentities = (callerIdRes?.results || []) as Array<{
-      provider: string;
-      username: string;
-      verified?: number | boolean;
-    }>;
-
-    const isAdmin = checkIsAdmin(callerUser, callerIdentities, env.ADMIN_USERS);
     const lowerReq = requestedUsername.toLowerCase();
     const baseReq = lowerReq.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, '');
 
-    const callerHandles = new Set<string>();
-    const hasVerifiedIdentity = callerIdentities.some(
-      id => id.verified === 1 || id.verified === true
-    );
-    if (hasVerifiedIdentity && callerUser.username) {
-      const cu = String(callerUser.username).trim().toLowerCase();
-      callerHandles.add(cu);
-      callerHandles.add(cu.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, ''));
-    }
-    for (const id of callerIdentities) {
-      if ((id.verified === 1 || id.verified === true) && id.username) {
-        const h = String(id.username).trim().toLowerCase();
-        callerHandles.add(h);
-        callerHandles.add(h.replace(/[-_](?:hub|git|dev|lab|mods?|gi|gl|co|cd|me)$/i, ''));
-      }
-    }
-
-    const isOwnAuthorProfile =
-      callerHandles.has(lowerReq) || (baseReq.length > 0 && callerHandles.has(baseReq));
-
-    if (!isAdmin && !isOwnAuthorProfile) {
-      return Response.json(
-        { error: 'Access denied: Only the author or an administrator can view these analytics.' },
-        { status: 403, headers: { 'Cache-Control': 'private, no-store' } }
-      );
-    }
-
-    await ensureExtendedPackageColumns(env.DB);
-
-    // 2. Gather all linked handles for the target author
+    // Gather all verified linked handles for the target author
     const targetHandles = new Set<string>([lowerReq]);
     if (baseReq) targetHandles.add(baseReq);
 
-    if (isOwnAuthorProfile) {
-      for (const h of callerHandles) {
-        if (h) targetHandles.add(h);
-      }
-    } else {
-      // Admin inspecting another author: look up their user_identities if registered
-      const targetUserRow = await env.DB.prepare(
-        `SELECT id, username FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+    const targetUserRow = await env.DB.prepare(
+      `SELECT id, username FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+    ).bind(requestedUsername).first().catch(() => null);
+    let targetUserId = targetUserRow?.id;
+    if (!targetUserId) {
+      const idLookup = await env.DB.prepare(
+        `SELECT user_id FROM user_identities WHERE LOWER(provider_username) = LOWER(?) AND verified = 1 LIMIT 1`
       ).bind(requestedUsername).first().catch(() => null);
-      if (targetUserRow?.id) {
-        const tIds = await env.DB.prepare(
-          `SELECT provider_username as username FROM user_identities WHERE user_id = ?`
-        ).bind(targetUserRow.id).all().catch(() => ({ results: [] }));
-        for (const r of tIds?.results || []) {
-          if (r?.username) {
-            targetHandles.add(String(r.username).trim().toLowerCase());
-          }
+      targetUserId = idLookup?.user_id;
+    }
+    if (targetUserId) {
+      const tIds = await env.DB.prepare(
+        `SELECT provider_username as username FROM user_identities WHERE user_id = ? AND verified = 1`
+      ).bind(targetUserId).all().catch(() => ({ results: [] }));
+      for (const r of tIds?.results || []) {
+        if (r?.username) {
+          targetHandles.add(String(r.username).trim().toLowerCase());
         }
       }
     }
@@ -512,14 +447,14 @@ export async function onRequestGet(context: {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Cache-Control': 'private, no-store'
+          'Cache-Control': 'public, max-age=180, s-maxage=300, stale-while-revalidate=600'
         }
       }
     );
   } catch (err: any) {
     return Response.json(
       { error: sanitizePublicErrorMessage(err, 'Failed to load author analytics.') },
-      { status: 500, headers: { 'Cache-Control': 'private, no-store' } }
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 }

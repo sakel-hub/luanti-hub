@@ -271,17 +271,15 @@ import {
                   </button>
                 }
 
-                <!-- Author / Admin Package Analytics Button -->
-                @if (canModerate()) {
-                  <button
-                    type="button"
-                    (click)="onOpenPackageAnalytics()"
-                    [appTooltip]="'modal.viewAnalyticsTooltip' | translate"
-                    [attr.aria-label]="'modal.viewAnalyticsTooltip' | translate"
-                    class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-sky text-sky-200/90 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
-                    <svg lucideTrendingUp class="w-4 h-4"></svg>
-                  </button>
-                }
+                <!-- Package Analytics Button (Public, matching ContentDB) -->
+                <button
+                  type="button"
+                  (click)="onOpenPackageAnalytics()"
+                  [appTooltip]="'modal.viewAnalyticsTooltip' | translate"
+                  [attr.aria-label]="'modal.viewAnalyticsTooltip' | translate"
+                  class="w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-sky text-sky-200/90 hover:text-sky-300 flex items-center justify-center transition hover:scale-105 cursor-pointer">
+                  <svg lucideTrendingUp class="w-4 h-4"></svg>
+                </button>
 
                 <!-- Author / Admin Delete Git Package Button (With Confirmation Prompt) -->
                 @if (canModerate() && isGitSubmittedPackage()) {
@@ -1672,16 +1670,14 @@ import {
                   class="cursor-pointer">
                   {{ 'modal.tabCompliance' | translate }}
                 </button>
-                @if (authService.canManagePackage(package) || authService.isAdmin()) {
-                  <button
-                    type="button"
-                    (click)="activeTab.set('analytics')"
-                    [class]="activeTab() === 'analytics' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap flex items-center gap-1.5' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap flex items-center gap-1.5'"
-                    class="cursor-pointer">
-                    <svg lucideTrendingUp class="w-3.5 h-3.5 text-sky-400"></svg>
-                    <span>{{ 'modal.tabAnalytics' | translate }}</span>
-                  </button>
-                }
+                <button
+                  type="button"
+                  (click)="activeTab.set('analytics')"
+                  [class]="activeTab() === 'analytics' ? 'text-sky-400 border-b-2 border-sky-400 py-2.5 font-bold whitespace-nowrap flex items-center gap-1.5' : 'text-slate-400 hover:text-white py-2.5 whitespace-nowrap flex items-center gap-1.5'"
+                  class="cursor-pointer">
+                  <svg lucideTrendingUp class="w-3.5 h-3.5 text-sky-400"></svg>
+                  <span>{{ 'modal.tabAnalytics' | translate }}</span>
+                </button>
               </div>
 
               <!-- Reviews Content (Always shows interactive Rate & Review box!) -->
@@ -2377,8 +2373,8 @@ import {
                 </div>
               }
 
-              <!-- Author / Admin Package Download Analytics Tab -->
-              @if (activeTab() === 'analytics' && (authService.canManagePackage(package) || authService.isAdmin())) {
+              <!-- Package Download Analytics Tab -->
+              @if (activeTab() === 'analytics') {
                 <div class="pt-4 luanti-tab-enter">
                   @defer (on immediate) {
                     <app-download-analytics-chart
@@ -3976,7 +3972,6 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onOpenPackageAnalytics(): void {
-    if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
     const resolvedAuthor =
@@ -4192,7 +4187,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onSubmitReview(): Promise<void> {
-    if (this.isPackageAuthor() || !this.reviewComment.trim()) return;
+    if (!this.authService.isLoggedIn() || this.isPackageAuthor() || !this.reviewComment.trim()) return;
 
     this.isSubmittingReview.set(true);
     const res = await this.packageService.submitReview(this.package, {
@@ -4242,6 +4237,12 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   toggleFlagReviewPrompt(reviewId: string): void {
+    if (!this.authService.isLoggedIn()) {
+      this.openSignInForReview();
+      return;
+    }
+    const targetRev = this.reviews().find(r => r.id === reviewId);
+    if (targetRev && this.isOwnReview(targetRev)) return;
     if (this.flaggingReviewId() === reviewId) {
       this.flaggingReviewId.set(null);
       this.flagReviewReason = '';
@@ -4252,6 +4253,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onConfirmFlagReview(rev: CommunityReview): Promise<void> {
+    if (!this.authService.isLoggedIn() || !rev || this.isOwnReview(rev)) return;
     this.isSubmittingReviewFlag.set(true);
     const res = await this.packageService.flagReview(this.package, rev.id, this.flagReviewReason);
     this.isSubmittingReviewFlag.set(false);
@@ -4288,6 +4290,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   toggleReportForm(): void {
     if (this.isPackageAuthor()) return;
+    if (!this.authService.isLoggedIn()) {
+      this.openSignInForReview();
+      return;
+    }
     const next = !this.isReportOpen();
     this.isReportOpen.set(next);
     if (next) {
@@ -4305,7 +4311,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onSubmitReport(): Promise<void> {
-    if (this.isPackageAuthor() || !this.reportDetails.trim()) return;
+    if (!this.authService.isLoggedIn() || this.isPackageAuthor() || !this.reportDetails.trim()) return;
     this.isReporting.set(true);
     const res = await this.packageService.reportPackage(this.package, this.reportReason, this.reportDetails.trim());
     this.isReporting.set(false);

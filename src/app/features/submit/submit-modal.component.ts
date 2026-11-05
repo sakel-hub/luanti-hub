@@ -619,6 +619,10 @@ export class SubmitModalComponent {
   }
 
   async onRunAudit(): Promise<void> {
+    if (!this.authService.isLoggedIn()) {
+      this.onSignInFromSubmit();
+      return;
+    }
     if (!this.repoUrl.trim()) return;
     this.isAuditing.set(true);
     this.statusMessage.set(null);
@@ -642,6 +646,10 @@ export class SubmitModalComponent {
   }
 
   async onPublish(): Promise<void> {
+    if (!this.authService.isLoggedIn()) {
+      this.onSignInFromSubmit();
+      return;
+    }
     const report = this.auditReport();
     if (!this.canPublish() || !report?.auditToken) return;
 

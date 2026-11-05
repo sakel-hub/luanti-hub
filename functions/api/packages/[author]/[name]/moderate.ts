@@ -71,8 +71,23 @@ export async function onRequestPost(context: {
     if (!userId) {
       return Response.json({ error: 'Please sign in to submit a moderation report.' }, { status: 401 });
     }
+    const existingPkgForReport = await env.DB.prepare(
+      `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+    ).bind(packageId, author, name).first().catch(() => null);
+    if (
+      verifyStrictPackageAuthorOwnership(
+        currentUser,
+        identities,
+        existingPkgForReport,
+        author
+      )
+    ) {
+      return Response.json({ error: 'Authors cannot report their own packages.' }, { status: 403 });
+    }
     const reason = body.reason || 'other';
-    const details = (body.details || '').trim();
+    const details = (body.details || '')
+      .replace(/\[(?:CLAIM_PACKAGE|ADMIN)[^\]]*\]/gi, '')
+      .trim();
     if (!details || details.length < 5) {
       return Response.json({ error: 'Please provide details explaining the issue (at least 5 characters).' }, { status: 400 });
     }

@@ -161,15 +161,13 @@ import {
               </span>
 
               <div class="flex items-center gap-2 flex-wrap">
-                @if (isOwnProfile() || authService.isAdmin()) {
-                  <button
-                    type="button"
-                    (click)="openAuthorAnalytics()"
-                    class="px-2.5 py-1 rounded-lg glass-btn-sky text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer">
-                    <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
-                    <span>{{ 'analytics.openDashboardBtn' | translate }}</span>
-                  </button>
-                }
+                <button
+                  type="button"
+                  (click)="openAuthorAnalytics()"
+                  class="px-2.5 py-1 rounded-lg glass-btn-sky text-white text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer">
+                  <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
+                  <span>{{ 'analytics.openDashboardBtn' | translate }}</span>
+                </button>
                 @if (isOwnProfile()) {
                   <button
                     type="button"

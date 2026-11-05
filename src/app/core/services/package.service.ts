@@ -9529,6 +9529,9 @@ export class PackageService {
     comment: string;
   }): Promise<{ success: boolean; review?: CommunityReview; message?: string }> {
     const user = this.authService.currentUser();
+    if (!user || !this.authService.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to submit a review.' };
+    }
     if (pkg && this.authService.isPackageAuthor(pkg)) {
       return { success: false, message: 'Authors cannot rate or review their own packages.' };
     }
@@ -9605,7 +9608,7 @@ export class PackageService {
         return { success: true, review: data.review };
       }
 
-      if (this.edgeApiAvailable && !res.ok) {
+      if ((this.edgeApiAvailable && !res.ok) || res.status === 401 || res.status === 403) {
         return { success: false, message: `Failed to submit review (HTTP ${res.status}).` };
       }
 
@@ -9633,6 +9636,9 @@ export class PackageService {
 
   // Flag an inappropriate review / comment for moderation
   async flagReview(pkg: LuantiPackage, reviewId: string, details?: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.authService.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to flag a review.' };
+    }
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
         method: 'POST',
@@ -9654,7 +9660,7 @@ export class PackageService {
         }
         return { success: true, message: data.message };
       }
-      if (!this.edgeApiAvailable) {
+      if (!this.edgeApiAvailable && res.status !== 401 && res.status !== 403) {
         return { success: true };
       }
       return { success: false, message: 'Failed to flag review.' };
@@ -9665,6 +9671,9 @@ export class PackageService {
 
   // Delete a review (Admins or Review Author)
   async deleteReview(pkg: LuantiPackage, reviewId: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.authService.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to delete a review.' };
+    }
     const cacheKey = pkg.id.toLowerCase();
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews`, {
@@ -9739,7 +9748,7 @@ export class PackageService {
         }
         return { success: true, message: data.message };
       }
-      if (!this.edgeApiAvailable) {
+      if (!this.edgeApiAvailable && res.status !== 401 && res.status !== 403) {
         this.reviewsCache.delete(cacheKey);
         return { success: true };
       }
@@ -9763,6 +9772,12 @@ export class PackageService {
     package?: LuantiPackage;
     pendingModeration?: boolean;
   }> {
+    if (!this.authService.isLoggedIn()) {
+      return {
+        success: false,
+        message: 'Authentication required: Please sign in before auditing or submitting a Git repository.'
+      };
+    }
     try {
       const res = await fetch('/api/packages/git', {
         method: 'POST',
@@ -9826,6 +9841,12 @@ export class PackageService {
 
   // Community Report / Flag Package
   async reportPackage(pkg: LuantiPackage, reason: string, details: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.authService.isLoggedIn()) {
+      return { success: false, message: 'Please sign in to submit a moderation report.' };
+    }
+    if (pkg && this.authService.isPackageAuthor(pkg)) {
+      return { success: false, message: 'Authors cannot report their own packages.' };
+    }
     try {
       const res = await fetch(`/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/moderate`, {
         method: 'POST',
@@ -10192,14 +10213,6 @@ export class PackageService {
     if (!cleanAuthor || !cleanName) return null;
 
     const foundPkg = this.findPackageInCatalogByRoute(cleanAuthor, cleanName);
-    if (
-      !this.authService.isAdmin() &&
-      (foundPkg
-        ? !this.authService.canManagePackage(foundPkg)
-        : !this.authService.canViewAuthorAnalytics(cleanAuthor))
-    ) {
-      return null;
-    }
 
     const cacheKey = `pkg:${cleanAuthor.toLowerCase()}/${cleanName.toLowerCase()}:${days}`;
     if (!forceRefresh) {
@@ -10225,17 +10238,11 @@ export class PackageService {
           return data;
         }
       }
-      if (this.edgeApiAvailable) {
-        return null;
-      }
     } catch {
-      if (this.edgeApiAvailable) {
-        return null;
-      }
-      // Fall back to direct ContentDB stats in local dev if authorized
+      // Fall back to direct ContentDB stats if Edge endpoint is unavailable or returns non-OK on localhost
     }
 
-    // Fallback for local dev (`ng serve`) when caller is authorized author/admin
+    // Fallback to direct ContentDB stats (e.g. local dev `ng serve` or when Edge endpoint is unreachable)
     const { prevStartDate, endDate } = this.buildUtcDateRange(days);
     const cdbStats = await this.fetchUpstreamWithMirrorFallback(
       `/packages/${encAuthor}/${encName}/stats/?start=${prevStartDate}&end=${endDate}`
@@ -10257,10 +10264,6 @@ export class PackageService {
   ): Promise<DownloadAnalyticsData | null> {
     const cleanUser = (username || '').trim();
     if (!cleanUser) return null;
-
-    if (!this.authService.canViewAuthorAnalytics(cleanUser)) {
-      return null;
-    }
 
     const cacheKey = `author:${cleanUser.toLowerCase()}:${days}`;
     if (!forceRefresh) {
@@ -10285,14 +10288,8 @@ export class PackageService {
           return data;
         }
       }
-      if (this.edgeApiAvailable) {
-        return null;
-      }
     } catch {
-      if (this.edgeApiAvailable) {
-        return null;
-      }
-      // Fall back to direct ContentDB user stats in local dev if authorized
+      // Fall back to direct ContentDB user stats if Edge endpoint is unavailable or returns non-OK on localhost
     }
 
     const { prevStartDate, endDate } = this.buildUtcDateRange(days);
@@ -10307,6 +10304,9 @@ export class PackageService {
   }
 
   async fetchAdminPromotions(): Promise<HeroPromotion[]> {
+    if (!this.authService.isLoggedIn() || !this.authService.isAdmin()) {
+      return [];
+    }
     try {
       const res = await fetch('/api/promotions?admin=1', {
         headers: { Accept: 'application/json' },
@@ -10331,6 +10331,9 @@ export class PackageService {
   async savePromotion(
     draft: Partial<HeroPromotion>
   ): Promise<{ success: boolean; error?: string; promotion?: HeroPromotion }> {
+    if (!this.authService.isLoggedIn() || !this.authService.isAdmin()) {
+      return { success: false, error: 'Administrator privileges required to manage promotions.' };
+    }
     try {
       const res = await fetch('/api/promotions', {
         method: 'POST',
@@ -10371,6 +10374,9 @@ export class PackageService {
   }
 
   async deletePromotion(id: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.authService.isLoggedIn() || !this.authService.isAdmin()) {
+      return { success: false, error: 'Administrator privileges required to delete promotions.' };
+    }
     const cleanId = (id || '').trim();
     if (!cleanId) return { success: false, error: 'Promotion ID is required.' };
     try {

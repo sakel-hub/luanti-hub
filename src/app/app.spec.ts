@@ -3410,15 +3410,16 @@ supported_games = minetest_game, voxelibre
       }
     };
 
-    // 1. Unauthenticated request to /api/packages/sakel/x_farming/stats -> 401
+    // 1. Public unauthenticated request to /api/packages/sakel/x_farming/stats -> 200 OK (ContentDB open analytics model)
     const unauthRes = await packageStatsOnRequestGet({
       request: new Request('https://luantihub.local/api/packages/sakel/x_farming/stats?days=7'),
       params: { author: 'sakel', name: 'x_farming' },
       env: { DB: mockDb, SESSION_SECRET: secret }
     });
-    expect(unauthRes.status).toBe(401);
+    expect(unauthRes.status).toBe(200);
+    expect(unauthRes.headers.get('Cache-Control')).toContain('public');
 
-    // 2. Non-owner request -> 403 Forbidden
+    // 2. Non-owner request -> 200 OK
     const strangerRes = await packageStatsOnRequestGet({
       request: new Request('https://luantihub.local/api/packages/sakel/x_farming/stats?days=7', {
         headers: { Cookie: `lh_session=${strangerToken}` }
@@ -3426,7 +3427,7 @@ supported_games = minetest_game, voxelibre
       params: { author: 'sakel', name: 'x_farming' },
       env: { DB: mockDb, SESSION_SECRET: secret }
     });
-    expect(strangerRes.status).toBe(403);
+    expect(strangerRes.status).toBe(200);
 
     // 3. Verified Package Author request -> 200 OK with granular reasons, platforms & views
     const ownerRes = await packageStatsOnRequestGet({
@@ -3454,7 +3455,7 @@ supported_games = minetest_game, voxelibre
     expect(ownerStats.summary.totalViews).toBe(40);
     expect(ownerStats.summary.conversionRatePercent).toBe(35);
 
-    // 4. Admin request to /api/authors/sakel/stats -> 200 OK with package_breakdown
+    // 4. Request to /api/authors/sakel/stats -> 200 OK with package_breakdown
     const adminAuthorRes = await authorStatsOnRequestGet({
       request: new Request('https://luantihub.local/api/authors/sakel/stats?days=30', {
         headers: { Cookie: `lh_session=${adminToken}` }
@@ -3469,7 +3470,7 @@ supported_games = minetest_game, voxelibre
     expect(authorStats.package_breakdown[0].name).toBe('x_farming');
     expect(authorStats.package_breakdown[0].totalPeriodDownloads).toBe(14);
 
-    // 5. Verify PackageDetailModalComponent hides Analytics tab for non-authors and shows it for the author
+    // 5. Verify PackageDetailModalComponent shows Analytics tab for all visitors (including guests and authors)
     const pkg = (pkgService as any).normalizePackage({
       id: 'sakel/x_farming',
       author: 'sakel',
@@ -3484,7 +3485,14 @@ supported_games = minetest_game, voxelibre
     const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
     modalFixture.componentInstance.package = pkg;
     modalFixture.detectChanges();
-    expect((modalFixture.nativeElement as HTMLElement).textContent).not.toContain('Analytics');
+    expect((modalFixture.nativeElement as HTMLElement).textContent).toContain('Analytics');
+
+    // Selecting the Analytics tab while logged out renders <app-download-analytics-chart>
+    modalFixture.componentInstance.activeTab.set('analytics');
+    modalFixture.detectChanges();
+    await modalFixture.whenStable();
+    modalFixture.detectChanges();
+    expect((modalFixture.nativeElement as HTMLElement).querySelector('app-download-analytics-chart')).not.toBeNull();
 
     // Now sign in as verified author 'sakel'
     (authService as any)._currentUser.set({
@@ -3797,7 +3805,7 @@ supported_games = minetest_game, voxelibre
       tags: ['mod']
     };
 
-    // Unverified handle sign-in must NOT grant package management or author analytics access
+    // Unverified handle sign-in must NOT grant package management, while public analytics remain open
     (authService as any)._currentUser.set({
       id: 'unverified_1',
       username: 'SaKeL',
@@ -3808,7 +3816,8 @@ supported_games = minetest_game, voxelibre
       packages: []
     });
     expect(authService.canManagePackage(testPkg)).toBe(false);
-    expect(authService.canViewAuthorAnalytics('SaKeL')).toBe(false);
+    expect(authService.canViewAuthorAnalytics('SaKeL')).toBe(true);
+    expect(authService.canViewAuthorAnalytics('')).toBe(false);
 
     // Verified OAuth identity grants management and analytics access
     (authService as any)._currentUser.set({
@@ -9623,5 +9632,83 @@ supported_games = minetest_game, voxelibre
     const leftCol = modalFixture.nativeElement.querySelector('.lg\\:col-span-2');
     expect(leftCol).not.toBeNull();
     expect(leftCol.textContent).toContain('Edit Metadata & Tags');
+  });
+
+  it('should protect UI action handlers and services against DOM manipulation when logged out or lacking author/admin privileges', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+
+    const pkg = (pkgService as any).normalizePackage({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      source: 'git',
+      provider: 'github',
+      repo_url: 'https://github.com/SaKeL/everness'
+    });
+
+    // 1. Logged-out visitor: DOM-manipulated calls to protected handlers must be blocked
+    (authService as any)._currentUser.set(null);
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = pkg;
+    modalFixture.detectChanges();
+
+    // Clicking Report Package while logged out prompts Sign In instead of opening report form
+    modalComp.toggleReportForm();
+    expect(modalComp.isReportOpen()).toBe(false);
+    expect(authService.isAuthModalOpen()).toBe(true);
+    authService.closeAuthModal();
+
+    // Direct call to openEditTags / onKillSwitch as guest is rejected
+    modalComp.openEditTags();
+    expect(modalComp.isEditingTags()).toBe(false);
+
+    // Service-level calls while logged out return access/auth error without mutating state
+    const savePromoRes = await pkgService.savePromotion({ title: 'Hack Promo' });
+    expect(savePromoRes.success).toBe(false);
+    const delPromoRes = await pkgService.deletePromotion('promo-1');
+    expect(delPromoRes.success).toBe(false);
+    const reportRes = await pkgService.reportPackage(pkg, 'other', 'Fake report while logged out');
+    expect(reportRes.success).toBe(false);
+    const reviewRes = await pkgService.submitReview(pkg, { rating: 5, comment: 'Anon review' });
+    expect(reviewRes.success).toBe(false);
+    const profileRes = await authService.updateProfile({ display_name: 'Hacked' });
+    expect(profileRes.success).toBe(false);
+
+    // 2. Non-admin logged-in user: DOM-manipulated calls to Admin tabs & bulk moderation in ProfileDrawerComponent must be blocked
+    (authService as any)._currentUser.set({
+      id: 'u_regular',
+      username: 'regular_user',
+      role: 'user',
+      is_admin: false,
+      identities: [{ provider: 'github', username: 'regular_user', verified: true }]
+    });
+
+    const drawerFixture = TestBed.createComponent(ProfileDrawerComponent);
+    const drawerComp = drawerFixture.componentInstance;
+    drawerFixture.detectChanges();
+
+    drawerComp.onSelectModerationTab();
+    expect(drawerComp.activeTab()).not.toBe('moderation');
+    drawerComp.onSelectPromotionsTab();
+    expect(drawerComp.activeTab()).not.toBe('promotions');
+
+    const bulkRes = await authService.bulkModerationAction('clear_closed');
+    expect(bulkRes.success).toBe(false);
+
+    // 3. Untrusted postMessage origin is ignored by AuthService OAuth popup listener
+    const handlePopupSpy = vi.spyOn(authService as any, 'handleOAuthPopupMessage');
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: 'https://evil.example.com',
+        data: { type: 'LH_OAUTH_COMPLETE', success: true, provider: 'github' }
+      })
+    );
+    expect(handlePopupSpy).not.toHaveBeenCalled();
+    handlePopupSpy.mockRestore();
   });
 });

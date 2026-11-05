@@ -313,7 +313,10 @@ export async function onRequestPost(context: { request: Request; params: { autho
   if (action === 'flag') {
     const rawReviewId = String(body.reviewId || '').trim();
     const cleanNumericId = Number(rawReviewId.replace(/^lh_/i, ''));
-    const flagDetails = String(body.details || 'Flagged as inappropriate community comment.').trim().slice(0, 800);
+    const flagDetails = String(body.details || 'Flagged as inappropriate community comment.')
+      .replace(/\[(?:CLAIM_PACKAGE|ADMIN)[^\]]*\]/gi, '')
+      .trim()
+      .slice(0, 800);
     if (!rawReviewId) {
       return Response.json({ error: 'Review ID is required to flag a comment.' }, { status: 400 });
     }
@@ -324,13 +327,16 @@ export async function onRequestPost(context: { request: Request; params: { autho
       let reviewAuthorHandle = 'user';
       if (Number.isFinite(cleanNumericId) && cleanNumericId > 0) {
         const revRow = await context.env.DB.prepare(`
-          SELECT r.id, r.comment, r.title, u.username
+          SELECT r.id, r.user_id, r.comment, r.title, u.username
           FROM reviews r
           LEFT JOIN users u ON r.user_id = u.id
           WHERE r.id = ? AND LOWER(r.package_id) = LOWER(?)
           LIMIT 1
         `).bind(cleanNumericId, packageId).first().catch(() => null);
         if (revRow) {
+          if (String(revRow.user_id || '') === userId) {
+            return Response.json({ error: 'You cannot flag your own review.' }, { status: 403 });
+          }
           reviewExcerpt = String(revRow.comment || '').slice(0, 240);
           reviewAuthorHandle = String(revRow.username || 'user');
         }

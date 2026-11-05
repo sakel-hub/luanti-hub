@@ -532,28 +532,53 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   // If an admin resolves a [CLAIM_PACKAGE:<packageId>:<claimantUserId>] report,
   // grant verified author ownership of that package to the claimant!
   let packageClaimApproved = false;
-  const claimMatch = String(reportRow.details || '').match(/\[CLAIM_PACKAGE:([^:\]]+):([^:\]]+)\]/i);
-  if (isAdmin && nextStatus === 'resolved' && claimMatch && claimMatch[1] && claimMatch[2]) {
+  const claimMatch = String(reportRow.details || '').match(/^\[CLAIM_PACKAGE:([^:\]]+):([^:\]]+)\]/i);
+  if (
+    isAdmin &&
+    nextStatus === 'resolved' &&
+    String(reportRow.reason || '') === 'other' &&
+    claimMatch &&
+    claimMatch[1] &&
+    claimMatch[2]
+  ) {
     const claimedPkgId = claimMatch[1].trim();
     const claimantUserId = claimMatch[2].trim();
-    const claimRes = await env.DB.prepare(`
-      UPDATE packages
-      SET author_id = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE LOWER(id) = LOWER(?)
-    `).bind(claimantUserId, claimedPkgId).run().catch(() => null);
-    if (Number(claimRes?.meta?.changes || 0) > 0) {
-      packageClaimApproved = true;
-      const [pkgAuthor, pkgName] = claimedPkgId.split('/');
-      await invalidateEdgeCacheKeys([
-        '/__api_packages_v2',
-        '/__api_packages_v2?boot=1',
-        '/__api_boot_catalog_bundle_v4',
-        '/__api_boot_catalog_bundle_v5',
-        ...(pkgAuthor && pkgName
-          ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
-          : [])
-      ]);
+    const matchesReportRow =
+      claimedPkgId.toLowerCase() === String(reportRow.package_id || '').trim().toLowerCase() &&
+      claimantUserId === String(reportRow.reporter_user_id || '').trim();
+    if (matchesReportRow) {
+      const claimRes = await env.DB.prepare(`
+        UPDATE packages
+        SET author_id = ?,
+            status = CASE
+              WHEN status = 'flagged' AND status_reason LIKE '[ADMIN] Pending repository ownership%' THEN 'active'
+              ELSE status
+            END,
+            status_reason = CASE
+              WHEN status = 'flagged' AND status_reason LIKE '[ADMIN] Pending repository ownership%' THEN NULL
+              ELSE status_reason
+            END,
+            flagged_at = CASE
+              WHEN status = 'flagged' AND status_reason LIKE '[ADMIN] Pending repository ownership%' THEN NULL
+              ELSE flagged_at
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE LOWER(id) = LOWER(?)
+          AND (author_id IS NULL OR author_id LIKE 'ext_%' OR author_id = ?)
+      `).bind(claimantUserId, claimedPkgId, claimantUserId).run().catch(() => null);
+      if (Number(claimRes?.meta?.changes || 0) > 0) {
+        packageClaimApproved = true;
+        const [pkgAuthor, pkgName] = claimedPkgId.split('/');
+        await invalidateEdgeCacheKeys([
+          '/__api_packages_v2',
+          '/__api_packages_v2?boot=1',
+          '/__api_boot_catalog_bundle_v4',
+          '/__api_boot_catalog_bundle_v5',
+          ...(pkgAuthor && pkgName
+            ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
+            : [])
+        ]);
+      }
     }
   }
 

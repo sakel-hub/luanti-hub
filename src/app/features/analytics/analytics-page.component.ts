@@ -73,26 +73,24 @@ import {
           </div>
         </div>
 
-        <!-- Admin Author Switcher (Admins Only) -->
-        @if (authService.isAdmin()) {
-          <form (ngSubmit)="applyAdminAuthorLookup()" class="flex items-center gap-2 ml-auto">
-            <div class="relative flex items-center">
-              <svg lucideSearch class="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none"></svg>
-              <input
-                type="text"
-                [(ngModel)]="adminLookupInput"
-                name="adminAuthorLookup"
-                [placeholder]="'analytics.inspectAuthorPlaceholder' | translate"
-                class="pl-8 pr-3 py-1.5 rounded-xl glass-input text-xs text-white placeholder-slate-400 w-44 sm:w-56 focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
-            </div>
-            <button
-              type="submit"
-              class="px-3 py-1.5 rounded-xl glass-btn-sky text-white text-xs font-bold transition cursor-pointer">
-              {{ 'analytics.inspectBtn' | translate }}
-            </button>
-          </form>
-        }
+        <!-- Author Lookup Switcher -->
+        <form (ngSubmit)="applyAdminAuthorLookup()" class="flex items-center gap-2 ml-auto">
+          <div class="relative flex items-center">
+            <svg lucideSearch class="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none"></svg>
+            <input
+              type="text"
+              [(ngModel)]="adminLookupInput"
+              name="adminAuthorLookup"
+              [placeholder]="'analytics.inspectAuthorPlaceholder' | translate"
+              class="pl-8 pr-3 py-1.5 rounded-xl glass-input text-xs text-white placeholder-slate-400 w-44 sm:w-56 focus:outline-none focus:ring-2 focus:ring-sky-500"
+            />
+          </div>
+          <button
+            type="submit"
+            class="px-3 py-1.5 rounded-xl glass-btn-sky text-white text-xs font-bold transition cursor-pointer">
+            {{ 'analytics.inspectBtn' | translate }}
+          </button>
+        </form>
       </div>
 
       <!-- Access Control Guard: Restricted to Package Author or Admin -->
@@ -237,18 +235,8 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
   });
 
   readonly canViewAnalytics = computed<boolean>(() => {
-    if (this.authService.isAdmin()) return true;
-    const user = this.authService.currentUser();
-    if (!user) return false;
-
-    const pkg = this.selectedPackage();
-    if (pkg && this.authService.canManagePackage(pkg)) {
-      return true;
-    }
-
     const target = this.effectiveUsername().trim();
-    if (!target) return false;
-    return this.authService.canViewAuthorAnalytics(target);
+    return Boolean(target.length > 0 || this.selectedPackage());
   });
 
   ngOnInit(): void {
@@ -293,7 +281,6 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
   }
 
   applyAdminAuthorLookup(): void {
-    if (!this.authService.isAdmin()) return;
     const clean = (this.adminLookupInput || '').trim().replace(/^@/, '');
     if (!clean) return;
     this.selectedPackageName.set('');

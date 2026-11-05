@@ -5,7 +5,8 @@ import {
   checkIsAdmin,
   reconcileAndMergeUserAccount,
   createAuditProofToken,
-  verifyAuditProofToken
+  verifyAuditProofToken,
+  verifyStrictPackageAuthorOwnership
 } from '../auth/lib/session';
 import {
   fetchUpstreamJsonCached,
@@ -1058,12 +1059,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // Check 6: Verify Cryptographic Repository Ownership (prevents posting someone else's Git repository)
     let ownershipVerified = false;
+    let isCallerAdmin = false;
+    let reconciledUser: any = null;
+    let callerIdentities: Array<{ provider: string; username: string; verified: boolean }> = [];
     let verifiedProviderUsername: string | null = null;
     let resolvedUserId: string | null = loggedInUserId;
 
     if (context.env.DB && loggedInUserId) {
       try {
-        const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, loggedInUserId);
+        reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, loggedInUserId);
         if (reconciledUser?.id) {
           resolvedUserId = String(reconciledUser.id);
         }
@@ -1071,17 +1075,18 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           `SELECT provider, provider_username as username, verified
            FROM user_identities WHERE user_id = ?`
         ).bind(resolvedUserId).all();
-        const identities: Array<{ provider: string; username: string; verified: boolean }> = (identitiesRes.results || []).map((id: any) => ({
+        callerIdentities = (identitiesRes.results || []).map((id: any) => ({
           provider: String(id.provider || '').toLowerCase(),
           username: String(id.username || ''),
           verified: Boolean(id.verified)
         }));
 
-        if (checkIsAdmin(reconciledUser, identities, context.env.ADMIN_USERS)) {
+        if (checkIsAdmin(reconciledUser, callerIdentities, context.env.ADMIN_USERS)) {
+          isCallerAdmin = true;
           ownershipVerified = true;
           verifiedProviderUsername = reconciledUser?.username || owner;
         } else {
-          const verifiedForProvider = identities.filter(id => id.provider === provider && id.verified);
+          const verifiedForProvider = callerIdentities.filter(id => id.provider === provider && id.verified);
           for (const id of verifiedForProvider) {
             if (id.username.trim().toLowerCase() === owner.trim().toLowerCase()) {
               ownershipVerified = true;
@@ -1160,6 +1165,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     // Check if this package already exists on ContentDB or in Cloudflare D1 to prevent duplicates
     // and link both ContentDB + Git Community badges onto the single canonical package!
     const submittedRepoKey = normalizeRepoKey(repoUrl);
+    const callerHasVerifiedHandle = (targetHandle: string): boolean => {
+      if (isCallerAdmin) return true;
+      const clean = String(targetHandle || '').trim().toLowerCase();
+      if (!clean) return false;
+      return callerIdentities.some(
+        id => id.verified && String(id.username || '').trim().toLowerCase() === clean
+      );
+    };
     let matchedContentDbPkg: any = null;
     try {
       const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600);
@@ -1176,7 +1189,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const itemRepoKey = normalizeRepoKey(item.repo || item.repo_url);
           if (submittedRepoKey && itemRepoKey && itemRepoKey === submittedRepoKey) return true;
           const itemTitle = String(item.title || '').trim().toLowerCase();
-          if (itemName === lowerName && itemTitle && itemTitle === lowerTitle) return true;
+          if (
+            itemName === lowerName &&
+            itemTitle &&
+            itemTitle === lowerTitle &&
+            callerHasVerifiedHandle(itemAuthor)
+          ) {
+            return true;
+          }
           return false;
         }) || null;
 
@@ -1188,7 +1208,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               String(item.type || 'mod').toLowerCase() === lowerType
           );
           if (sameNameType.length === 1) {
-            matchedContentDbPkg = sameNameType[0];
+            const cand = sameNameType[0];
+            const candRepoKey = normalizeRepoKey(cand.repo || cand.repo_url);
+            if (
+              (submittedRepoKey && candRepoKey && candRepoKey === submittedRepoKey) ||
+              callerHasVerifiedHandle(cand.author)
+            ) {
+              matchedContentDbPkg = cand;
+            }
           }
         }
 
@@ -1213,9 +1240,26 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let existingD1Pkg: any = null;
     if (context.env.DB) {
       try {
-        existingD1Pkg = await context.env.DB.prepare(
-          `SELECT * FROM packages WHERE (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) OR (LOWER(name) = LOWER(?) AND LOWER(title) = LOWER(?)) LIMIT 1`
-        ).bind( matchedContentDbPkg?.author || owner, technicalName, technicalName, title ).first();
+        const candidateD1Rows = await context.env.DB.prepare(
+          `SELECT * FROM packages WHERE (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) OR (LOWER(name) = LOWER(?) AND LOWER(title) = LOWER(?)) LIMIT 5`
+        ).bind(matchedContentDbPkg?.author || owner, technicalName, technicalName, title).all();
+        for (const row of candidateD1Rows?.results || []) {
+          const rowAuthor = String(row.author_name || '').toLowerCase();
+          const rowName = String(row.name || '').toLowerCase();
+          const rowRepoKey = normalizeRepoKey(row.repo_url);
+          const sameAuthorAndName =
+            rowAuthor === (matchedContentDbPkg?.author || owner).toLowerCase() &&
+            rowName === technicalName.toLowerCase();
+          const sameRepo = Boolean(submittedRepoKey && rowRepoKey && rowRepoKey === submittedRepoKey);
+          const callerOwnsExisting =
+            isCallerAdmin ||
+            (reconciledUser &&
+              verifyStrictPackageAuthorOwnership(reconciledUser, callerIdentities, row, row.author_name));
+          if (sameAuthorAndName || sameRepo || callerOwnsExisting) {
+            existingD1Pkg = row;
+            break;
+          }
+        }
       } catch {
         existingD1Pkg = null;
       }
@@ -1488,6 +1532,27 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }, { status: 403 });
     }
 
+    // Prevent overwriting or claiming a package that is already owned by another verified Luanti Hub user
+    const existingOwnerId = existingD1Pkg?.author_id ? String(existingD1Pkg.author_id) : '';
+    const hasExistingVerifiedOwner = Boolean(existingOwnerId && !existingOwnerId.startsWith('ext_'));
+    if (
+      hasExistingVerifiedOwner &&
+      !isCallerAdmin &&
+      existingOwnerId !== String(resolvedUserId || '')
+    ) {
+      return Response.json({
+        success: false,
+        canPublish: false,
+        ownershipVerified: false,
+        requiresOwnershipVerification: true,
+        requiredProvider: provider,
+        repoOwner: owner,
+        error: `Ownership conflict: Package '${packageId}' is already owned by a verified creator on Luanti Hub.`,
+        audit: auditReport,
+        auditReport
+      }, { status: 403 });
+    }
+
     if (!warrantiesAccepted) {
       return Response.json({
         success: false,
@@ -1496,6 +1561,80 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         audit: auditReport,
         auditReport
       }, { status: 400 });
+    }
+
+    // If this is an unverified claim request (pendingAdminClaim), queue the moderation claim without mutating existing packages/releases
+    if (pendingAdminClaim && !ownershipVerified) {
+      if (!resolvedUserId) {
+        return Response.json({
+          success: false,
+          canPublish: false,
+          error: 'Authentication is required to submit a package ownership claim.',
+          audit: auditReport,
+          auditReport
+        }, { status: 401 });
+      }
+      if (context.env.DB) {
+        await ensureExtendedPackageColumns(context.env.DB);
+        await ensureModerationColumns(context.env.DB);
+        // Ensure a placeholder package row exists only if not already in D1 so foreign keys on moderation_reports succeed
+        if (!existingD1Pkg) {
+          const placeholderAuthorId = `ext_${canonicalAuthor}`;
+          await context.env.DB.prepare(`
+            INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
+            VALUES (?, ?, ?, ?)
+          `).bind(placeholderAuthorId, canonicalAuthor, canonicalAuthor, `https://github.com/${owner}.png`).run().catch(() => {});
+          await context.env.DB.prepare(`
+            INSERT OR IGNORE INTO packages (
+              id, author_id, author_name, name, title, type, short_desc, long_desc,
+              repo_url, provider, default_branch, thumbnail_url, banner_url,
+              license, media_license, status, status_reason, flagged_at
+            )
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'flagged', '[ADMIN] Pending repository ownership claim approval', CURRENT_TIMESTAMP)
+          `).bind(
+            packageId,
+            canonicalAuthor,
+            technicalName,
+            packagePayload.title,
+            packageType,
+            shortDesc,
+            resolvedLongDesc,
+            repoUrl.trim(),
+            provider,
+            branch,
+            resolvedThumbnail,
+            resolvedBanner,
+            effectiveLicense,
+            effectiveMediaLicense
+          ).run().catch(() => {});
+        }
+        const claimTag = `[CLAIM_PACKAGE:${packageId}:${resolvedUserId}]`;
+        const claimDetails =
+          `${claimTag} Package ownership claim submitted via Git Pre-Flight Audit (${repoUrl.trim()}). ` +
+          `Click Resolve to approve and assign verified author ownership of '${packageId}' to user ${resolvedUserId}, or Dismiss to reject.`;
+        const existingClaim = await context.env.DB.prepare(`
+          SELECT id FROM moderation_reports
+          WHERE LOWER(package_id) = LOWER(?) AND reporter_user_id = ? AND status = 'open' AND details LIKE ?
+          LIMIT 1
+        `).bind(packageId, resolvedUserId, `%[CLAIM_PACKAGE:%`).first().catch(() => null);
+        if (!existingClaim?.id) {
+          await context.env.DB.prepare(`
+            INSERT INTO moderation_reports (package_id, reporter_user_id, reason, details, status)
+            VALUES (?, ?, 'other', ?, 'open')
+          `).bind(packageId, resolvedUserId, claimDetails.slice(0, 1000)).run();
+        }
+      }
+
+      return Response.json({
+        success: true,
+        canPublish: true,
+        pendingModeration: true,
+        status: 'flagged',
+        message: `Your ownership claim for '${packageId}' has been submitted to moderators for verification.`,
+        audit: auditReport,
+        auditReport,
+        package: packagePayload
+      });
     }
 
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)
@@ -1553,7 +1692,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
         ON CONFLICT(id) DO UPDATE SET
-          author_id = excluded.author_id,
+          author_id = CASE
+            WHEN packages.author_id IS NULL OR packages.author_id LIKE 'ext_%' THEN excluded.author_id
+            ELSE packages.author_id
+          END,
           title = excluded.title,
           short_desc = excluded.short_desc,
           long_desc = excluded.long_desc,

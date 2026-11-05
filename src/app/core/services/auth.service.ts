@@ -277,6 +277,9 @@ export class AuthService {
   private initOAuthPopupListener(): void {
     if (typeof window === 'undefined') return;
     window.addEventListener('message', (event: MessageEvent) => {
+      if (event?.origin && event.origin !== window.location.origin) {
+        return;
+      }
       if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
         this.handleOAuthPopupMessage(event.data);
       }
@@ -498,27 +501,10 @@ export class AuthService {
   }
 
   /**
-   * Checks whether the current user is an administrator or holds a cryptographically verified
-   * identity matching the target author handle.
+   * Public analytics model (matching ContentDB): any visitor can view package and author download analytics.
    */
   canViewAuthorAnalytics(username?: string | null): boolean {
-    const user = this._currentUser();
-    if (!user || !username) return false;
-    if (this.isAdmin()) return true;
-
-    const targetLower = username.trim().toLowerCase();
-    if (!targetLower) return false;
-
-    const verifiedIdentities = (user.identities || []).filter(id => Boolean(id.verified));
-    if (verifiedIdentities.length === 0) return false;
-
-    if (String(user.username || '').trim().toLowerCase() === targetLower) {
-      return true;
-    }
-
-    return verifiedIdentities.some(
-      id => String(id.username || '').trim().toLowerCase() === targetLower
-    );
+    return Boolean(username && username.trim().length > 0);
   }
 
   async initAuth(forceRefresh = false): Promise<void> {
@@ -898,6 +884,9 @@ export class AuthService {
     bio?: string;
     avatar_url?: string;
   }): Promise<{ success: boolean; message?: string }> {
+    if (!this.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to update profile.' };
+    }
     try {
       const res = await fetch('/api/auth/me', {
         method: 'PUT',
@@ -906,14 +895,25 @@ export class AuthService {
       });
 
       const contentType = res.headers.get('content-type') || '';
-      if (contentType.includes('application/json') && res.ok) {
+      if (contentType.includes('application/json')) {
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          return {
+            success: false,
+            message: sanitizeUserFacingError(data.error, 'Failed to update profile.')
+          };
+        }
         this.clearAuthCache();
         await this.initAuth(true);
         this.pwaService.showToast('profile.savedSuccess');
         return { success: true };
       }
 
-      // Local in-memory fallback update
+      if (this.settingsService.edgeApiAvailable() && !res.ok) {
+        return { success: false, message: 'Failed to update profile.' };
+      }
+
+      // Local in-memory fallback update (only when running `ng serve` without Edge worker)
       this._currentUser.update(u => {
         if (!u) return null;
         return {
@@ -931,6 +931,9 @@ export class AuthService {
   }
 
   async unlinkIdentity(provider: GitProvider, username?: string): Promise<{ success: boolean; message?: string }> {
+    if (!this.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to unlink identity.' };
+    }
     try {
       const cleanUsername = (username || '').trim();
       const query = `provider=${encodeURIComponent(provider)}${cleanUsername ? `&username=${encodeURIComponent(cleanUsername)}` : ''}`;
@@ -967,6 +970,9 @@ export class AuthService {
   }
 
   async deleteAccount(options?: { deleteSubmittedPackages?: boolean }): Promise<{ success: boolean; message?: string }> {
+    if (!this.isLoggedIn()) {
+      return { success: false, message: 'Authentication required to delete account.' };
+    }
     const deletePackagesParam = options?.deleteSubmittedPackages === false ? '0' : '1';
     try {
       const res = await fetch(`/api/auth/me?account=1&deletePackages=${deletePackagesParam}`, {
@@ -1114,6 +1120,12 @@ export class AuthService {
     action: 'dismiss' | 'resolve' | 'reopen' | 'reply' | 'recheck',
     note?: string
   ): Promise<{ success: boolean; message?: string; online?: boolean }> {
+    if (!this.isLoggedIn()) {
+      return { success: false, message: 'Authentication required.' };
+    }
+    if (action === 'reopen' && !this.isAdmin()) {
+      return { success: false, message: 'Only administrators can reopen moderation reports.' };
+    }
     try {
       const res = await fetch('/api/admin/moderation', {
         method: 'POST',
@@ -1141,6 +1153,9 @@ export class AuthService {
     action: 'dismiss_all_broken' | 'clear_closed',
     note?: string
   ): Promise<{ success: boolean; message?: string }> {
+    if (!this.isLoggedIn() || !this.isAdmin()) {
+      return { success: false, message: 'Administrator privileges required.' };
+    }
     try {
       const res = await fetch('/api/admin/moderation', {
         method: 'POST',

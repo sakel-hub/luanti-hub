@@ -466,6 +466,19 @@ const PACKAGE_PALETTE: Array<{ border: string; bg: string }> = [
             </div>
           </div>
         }
+      } @else {
+        <div class="p-8 rounded-2xl glass-panel text-center space-y-3">
+          <p class="text-xs text-slate-400">
+            {{ 'analytics.loadingStats' | translate }}
+          </p>
+          <button
+            type="button"
+            (click)="loadStats(true)"
+            class="px-3.5 py-1.5 rounded-xl glass-btn-sky text-white text-xs font-bold inline-flex items-center gap-1.5 transition cursor-pointer">
+            <svg lucideRefreshCw class="w-3.5 h-3.5"></svg>
+            <span>{{ 'common.refresh' | translate }}</span>
+          </button>
+        </div>
       }
     </div>
   `

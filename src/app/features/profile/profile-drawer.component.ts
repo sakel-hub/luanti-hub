@@ -2226,10 +2226,14 @@ export class ProfileDrawerComponent implements OnInit {
       const requestedTab = this.authService.requestedDrawerTab();
       if (requestedTab) {
         this.authService.consumeRequestedDrawerTab();
-        if (requestedTab === 'moderation' && this.authService.isAdmin()) {
-          this.onSelectModerationTab();
-        } else if (requestedTab === 'promotions' && this.authService.isAdmin()) {
-          this.onSelectPromotionsTab();
+        if (requestedTab === 'moderation') {
+          if (this.authService.isAdmin()) {
+            this.onSelectModerationTab();
+          }
+        } else if (requestedTab === 'promotions') {
+          if (this.authService.isAdmin()) {
+            this.onSelectPromotionsTab();
+          }
         } else if (requestedTab === 'account') {
           this.onSelectAccountTab();
         } else {
@@ -2419,6 +2423,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   toggleDeleteSection(): void {
+    if (!this.authService.isLoggedIn()) return;
     const next = !this.isDeleteSectionExpanded();
     this.isDeleteSectionExpanded.set(next);
     if (!next) {
@@ -2428,6 +2433,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   onOpenDeleteAccountConfirm(): void {
+    if (!this.authService.isLoggedIn()) return;
     this.deleteAccountError.set(null);
     this.isDeleteSectionExpanded.set(true);
     this.isConfirmingAccountDelete.set(true);
@@ -2439,7 +2445,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onConfirmDeleteAccount(): Promise<void> {
-    if (this.isDeletingAccount()) return;
+    if (!this.authService.isLoggedIn() || this.isDeletingAccount()) return;
     this.isDeletingAccount.set(true);
     this.deleteAccountError.set(null);
     const currentUser = this.authService.currentUser();
@@ -2477,6 +2483,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   onSelectModerationTab(): void {
+    if (!this.authService.isAdmin()) return;
     this.activeTab.set('moderation');
     this.authService.fetchModerationQueue(true);
   }
@@ -2814,14 +2821,17 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   onFilterModerationStatus(status: 'open' | 'closed' | 'delisted'): void {
+    if (!this.authService.isAdmin()) return;
     this.authService.fetchModerationQueue(true, 1, status, this.authService.moderationReasonFilter());
   }
 
   onFilterModerationReason(reason: string): void {
+    if (!this.authService.isAdmin()) return;
     this.authService.fetchModerationQueue(true, 1, this.authService.moderationStatusFilter(), reason);
   }
 
   onChangeModerationPage(nextPage: number): void {
+    if (!this.authService.isAdmin()) return;
     if (nextPage < 1 || nextPage > this.authService.moderationTotalPages()) return;
     this.authService.fetchModerationQueue(true, nextPage);
   }
@@ -2846,7 +2856,23 @@ export class ProfileDrawerComponent implements OnInit {
     await this.pwaService.setNotificationsEnabled(enabled);
   }
 
+  private canActOnReport(rep: ModerationReport, allowReporter = false): boolean {
+    if (!this.authService.isLoggedIn() || !rep) return false;
+    if (this.authService.isAdmin()) return true;
+    const userId = String(this.authService.currentUser()?.id || '');
+    if (allowReporter && userId && String(rep.reporter_user_id || '') === userId) {
+      return true;
+    }
+    const [author, name] = String(rep.package_id || '').split('/');
+    if (!author || !name) return false;
+    const foundPkg = this.packageService.packages().find(
+      p => p.id.toLowerCase() === rep.package_id.toLowerCase()
+    );
+    return this.authService.canManagePackage(foundPkg || ({ author, name, id: rep.package_id } as any));
+  }
+
   async onReplyToReport(rep: ModerationReport): Promise<void> {
+    if (!this.canActOnReport(rep, true)) return;
     const note = this.getNoteInput(rep.id).trim();
     if (!note) return;
     this.setActingOnReport(rep.id, true);
@@ -2858,12 +2884,16 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onRecheckReport(rep: ModerationReport): Promise<void> {
+    if (!this.canActOnReport(rep, true)) return;
     this.setActingOnReport(rep.id, true);
     await this.authService.actOnModerationReport(rep.id, 'recheck', this.getNoteInput(rep.id).trim() || undefined);
     this.setActingOnReport(rep.id, false);
   }
 
   async onResolveReport(rep: ModerationReport): Promise<void> {
+    if (!this.authService.isAdmin() && !(rep?.reason === 'broken' && this.canActOnReport(rep, false))) {
+      return;
+    }
     this.setActingOnReport(rep.id, true);
     const res = await this.authService.actOnModerationReport(rep.id, 'resolve', this.getNoteInput(rep.id).trim() || undefined);
     this.setActingOnReport(rep.id, false);
@@ -2873,6 +2903,9 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onDismissReport(rep: ModerationReport): Promise<void> {
+    if (!this.authService.isAdmin() && !(rep?.reason === 'broken' && this.canActOnReport(rep, false))) {
+      return;
+    }
     this.setActingOnReport(rep.id, true);
     const res = await this.authService.actOnModerationReport(rep.id, 'dismiss', this.getNoteInput(rep.id).trim() || undefined);
     this.setActingOnReport(rep.id, false);
@@ -2882,16 +2915,19 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onReopenReport(rep: ModerationReport): Promise<void> {
+    if (!this.authService.isAdmin()) return;
     this.setActingOnReport(rep.id, true);
     await this.authService.actOnModerationReport(rep.id, 'reopen', this.getNoteInput(rep.id).trim() || undefined);
     this.setActingOnReport(rep.id, false);
   }
 
   async onBulkDismissBroken(): Promise<void> {
+    if (!this.authService.isAdmin()) return;
     await this.authService.bulkModerationAction('dismiss_all_broken');
   }
 
   async onBulkClearClosed(): Promise<void> {
+    if (!this.authService.isAdmin()) return;
     await this.authService.bulkModerationAction('clear_closed');
   }
 
@@ -2917,6 +2953,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   openPackageAndEditTags(pkg: LuantiPackage): void {
+    if (!this.authService.canManagePackage(pkg)) return;
     this.authService.closeProfileDrawer(false);
     this.packageService.openPackageModal(pkg, true, true);
   }
@@ -2926,6 +2963,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onAuthorManagePackage(pkg: LuantiPackage, action: 'delist' | 'restore' | 'remove'): Promise<void> {
+    if (!pkg || !this.authService.canManagePackage(pkg)) return;
     const [author, name] = (pkg.id || `${pkg.author}/${pkg.name}`).split('/');
     if (!author || !name) return;
     this.managingPackageId.set(pkg.id);
@@ -2939,6 +2977,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onSaveAccount(): Promise<void> {
+    if (!this.authService.isLoggedIn()) return;
     this.isSavingProfile.set(true);
     await this.authService.updateProfile({
       display_name: this.editDisplayName.trim(),
@@ -2948,6 +2987,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onAdminKillSwitch(rep: ModerationReport): Promise<void> {
+    if (!this.authService.isAdmin() || !rep?.package_id) return;
     const [author, name] = rep.package_id.split('/');
     if (!author || !name) return;
     const note = this.getNoteInput(rep.id).trim();
@@ -2963,6 +3003,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   async onRestorePackage(pkg: LuantiPackage): Promise<void> {
+    if (!pkg || (!this.authService.isAdmin() && !this.authService.canManagePackage(pkg))) return;
     const [author, name] = (pkg.id || `${pkg.author}/${pkg.name}`).split('/');
     if (!author || !name) return;
     await this.packageService.moderatePackage(
@@ -3010,7 +3051,7 @@ export class ProfileDrawerComponent implements OnInit {
   }
 
   onOpenPackageAnalytics(pkg: LuantiPackage): void {
-    if (!pkg || !this.authService.canManagePackage(pkg)) return;
+    if (!pkg) return;
     this.packageService.openAnalyticsPage(pkg.author, pkg.name);
   }
 }

@@ -4,13 +4,6 @@ import {
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage
 } from '../../../lib/upstream';
-import {
-  parseCookies,
-  verifySessionToken,
-  checkIsAdmin,
-  reconcileAndMergeUserAccount,
-  verifyStrictPackageAuthorOwnership
-} from '../../../auth/lib/session';
 
 interface Env {
   DB?: any;
@@ -74,39 +67,6 @@ export async function onRequestGet(context: {
   }
 
   try {
-    // 1. Authenticate caller and enforce strict Author or Admin visibility
-    const cookies = parseCookies(request);
-    const sessionToken = cookies['lh_session'];
-    const sessionUserId = sessionToken
-      ? await verifySessionToken(sessionToken, env.SESSION_SECRET)
-      : null;
-
-    if (!sessionUserId) {
-      return Response.json(
-        { error: 'Authentication required to view package analytics.' },
-        { status: 401, headers: { 'Cache-Control': 'private, no-store' } }
-      );
-    }
-
-    const user = await reconcileAndMergeUserAccount(env.DB, sessionUserId);
-    if (!user) {
-      return Response.json(
-        { error: 'User account not found.' },
-        { status: 401, headers: { 'Cache-Control': 'private, no-store' } }
-      );
-    }
-
-    const idRes = await env.DB.prepare(
-      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
-    ).bind(user.id).all().catch(() => ({ results: [] }));
-    const identities = (idRes?.results || []) as Array<{
-      provider: string;
-      username: string;
-      verified?: number | boolean;
-    }>;
-
-    const isAdmin = checkIsAdmin(user, identities, env.ADMIN_USERS);
-
     await ensureExtendedPackageColumns(env.DB);
     const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     const pkgRow = await env.DB.prepare(
@@ -116,29 +76,7 @@ export async function onRequestGet(context: {
        LIMIT 1`
     ).bind(packageId, author, name, sanitizedName).first().catch(() => null);
 
-    if (!isAdmin) {
-      const strictOwns = pkgRow
-        ? verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author)
-        : false;
-      const verifiedIdentities = identities.filter(id => id.verified === 1 || id.verified === true);
-      const lowerAuthor = author.toLowerCase();
-      const baseAuthor = lowerAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      const isPureGitInD1 = Boolean(pkgRow && pkgRow.provider && pkgRow.provider !== 'contentdb');
-      const hasVerifiedHandleMatch = !isPureGitInD1 && verifiedIdentities.some(id => {
-        const h = String(id.username || '').trim().toLowerCase();
-        const b = h.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-        return h === lowerAuthor || (b.length > 0 && b === baseAuthor);
-      });
-
-      if (!strictOwns && !hasVerifiedHandleMatch) {
-        return Response.json(
-          { error: 'Access denied: Only the package author or an administrator can view these analytics.' },
-          { status: 403, headers: { 'Cache-Control': 'private, no-store' } }
-        );
-      }
-    }
-
-    // 2. Parse requested timeframe
+    // Parse requested timeframe
     const reqUrl = new URL(request.url, 'https://luantihub.local');
     const daysParam = Number(reqUrl.searchParams.get('days') || 30);
     const days = [7, 30, 90, 365].includes(daysParam)
@@ -344,14 +282,14 @@ export async function onRequestGet(context: {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Cache-Control': 'private, no-store'
+          'Cache-Control': 'public, max-age=180, s-maxage=300, stale-while-revalidate=600'
         }
       }
     );
   } catch (err: any) {
     return Response.json(
       { error: sanitizePublicErrorMessage(err, 'Failed to load package analytics.') },
-      { status: 500, headers: { 'Cache-Control': 'private, no-store' } }
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 }
