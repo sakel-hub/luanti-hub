@@ -20,7 +20,8 @@ import {
   writeEdgeCacheJson,
   readSharedEdgeRatingsMap,
   mergeSharedEdgeRatingsMap,
-  SharedEdgeRatingEntry
+  SharedEdgeRatingEntry,
+  normalizeUtcIsoTimestamp
 } from '../lib/upstream';
 
 interface Env {
@@ -93,9 +94,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const cdbDl = Number(row.contentdb_downloads || 0);
           const lhDl = Number(row.luantihub_downloads || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
+          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
           const rowScore = computeStarRatingFromData({
             review_thread_counts: parsedRowRevCounts,
-            score: row.score
+            score: (!isOfficialD1Row || parsedRowRevCounts) ? row.score : 0
           });
           const sanitizedRowBanner = sanitizePackageImageUrl(row.banner_url);
           const sanitizedRowThumb = upgradeContentDbThumbnailUrl(row.thumbnail_url);
@@ -106,7 +108,6 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             [gitShotD1, sanitizedRowBanner, sanitizedRowThumb],
             parseJsonArray(row.screenshots).filter((s: string) => !isDeadMirrorScreenshotUrl(s))
           );
-          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
           const rawNonGitRowThumb =
             (sanitizedRowThumb && !isGitRepositoryAssetUrl(sanitizedRowThumb)
               ? sanitizedRowThumb
@@ -319,15 +320,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               ratingChecked = true;
             }
           }
-          const resolvedScore =
-            computeStarRatingFromData({
-              ...(detail || {}),
-              review_thread_counts: detailRevCounts,
-              reviews_list: cdbRevList,
-              score: existing.score
-            }) ||
-            sharedRating?.score ||
-            0;
+          const hasExplicitZeroReviews =
+            (Array.isArray(cdbRevList) && cdbRevList.length === 0 && !detailRevCounts) ||
+            (!detailRevCounts &&
+              scoreEntry?.reviews &&
+              Number(scoreEntry.reviews.positive || 0) === 0 &&
+              Number(scoreEntry.reviews.neutral || 0) === 0 &&
+              Number(scoreEntry.reviews.negative || 0) === 0);
+          const resolvedScore = hasExplicitZeroReviews
+            ? 0
+            : (computeStarRatingFromData({
+                ...(detail || {}),
+                review_thread_counts: detailRevCounts,
+                reviews_list: cdbRevList,
+                score: detailRevCounts ? existing.score : undefined
+              }) ||
+              (sharedRating?.review_thread_counts ? sharedRating?.score : 0) ||
+              0);
           const cdbDl = Math.max(
             Number(existing.contentdb_downloads || 0),
             Number(detail?.downloads || 0),
@@ -417,6 +426,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               existing.banner,
               resolvedHydrateThumb
             ) || null;
+          const normDetailCreated = detail?.created_at ? normalizeUtcIsoTimestamp(detail.created_at) : '';
+          const normDetailApproved = detail?.approved_at ? normalizeUtcIsoTimestamp(detail.approved_at) : '';
+          const detailCreatedMs = normDetailCreated ? Date.parse(normDetailCreated) : NaN;
+          const detailApprovedMs = normDetailApproved ? Date.parse(normDetailApproved) : NaN;
+          const resolvedDetailCreatedAt =
+            Number.isFinite(detailCreatedMs) && Number.isFinite(detailApprovedMs)
+              ? (detailApprovedMs >= detailCreatedMs ? normDetailApproved : normDetailCreated)
+              : (normDetailApproved || normDetailCreated || undefined);
           hydratedMap[lowerKey] = {
             id: canonicalId,
             license: lic,
@@ -430,7 +447,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             rating_checked: ratingChecked || undefined,
             tags: detailTags.length > 0 ? detailTags : undefined,
             dev_state: devState || undefined,
-            created_at: detail?.created_at || detail?.approved_at || undefined,
+            created_at: resolvedDetailCreatedAt,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,

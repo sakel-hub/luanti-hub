@@ -696,10 +696,10 @@ export interface SharedEdgeRatingEntry {
   checked?: boolean;
 }
 
-const SHARED_EDGE_RATINGS_CACHE_KEY = '/__pkg_ratings_map_v1';
+const SHARED_EDGE_RATINGS_CACHE_KEY = '/__pkg_ratings_map_v2';
 
 /**
- * Reads the shared Edge Cache map of hydrated package star ratings & review thread counts (`/__pkg_ratings_map_v1`).
+ * Reads the shared Edge Cache map of hydrated package star ratings & review thread counts (`/__pkg_ratings_map_v2`).
  * Enables upstream ContentDB packages (which may not have a full row in D1 `packages`) to retain their
  * hydrated star ratings across catalog boots with zero D1 row reads.
  */
@@ -709,7 +709,7 @@ export async function readSharedEdgeRatingsMap(): Promise<Record<string, SharedE
 }
 
 /**
- * Merges newly hydrated package star ratings and review thread counts into `/__pkg_ratings_map_v1`
+ * Merges newly hydrated package star ratings and review thread counts into `/__pkg_ratings_map_v2`
  * in Isolate Memory + Cloudflare Edge Cache (24h TTL).
  */
 export async function mergeSharedEdgeRatingsMap(
@@ -721,13 +721,18 @@ export async function mergeSharedEdgeRatingsMap(
   for (const [rawKey, entry] of Object.entries(updates)) {
     const k = String(rawKey || '').trim().toLowerCase();
     if (!k || !entry) continue;
-    const validScore = typeof entry.score === 'number' && entry.score >= 1 && entry.score <= 5 ? entry.score : 0;
     const validCounts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
+    const validScore = typeof entry.score === 'number' && entry.score >= 1 && entry.score <= 5 ? entry.score : 0;
     const isChecked = Boolean(entry.checked || validScore > 0 || validCounts);
     if (validScore <= 0 && !validCounts && !isChecked) continue;
     const prev = current[k];
-    const nextScore = validScore > 0 ? validScore : (prev?.score || 0);
-    const nextCounts = validCounts || prev?.review_thread_counts;
+    const isExplicitZeroReset = Boolean(entry.checked && validScore === 0 && !validCounts);
+    const nextScore = isExplicitZeroReset
+      ? 0
+      : (validScore > 0 ? validScore : (prev?.score || 0));
+    const nextCounts = isExplicitZeroReset
+      ? undefined
+      : (validCounts || prev?.review_thread_counts);
     const nextChecked = isChecked || Boolean(prev?.checked);
     if (
       !prev ||
@@ -4313,19 +4318,20 @@ export async function fetchGitReleaseNotesBetweenRefs(
   const displayHeadRef = abbreviateGitRefLabel(headRef) || headRef;
   const displayBaseRef = abbreviateGitRefLabel(baseRef) || undefined;
 
-  let effectiveRepoUrl = repoUrl;
+  let effectiveRepoUrl = repoUrl ? String(repoUrl).trim() : '';
   if (!effectiveRepoUrl && fallbackOwner && fallbackRepo) {
     try {
       const scanned = await scanGitRepoMetadataCached(fallbackOwner, fallbackRepo);
-      if (scanned?.repoUrl) {
+      if (scanned?.repoUrl && scanned.gitRepoStatus === 'verified') {
         effectiveRepoUrl = scanned.repoUrl;
       }
     } catch {
-      // Proceed with fallback target
+      // No confirmed Git repository found
     }
   }
 
-  const target = parseGitRepoTarget(effectiveRepoUrl, fallbackOwner, fallbackRepo);
+  // Only resolve commit logs & compare_url when a confirmed Git repository URL exists
+  const target = effectiveRepoUrl ? parseGitRepoTarget(effectiveRepoUrl) : null;
   if (!target) {
     return {
       source: releaseBody ? 'release_notes' : 'metadata',

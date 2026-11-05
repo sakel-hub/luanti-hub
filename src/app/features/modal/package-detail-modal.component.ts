@@ -2056,17 +2056,19 @@ import {
                           <span class="block text-[11px] text-slate-400">Ready-to-drop Luanti .zip archive</span>
                         </div>
                         <div class="flex items-center gap-2 flex-wrap">
-                          <button
-                            type="button"
-                            (click)="toggleBranchFallbackNotes()"
-                            [attr.aria-expanded]="isReleaseNotesExpanded('branch-fallback')"
-                            class="px-3 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
-                            <svg
-                              lucideChevronDown
-                              [class]="isReleaseNotesExpanded('branch-fallback') ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
-                            </svg>
-                            <span>{{ (isReleaseNotesExpanded('branch-fallback') ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
-                          </button>
+                          @if (hasValidGitRepo) {
+                            <button
+                              type="button"
+                              (click)="toggleBranchFallbackNotes()"
+                              [attr.aria-expanded]="isReleaseNotesExpanded('branch-fallback')"
+                              class="px-3 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                              <svg
+                                lucideChevronDown
+                                [class]="isReleaseNotesExpanded('branch-fallback') ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
+                              </svg>
+                              <span>{{ (isReleaseNotesExpanded('branch-fallback') ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
+                            </button>
+                          }
                           <button
                             type="button"
                             (click)="onDownloadClick()"
@@ -2077,7 +2079,7 @@ import {
                         </div>
                       </div>
 
-                      @if (isReleaseNotesExpanded('branch-fallback')) {
+                      @if (hasValidGitRepo && isReleaseNotesExpanded('branch-fallback')) {
                         <div class="border-t border-white/10 pt-3 mt-1 space-y-2.5">
                           @if (loadingReleaseNotesKey() === 'branch-fallback') {
                             <div class="flex items-center gap-2 text-[11px] text-slate-400 py-1">
@@ -2192,17 +2194,19 @@ import {
                           </div>
 
                           <div class="flex items-center gap-2 flex-wrap ml-auto">
-                            <button
-                              type="button"
-                              (click)="toggleReleaseNotes(rel, idx)"
-                              [attr.aria-expanded]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))"
-                              class="px-2.5 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
-                              <svg
-                                lucideChevronDown
-                                [class]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
-                              </svg>
-                              <span>{{ (isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
-                            </button>
+                            @if (hasValidGitRepo || getCleanReleaseNotes(rel)) {
+                              <button
+                                type="button"
+                                (click)="toggleReleaseNotes(rel, idx)"
+                                [attr.aria-expanded]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx))"
+                                class="px-2.5 py-1.5 rounded-xl glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white font-semibold text-[11px] flex items-center gap-1.5 flex-shrink-0 transition cursor-pointer">
+                                <svg
+                                  lucideChevronDown
+                                  [class]="isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'w-3.5 h-3.5 text-sky-400 rotate-180 transition-transform' : 'w-3.5 h-3.5 text-slate-400 transition-transform'">
+                                </svg>
+                                <span>{{ (isReleaseNotesExpanded(getReleaseNotesKey(rel, idx)) ? 'modal.hideReleaseNotes' : 'modal.viewReleaseNotes') | translate }}</span>
+                              </button>
+                            }
 
                             <button
                               type="button"
@@ -2237,75 +2241,77 @@ import {
                               </div>
                             }
 
-                            @if (loadingReleaseNotesKey() === getReleaseNotesKey(rel, idx)) {
-                              <div class="flex items-center gap-2 text-[11px] text-slate-400 py-1">
-                                <span class="w-3.5 h-3.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"></span>
-                                <span>{{ 'modal.loadingReleaseNotes' | translate }}</span>
-                              </div>
-                            } @else if (getReleaseNotesPayload(getReleaseNotesKey(rel, idx)); as payload) {
-                              <div class="flex items-center justify-between gap-2 flex-wrap">
-                                <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
-                                  <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
-                                  @if (payload.source === 'compare' && payload.base_ref) {
-                                    <span>{{ 'modal.commitsBetween' | translate:{ base: formatRefLabel(payload.base_ref), head: formatRefLabel(payload.head_ref) } }}</span>
-                                  } @else {
-                                    <span>{{ 'modal.recentBranchCommits' | translate:{ branch: formatRefLabel(payload.head_ref || package.default_branch || 'main') } }}</span>
-                                  }
-                                </span>
-                                @if (payload.compare_url) {
-                                  <a
-                                    [href]="payload.compare_url"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition">
-                                    <span>{{ 'modal.viewFullDiffOnGit' | translate }}</span>
-                                    <svg lucideExternalLink class="w-2.5 h-2.5"></svg>
-                                  </a>
-                                }
-                              </div>
-
-                              @if (payload.commits && payload.commits.length > 0) {
-                                <ul class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                                  @for (commit of payload.commits; track commit.sha) {
-                                    <li class="p-2 rounded-xl bg-slate-950/60 border border-white/5 flex items-start justify-between gap-2 text-[11px]">
-                                      <div class="min-w-0 space-y-0.5">
-                                        <p class="text-slate-200 font-medium break-words">{{ commit.title }}</p>
-                                        <div class="flex items-center gap-2 text-[10px] text-slate-500 flex-wrap">
-                                          @if (commit.author_name) {
-                                            <span>{{ commit.author_name }}</span>
-                                          }
-                                          @if (commit.committed_at) {
-                                            <span>• {{ commit.committed_at | date:'mediumDate' }}</span>
-                                          }
-                                        </div>
-                                      </div>
-                                      @if (commit.url) {
-                                        <a
-                                          [href]="commit.url"
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 hover:text-sky-300 flex-shrink-0 transition">
-                                          {{ commit.short_sha }}
-                                        </a>
-                                      } @else {
-                                        <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 flex-shrink-0">
-                                          {{ commit.short_sha }}
-                                        </code>
-                                      }
-                                    </li>
-                                  }
-                                </ul>
-                              } @else if (!getCleanReleaseNotes(rel) && payload.markdown_body) {
-                                <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10">
-                                  <p class="text-[11px] text-slate-200 leading-relaxed whitespace-pre-line">
-                                    {{ payload.markdown_body }}
-                                  </p>
+                            @if (hasValidGitRepo) {
+                              @if (loadingReleaseNotesKey() === getReleaseNotesKey(rel, idx)) {
+                                <div class="flex items-center gap-2 text-[11px] text-slate-400 py-1">
+                                  <span class="w-3.5 h-3.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"></span>
+                                  <span>{{ 'modal.loadingReleaseNotes' | translate }}</span>
                                 </div>
+                              } @else if (getReleaseNotesPayload(getReleaseNotesKey(rel, idx)); as payload) {
+                                <div class="flex items-center justify-between gap-2 flex-wrap">
+                                  <span class="text-[10px] font-bold uppercase tracking-wider text-sky-300 flex items-center gap-1.5">
+                                    <svg lucideGitBranch class="w-3 h-3 text-sky-400"></svg>
+                                    @if (payload.source === 'compare' && payload.base_ref) {
+                                      <span>{{ 'modal.commitsBetween' | translate:{ base: formatRefLabel(payload.base_ref), head: formatRefLabel(payload.head_ref) } }}</span>
+                                    } @else {
+                                      <span>{{ 'modal.recentBranchCommits' | translate:{ branch: formatRefLabel(payload.head_ref || package.default_branch || 'main') } }}</span>
+                                    }
+                                  </span>
+                                  @if (payload.compare_url) {
+                                    <a
+                                      [href]="payload.compare_url"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      class="text-[10px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition">
+                                      <span>{{ 'modal.viewFullDiffOnGit' | translate }}</span>
+                                      <svg lucideExternalLink class="w-2.5 h-2.5"></svg>
+                                    </a>
+                                  }
+                                </div>
+
+                                @if (payload.commits && payload.commits.length > 0) {
+                                  <ul class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                                    @for (commit of payload.commits; track commit.sha) {
+                                      <li class="p-2 rounded-xl bg-slate-950/60 border border-white/5 flex items-start justify-between gap-2 text-[11px]">
+                                        <div class="min-w-0 space-y-0.5">
+                                          <p class="text-slate-200 font-medium break-words">{{ commit.title }}</p>
+                                          <div class="flex items-center gap-2 text-[10px] text-slate-500 flex-wrap">
+                                            @if (commit.author_name) {
+                                              <span>{{ commit.author_name }}</span>
+                                            }
+                                            @if (commit.committed_at) {
+                                              <span>• {{ commit.committed_at | date:'mediumDate' }}</span>
+                                            }
+                                          </div>
+                                        </div>
+                                        @if (commit.url) {
+                                          <a
+                                            [href]="commit.url"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 hover:text-sky-300 flex-shrink-0 transition">
+                                            {{ commit.short_sha }}
+                                          </a>
+                                        } @else {
+                                          <code class="px-1.5 py-0.5 rounded bg-slate-900 border border-white/10 font-mono text-[10px] text-sky-400 flex-shrink-0">
+                                            {{ commit.short_sha }}
+                                          </code>
+                                        }
+                                      </li>
+                                    }
+                                  </ul>
+                                } @else if (!getCleanReleaseNotes(rel) && payload.markdown_body) {
+                                  <div class="p-2.5 rounded-xl bg-slate-950/60 border border-white/10">
+                                    <p class="text-[11px] text-slate-200 leading-relaxed whitespace-pre-line">
+                                      {{ payload.markdown_body }}
+                                    </p>
+                                  </div>
+                                } @else if (!getCleanReleaseNotes(rel)) {
+                                  <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
+                                }
                               } @else if (!getCleanReleaseNotes(rel)) {
                                 <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
                               }
-                            } @else if (!getCleanReleaseNotes(rel)) {
-                              <p class="text-[11px] text-slate-500 italic">{{ 'modal.noReleaseNotesFallback' | translate }}</p>
                             }
                           </div>
                         }
@@ -4038,6 +4044,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async toggleBranchFallbackNotes(): Promise<void> {
+    if (!this.hasValidGitRepo) return;
     const key = 'branch-fallback';
     const nextExpanded = new Set(this.expandedReleaseKeys());
     if (nextExpanded.has(key)) {
@@ -4066,6 +4073,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async toggleReleaseNotes(rel: PackageRelease, pageIdx: number): Promise<void> {
+    const cleanNotes = this.getCleanReleaseNotes(rel);
+    if (!this.hasValidGitRepo && !cleanNotes) return;
+
     const key = this.getReleaseNotesKey(rel, pageIdx);
     const nextExpanded = new Set(this.expandedReleaseKeys());
     if (nextExpanded.has(key)) {
@@ -4076,7 +4086,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     nextExpanded.add(key);
     this.expandedReleaseKeys.set(nextExpanded);
 
-    if (this.releaseNotesByKey().has(key)) return;
+    if (!this.hasValidGitRepo || this.releaseNotesByKey().has(key)) return;
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
 

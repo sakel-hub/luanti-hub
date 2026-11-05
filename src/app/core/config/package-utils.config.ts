@@ -195,7 +195,12 @@ export function computeStarRatingFromData(
   if (typeof d1ReviewAvg === 'number' && d1ReviewAvg >= 1 && d1ReviewAvg <= 5) {
     return Number(d1ReviewAvg.toFixed(1));
   }
+  const explicitReviewScore = Number(item?.review_score ?? item?.luantihub_score ?? 0);
+  if (Number.isFinite(explicitReviewScore) && explicitReviewScore >= 1 && explicitReviewScore <= 5) {
+    return Number(explicitReviewScore.toFixed(1));
+  }
   const rev = item?.reviews ?? item?.review_thread_counts;
+  let hasExplicitZeroRevCounts = false;
   if (rev && typeof rev === 'object' && !Array.isArray(rev)) {
     const pos = Number(rev.positive) || 0;
     const neu = Number(rev.neutral) || 0;
@@ -205,30 +210,56 @@ export function computeStarRatingFromData(
       const stars = (pos * 5 + neu * 3 + neg * 1) / total;
       return Number(Math.min(5.0, Math.max(1.0, stars)).toFixed(1));
     }
+    if (rev.positive !== undefined || rev.neutral !== undefined || rev.negative !== undefined) {
+      hasExplicitZeroRevCounts = true;
+    }
   }
   const revList = Array.isArray(item?.reviews_list)
     ? item.reviews_list
     : Array.isArray(rev)
       ? rev
       : null;
-  if (revList && revList.length > 0) {
-    let sum = 0;
-    let count = 0;
-    for (const r of revList) {
-      if (!r || typeof r !== 'object') continue;
-      const explicitRating = Number(r.rating);
-      if (Number.isFinite(explicitRating) && explicitRating >= 1 && explicitRating <= 5) {
-        sum += explicitRating;
-        count++;
-      } else if (typeof r.is_positive === 'boolean' || typeof r.recommends === 'boolean') {
-        const pos = r.is_positive ?? r.recommends;
-        sum += pos ? 5 : 1;
-        count++;
+  if (revList) {
+    if (revList.length > 0) {
+      let sum = 0;
+      let count = 0;
+      for (const r of revList) {
+        if (!r || typeof r !== 'object') continue;
+        const explicitRating = Number(r.rating);
+        if (Number.isFinite(explicitRating) && explicitRating >= 1 && explicitRating <= 5) {
+          sum += explicitRating;
+          count++;
+        } else if (typeof r.is_positive === 'boolean' || typeof r.recommends === 'boolean') {
+          const pos = r.is_positive ?? r.recommends;
+          sum += pos ? 5 : 1;
+          count++;
+        }
+      }
+      if (count > 0) {
+        return Number(Math.min(5.0, Math.max(1.0, sum / count)).toFixed(1));
       }
     }
-    if (count > 0) {
-      return Number(Math.min(5.0, Math.max(1.0, sum / count)).toFixed(1));
-    }
+    return 0;
+  }
+  if (hasExplicitZeroRevCounts) {
+    return 0;
+  }
+  // ContentDB payloads (`/api/scores/` and `/api/packages/<author>/<name>/`) expose `score = score_downloads + score_reviews`
+  // (popularity points, NOT a 1-5 star rating). For brand-new packages with a few downloads and 0 reviews,
+  // `score` falls in `[1.0, 5.0]` (e.g. `1` or `2`). Never mistake ContentDB popularity points or zero-review items for stars.
+  const isRawCdbPayload =
+    item?.contentdb_score === undefined &&
+    (item?.score_downloads !== undefined ||
+      item?.score_reviews !== undefined ||
+      item?.short_description !== undefined);
+  const hasZeroReviewScore =
+    item?.score_reviews !== undefined && Number(item.score_reviews) <= 0;
+  const isEchoingCdbScore =
+    item?.contentdb_score !== undefined &&
+    Number(item.contentdb_score) > 0 &&
+    Number(item?.score) === Number(item.contentdb_score);
+  if (isRawCdbPayload || hasZeroReviewScore || isEchoingCdbScore) {
+    return hasZeroReviewScore ? 0 : fallbackScore;
   }
   if (item?.score !== undefined && item?.score !== null) {
     const rawScore = Number(item.score);

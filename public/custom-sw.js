@@ -759,6 +759,33 @@
               mergedCooldown[lowerKey] = maxTs;
           }
       }
+      const localRecentDiscovered = localState.recentDiscoveredPackages &&
+          typeof localState.recentDiscoveredPackages === 'object' &&
+          !Array.isArray(localState.recentDiscoveredPackages)
+          ? localState.recentDiscoveredPackages
+          : {};
+      const remoteRecentDiscovered = remoteState.recentDiscoveredPackages &&
+          typeof remoteState.recentDiscoveredPackages === 'object' &&
+          !Array.isArray(remoteState.recentDiscoveredPackages)
+          ? remoteState.recentDiscoveredPackages
+          : {};
+      const mergedRecentDiscoveredRaw = {};
+      for (const key of new Set([
+          ...Object.keys(localRecentDiscovered),
+          ...Object.keys(remoteRecentDiscovered)
+      ])) {
+          const lowerKey = key.toLowerCase();
+          const lTs = Number(localRecentDiscovered[key] || 0);
+          const rTs = Number(remoteRecentDiscovered[key] || 0);
+          const maxTs = Math.max(Number.isFinite(lTs) ? lTs : 0, Number.isFinite(rTs) ? rTs : 0);
+          if (maxTs > 0) {
+              mergedRecentDiscoveredRaw[lowerKey] = Math.max(mergedRecentDiscoveredRaw[lowerKey] || 0, maxTs);
+          }
+      }
+      const mergedRecentDiscoveredEntries = Object.entries(mergedRecentDiscoveredRaw)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 100);
+      const mergedRecentDiscovered = Object.fromEntries(mergedRecentDiscoveredEntries);
       const lSeed = Number(localState.baselineSeededAt || 0);
       const rSeed = Number(remoteState.baselineSeededAt || 0);
       const baselineSeededAt = lSeed > 0 && rSeed > 0 ? Math.min(lSeed, rSeed) : Math.max(lSeed, rSeed, 0);
@@ -774,6 +801,7 @@
           seenReviewIds: mergedReviews,
           packageUpdateCooldown: mergedCooldown,
           packageUpdateCooldowns: mergedCooldown,
+          recentDiscoveredPackages: mergedRecentDiscovered,
           bootManifestSignature: localState.bootManifestSignature || remoteState.bootManifestSignature || '',
           baselineSeededAt,
           lastBootFetchAt
@@ -855,6 +883,23 @@
                   knownGitSet.add('__cdb_seeded_v1__');
               }
               stateUpdates.knownGitPackages = Array.from(knownGitSet).slice(-10000);
+          }
+          if (newlyDiscoveredGit.length > 0) {
+              const recentDiscoveredMap = Object.assign({}, state.recentDiscoveredPackages &&
+                  typeof state.recentDiscoveredPackages === 'object' &&
+                  !Array.isArray(state.recentDiscoveredPackages)
+                  ? state.recentDiscoveredPackages
+                  : {});
+              for (const item of newlyDiscoveredGit) {
+                  const lowerId = String(item.resolvedId || '').toLowerCase();
+                  if (lowerId) {
+                      recentDiscoveredMap[lowerId] = Math.max(Number(recentDiscoveredMap[lowerId] || 0), item.eventTimestampMs || nowMs);
+                  }
+              }
+              const trimmedRecentEntries = Object.entries(recentDiscoveredMap)
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 100);
+              stateUpdates.recentDiscoveredPackages = Object.fromEntries(trimmedRecentEntries);
           }
           for (const item of newlyDiscoveredGit.slice(0, 3)) {
               notifications.push(buildNewGitPackageNotificationSpec(item.pkg, item.resolvedId, item.eventTimestampMs));

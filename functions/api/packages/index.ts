@@ -1448,7 +1448,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           item.downloads = s.downloads;
         }
         if (typeof s.score === 'number') {
-          item.score = Math.round(s.score * 10) / 10;
+          item.contentdb_score = Math.round(s.score * 10) / 10;
         }
         if (typeof s.score_downloads === 'number') {
           item.score_downloads = Math.round(s.score_downloads * 10) / 10;
@@ -1682,7 +1682,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       {
         ...(matchedUpstream || {}),
         review_thread_counts: effectiveReviewThreadCounts,
-        score: p.score ?? matchedUpstream?.score
+        score: (!isAlsoOfficial || effectiveReviewThreadCounts) ? (p.score ?? matchedUpstream?.score) : undefined
       },
       d1StarAvg
     );
@@ -1698,7 +1698,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       score: itemStarScore,
       reviewThreadCounts: effectiveReviewThreadCounts,
       favoritesCount: itemFavCount,
-      contentdbScore: Number(matchedUpstream?.score || 0),
+      contentdbScore: Number(matchedUpstream?.contentdb_score ?? matchedUpstream?.score ?? 0),
       contentdbScoreDownloads: Number(matchedUpstream?.score_downloads || 0),
       contentdbScoreReviews: Number(matchedUpstream?.score_reviews || 0)
     });
@@ -1741,8 +1741,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       banner: resolvedBanner,
       screenshots: mergedCatalogScreenshots.length > 0 ? mergedCatalogScreenshots : undefined,
       review_thread_counts: effectiveReviewThreadCounts,
+      ...(d1StarAvg > 0 ? { review_score: d1StarAvg } : {}),
       score: itemStarScore,
-      contentdb_score: Number(matchedUpstream?.score || 0),
+      contentdb_score: Number(matchedUpstream?.contentdb_score ?? matchedUpstream?.score ?? 0),
       luantihub_score_downloads: frecency.luantihub_score_downloads,
       contentdb_score_downloads: frecency.contentdb_score_downloads,
       score_downloads: frecency.score_downloads,
@@ -1806,7 +1807,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       { ...item, review_thread_counts: upstreamRevCounts },
       d1StarAvg
     );
-    const resolvedScore = computedScore > 0 ? computedScore : (sharedRating?.score || 0);
+    const hasExplicitZeroUpstreamReviews =
+      !upstreamRevCounts &&
+      !(d1StarAvg && d1StarAvg > 0) &&
+      ((item.reviews &&
+        Number(item.reviews.positive || 0) === 0 &&
+        Number(item.reviews.neutral || 0) === 0 &&
+        Number(item.reviews.negative || 0) === 0) ||
+        (item.score_reviews !== undefined && Number(item.score_reviews) <= 0));
+    const resolvedScore =
+      computedScore > 0
+        ? computedScore
+        : (!hasExplicitZeroUpstreamReviews && sharedRating?.review_thread_counts ? (sharedRating?.score || 0) : 0);
     const sanitizedItemThumb = upgradeContentDbThumbnailUrl(item.thumbnail || item.thumbnail_url);
     const resolvedUpstreamBanner =
       selectSharpPackageBanner(
@@ -1825,7 +1837,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       score: resolvedScore,
       reviewThreadCounts: upstreamRevCounts,
       favoritesCount: favCnt,
-      contentdbScore: Number(item.score || 0),
+      contentdbScore: Number(item.contentdb_score ?? item.score ?? 0),
       contentdbScoreDownloads: Number(item.score_downloads || 0),
       contentdbScoreReviews: Number(item.score_reviews || 0)
     });
@@ -1839,8 +1851,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ...(sanitizedItemThumb ? { thumbnail: sanitizedItemThumb } : {}),
       ...(resolvedUpstreamBanner ? { banner: resolvedUpstreamBanner } : {}),
       ...(upstreamRevCounts ? { review_thread_counts: upstreamRevCounts, rating_checked: true } : {}),
+      ...(d1StarAvg && d1StarAvg > 0 ? { review_score: d1StarAvg, rating_checked: true } : {}),
       score: resolvedScore,
-      contentdb_score: Number(item.score || 0),
+      contentdb_score: Number(item.contentdb_score ?? item.score ?? 0),
       luantihub_score_downloads: upstreamFrecency.luantihub_score_downloads,
       contentdb_score_downloads: upstreamFrecency.contentdb_score_downloads,
       score_downloads: upstreamFrecency.score_downloads,
@@ -1872,7 +1885,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       const lowerKey = String(pkg.id || '').toLowerCase();
       const sharedEntry = sharedEdgeRatings[lowerKey];
       if (sharedEntry) {
-        if (!(pkg.score > 0) && sharedEntry.score > 0) {
+        if (sharedEntry.checked && sharedEntry.score === 0 && !pkg.review_thread_counts && !d1Ratings.get(lowerKey)) {
+          pkg.score = 0;
+          pkg.rating_checked = true;
+        } else if (!(pkg.score > 0) && sharedEntry.score > 0 && (sharedEntry.review_thread_counts || pkg.review_thread_counts)) {
           pkg.score = sharedEntry.score;
         }
         if (!pkg.review_thread_counts && sharedEntry.review_thread_counts) {
@@ -1962,11 +1978,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         (Number(b.downloads) || 0) * computeDependencyPrioritizationMultiplier(b) -
         (Number(a.downloads) || 0) * computeDependencyPrioritizationMultiplier(a)
     );
+    pushPool(recentUpstreamMerged.slice(0, 8));
     if (promoDelta && Object.keys(promoDelta.tagMap || {}).length > 0) {
       const promoPkgKeys = new Set(Object.keys(promoDelta.tagMap));
       pushPool(merged.filter(p => promoPkgKeys.has(String(p.id || '').toLowerCase())).slice(0, 8));
     }
-    pushPool(recentUpstreamMerged.slice(0, 8));
     pushPool(merged.filter(p => p.sources?.includes('git')));
     pushPool(top10Today);
     pushPool(top10Week);
@@ -2000,14 +2016,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detail?.dev_state && !pkg.dev_state) {
             pkg.dev_state = detail.dev_state;
           }
-          if ((detail?.created_at || detail?.approved_at) && !pkg.created_at) {
+          if (detail?.created_at || detail?.approved_at) {
+            const normExisting = pkg.created_at ? normalizeUtcIsoTimestamp(pkg.created_at) : '';
             const normCreated = detail?.created_at ? normalizeUtcIsoTimestamp(detail.created_at) : '';
             const normApproved = detail?.approved_at ? normalizeUtcIsoTimestamp(detail.approved_at) : '';
-            const cMs = normCreated ? Date.parse(normCreated) : NaN;
-            const aMs = normApproved ? Date.parse(normApproved) : NaN;
-            if (Number.isFinite(cMs) && Number.isFinite(aMs)) {
-              pkg.created_at = aMs >= cMs ? normApproved : normCreated;
-            } else {
+            const candidates = [normApproved, normCreated, normExisting]
+              .filter(Boolean)
+              .map(iso => ({ iso, ms: Date.parse(iso) }))
+              .filter(c => Number.isFinite(c.ms) && c.ms > 0);
+            if (candidates.length > 0) {
+              candidates.sort((a, b) => b.ms - a.ms);
+              pkg.created_at = candidates[0].iso;
+            } else if (!pkg.created_at) {
               pkg.created_at = normApproved || normCreated;
             }
           }
@@ -2075,17 +2095,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                 pkg.thumbnail
               ) || pkg.banner;
           }
+          const d1PkgRating = d1Ratings.get(lowerPkgKey);
           const hydratedScore = computeCatalogStarRating(
             {
               ...detail,
               review_thread_counts: pkg.review_thread_counts,
               reviews_list: cdbRevList,
-              score: pkg.score
+              score: pkg.review_thread_counts ? pkg.score : undefined
             },
-            d1Ratings.get(lowerPkgKey)
+            d1PkgRating
           );
           if (hydratedScore > 0) {
             pkg.score = hydratedScore;
+          } else if (
+            Array.isArray(cdbRevList) &&
+            cdbRevList.length === 0 &&
+            !pkg.review_thread_counts &&
+            !(d1PkgRating && d1PkgRating > 0)
+          ) {
+            pkg.score = 0;
           }
           if (pkg.score > 0 || pkg.review_thread_counts || pkg.rating_checked) {
             newEdgeRatings[lowerPkgKey] = {
@@ -2251,25 +2279,43 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week = syncPreHydratedToTop10(top10Week);
     }
 
-    // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB)
+    // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB).
+    // `recentUpstreamMerged` is ordered by ContentDB `approved_at DESC` (where `approved_at >= created_at`).
+    // Compute the right-to-left suffix maximum `suffixMaxMs[i] = max_{j >= i} created_at[j]` so that packages
+    // drafted days/weeks before moderator approval (e.g. `titou4/x_entity` drafted Oct 9, approved Nov 5 at rank 0)
+    // receive an effective approval timestamp `>= suffixMaxMs[i]` and never drag `anchorMs` backwards.
     let maxRecentCdbMs = 0;
-    for (const pkg of recentUpstreamMerged) {
+    const suffixMaxMs = new Array<number>(recentUpstreamMerged.length).fill(0);
+    for (let i = recentUpstreamMerged.length - 1; i >= 0; i--) {
+      const pkg = recentUpstreamMerged[i];
       const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-      if (Number.isFinite(parsedMs) && parsedMs > maxRecentCdbMs) {
-        maxRecentCdbMs = parsedMs;
+      const validMs = Number.isFinite(parsedMs) && parsedMs > 0 ? parsedMs : 0;
+      if (validMs > maxRecentCdbMs) {
+        maxRecentCdbMs = validMs;
       }
+      const nextSuffixMax = i + 1 < recentUpstreamMerged.length ? suffixMaxMs[i + 1] : 0;
+      suffixMaxMs[i] = Math.max(validMs, nextSuffixMax);
     }
     const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
     let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
-    for (const pkg of recentUpstreamMerged) {
+    for (let i = 0; i < recentUpstreamMerged.length; i++) {
+      const pkg = recentUpstreamMerged[i];
       const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-      if (Number.isFinite(parsedMs) && parsedMs > 0) {
+      const floorMs = suffixMaxMs[i];
+      if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs >= floorMs) {
         if (parsedMs < anchorMs) {
           anchorMs = parsedMs;
         } else {
           anchorMs -= 1_000;
           pkg.created_at = new Date(anchorMs).toISOString();
         }
+      } else if (floorMs > 0) {
+        const candidateMs = Math.min(
+          anchorMs - 1_000,
+          floorMs + (recentUpstreamMerged.length - i) * 1_000
+        );
+        anchorMs = Math.max(floorMs, candidateMs);
+        pkg.created_at = new Date(anchorMs).toISOString();
       } else {
         anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
         pkg.created_at = new Date(anchorMs).toISOString();

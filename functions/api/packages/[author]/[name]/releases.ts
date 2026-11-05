@@ -84,6 +84,7 @@ export async function onRequestGet(context: { request: Request; params: { author
     let repoUrl = d1Pkg?.repo_url || repoParam || '';
     const releaseBody = '';
 
+    let cdbHasNoRepo = false;
     if (!repoUrl) {
       const cdbDetail = await fetchUpstreamJsonCached<any>(
         `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
@@ -91,13 +92,15 @@ export async function onRequestGet(context: { request: Request; params: { author
       );
       if (cdbDetail?.repo) {
         repoUrl = String(cdbDetail.repo).trim();
+      } else if (cdbDetail && typeof cdbDetail === 'object' && (cdbDetail.name || cdbDetail.author)) {
+        cdbHasNoRepo = true;
       }
     }
 
-    if (!repoUrl) {
+    if (!repoUrl && !cdbHasNoRepo) {
       try {
         const scanned = await scanGitRepoMetadataCached(author, name);
-        if (scanned?.repoUrl) {
+        if (scanned?.repoUrl && scanned.gitRepoStatus === 'verified') {
           repoUrl = scanned.repoUrl;
         }
       } catch {
@@ -105,13 +108,18 @@ export async function onRequestGet(context: { request: Request; params: { author
       }
     }
 
-    const notesPayload = await fetchGitReleaseNotesBetweenRefs(repoUrl || null, author, name, {
-      headRef: headRef || branchParam || 'HEAD',
-      baseRef: baseRef || undefined,
-      defaultBranch: branchParam || 'main',
-      releaseBody,
-      untilDate: untilParam || undefined
-    });
+    const notesPayload = await fetchGitReleaseNotesBetweenRefs(
+      repoUrl || null,
+      cdbHasNoRepo ? undefined : author,
+      cdbHasNoRepo ? undefined : name,
+      {
+        headRef: headRef || branchParam || 'HEAD',
+        baseRef: baseRef || undefined,
+        defaultBranch: branchParam || 'main',
+        releaseBody,
+        untilDate: untilParam || undefined
+      }
+    );
 
     return new Response(JSON.stringify(notesPayload), {
       headers: {
@@ -126,14 +134,17 @@ export async function onRequestGet(context: { request: Request; params: { author
   const isPureGitOnly = Boolean(d1Pkg && d1Pkg.provider && d1Pkg.provider !== 'contentdb');
   const queryRepoParam = (reqUrl?.searchParams.get('repo') || '').trim();
   let resolvedRepoUrl: string = (d1Pkg?.repo_url ? String(d1Pkg.repo_url).trim() : '') || queryRepoParam;
+  let cdbHasNoRepo = false;
 
   if (!resolvedRepoUrl && !isPureGitOnly) {
     const cdbDetail = await fetchUpstreamJsonCached<any>(
       `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
       600
     ).catch(() => null);
-    if (cdbDetail?.repo) {
-      resolvedRepoUrl = String(cdbDetail.repo).trim();
+    if (cdbDetail?.repo || cdbDetail?.repo_url) {
+      resolvedRepoUrl = String(cdbDetail.repo || cdbDetail.repo_url).trim();
+    } else if (cdbDetail && typeof cdbDetail === 'object') {
+      cdbHasNoRepo = true;
     }
   }
 
@@ -323,7 +334,7 @@ export async function onRequestGet(context: { request: Request; params: { author
   }
 
   // 3. Fallback: Discover Git releases/tags by author/name when D1 had no explicit repo_url
-  if (!resolvedRepoUrl && !isPureGitOnly) {
+  if (!resolvedRepoUrl && !isPureGitOnly && !cdbHasNoRepo) {
     const fallbackGitReleases = await fetchGitRepoReleasesAndTags(
       null,
       author,

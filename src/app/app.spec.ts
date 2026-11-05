@@ -10417,4 +10417,534 @@ supported_games = minetest_game, voxelibre
       localStorage.removeItem('lh_seen_notification_tags');
     }
   });
+
+  it('should exclude logged-in author packages across ContentDB and Git handles from recommendedFromFavorites and getSimilarPackages while enforcing diversity, optional_dependencies add-ons, and content filters', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    const favMod = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/farming',
+      author: 'TenPlus1',
+      name: 'farming',
+      title: 'Farming Redo',
+      type: 'mod',
+      short_desc: 'Expanded farming crops and food items.',
+      tags: ['survival', 'plants_and_farming'],
+      dependencies: ['default'],
+      game_support: [{ game: { name: 'minetest_game', title: 'Minetest Game' }, supports: true }],
+      downloads: 180000,
+      score: 4.9
+    });
+
+    // Logged-in user's own packages across ContentDB ('SaKeL') and Git ('sakel-hub')
+    const ownCdbMod = (pkgService as any).normalizePackage({
+      id: 'SaKeL/x_farming',
+      author: 'SaKeL',
+      name: 'x_farming',
+      title: 'X Farming',
+      type: 'mod',
+      short_desc: 'Extra crops and survival farming items.',
+      tags: ['survival', 'plants_and_farming'],
+      dependencies: ['default', 'farming'],
+      game_support: [{ game: { name: 'minetest_game', title: 'Minetest Game' }, supports: true }],
+      downloads: 95000,
+      score: 4.9
+    });
+    const ownGitMod = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/pixie_farming',
+      author: 'sakel-hub',
+      name: 'pixie_farming',
+      title: 'Pixie Farming',
+      type: 'mod',
+      short_desc: 'Magical farming companion.',
+      tags: ['survival', 'plants_and_farming'],
+      dependencies: ['farming'],
+      downloads: 12000,
+      score: 5.0,
+      source: 'git',
+      sources: ['git']
+    });
+
+    // Optional reverse-dependency add-on (no shared tags, only optional_dependencies on 'farming')
+    const optAddonMod = (pkgService as any).normalizePackage({
+      id: 'ChefAuthor/cucina_vegana',
+      author: 'ChefAuthor',
+      name: 'cucina_vegana',
+      title: 'Cucina Vegana',
+      type: 'mod',
+      short_desc: 'Vegan recipes integrating with farming.',
+      tags: ['crafting'],
+      optional_dependencies: ['farming'],
+      downloads: 45000,
+      score: 4.8
+    });
+
+    // Unrelated texture pack and unrelated minetest_game mod (should NOT match solely via minetest_game / txp)
+    const unrelatedTxp = (pkgService as any).normalizePackage({
+      id: 'PixelArtist/retro_16x',
+      author: 'PixelArtist',
+      name: 'retro_16x',
+      title: 'Retro 16x Textures',
+      type: 'txp',
+      short_desc: 'Classic 16px texture pack.',
+      tags: ['16px'],
+      downloads: 80000,
+      score: 4.8
+    });
+    const unrelatedMtgMod = (pkgService as any).normalizePackage({
+      id: 'OtherDev/chat_filter',
+      author: 'OtherDev',
+      name: 'chat_filter',
+      title: 'Chat Filter',
+      type: 'mod',
+      short_desc: 'Server chat moderation tool.',
+      tags: ['chat'],
+      dependencies: ['default'],
+      game_support: [{ game: { name: 'minetest_game', title: 'Minetest Game' }, supports: true }],
+      downloads: 70000,
+      score: 4.7
+    });
+
+    // Prolific author with 3 matching mods (diversity cap should limit to 2 when another creator exists)
+    const prolific1 = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs_animal',
+      author: 'TenPlus1',
+      name: 'mobs_animal',
+      title: 'Mobs Animal',
+      type: 'mod',
+      tags: ['survival'],
+      downloads: 150000,
+      score: 4.9
+    });
+    const prolific2 = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/ethereal',
+      author: 'TenPlus1',
+      name: 'ethereal',
+      title: 'Ethereal NG',
+      type: 'mod',
+      tags: ['survival', 'plants_and_farming'],
+      downloads: 140000,
+      score: 4.9
+    });
+    const prolific3 = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/wine',
+      author: 'TenPlus1',
+      name: 'wine',
+      title: 'Wine & Beverages',
+      type: 'mod',
+      tags: ['survival', 'plants_and_farming'],
+      dependencies: ['farming'],
+      downloads: 60000,
+      score: 4.7
+    });
+    const wipMod = (pkgService as any).normalizePackage({
+      id: 'ThirdCreator/wip_crops',
+      author: 'ThirdCreator',
+      name: 'wip_crops',
+      title: 'WIP Crops',
+      type: 'mod',
+      dev_state: 'WIP',
+      tags: ['survival', 'plants_and_farming'],
+      downloads: 5000,
+      score: 4.5
+    });
+
+    (pkgService as any)._packages.set([
+      favMod,
+      ownCdbMod,
+      ownGitMod,
+      optAddonMod,
+      unrelatedTxp,
+      unrelatedMtgMod,
+      prolific1,
+      prolific2,
+      prolific3,
+      wipMod
+    ]);
+    settingsService.favorites.set(['TenPlus1/farming']);
+    settingsService.hideWipDeprecated.set(true);
+
+    try {
+      // Authenticate as SaKeL / sakel-hub
+      (authService as any)._currentUser.set({
+        id: 'user_sakel_1',
+        username: 'sakel-hub',
+        display_name: 'SaKeL',
+        identities: [
+          { provider: 'github', username: 'sakel-hub', verified: true }
+        ],
+        packages: [{ id: 'sakel-hub/pixie_farming', name: 'pixie_farming', author: 'sakel-hub' }]
+      });
+
+      expect(pkgService.isOwnedByCurrentUser(ownCdbMod)).toBe(true);
+      expect(pkgService.isOwnedByCurrentUser(ownGitMod)).toBe(true);
+      expect(pkgService.isOwnedByCurrentUser(favMod)).toBe(false);
+
+      const recs = pkgService.recommendedFromFavorites();
+      const recIds = recs.map(p => p.id);
+
+      // 1. Author's own packages ('SaKeL/x_farming' and 'sakel-hub/pixie_farming') are excluded
+      expect(recIds).not.toContain('SaKeL/x_farming');
+      expect(recIds).not.toContain('sakel-hub/pixie_farming');
+
+      // 2. Unrelated texture pack and unrelated minetest_game mod are excluded
+      expect(recIds).not.toContain('PixelArtist/retro_16x');
+      expect(recIds).not.toContain('OtherDev/chat_filter');
+
+      // 3. WIP mod is excluded when hideWipDeprecated is true
+      expect(recIds).not.toContain('ThirdCreator/wip_crops');
+
+      // 4. Optional reverse-dependency add-on ('ChefAuthor/cucina_vegana') is included
+      expect(recIds).toContain('ChefAuthor/cucina_vegana');
+
+      // 5. Similar packages in Package Detail Modal also exclude the logged-in author's own packages
+      const similar = pkgService.getSimilarPackages(favMod, 4);
+      const similarIds = similar.map(p => p.id);
+      expect(similarIds).not.toContain('SaKeL/x_farming');
+      expect(similarIds).not.toContain('sakel-hub/pixie_farming');
+      expect(similarIds).not.toContain('ThirdCreator/wip_crops');
+    } finally {
+      (authService as any)._currentUser.set(null);
+      settingsService.favorites.set([]);
+      settingsService.hideWipDeprecated.set(false);
+    }
+  });
+
+  it('should place pre-approval drafted ContentDB packages (titou4/x_entity) in Recently Added, bridge notified packages into recentlyAddedPackages, suppress Git release notes/diff links for zip-only packages, and never show 1-2 star ratings for 0-review ContentDB packages', async () => {
+    const { computeStarRatingFromData } = await import('./core/config/package-utils.config');
+    const { fetchGitReleaseNotesBetweenRefs, invalidateEdgeCacheKeys } = await import('../../functions/api/lib/upstream');
+    const { onRequestGet: onPackagesGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: onReleasesGet } = await import('../../functions/api/packages/[author]/[name]/releases');
+    const { evaluateCatalogNotificationsBatch } = await import('./core/utils/notification-engine');
+
+    // --- Issue C: 0-review ContentDB packages must never inherit popularity score (1.3 / 2.1) as star ratings ---
+    expect(
+      computeStarRatingFromData({
+        author: 'ac_adapter',
+        name: 'waving_snow',
+        score: 1.3,
+        score_downloads: 1.3,
+        score_reviews: 0,
+        reviews: { positive: 0, neutral: 0, negative: 0 }
+      })
+    ).toBe(0);
+
+    expect(
+      computeStarRatingFromData({
+        author: 'escapa_del_tiempo',
+        name: 'x3_blood_splatter',
+        score: 2.1,
+        score_downloads: 2.1,
+        score_reviews: 0
+      })
+    ).toBe(0);
+
+    expect(
+      computeStarRatingFromData({
+        author: 'titou4',
+        name: 'x_entity',
+        score: 1.5,
+        contentdb_score: 1.5
+      })
+    ).toBe(0);
+
+    // Genuine reviews still produce accurate 1-5 star ratings
+    expect(
+      computeStarRatingFromData({
+        author: 'TenPlus1',
+        name: 'farming',
+        review_thread_counts: { positive: 10, neutral: 0, negative: 0 }
+      })
+    ).toBe(5);
+
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+    const normalizedWavingSnow = (pkgService as any).normalizePackage({
+      id: 'ac_adapter/waving_snow',
+      author: 'ac_adapter',
+      name: 'waving_snow',
+      title: 'Waving Snow',
+      type: 'mod',
+      downloads: 3,
+      score: 1.3,
+      contentdb_score: 1.3,
+      score_downloads: 1.3,
+      score_reviews: 0,
+      reviews: { positive: 0, neutral: 0, negative: 0 }
+    });
+    expect(normalizedWavingSnow.score).toBe(0);
+    expect(normalizedWavingSnow.contentdb_score).toBe(1.3);
+
+    // --- Issue A & C on Backend (`/api/packages/?boot=1`): `titou4/x_entity` approval floor + 0-review star prevention ---
+    await invalidateEdgeCacheKeys(['/__api_boot_catalog_bundle_v19', '/__pkg_ratings_map_v2']);
+
+    const nowMs = Date.now();
+    const recentIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
+    const olderDraftIso = new Date(nowMs - 27 * 24 * 60 * 60 * 1000).toISOString(); // 27 days earlier draft date
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('sort=approved_at')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'titou4',
+              name: 'x_entity',
+              title: 'X Entity',
+              type: 'mod',
+              short_description: 'Entity helpers',
+              release: 36010
+            },
+            {
+              author: 'ac_adapter',
+              name: 'waving_snow',
+              title: 'Waving Snow',
+              type: 'mod',
+              short_description: 'Makes snow wave',
+              release: 36009
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/?fmt=vcs')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'titou4',
+              name: 'x_entity',
+              title: 'X Entity',
+              type: 'mod',
+              short_description: 'Entity helpers',
+              release: 36010
+            },
+            {
+              author: 'ac_adapter',
+              name: 'waving_snow',
+              title: 'Waving Snow',
+              type: 'mod',
+              short_description: 'Makes snow wave',
+              release: 36009
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/scores/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'titou4',
+              name: 'x_entity',
+              downloads: 5,
+              score: 1.4,
+              score_downloads: 1.4,
+              score_reviews: 0,
+              reviews: { positive: 0, neutral: 0, negative: 0 }
+            },
+            {
+              author: 'ac_adapter',
+              name: 'waving_snow',
+              downloads: 3,
+              score: 1.2,
+              score_downloads: 1.2,
+              score_reviews: 0,
+              reviews: { positive: 0, neutral: 0, negative: 0 }
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/titou4/x_entity/reviews/')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/api/packages/ac_adapter/waving_snow/reviews/')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/api/packages/titou4/x_entity/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 36010,
+              title: '1',
+              url: '/uploads/x_entity.zip',
+              release_date: olderDraftIso,
+              downloads: 5
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/titou4/x_entity/')) {
+        // Simulates ContentDB package drafted 27 days ago (`created_at: olderDraftIso`) and zip-only (`repo: null`)
+        return new Response(
+          JSON.stringify({
+            author: 'titou4',
+            name: 'x_entity',
+            title: 'X Entity',
+            type: 'mod',
+            created_at: olderDraftIso,
+            repo: null,
+            license: 'MIT',
+            downloads: 5
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/ac_adapter/waving_snow/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'ac_adapter',
+            name: 'waving_snow',
+            title: 'Waving Snow',
+            type: 'mod',
+            created_at: recentIso,
+            license: 'LGPL-2.1-ONLY',
+            downloads: 3
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }) as any;
+
+    try {
+      const bootRes = await onPackagesGet({
+        request: new Request('https://luantihub.org/api/packages/?boot=1&nocache=1'),
+        env: {}
+      });
+      const bootJson = await bootRes.json();
+      expect(Array.isArray(bootJson.recentlyAdded)).toBe(true);
+      expect(bootJson.recentlyAdded[0]?.id).toBe('titou4/x_entity');
+      expect(bootJson.recentlyAdded[1]?.id).toBe('ac_adapter/waving_snow');
+      // `titou4/x_entity` received an effective approval timestamp >= `waving_snow`'s `recentIso`
+      expect(Date.parse(bootJson.recentlyAdded[0].created_at)).toBeGreaterThan(Date.parse(recentIso) - 1000);
+      // Neither 0-review package has a star score
+      expect(bootJson.recentlyAdded[0].score).toBe(0);
+      expect(bootJson.recentlyAdded[1].score).toBe(0);
+
+      // --- Issue B on Backend: zip-only package must not fabricate github.com/titou4/x_entity or fetch commits ---
+      const directNotes = await fetchGitReleaseNotesBetweenRefs(undefined, undefined, undefined, {
+        headRef: '1',
+        defaultBranch: 'main'
+      });
+      expect(directNotes.commits).toEqual([]);
+      expect(directNotes.compare_url).toBeUndefined();
+
+      const relNotesRes = await onReleasesGet({
+        request: new Request('https://luantihub.org/api/packages/titou4/x_entity/releases?notes=1&head=1&branch=main'),
+        env: {},
+        params: { author: 'titou4', name: 'x_entity' }
+      });
+      const relNotesJson = await relNotesRes.json();
+      expect(relNotesJson.commits).toEqual([]);
+      expect(relNotesJson.compare_url).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // --- Issue A on Frontend: notified package bridge into `recentlyAddedPackages` ---
+    const batchEval = evaluateCatalogNotificationsBatch(
+      {
+        packages: [
+          {
+            id: 'titou4/x_entity',
+            author: 'titou4',
+            name: 'x_entity',
+            title: 'X Entity',
+            type: 'mod',
+            source: 'official',
+            sources: ['official'],
+            created_at: recentIso
+          }
+        ]
+      },
+      {
+        prefs: {
+          notificationsEnabled: true,
+          notifyNewGitPackages: true
+        },
+        knownGitPackages: ['tenplus1/farming', '__cdb_seeded_v1__'],
+        baselineSeededAt: nowMs - 2 * 3600 * 1000
+      },
+      nowMs
+    );
+    expect(batchEval.notifications.length).toBe(1);
+    expect(batchEval.stateUpdates.recentDiscoveredPackages?.['titou4/x_entity']).toBeGreaterThan(0);
+
+    // Even if `titou4/x_entity` in `_packages` had an old draft `created_at` and was missing from `_serverRecentlyAdded`,
+    // recording it in `pwaService.recentDiscoveredPackages` surfaces it at the top of `recentlyAddedPackages()`
+    (pkgService as any)._packages.set([
+      (pkgService as any).normalizePackage({
+        id: 'titou4/x_entity',
+        author: 'titou4',
+        name: 'x_entity',
+        title: 'X Entity',
+        type: 'mod',
+        source: 'official',
+        sources: ['official'],
+        created_at: olderDraftIso
+      })
+    ]);
+    (pkgService as any)._serverRecentlyAdded.set([]);
+    pwaService.recentDiscoveredPackages.set({ 'titou4/x_entity': nowMs });
+    expect(pkgService.recentlyAddedPackages().map(p => p.id)).toContain('titou4/x_entity');
+    pwaService.recentDiscoveredPackages.set({});
+
+    // --- Issue B on Frontend: PackageDetailModalComponent hides Git release notes & diff link when `!hasValidGitRepo` ---
+    const zipOnlyPkg = (pkgService as any).normalizePackage({
+      id: 'titou4/x_entity',
+      author: 'titou4',
+      name: 'x_entity',
+      title: 'X Entity',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      repo_url: undefined
+    });
+    (pkgService as any)._activePackage.set(zipOnlyPkg);
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = zipOnlyPkg;
+    modalComp.activeTab.set('releases');
+    modalComp.isLoadingReleases.set(false);
+    modalComp.releases.set([
+      {
+        id: 36010,
+        version: '1',
+        tag_name: '',
+        commit_sha: '',
+        download_url: '/api/packages/titou4/x_entity/download',
+        min_minetest_version: '5.0.0',
+        released_at: olderDraftIso,
+        sha256: 'ee6ae02812345678'
+      }
+    ]);
+    modalFixture.detectChanges();
+
+    expect(modalComp.hasValidGitRepo).toBe(false);
+    const modalText = modalFixture.nativeElement.textContent || '';
+    expect(modalText).not.toContain('View Full Diff on Git');
+    expect(modalText).not.toContain('RECENT COMMITS ON MAIN');
+
+    // Calling toggleReleaseNotes on a zip-only release without release_notes is a no-op
+    const fetchNotesSpy = vi.spyOn(pkgService, 'fetchReleaseNotesForRelease');
+    await modalComp.toggleReleaseNotes(modalComp.releases()[0], 0);
+    expect(fetchNotesSpy).not.toHaveBeenCalled();
+    expect(modalComp.isReleaseNotesExpanded(modalComp.getReleaseNotesKey(modalComp.releases()[0], 0))).toBe(false);
+    fetchNotesSpy.mockRestore();
+    modalFixture.destroy();
+  });
 });

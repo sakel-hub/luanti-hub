@@ -1175,6 +1175,86 @@ export class PackageService {
     }
   }
 
+  /**
+   * Returns true if `pkg` belongs to the currently authenticated user across
+   * D1 `author_id`, claimed `user.packages`, primary username/display_name, or verified Git/ContentDB identities.
+   */
+  isOwnedByCurrentUser(pkg: Partial<LuantiPackage> | null | undefined): boolean {
+    if (!pkg) return false;
+    const currentUser = this.authService.currentUser();
+    if (!currentUser) return false;
+    if (this.authService.isPackageAuthor(pkg)) return true;
+
+    const normalizeBase = (h: string) =>
+      String(h || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+
+    const rawAuthor = String(pkg.author || (pkg as any).author_name || '').trim().toLowerCase();
+    const rawDisplay = String(pkg.author_display_name || '').trim().toLowerCase();
+    const baseAuthor = normalizeBase(rawAuthor);
+
+    const ownedHandles = new Set<string>();
+    const ownedBaseHandles = new Set<string>();
+    const addHandle = (h?: string | null) => {
+      const clean = String(h || '').trim().toLowerCase();
+      if (!clean) return;
+      ownedHandles.add(clean);
+      const base = normalizeBase(clean);
+      if (base) ownedBaseHandles.add(base);
+    };
+
+    addHandle(currentUser.username);
+    addHandle(currentUser.display_name);
+    for (const id of currentUser.identities || []) {
+      if (id?.verified && id?.username) {
+        addHandle(id.username);
+      }
+    }
+
+    if (rawAuthor && ownedHandles.has(rawAuthor)) return true;
+    if (rawDisplay && ownedHandles.has(rawDisplay)) return true;
+    if (baseAuthor && ownedBaseHandles.has(baseAuthor)) return true;
+
+    return false;
+  }
+
+  /**
+   * Checks whether `pkg` explicitly declares or infers support for `rawGameSlug`
+   * (without treating generic `supports_all_games` or `type === 'txp'` as an explicit target).
+   */
+  doesPackageExplicitlyTargetGame(pkg: Partial<LuantiPackage> | null | undefined, rawGameSlug: string): boolean {
+    const gameSlug = String(rawGameSlug || '').trim().toLowerCase();
+    if (!pkg || !gameSlug || gameSlug === 'all') return false;
+    const pkgName = String(pkg.name || '').toLowerCase();
+    const pkgId = String(pkg.id || '').toLowerCase();
+    if (pkgName === gameSlug || pkgId === gameSlug || pkgId.endsWith('/' + gameSlug)) return true;
+
+    const supportList = Array.isArray(pkg.game_support) ? pkg.game_support : [];
+    const explicitIncompatible = supportList.some(gs => {
+      if (gs?.supports !== false) return false;
+      const gName = String(gs?.game?.name || '').toLowerCase();
+      const gId = String(gs?.game?.id || '').toLowerCase();
+      return gName === gameSlug || gId === gameSlug || gId.endsWith('/' + gameSlug);
+    });
+    if (explicitIncompatible) return false;
+
+    const explicitCompatible = supportList.some(gs => {
+      if (gs?.supports === false) return false;
+      const gName = String(gs?.game?.name || '').toLowerCase();
+      const gId = String(gs?.game?.id || '').toLowerCase();
+      return gName === gameSlug || gId === gameSlug || gId.endsWith('/' + gameSlug);
+    });
+    if (explicitCompatible) return true;
+
+    const inferred = inferGameSupportFromDependencies([
+      ...(pkg.dependencies || []),
+      ...(pkg.optional_dependencies || [])
+    ]);
+    return inferred.some(gs => gs.supports !== false && gs.game.name.toLowerCase() === gameSlug);
+  }
+
   doesPackageSupportGame(pkg: Partial<LuantiPackage> | null | undefined, rawGameSlug: string): boolean {
     const gameSlug = String(rawGameSlug || '').trim().toLowerCase();
     if (!pkg || !gameSlug || gameSlug === 'all') return true;
@@ -1559,10 +1639,22 @@ export class PackageService {
   readonly recentlyAddedPackages = computed<LuantiPackage[]>(() => {
     const serverList = this._serverRecentlyAdded();
     const list = this._packages();
+    const recentDiscoveries = this.pwaService.recentDiscoveredPackages();
     const byLowerId = new Map<string, LuantiPackage>();
     for (const p of list) {
       byLowerId.set(p.id.toLowerCase(), p);
     }
+
+    const pickNewerIso = (a?: string, b?: string): string | undefined => {
+      if (!a) return b;
+      if (!b) return a;
+      const msA = Date.parse(String(a));
+      const msB = Date.parse(String(b));
+      if (Number.isFinite(msA) && Number.isFinite(msB)) {
+        return msA >= msB ? a : b;
+      }
+      return a || b;
+    };
 
     const serverRankById = new Map<string, number>();
     const candidatesById = new Map<string, LuantiPackage>();
@@ -1574,7 +1666,7 @@ export class PackageService {
         ? {
             ...item,
             ...live,
-            created_at: item.created_at || live.created_at,
+            created_at: pickNewerIso(item.created_at, live.created_at),
             downloads: Math.max(live.downloads || 0, item.downloads || 0)
           }
         : item;
@@ -1595,11 +1687,28 @@ export class PackageService {
             ? {
                 ...existing,
                 ...pkg,
-                created_at: existing.created_at || pkg.created_at
+                created_at: pickNewerIso(existing.created_at, pkg.created_at)
               }
             : pkg
         );
       }
+    }
+
+    // Bridge newly notified/discovered packages (from foreground or Service Worker catalog checks)
+    // so any package that triggered a "New Package" notification is guaranteed to appear in Recently Added.
+    const nowMs = Date.now();
+    const maxDiscoveryAgeMs = 7 * 24 * 60 * 60 * 1000;
+    for (const [lowerId, discoveredAtMs] of Object.entries(recentDiscoveries || {})) {
+      if (!Number.isFinite(discoveredAtMs) || discoveredAtMs <= 0 || nowMs - discoveredAtMs > maxDiscoveryAgeMs) {
+        continue;
+      }
+      const existing = candidatesById.get(lowerId) || byLowerId.get(lowerId);
+      if (!existing || this.isPackageDeprecated(existing)) continue;
+      const discoveredIso = new Date(discoveredAtMs).toISOString();
+      candidatesById.set(lowerId, {
+        ...existing,
+        created_at: pickNewerIso(existing.created_at, discoveredIso)
+      });
     }
 
     return Array.from(candidatesById.values())
@@ -1679,16 +1788,34 @@ export class PackageService {
     );
     if (favPackages.length === 0) return [];
 
+    const hideWipDeprecated = this.settingsService.hideWipDeprecated();
+    const hideWarnings = this.settingsService.hideContentWarnings();
+    const prefGame = String(this.settingsService.preferredGame() || 'all').trim().toLowerCase();
+
     const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'mesehub', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
     const favTagCounts = new Map<string, number>();
     const favAuthors = new Set<string>();
-    const favDepsAndNames = new Set<string>();
-    const favGames = new Set<string>();
+    const favDirectNames = new Set<string>();
+    const favDepNames = new Set<string>();
+    const explicitFavGames = new Set<string>();
+    const favModGames = new Set<string>();
 
     for (const fp of favPackages) {
-      if (fp.author) favAuthors.add(fp.author.toLowerCase());
-      if (fp.name) favDepsAndNames.add(fp.name.toLowerCase());
-      if (fp.type === 'game' && fp.name) favGames.add(fp.name.toLowerCase());
+      if (fp.author && !this.isOwnedByCurrentUser(fp)) {
+        favAuthors.add(fp.author.toLowerCase());
+      }
+      if (fp.name) {
+        favDirectNames.add(fp.name.toLowerCase());
+      }
+      for (const prov of fp.provides || []) {
+        const cleanProv = String(prov || '').toLowerCase().trim();
+        if (cleanProv && cleanProv !== 'default') {
+          favDirectNames.add(cleanProv);
+        }
+      }
+      if (fp.type === 'game' && fp.name) {
+        explicitFavGames.add(fp.name.toLowerCase());
+      }
       for (const t of fp.tags || []) {
         const clean = String(t || '').toLowerCase().trim();
         if (clean && !systemTagSet.has(clean)) {
@@ -1697,41 +1824,128 @@ export class PackageService {
       }
       for (const d of [...(fp.dependencies || []), ...(fp.optional_dependencies || [])]) {
         const clean = String(d || '').toLowerCase().trim();
-        if (clean && clean !== 'default') favDepsAndNames.add(clean);
+        if (clean && clean !== 'default') {
+          favDepNames.add(clean);
+        }
       }
       for (const gs of fp.game_support || []) {
         if (gs?.supports !== false && gs?.game?.name) {
-          favGames.add(gs.game.name.toLowerCase());
+          favModGames.add(gs.game.name.toLowerCase());
         }
       }
     }
 
-    return this.sortByRelevanceDesc(
+    const totalFavCount = Math.max(1, favPackages.length);
+
+    const rankedCandidates = this.sortByRelevanceDesc(
       catalog.filter(cand => {
         if (!cand || cand.status === 'delisted' || cand.status === 'flagged') return false;
         if (this.isPackageDeprecated(cand)) return false;
+        if (this.isOwnedByCurrentUser(cand)) return false;
+        if (hideWipDeprecated && cand.dev_state === 'WIP') return false;
+        if (hideWarnings && Array.isArray(cand.content_warnings) && cand.content_warnings.length > 0) return false;
+        if (prefGame !== 'all' && !this.doesPackageSupportGame(cand, prefGame)) return false;
         if (favLowerSet.has(cand.id.toLowerCase()) || favLowerSet.has(cand.name.toLowerCase())) return false;
+
+        const candName = String(cand.name || '').toLowerCase();
+        const candProvideNames = (cand.provides || []).map(p => String(p || '').toLowerCase().trim()).filter(Boolean);
+        const candReqDeps = (cand.dependencies || []).map(d => String(d || '').toLowerCase().trim()).filter(Boolean);
+        const candOptDeps = (cand.optional_dependencies || []).map(d => String(d || '').toLowerCase().trim()).filter(Boolean);
+
         const hasSharedTag = (cand.tags || []).some(t => favTagCounts.has(String(t || '').toLowerCase()));
         const hasSameAuthor = favAuthors.has(String(cand.author || '').toLowerCase());
-        const hasSharedDep =
-          favDepsAndNames.has(String(cand.name || '').toLowerCase()) ||
-          (cand.dependencies || []).some(d => favDepsAndNames.has(String(d || '').toLowerCase()));
-        const hasSharedGame = Array.from(favGames).some(g => this.doesPackageSupportGame(cand, g));
-        return hasSharedTag || hasSameAuthor || hasSharedDep || hasSharedGame;
+        const hasDirectDep =
+          favDepNames.has(candName) ||
+          candProvideNames.some(p => favDepNames.has(p)) ||
+          candReqDeps.some(d => favDirectNames.has(d)) ||
+          candOptDeps.some(d => favDirectNames.has(d));
+        const hasSharedEcosystemDep =
+          candReqDeps.some(d => favDepNames.has(d)) ||
+          candOptDeps.some(d => favDepNames.has(d));
+        const hasExplicitFavGame =
+          explicitFavGames.size > 0 &&
+          Array.from(explicitFavGames).some(g => this.doesPackageExplicitlyTargetGame(cand, g));
+
+        return hasSharedTag || hasSameAuthor || hasDirectDep || hasSharedEcosystemDep || hasExplicitFavGame;
       }),
-      CAROUSEL_CAP,
+      CAROUSEL_CAP * 3,
       cand => {
         let bonus = 0;
+        let tagBonus = 0;
         for (const t of cand.tags || []) {
           const count = favTagCounts.get(String(t || '').toLowerCase()) || 0;
-          if (count > 0) bonus += 18 + count * 6;
+          if (count > 0) {
+            const concentrationBoost = Math.round((count / totalFavCount) * 8);
+            tagBonus += 16 + count * 5 + concentrationBoost;
+          }
         }
-        if (favAuthors.has(String(cand.author || '').toLowerCase())) bonus += 24;
-        if ((cand.dependencies || []).some(d => favDepsAndNames.has(String(d || '').toLowerCase()))) bonus += 22;
-        if (Array.from(favGames).some(g => this.doesPackageSupportGame(cand, g))) bonus += 16;
+        bonus += Math.min(72, tagBonus);
+
+        if (favAuthors.has(String(cand.author || '').toLowerCase())) {
+          bonus += 20;
+        }
+
+        const candName = String(cand.name || '').toLowerCase();
+        const candProvideNames = (cand.provides || []).map(p => String(p || '').toLowerCase().trim()).filter(Boolean);
+        const candReqDeps = (cand.dependencies || []).map(d => String(d || '').toLowerCase().trim()).filter(Boolean);
+        const candOptDeps = (cand.optional_dependencies || []).map(d => String(d || '').toLowerCase().trim()).filter(Boolean);
+
+        const isDirectReqOrRequiredBy =
+          favDepNames.has(candName) ||
+          candProvideNames.some(p => favDepNames.has(p)) ||
+          candReqDeps.some(d => favDirectNames.has(d));
+        const isDirectOptAddon = candOptDeps.some(d => favDirectNames.has(d));
+        const isSharedEcosystemDep =
+          candReqDeps.some(d => favDepNames.has(d)) ||
+          candOptDeps.some(d => favDepNames.has(d));
+
+        if (isDirectReqOrRequiredBy) {
+          bonus += 28;
+        } else if (isDirectOptAddon) {
+          bonus += 22;
+        } else if (isSharedEcosystemDep) {
+          bonus += 14;
+        }
+
+        if (
+          explicitFavGames.size > 0 &&
+          Array.from(explicitFavGames).some(g => this.doesPackageExplicitlyTargetGame(cand, g))
+        ) {
+          bonus += 20;
+        } else if (
+          favModGames.size > 0 &&
+          Array.from(favModGames).some(g => this.doesPackageExplicitlyTargetGame(cand, g))
+        ) {
+          bonus += 14;
+        }
+
         return bonus;
       }
     );
+
+    const selected: LuantiPackage[] = [];
+    const overflow: LuantiPackage[] = [];
+    const authorCounts = new Map<string, number>();
+    const MAX_PER_AUTHOR = 2;
+
+    for (const pkg of rankedCandidates) {
+      if (selected.length >= CAROUSEL_CAP) break;
+      const authorKey = String(pkg.author || '').toLowerCase();
+      const count = authorCounts.get(authorKey) || 0;
+      if (authorKey && count >= MAX_PER_AUTHOR) {
+        overflow.push(pkg);
+        continue;
+      }
+      selected.push(pkg);
+      if (authorKey) authorCounts.set(authorKey, count + 1);
+    }
+
+    for (const pkg of overflow) {
+      if (selected.length >= CAROUSEL_CAP) break;
+      selected.push(pkg);
+    }
+
+    return selected;
   });
 
   constructor() {
@@ -1820,6 +2034,7 @@ export class PackageService {
           }
         }
       }
+      const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
       const rawV12 = localStorage.getItem('lh_hydrated_meta_v12');
       const rawV11 = localStorage.getItem('lh_hydrated_meta_v11');
       const rawV10 = localStorage.getItem('lh_hydrated_meta_v10');
@@ -1833,9 +2048,12 @@ export class PackageService {
       if (rawV11) {
         localStorage.removeItem('lh_hydrated_meta_v11');
       }
-      const raw = rawV12 || rawV11 || rawV10 || rawV9;
+      if (rawV12) {
+        localStorage.removeItem('lh_hydrated_meta_v12');
+      }
+      const raw = rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
       if (!raw) return;
-      const isMigratingLegacy = !rawV12 && Boolean(rawV11 || rawV10 || rawV9);
+      const isMigratingLegacy = !rawV13 && Boolean(rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -1871,7 +2089,8 @@ export class PackageService {
             if (entry.review_thread_counts) {
               entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
             }
-            if (isMigratingLegacy && !(entry.score && entry.score > 0) && !entry.review_thread_counts) {
+            if (isMigratingLegacy && !entry.review_thread_counts) {
+              entry.score = 0;
               entry.rating_checked = false;
             }
             this.hydratedMetaCache.set(k.toLowerCase(), entry);
@@ -1898,7 +2117,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v12', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v13', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -1993,27 +2212,31 @@ export class PackageService {
       (item.reviews && !Array.isArray(item.reviews) && typeof item.reviews === 'object'
         ? item.reviews
         : undefined);
+    const parsedDirectRevCounts = parseNonZeroReviewThreadCounts(rawItemRevCounts);
     const explicitZeroRevCounts = Boolean(
-      rawItemRevCounts &&
-      typeof rawItemRevCounts === 'object' &&
-      Number(rawItemRevCounts.positive || 0) === 0 &&
-      Number(rawItemRevCounts.neutral || 0) === 0 &&
-      Number(rawItemRevCounts.negative || 0) === 0 &&
+      !parsedDirectRevCounts &&
       !(Number(item?.review_score ?? item?.luantihub_score ?? 0) > 0) &&
-      !(Number(item?.score ?? 0) > 0 && Number(item?.score ?? 0) <= 5) &&
-      (!Array.isArray(item?.reviews_list) || item.reviews_list.length === 0)
+      (!Array.isArray(item?.reviews_list) || item.reviews_list.length === 0) &&
+      ((rawItemRevCounts &&
+        typeof rawItemRevCounts === 'object' &&
+        Number(rawItemRevCounts.positive || 0) === 0 &&
+        Number(rawItemRevCounts.neutral || 0) === 0 &&
+        Number(rawItemRevCounts.negative || 0) === 0) ||
+        (item?.score_reviews !== undefined && Number(item.score_reviews) <= 0))
     );
     if (explicitZeroRevCounts && cachedMeta && cachedMeta.score) {
       cachedMeta.score = 0;
     }
     const reviewThreadCounts =
-      parseNonZeroReviewThreadCounts(rawItemRevCounts) ||
+      parsedDirectRevCounts ||
       (explicitZeroRevCounts ? undefined : parseNonZeroReviewThreadCounts(cachedMeta?.review_thread_counts));
+    const fallbackCachedScore =
+      reviewThreadCounts && cachedMeta?.score && cachedMeta.score > 0 ? cachedMeta.score : 0;
     const score = explicitZeroRevCounts
       ? 0
       : this.computeStarRatingFromData(
           { ...item, review_thread_counts: reviewThreadCounts },
-          cachedMeta?.score || 0
+          fallbackCachedScore
         );
     const rawCdbScore = Number(item?.contentdb_score ?? item?.score ?? cachedMeta?.contentdb_score ?? 0);
     const contentdbScore = Number.isFinite(rawCdbScore) && rawCdbScore > 0 ? rawCdbScore : 0;
@@ -3646,14 +3869,16 @@ export class PackageService {
           }
         }
 
-        if (isLocalhost && cdbRecentItems.length > 0) {
+        if ((isLocalhost || this.edgeApiAvailable) && cdbRecentItems.length > 0) {
           await Promise.all(
             cdbRecentItems.slice(0, 8).map(async pkg => {
               try {
-                const detailRes = await fetch(
-                  `/cdb-api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/?ngsw-bypass=true`,
-                  { headers: { Accept: 'application/json', 'ngsw-bypass': 'true' } }
-                ).catch(() => null);
+                const detailUrl = isLocalhost
+                  ? `/cdb-api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/?ngsw-bypass=true`
+                  : `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}?lite=1&ngsw-bypass=true`;
+                const detailRes = await fetch(detailUrl, {
+                  headers: { Accept: 'application/json', 'ngsw-bypass': 'true' }
+                }).catch(() => null);
                 if (!detailRes || !detailRes.ok || !(detailRes.headers.get('content-type') || '').includes('application/json')) {
                   return;
                 }
@@ -3691,23 +3916,37 @@ export class PackageService {
         }
 
         let maxRecentCdbMs = 0;
-        for (const pkg of cdbRecentItems) {
+        const suffixMaxMs = new Array<number>(cdbRecentItems.length).fill(0);
+        for (let i = cdbRecentItems.length - 1; i >= 0; i--) {
+          const pkg = cdbRecentItems[i];
           const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-          if (Number.isFinite(parsedMs) && parsedMs > maxRecentCdbMs) {
-            maxRecentCdbMs = parsedMs;
+          const validMs = Number.isFinite(parsedMs) && parsedMs > 0 ? parsedMs : 0;
+          if (validMs > maxRecentCdbMs) {
+            maxRecentCdbMs = validMs;
           }
+          const nextSuffixMax = i + 1 < cdbRecentItems.length ? suffixMaxMs[i + 1] : 0;
+          suffixMaxMs[i] = Math.max(validMs, nextSuffixMax);
         }
         const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
         let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
-        for (const pkg of cdbRecentItems) {
+        for (let i = 0; i < cdbRecentItems.length; i++) {
+          const pkg = cdbRecentItems[i];
           const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-          if (Number.isFinite(parsedMs) && parsedMs > 0) {
+          const floorMs = suffixMaxMs[i];
+          if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs >= floorMs) {
             if (parsedMs < anchorMs) {
               anchorMs = parsedMs;
             } else {
               anchorMs -= 1_000;
               pkg.created_at = new Date(anchorMs).toISOString();
             }
+          } else if (floorMs > 0) {
+            const candidateMs = Math.min(
+              anchorMs - 1_000,
+              floorMs + (cdbRecentItems.length - i) * 1_000
+            );
+            anchorMs = Math.max(floorMs, candidateMs);
+            pkg.created_at = new Date(anchorMs).toISOString();
           } else {
             anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
             pkg.created_at = new Date(anchorMs).toISOString();
@@ -3949,14 +4188,13 @@ export class PackageService {
             const lhDl = pkg.luantihub_downloads || 0;
             const totalDl = Math.max(pkg.downloads || 0, cdbDl + lhDl);
             const rawCdbScore = typeof s.score === 'number' ? Math.round(s.score * 10) / 10 : (pkg.contentdb_score || 0);
-            const starScore = this.computeStarRatingFromData(s, pkg.score || 0);
-            const revCounts = s.reviews && typeof s.reviews === 'object'
-              ? {
-                  positive: Number(s.reviews.positive || 0),
-                  neutral: Number(s.reviews.neutral || 0),
-                  negative: Number(s.reviews.negative || 0)
-                }
-              : pkg.review_thread_counts;
+            const revCounts =
+              parseNonZeroReviewThreadCounts(s.reviews) ||
+              parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
+            const starScore = this.computeStarRatingFromData(
+              { ...s, review_thread_counts: revCounts },
+              revCounts ? (pkg.score || 0) : 0
+            );
 
             const existingMeta = this.hydratedMetaCache.get(pkg.id.toLowerCase()) || {};
             this.hydratedMetaCache.set(pkg.id.toLowerCase(), {
@@ -3964,7 +4202,7 @@ export class PackageService {
               contentdb_downloads: cdbDl,
               downloads: totalDl,
               contentdb_score: rawCdbScore,
-              score: starScore || existingMeta.score
+              score: starScore
             });
 
             return {
@@ -4139,7 +4377,7 @@ export class PackageService {
       };
       let existingTs = Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v22');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v23');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -4212,7 +4450,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v22',
+          'lh_boot_cache_v23',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -4379,7 +4617,8 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v18') ||
               sessionStorage.getItem('lh_boot_cache_v19') ||
               sessionStorage.getItem('lh_boot_cache_v20') ||
-              sessionStorage.getItem('lh_boot_cache_v21')
+              sessionStorage.getItem('lh_boot_cache_v21') ||
+              sessionStorage.getItem('lh_boot_cache_v22')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -4390,8 +4629,9 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v19');
               sessionStorage.removeItem('lh_boot_cache_v20');
               sessionStorage.removeItem('lh_boot_cache_v21');
+              sessionStorage.removeItem('lh_boot_cache_v22');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v22');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v23');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -4498,8 +4738,7 @@ export class PackageService {
                   item.contentdb_downloads = s.downloads;
                 }
                 if (typeof s.score === 'number') {
-                  item.score = Math.round(s.score * 10) / 10;
-                  item.contentdb_score = item.score;
+                  item.contentdb_score = Math.round(s.score * 10) / 10;
                 }
                 if (s.reviews && typeof s.reviews === 'object') {
                   item.reviews = s.reviews;
@@ -4661,9 +4900,22 @@ export class PackageService {
         const patch = batch.get(key);
         return patch ? { ...item, ...patch } : item;
       });
+    const syncRecentlyAdded = (list: LuantiPackage[]) =>
+      list.map(item => {
+        const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
+        const patch = batch.get(key);
+        if (!patch) return item;
+        const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
+        const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
+        const preservedCreatedAt =
+          Number.isFinite(itemMs) && Number.isFinite(patchMs)
+            ? (itemMs >= patchMs ? item.created_at : patch.created_at)
+            : (item.created_at || patch.created_at);
+        return { ...item, ...patch, created_at: preservedCreatedAt };
+      });
     this._serverTop10Today.update(syncTop10);
     this._serverTop10Week.update(syncTop10);
-    this._serverRecentlyAdded.update(syncTop10);
+    this._serverRecentlyAdded.update(syncRecentlyAdded);
   }
 
   private queueCatalogPatch(targetIdLower: string, patch: Partial<LuantiPackage>, flushImmediately = false): void {
@@ -4894,7 +5146,7 @@ export class PackageService {
             parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
           const resolvedScore = this.computeStarRatingFromData(
             { ...h, review_thread_counts: resolvedRevCounts },
-            pkg.score || 0
+            resolvedRevCounts ? (pkg.score || 0) : 0
           );
 
           const isOfficialPkg = pkg.sources?.includes('official') || pkg.source === 'official';
@@ -4927,7 +5179,11 @@ export class PackageService {
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
-            ...(resolvedScore > 0 ? { score: resolvedScore } : {}),
+            ...(resolvedScore > 0
+              ? { score: resolvedScore }
+              : wasRatingActuallyChecked && !resolvedRevCounts
+                ? { score: 0 }
+                : {}),
             ...(resolvedRevCounts ? { review_thread_counts: resolvedRevCounts } : {}),
             ...(wasRatingActuallyChecked ? { rating_checked: true } : {}),
             ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
@@ -4989,9 +5245,22 @@ export class PackageService {
                 const patch = updatesByLowerId.get(lowerKey);
                 return patch ? { ...item, ...patch } : item;
               });
+            const patchRecentlyAddedList = (list: LuantiPackage[]) =>
+              list.map(item => {
+                const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
+                const patch = updatesByLowerId.get(lowerKey);
+                if (!patch) return item;
+                const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
+                const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
+                const preservedCreatedAt =
+                  Number.isFinite(itemMs) && Number.isFinite(patchMs)
+                    ? (itemMs >= patchMs ? item.created_at : patch.created_at)
+                    : (item.created_at || patch.created_at);
+                return { ...item, ...patch, created_at: preservedCreatedAt };
+              });
             this._serverTop10Today.update(patchTopList);
             this._serverTop10Week.update(patchTopList);
-            this._serverRecentlyAdded.update(patchTopList);
+            this._serverRecentlyAdded.update(patchRecentlyAddedList);
           } else {
             for (const [lowerKey, patch] of updatesByLowerId.entries()) {
               const existing = this.pendingCatalogPatches.get(lowerKey);
@@ -5403,8 +5672,10 @@ export class PackageService {
         matchedKeys.add(idLower);
         matchedKeys.add(nameLower);
 
-        const authorKey = item.author.toLowerCase();
-        authorWeights.set(authorKey, (authorWeights.get(authorKey) || 0) + weight);
+        if (!this.isOwnedByCurrentUser(item)) {
+          const authorKey = item.author.toLowerCase();
+          authorWeights.set(authorKey, (authorWeights.get(authorKey) || 0) + weight);
+        }
 
         typeWeights[item.type] = (typeWeights[item.type] || 0) + weight;
         totalTypeWeight += weight;
@@ -6064,7 +6335,17 @@ export class PackageService {
         return results;
       }
 
-      if (!pkg?.name || !pkg?.author || this.edgeApiAvailable) return results;
+      if (
+        !pkg?.name ||
+        !pkg?.author ||
+        this.edgeApiAvailable ||
+        (pkg.source === 'official' &&
+          !pkg.sources?.includes('git') &&
+          !pkg.repo_url &&
+          this.isPackageDeepHydrated(pkg))
+      ) {
+        return results;
+      }
       const targetName = pkg.name.toLowerCase();
       const targetAuthor = pkg.author.toLowerCase();
 
@@ -7336,13 +7617,17 @@ export class PackageService {
           deriveReviewThreadCountsFromList(normalizedBundledReviews) ||
           parseNonZeroReviewThreadCounts(pkg.review_thread_counts);
 
+        const hasVerifiedZeroReviews =
+          !reviewThreadCounts &&
+          Array.isArray(normalizedBundledReviews) &&
+          normalizedBundledReviews.length === 0;
         const resolvedScore = this.computeStarRatingFromData(
           {
             ...data,
             review_thread_counts: reviewThreadCounts,
             reviews_list: normalizedBundledReviews
           },
-          pkg.score || 0
+          hasVerifiedZeroReviews ? 0 : (pkg.score || 0)
         );
 
         const rawTags = Array.isArray(data.tags)
@@ -7460,6 +7745,13 @@ export class PackageService {
           this.setBoundedCache(this.readmeCache, cacheKey, readmeText, 40);
         }
 
+        const resolvedCreatedAt =
+          [data.approved_at, data.created_at, pkg.created_at]
+            .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
+            .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ||
+          data.created_at ||
+          pkg.created_at;
+
         const updatedFields: Partial<LuantiPackage> = {
           ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
           ...(data.title ? { title: String(data.title) } : {}),
@@ -7502,7 +7794,7 @@ export class PackageService {
           review_thread_counts: reviewThreadCounts,
           supports_all_games: typeof data.supports_all_games === 'boolean' ? data.supports_all_games : pkg.supports_all_games,
           game_support: gameSupport.length > 0 ? gameSupport : pkg.game_support,
-          created_at: data.created_at || pkg.created_at,
+          created_at: resolvedCreatedAt,
           updated_at: data.updated_at || pkg.updated_at,
           min_minetest_version: minVersion,
           max_minetest_version: data.max_minetest_version || pkg.max_minetest_version,
@@ -7528,7 +7820,7 @@ export class PackageService {
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
             contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
             downloads: resolvedDownloads || prevMeta.downloads,
-            score: resolvedScore || prevMeta.score || 0,
+            score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
             ...(reviewThreadCounts || prevMeta.review_thread_counts
               ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
               : {}),
@@ -7620,6 +7912,15 @@ export class PackageService {
     }
     if (this.readmeCache.has(cacheKey)) {
       return this.readmeCache.get(cacheKey) || undefined;
+    }
+    if (
+      !pkg.repo_url &&
+      pkg.source === 'official' &&
+      !pkg.sources?.includes('git') &&
+      this.isPackageDeepHydrated(pkg)
+    ) {
+      this.setBoundedCache(this.readmeCache, cacheKey, null, 40);
+      return undefined;
     }
     const existingInFlight = this.readmePromiseCache.get(cacheKey);
     if (existingInFlight) {
@@ -8241,8 +8542,10 @@ export class PackageService {
     const encAuthor = encodeURIComponent(pkg.author);
     const encName = encodeURIComponent(pkg.name);
     const branch = pkg.default_branch || 'main';
+    const hasValidRepo =
+      Boolean(this.normalizeGitRepoUrl(pkg.repo_url)) && pkg.git_repo_status !== 'broken_404';
 
-    if (this.edgeApiAvailable) {
+    if (this.edgeApiAvailable && hasValidRepo) {
       try {
         const res = await fetch(
           `/api/packages/${encAuthor}/${encName}/releases?notes=1&head=${encodeURIComponent(cleanHead)}&base=${encodeURIComponent(cleanBase)}&branch=${encodeURIComponent(branch)}&until=${encodeURIComponent(cleanUntil)}&repo=${encodeURIComponent(pkg.repo_url || '')}`,
@@ -8357,11 +8660,16 @@ export class PackageService {
       extractTokens(`${pkg.title || ''} ${pkg.name || ''} ${pkg.short_desc || ''}`)
     );
 
+    const hideWipDeprecated = this.settingsService.hideWipDeprecated();
+    const hideWarnings = this.settingsService.hideContentWarnings();
     const scored: Array<{ item: LuantiPackage; score: number; sameAuthor: boolean }> = [];
 
     for (const cand of catalog) {
       if (!cand || cand.status === 'delisted' || cand.status === 'flagged') continue;
       if (this.isPackageDeprecated(cand)) continue;
+      if (this.isOwnedByCurrentUser(cand)) continue;
+      if (hideWipDeprecated && cand.dev_state === 'WIP') continue;
+      if (hideWarnings && Array.isArray(cand.content_warnings) && cand.content_warnings.length > 0) continue;
       const candId = (cand.id || `${cand.author}/${cand.name}`).toLowerCase();
       if (candId === selfId) continue;
       if ((cand.author || '').toLowerCase() === selfAuthor && (cand.name || '').toLowerCase() === selfName) {

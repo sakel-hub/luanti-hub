@@ -67,6 +67,7 @@ const SEEN_PROMOTIONS_KEY = 'lh_seen_promotions_v1';
 const SEEN_BLOG_POSTS_KEY = 'lh_seen_blog_posts_v1';
 const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
 const PACKAGE_UPDATE_COOLDOWN_MS = NOTIFICATION_PACKAGE_COOLDOWN_MS;
+const RECENT_DISCOVERIES_KEY = 'lh_recent_discoveries_v1';
 const BASELINE_SEEDED_AT_KEY = 'lh_notif_baseline_seeded_at_v1';
 const LAST_BOOT_FETCH_AT_KEY = 'lh_last_boot_fetch_at_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
@@ -408,6 +409,9 @@ export class PwaService {
   readonly wcoTitlebarRect = signal<{ x: number; y: number; width: number; height: number } | null>(null);
   readonly canNavigateBack = signal<boolean>(false);
   readonly canNavigateForward = signal<boolean>(false);
+  readonly recentDiscoveredPackages = signal<Record<string, number>>(
+    this.readRecentDiscoveriesFromStorage()
+  );
 
   private deferredPrompt: any = null;
   private messageClearTimer: any = null;
@@ -459,6 +463,57 @@ export class PwaService {
     });
   }
 
+  private readRecentDiscoveriesFromStorage(): Record<string, number> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(RECENT_DISCOVERIES_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        const lower = String(k || '').trim().toLowerCase();
+        const ts = Number(v);
+        if (lower && Number.isFinite(ts) && ts > 0) {
+          out[lower] = ts;
+        }
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
+  private recordRecentDiscoveredPackages(entries: Record<string, number>): void {
+    const incomingKeys = Object.keys(entries || {});
+    if (incomingKeys.length === 0) return;
+    const current = { ...this.readRecentDiscoveriesFromStorage(), ...this.recentDiscoveredPackages() };
+    let changed = false;
+    for (const [rawKey, rawTs] of Object.entries(entries)) {
+      const lower = String(rawKey || '').trim().toLowerCase();
+      const ts = Number(rawTs);
+      if (!lower || !Number.isFinite(ts) || ts <= 0) continue;
+      if (!current[lower] || ts > current[lower]) {
+        current[lower] = ts;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    const trimmed = Object.fromEntries(
+      Object.entries(current)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 100)
+    );
+    this.recentDiscoveredPackages.set(trimmed);
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(RECENT_DISCOVERIES_KEY, JSON.stringify(trimmed));
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+  }
+
   private readLocalNotificationState(customPrefs?: Record<string, any>): NotificationPersistenceState {
     const parseJsonSafe = (key: string, fallback: any) => {
       try {
@@ -481,6 +536,7 @@ export class PwaService {
     const seenReviews =
       parseJsonSafe(SEEN_REVIEWS_KEY, null) ?? parseJsonSafe(LEGACY_SEEN_REVIEWS_KEY, null);
     const packageUpdateCooldown = parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {});
+    const recentDiscoveredPackages = this.readRecentDiscoveriesFromStorage();
     const baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
     const lastBootFetchAt = Number(localStorage.getItem(LAST_BOOT_FETCH_AT_KEY) || 0) || 0;
     return {
@@ -494,6 +550,7 @@ export class PwaService {
       seenReviewIds: seenReviews,
       packageUpdateCooldown,
       packageUpdateCooldowns: packageUpdateCooldown,
+      recentDiscoveredPackages,
       ...(this.bootManifestSignature ? { bootManifestSignature: this.bootManifestSignature } : {}),
       ...(baselineSeededAt > 0 ? { baselineSeededAt } : {}),
       ...(lastBootFetchAt > 0 ? { lastBootFetchAt } : {})
@@ -536,7 +593,8 @@ export class PwaService {
             seenReviews: merged.seenReviews ?? null,
             seenReviewIds: merged.seenReviewIds ?? null,
             packageUpdateCooldown: merged.packageUpdateCooldown || {},
-            packageUpdateCooldowns: merged.packageUpdateCooldowns || {}
+            packageUpdateCooldowns: merged.packageUpdateCooldowns || {},
+            recentDiscoveredPackages: merged.recentDiscoveredPackages || {}
           };
           if (merged.bootManifestSignature) {
             entries['bootManifestSignature'] = merged.bootManifestSignature;
@@ -645,6 +703,14 @@ export class PwaService {
             JSON.stringify(merged.packageUpdateCooldowns)
           );
         } catch {}
+      }
+
+      if (
+        merged.recentDiscoveredPackages &&
+        typeof merged.recentDiscoveredPackages === 'object' &&
+        Object.keys(merged.recentDiscoveredPackages).length > 0
+      ) {
+        this.recordRecentDiscoveredPackages(merged.recentDiscoveredPackages);
       }
 
       if (merged.baselineSeededAt && merged.baselineSeededAt > 0) {
@@ -1865,6 +1931,19 @@ export class PwaService {
     }
 
     if (newlyDiscovered.length === 0) return 0;
+
+    const discoveryUpdates: Record<string, number> = {};
+    for (const item of newlyDiscovered) {
+      const lowerId = String(item.resolvedId || '').toLowerCase();
+      if (lowerId) {
+        discoveryUpdates[lowerId] = Math.max(
+          Number(discoveryUpdates[lowerId] || 0),
+          item.createdMs || nowMs
+        );
+      }
+    }
+    this.recordRecentDiscoveredPackages(discoveryUpdates);
+    this.syncNotificationStateToIndexedDb().catch(() => {});
 
     // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
     for (const item of newlyDiscovered.slice(0, 3)) {

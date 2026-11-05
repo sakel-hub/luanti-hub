@@ -443,7 +443,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     'en';
   const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
   const langKeySegment = normalizedLang && normalizedLang !== 'en' ? `${normalizedLang}/` : '';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v19/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${langKeySegment}${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v20/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${langKeySegment}${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -958,6 +958,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           if (fastSources.length === 0) fastSources.push('official');
 
           const newestFastReleaseDate = fastBundledReleases[0]?.released_at;
+          const resolvedFastCreatedAt = [fastCdbDetail?.approved_at, fastCdbDetail?.created_at, d1Pkg.created_at]
+            .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
+            .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || d1Pkg.created_at || fastCdbDetail?.created_at || undefined;
           const resolvedFastUpdatedAt =
             newestFastReleaseDate &&
             (!d1Pkg.updated_at || new Date(newestFastReleaseDate).getTime() > new Date(d1Pkg.updated_at).getTime())
@@ -1045,7 +1048,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             review_thread_counts: parsedRevCounts,
             supports_all_games: Boolean(d1Pkg.supports_all_games || fastCdbDetail?.supports_all_games) || undefined,
             game_support: fastMergedGameSupport.length > 0 ? fastMergedGameSupport : undefined,
-            created_at: d1Pkg.created_at || fastCdbDetail?.created_at || undefined,
+            created_at: resolvedFastCreatedAt,
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
             tags: fastCombinedTags.length > 0 ? fastCombinedTags : [d1Pkg.type || 'mod'],
@@ -1054,6 +1057,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             downloads: totalDl,
             favorites_count: d1FavoritesCount,
             score: fastScore,
+            contentdb_score: Number(fastCdbDetail?.score || 0) || undefined,
             luantihub_score_downloads: fastFrecency.luantihub_score_downloads,
             contentdb_score_downloads: fastFrecency.contentdb_score_downloads,
             score_downloads: fastFrecency.score_downloads,
@@ -1674,7 +1678,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const hasResolvedVideo = Boolean(upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url);
   const hasStoredGitScreenshot =
     isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg?.banner_url);
-  const needsGitProbe = !resolvedLicense || ((!hasResolvedVideo || !hasStoredGitScreenshot) && Boolean(repoUrl));
+  const needsGitProbe = Boolean(repoUrl) && (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot);
   if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
@@ -1952,7 +1956,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
-  const createdAt = upstreamData.created_at || forClientData?.created_at || d1Pkg?.created_at || undefined;
+  const createdAt =
+    [upstreamData.approved_at, forClientData?.approved_at, upstreamData.created_at, forClientData?.created_at, d1Pkg?.created_at]
+      .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ||
+    upstreamData.created_at ||
+    forClientData?.created_at ||
+    d1Pkg?.created_at ||
+    undefined;
   const candidateUpdatedAt =
     upstreamData.updated_at ||
     forClientData?.updated_at ||
@@ -2015,9 +2026,11 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const newRevCountsJson =
       !d1ValidRevCounts && reviewThreadCounts ? JSON.stringify(reviewThreadCounts) : null;
     const newScoreVal =
-      !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
-        ? resolvedScore
-        : null;
+      resolvedScore === 0 && Number(d1Pkg.score) > 0
+        ? 0
+        : !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
+          ? resolvedScore
+          : null;
     const newTagsJson = mergedTags.length > d1Tags.length ? JSON.stringify(mergedTags) : null;
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
@@ -2168,6 +2181,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     downloads: totalDownloads,
     favorites_count: d1FavoritesCount,
     score: resolvedScore,
+    contentdb_score: Number(upstreamData.score || 0) || undefined,
     luantihub_score_downloads: enrichedFrecency.luantihub_score_downloads,
     contentdb_score_downloads: enrichedFrecency.contentdb_score_downloads,
     score_downloads: enrichedFrecency.score_downloads,
