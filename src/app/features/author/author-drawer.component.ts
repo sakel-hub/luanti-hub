@@ -21,6 +21,12 @@ import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import {
+  DrawerPaginationComponent,
+  computeDrawerTotalPages,
+  filterAndSortDrawerPackages,
+  sliceDrawerPage
+} from '../../shared/components/drawer-pagination.component';
+import {
   LucideX,
   LucideCheck,
   LucideStar,
@@ -32,13 +38,9 @@ import {
   LucideUser,
   LucideSearch,
   LucideSlidersHorizontal,
-  LucideChevronLeft,
-  LucideChevronRight,
   LucideTag,
   LucideTrendingUp
 } from '@lucide/angular';
-
-const AUTHOR_PACKAGES_PAGE_SIZE = 8;
 
 @Component({
   selector: 'app-author-drawer',
@@ -52,6 +54,7 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
     TooltipDirective,
     ImgFallbackDirective,
     PackageBadgesComponent,
+    DrawerPaginationComponent,
     LucideX,
     LucideCheck,
     LucideStar,
@@ -63,8 +66,6 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
     LucideUser,
     LucideSearch,
     LucideSlidersHorizontal,
-    LucideChevronLeft,
-    LucideChevronRight,
     LucideTag,
     LucideTrendingUp
   ],
@@ -492,32 +493,12 @@ const AUTHOR_PACKAGES_PAGE_SIZE = 8;
               </div>
 
               <!-- Pagination Bar (8 per page) -->
-              @if (totalPages() > 1) {
-                <div class="pt-2 flex items-center justify-between gap-2 text-xs">
-                  <button
-                    type="button"
-                    (click)="setPage(currentPage() - 1)"
-                    [disabled]="currentPage() <= 1"
-                    class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 font-semibold flex items-center gap-1 transition cursor-pointer">
-                    <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
-                    <span>{{ 'profile.prevPage' | translate }}</span>
-                  </button>
-
-                  <span class="text-slate-400 font-mono text-[11px]">
-                    {{ 'profile.pageLabel' | translate }} {{ currentPage() }} / {{ totalPages() }}
-                    ({{ filteredAuthorPackages().length }})
-                  </span>
-
-                  <button
-                    type="button"
-                    (click)="setPage(currentPage() + 1)"
-                    [disabled]="currentPage() >= totalPages()"
-                    class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white disabled:opacity-40 font-semibold flex items-center gap-1 transition cursor-pointer">
-                    <span>{{ 'profile.nextPage' | translate }}</span>
-                    <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
-                  </button>
-                </div>
-              }
+              <app-drawer-pagination
+                [currentPage]="currentPage()"
+                [totalPages]="totalPages()"
+                [totalItems]="filteredAuthorPackages().length"
+                (pageChange)="setPage($event)">
+              </app-drawer-pagination>
             }
           </div>
 
@@ -628,56 +609,22 @@ export class AuthorDrawerComponent {
       .slice(0, 6);
   });
 
-  readonly filteredAuthorPackages = computed<LuantiPackage[]>(() => {
-    const cat = this.selectedCategory();
-    const tag = this.selectedTag().toLowerCase();
-    const q = this.searchTerm().trim().toLowerCase();
-    const sort = this.sortBy();
-
-    const filtered = this.authorPackages().filter(pkg => {
-      if (cat === 'git') {
-        if (!pkg.sources?.includes('git') && pkg.source !== 'git') return false;
-      } else if (cat !== 'all' && pkg.type !== cat) {
-        return false;
-      }
-
-      if (tag !== 'all') {
-        const hasTag = (pkg.tags || []).some(t => t.toLowerCase() === tag);
-        if (!hasTag) return false;
-      }
-
-      if (q) {
-        const hay = `${pkg.title} ${pkg.name} ${pkg.short_desc}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-
-    return [...filtered].sort((a, b) => {
-      if (sort === 'score') {
-        return (b.score || 0) - (a.score || 0) || (b.downloads || 0) - (a.downloads || 0);
-      }
-      if (sort === 'updated') {
-        const tB = b.updated_at || b.created_at ? new Date(b.updated_at || b.created_at!).getTime() || 0 : Number(b.release_id || 0);
-        const tA = a.updated_at || a.created_at ? new Date(a.updated_at || a.created_at!).getTime() || 0 : Number(a.release_id || 0);
-        return tB - tA || (b.downloads || 0) - (a.downloads || 0);
-      }
-      if (sort === 'title') {
-        return (a.title || a.name).localeCompare(b.title || b.name);
-      }
-      return (b.downloads || 0) - (a.downloads || 0);
-    });
-  });
-
-  readonly totalPages = computed(() =>
-    Math.max(1, Math.ceil(this.filteredAuthorPackages().length / AUTHOR_PACKAGES_PAGE_SIZE))
+  readonly filteredAuthorPackages = computed<LuantiPackage[]>(() =>
+    filterAndSortDrawerPackages(this.authorPackages(), {
+      category: this.selectedCategory(),
+      tag: this.selectedTag(),
+      searchTerm: this.searchTerm(),
+      sortBy: this.sortBy()
+    })
   );
 
-  readonly pagedAuthorPackages = computed<LuantiPackage[]>(() => {
-    const page = Math.min(Math.max(1, this.currentPage()), this.totalPages());
-    const start = (page - 1) * AUTHOR_PACKAGES_PAGE_SIZE;
-    return this.filteredAuthorPackages().slice(start, start + AUTHOR_PACKAGES_PAGE_SIZE);
-  });
+  readonly totalPages = computed(() =>
+    computeDrawerTotalPages(this.filteredAuthorPackages().length)
+  );
+
+  readonly pagedAuthorPackages = computed<LuantiPackage[]>(() =>
+    sliceDrawerPage(this.filteredAuthorPackages(), this.currentPage())
+  );
 
   selectCategory(cat: 'all' | 'game' | 'mod' | 'txp' | 'git'): void {
     this.selectedCategory.set(cat);

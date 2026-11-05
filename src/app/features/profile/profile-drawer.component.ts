@@ -1,4 +1,14 @@
-import { Component, ChangeDetectionStrategy, inject, signal, computed, OnInit, effect } from '@angular/core';
+import {
+  Component,
+  ChangeDetectionStrategy,
+  inject,
+  signal,
+  computed,
+  OnInit,
+  effect,
+  ElementRef,
+  ViewChild
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
@@ -14,13 +24,21 @@ import {
   PackageType,
   PromotionLocaleOverride,
   PromoRowIcon,
-  PromoRowSortOption
+  PromoRowSortOption,
+  SortOption
 } from '../../core/models/package.model';
 import { LocaleId } from '../../core/i18n/translation.types';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
+import {
+  DrawerPackageCategoryFilter,
+  DrawerPaginationComponent,
+  computeDrawerTotalPages,
+  filterAndSortDrawerPackages,
+  sliceDrawerPage
+} from '../../shared/components/drawer-pagination.component';
 import { PROMO_ROW_ICON_OPTIONS, ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideX,
@@ -37,7 +55,7 @@ import {
   LucideTag,
   LucideRefreshCw,
   LucideMessageSquare,
-  LucideChevronLeft,
+  LucideSlidersHorizontal,
   LucideChevronRight,
   LucideChevronDown,
   LucideChevronUp,
@@ -56,6 +74,7 @@ import {
     TranslatePipe,
     ImgFallbackDirective,
     PackageBadgesComponent,
+    DrawerPaginationComponent,
     ThemeIconComponent,
     LucideX,
     LucideCheck,
@@ -71,7 +90,7 @@ import {
     LucideTag,
     LucideRefreshCw,
     LucideMessageSquare,
-    LucideChevronLeft,
+    LucideSlidersHorizontal,
     LucideChevronRight,
     LucideChevronDown,
     LucideChevronUp,
@@ -215,9 +234,9 @@ import {
 
           <!-- TAB 1: MY PACKAGES -->
           @if (activeTab() === 'packages') {
-            <div class="space-y-4 flex-1 luanti-tab-enter">
+            <div #myPackagesSectionTop class="space-y-4 flex-1 luanti-tab-enter">
               <!-- User's Published Packages -->
-              <div class="space-y-2.5">
+              <div class="space-y-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
                   <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
                     {{ 'profile.myPackages' | translate }} ({{ userPackages().length }})
@@ -253,119 +272,220 @@ import {
                     </button>
                   </div>
                 } @else {
-                  <div class="space-y-2">
-                    @for (pkg of userPackages(); track pkg.id) {
-                      <div class="p-3 rounded-2xl glass-panel space-y-2.5 text-xs hover:border-sky-400/40 transition">
-                        <div class="flex items-center justify-between gap-3">
-                          <button
-                            type="button"
-                            (click)="openPackage(pkg)"
-                            class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
-                            <img [src]="pkg.banner || pkg.thumbnail || 'logo.svg'" [fallbackThumbnail]="pkg.thumbnail || ''" appImgFallback [alt]="pkg.title" loading="lazy" decoding="async" class="w-10 h-10 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
-                            <div class="min-w-0 flex-1">
-                              <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
-                              <div class="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 flex-wrap">
-                                <span>{{ (pkg.downloads || 0) | compactNumber }} dl</span>
-                                <span>•</span>
-                                <app-package-badges
-                                  [package]="pkg"
-                                  [compact]="true"
-                                  [showOfficial]="false"
-                                  [showFeatured]="false">
-                                </app-package-badges>
+                  <!-- Category Filter Pills + Sort Controls (Matching Public Author Profile) -->
+                  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1 border-t border-white/10">
+                    <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                      <button
+                        type="button"
+                        (click)="selectPackageCategory('all')"
+                        [class]="selectedPackageCategory() === 'all' ? 'bg-sky-500/25 text-sky-300 border-sky-400/50' : 'glass-pill text-slate-400 hover:text-white'"
+                        class="px-2.5 py-1 rounded-xl border text-[11px] font-bold whitespace-nowrap flex-shrink-0 transition cursor-pointer">
+                        {{ 'header.filterAll' | translate }} ({{ userPackages().length }})
+                      </button>
+                      @if (userGameCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="selectPackageCategory('game')"
+                          [class]="selectedPackageCategory() === 'game' ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/50' : 'glass-pill text-slate-400 hover:text-white'"
+                          class="px-2.5 py-1 rounded-xl border text-[11px] font-bold whitespace-nowrap flex-shrink-0 transition cursor-pointer">
+                          {{ 'header.filterGames' | translate }} ({{ userGameCount() }})
+                        </button>
+                      }
+                      @if (userModCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="selectPackageCategory('mod')"
+                          [class]="selectedPackageCategory() === 'mod' ? 'bg-sky-500/25 text-sky-300 border-sky-400/50' : 'glass-pill text-slate-400 hover:text-white'"
+                          class="px-2.5 py-1 rounded-xl border text-[11px] font-bold whitespace-nowrap flex-shrink-0 transition cursor-pointer">
+                          {{ 'header.filterMods' | translate }} ({{ userModCount() }})
+                        </button>
+                      }
+                      @if (userTxpCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="selectPackageCategory('txp')"
+                          [class]="selectedPackageCategory() === 'txp' ? 'bg-purple-500/25 text-purple-300 border-purple-400/50' : 'glass-pill text-slate-400 hover:text-white'"
+                          class="px-2.5 py-1 rounded-xl border text-[11px] font-bold whitespace-nowrap flex-shrink-0 transition cursor-pointer">
+                          {{ 'header.filterTxp' | translate }} ({{ userTxpCount() }})
+                        </button>
+                      }
+                      @if (userGitCount() > 0) {
+                        <button
+                          type="button"
+                          (click)="selectPackageCategory('git')"
+                          [class]="selectedPackageCategory() === 'git' ? 'bg-amber-500/25 text-amber-300 border-amber-400/50' : 'glass-pill text-slate-400 hover:text-white'"
+                          class="px-2.5 py-1 rounded-xl border text-[11px] font-bold whitespace-nowrap flex-shrink-0 transition cursor-pointer">
+                          {{ 'header.filterGit' | translate }} ({{ userGitCount() }})
+                        </button>
+                      }
+                    </div>
+
+                    <div class="flex items-center gap-1.5 glass-panel rounded-xl px-2.5 py-1 text-[11px] self-start sm:self-auto flex-shrink-0">
+                      <svg lucideSlidersHorizontal class="w-3 h-3 text-sky-400"></svg>
+                      <select
+                        [ngModel]="packagesSortBy()"
+                        (ngModelChange)="onPackagesSortChange($event)"
+                        aria-label="Sort my packages"
+                        class="bg-transparent text-white font-bold focus:outline-none cursor-pointer">
+                        <option value="downloads" class="bg-slate-900 text-white">{{ 'catalog.sortDownloads' | translate }}</option>
+                        <option value="score" class="bg-slate-900 text-white">{{ 'catalog.sortScore' | translate }}</option>
+                        <option value="updated" class="bg-slate-900 text-white">{{ 'catalog.sortUpdated' | translate }}</option>
+                        <option value="title" class="bg-slate-900 text-white">{{ 'catalog.sortTitle' | translate }}</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <!-- Inline Quick Search when user has > 5 packages -->
+                  @if (userPackages().length > 5) {
+                    <div>
+                      <input
+                        type="text"
+                        [ngModel]="packagesSearchTerm()"
+                        (ngModelChange)="onPackagesSearchInput($event)"
+                        [placeholder]="'author.searchAuthorPackages' | translate"
+                        class="w-full glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none"
+                      />
+                    </div>
+                  }
+
+                  @if (filteredUserPackages().length === 0) {
+                    <div class="p-6 rounded-2xl glass-panel text-center space-y-2">
+                      <p class="text-xs text-slate-400">{{ 'common.noResults' | translate }}</p>
+                    </div>
+                  } @else {
+                    <div class="space-y-2">
+                      @for (pkg of pagedUserPackages(); track pkg.id) {
+                        <div class="p-3 rounded-2xl glass-panel space-y-2.5 text-xs hover:border-sky-400/40 transition">
+                          <div class="flex items-center justify-between gap-3">
+                            <button
+                              type="button"
+                              (click)="openPackage(pkg)"
+                              class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
+                              <img [src]="pkg.banner || pkg.thumbnail || 'logo.svg'" [fallbackThumbnail]="pkg.thumbnail || ''" appImgFallback [alt]="pkg.title" loading="lazy" decoding="async" class="w-11 h-11 rounded-xl object-cover bg-slate-900 flex-shrink-0 border border-white/10" />
+                              <div class="min-w-0 flex-1">
+                                <div class="flex items-center gap-1.5">
+                                  <h4 class="font-bold text-white group-hover:text-sky-400 transition truncate">{{ pkg.title }}</h4>
+                                  @if (pkg.score > 0) {
+                                    <span class="flex items-center gap-0.5 text-[10px] font-bold text-amber-400 flex-shrink-0">
+                                      <svg lucideStar class="w-2.5 h-2.5 fill-amber-400 text-amber-400" [style.fill]="'#fbbf24'" [color]="'#fbbf24'"></svg>
+                                      {{ pkg.score }}
+                                    </span>
+                                  }
+                                </div>
+                                <p class="text-[11px] text-slate-400 truncate mt-0.5">
+                                  {{ pkg.short_desc || pkg.name }}
+                                </p>
+                                <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1 flex-wrap">
+                                  <app-package-badges
+                                    [package]="pkg"
+                                    [compact]="true"
+                                    [showOfficial]="false"
+                                    [showFeatured]="false">
+                                  </app-package-badges>
+                                  <span>•</span>
+                                  <span class="font-mono">{{ (pkg.downloads || 0) | compactNumber }} dl</span>
+                                  @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
+                                    <span class="glass-badge glass-badge-amber font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
+                                      {{ pkg.status }}
+                                    </span>
+                                  }
+                                </div>
+                              </div>
+                            </button>
+
+                            <div class="flex items-center gap-1.5 flex-shrink-0">
+                              @if (authService.canManagePackage(pkg)) {
+                                <button
+                                  type="button"
+                                  (click)="onOpenPackageAnalytics(pkg)"
+                                  class="p-2 rounded-xl glass-icon-btn text-emerald-400 hover:text-white transition cursor-pointer"
+                                  [attr.title]="'modal.tabAnalytics' | translate"
+                                  [attr.aria-label]="'modal.tabAnalytics' | translate">
+                                  <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  (click)="openPackageAndEditTags(pkg)"
+                                  class="p-2 rounded-xl glass-icon-btn text-sky-400 hover:text-white transition cursor-pointer"
+                                  title="Edit Tags"
+                                  aria-label="Edit package tags">
+                                  <svg lucideTag class="w-3.5 h-3.5"></svg>
+                                </button>
+                              }
+                              <button
+                                type="button"
+                                (click)="packageService.downloadPackage(pkg)"
+                                class="p-2 rounded-xl glass-icon-btn text-slate-200 hover:text-white transition cursor-pointer"
+                                [attr.aria-label]="'card.downloadZip' | translate">
+                                <svg lucideDownload class="w-3.5 h-3.5"></svg>
+                              </button>
+                              @if (authService.canManagePackage(pkg)) {
+                                <button
+                                  type="button"
+                                  (click)="toggleConfirmManagePackage(pkg.id)"
+                                  class="p-2 rounded-xl glass-icon-btn text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                                  title="Delist or remove package"
+                                  aria-label="Delist or remove package">
+                                  <svg lucideTrash class="w-3.5 h-3.5"></svg>
+                                </button>
+                              }
+                            </div>
+                          </div>
+
+                          @if (confirmingPackageId() === pkg.id) {
+                            <div class="pt-2.5 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                              <span class="text-slate-300 font-medium">
+                                Manage <strong class="text-white font-mono">{{ pkg.id }}</strong>:
+                              </span>
+                              <div class="flex items-center gap-1.5 flex-wrap justify-end">
+                                <button
+                                  type="button"
+                                  (click)="confirmingPackageId.set(null)"
+                                  [disabled]="managingPackageId() === pkg.id"
+                                  class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
+                                  {{ 'profile.cancel' | translate }}
+                                </button>
                                 @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
-                                  <span class="glass-badge glass-badge-amber font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
-                                    {{ pkg.status }}
-                                  </span>
+                                  <button
+                                    type="button"
+                                    (click)="onAuthorManagePackage(pkg, 'restore')"
+                                    [disabled]="managingPackageId() === pkg.id"
+                                    class="px-2.5 py-1 rounded-lg glass-btn-emerald font-bold text-white cursor-pointer">
+                                    {{ 'modal.killSwitchRestore' | translate }}
+                                  </button>
+                                } @else {
+                                  <button
+                                    type="button"
+                                    (click)="onAuthorManagePackage(pkg, 'delist')"
+                                    [disabled]="managingPackageId() === pkg.id"
+                                    class="px-2.5 py-1 rounded-lg glass-btn-amber font-bold cursor-pointer">
+                                    {{ 'modal.killSwitchDelist' | translate }}
+                                  </button>
+                                }
+                                @if (pkg.source === 'git' || (pkg.provider && pkg.provider !== 'contentdb')) {
+                                  <button
+                                    type="button"
+                                    (click)="onAuthorManagePackage(pkg, 'remove')"
+                                    [disabled]="managingPackageId() === pkg.id"
+                                    class="px-2.5 py-1 rounded-lg glass-btn-rose font-black text-white cursor-pointer">
+                                    Remove Permanently
+                                  </button>
                                 }
                               </div>
                             </div>
-                          </button>
-
-                          <div class="flex items-center gap-1.5 flex-shrink-0">
-                            @if (authService.canManagePackage(pkg)) {
-                              <button
-                                type="button"
-                                (click)="onOpenPackageAnalytics(pkg)"
-                                class="p-2 rounded-xl glass-icon-btn text-emerald-400 hover:text-white transition cursor-pointer"
-                                [attr.title]="'modal.tabAnalytics' | translate"
-                                [attr.aria-label]="'modal.tabAnalytics' | translate">
-                                <svg lucideTrendingUp class="w-3.5 h-3.5"></svg>
-                              </button>
-                              <button
-                                type="button"
-                                (click)="openPackageAndEditTags(pkg)"
-                                class="p-2 rounded-xl glass-icon-btn text-sky-400 hover:text-white transition cursor-pointer"
-                                title="Edit Tags"
-                                aria-label="Edit package tags">
-                                <svg lucideTag class="w-3.5 h-3.5"></svg>
-                              </button>
-                            }
-                            <button
-                              type="button"
-                              (click)="packageService.downloadPackage(pkg)"
-                              class="p-2 rounded-xl glass-icon-btn text-slate-200 hover:text-white transition cursor-pointer"
-                              [attr.aria-label]="'card.downloadZip' | translate">
-                              <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                            </button>
-                            @if (authService.canManagePackage(pkg)) {
-                              <button
-                                type="button"
-                                (click)="toggleConfirmManagePackage(pkg.id)"
-                                class="p-2 rounded-xl glass-icon-btn text-slate-400 hover:text-rose-400 transition cursor-pointer"
-                                title="Delist or remove package"
-                                aria-label="Delist or remove package">
-                                <svg lucideTrash class="w-3.5 h-3.5"></svg>
-                              </button>
-                            }
-                          </div>
+                          }
                         </div>
+                      }
+                    </div>
 
-                        @if (confirmingPackageId() === pkg.id) {
-                          <div class="pt-2.5 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
-                            <span class="text-slate-300 font-medium">
-                              Manage <strong class="text-white font-mono">{{ pkg.id }}</strong>:
-                            </span>
-                            <div class="flex items-center gap-1.5 flex-wrap justify-end">
-                              <button
-                                type="button"
-                                (click)="confirmingPackageId.set(null)"
-                                [disabled]="managingPackageId() === pkg.id"
-                                class="px-2.5 py-1 rounded-lg glass-btn text-slate-300 hover:text-white font-semibold cursor-pointer">
-                                {{ 'profile.cancel' | translate }}
-                              </button>
-                              @if (pkg.status === 'delisted' || pkg.status === 'flagged') {
-                                <button
-                                  type="button"
-                                  (click)="onAuthorManagePackage(pkg, 'restore')"
-                                  [disabled]="managingPackageId() === pkg.id"
-                                  class="px-2.5 py-1 rounded-lg glass-btn-emerald font-bold text-white cursor-pointer">
-                                  {{ 'modal.killSwitchRestore' | translate }}
-                                </button>
-                              } @else {
-                                <button
-                                  type="button"
-                                  (click)="onAuthorManagePackage(pkg, 'delist')"
-                                  [disabled]="managingPackageId() === pkg.id"
-                                  class="px-2.5 py-1 rounded-lg glass-btn-amber font-bold cursor-pointer">
-                                  {{ 'modal.killSwitchDelist' | translate }}
-                                </button>
-                              }
-                              @if (pkg.source === 'git' || (pkg.provider && pkg.provider !== 'contentdb')) {
-                                <button
-                                  type="button"
-                                  (click)="onAuthorManagePackage(pkg, 'remove')"
-                                  [disabled]="managingPackageId() === pkg.id"
-                                  class="px-2.5 py-1 rounded-lg glass-btn-rose font-black text-white cursor-pointer">
-                                  Remove Permanently
-                                </button>
-                              }
-                            </div>
-                          </div>
-                        }
-                      </div>
-                    }
-                  </div>
+                    <!-- Pagination Bar (8 per page, shared with AuthorDrawerComponent) -->
+                    <app-drawer-pagination
+                      [currentPage]="packagesCurrentPage()"
+                      [totalPages]="packagesTotalPages()"
+                      [totalItems]="filteredUserPackages().length"
+                      (pageChange)="setPackagesPage($event)">
+                    </app-drawer-pagination>
+                  }
                 }
               </div>
             </div>
@@ -385,7 +505,7 @@ import {
                 </div>
               } @else {
                 <div class="space-y-2">
-                  @for (pkg of favoritePackages(); track pkg.id) {
+                  @for (pkg of pagedFavoritePackages(); track pkg.id) {
                     <div class="p-3 rounded-2xl glass-panel flex items-center justify-between gap-3 text-xs hover:border-sky-400/40 transition">
                       <button
                         type="button"
@@ -417,6 +537,14 @@ import {
                     </div>
                   }
                 </div>
+
+                <!-- Pagination Bar (8 per page) -->
+                <app-drawer-pagination
+                  [currentPage]="favoritesCurrentPage()"
+                  [totalPages]="favoritesTotalPages()"
+                  [totalItems]="favoritePackages().length"
+                  (pageChange)="setFavoritesPage($event)">
+                </app-drawer-pagination>
               }
             </div>
           }
@@ -670,31 +798,11 @@ import {
                         </div>
                       }
 
-                      @if (myReportsTotalPages() > 1) {
-                        <div class="pt-1 flex items-center justify-between gap-2">
-                          <button
-                            type="button"
-                            [disabled]="authService.myReportsPage() <= 1"
-                            (click)="onChangeMyReportsPage(authService.myReportsPage() - 1)"
-                            class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
-                            <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
-                            <span>{{ 'profile.prevPage' | translate }}</span>
-                          </button>
-
-                          <span class="text-[11px] font-mono text-slate-300">
-                            {{ 'profile.pageLabel' | translate }} {{ authService.myReportsPage() }} / {{ myReportsTotalPages() }}
-                          </span>
-
-                          <button
-                            type="button"
-                            [disabled]="authService.myReportsPage() >= myReportsTotalPages()"
-                            (click)="onChangeMyReportsPage(authService.myReportsPage() + 1)"
-                            class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
-                            <span>{{ 'profile.nextPage' | translate }}</span>
-                            <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
-                          </button>
-                        </div>
-                      }
+                      <app-drawer-pagination
+                        [currentPage]="authService.myReportsPage()"
+                        [totalPages]="myReportsTotalPages()"
+                        (pageChange)="onChangeMyReportsPage($event)">
+                      </app-drawer-pagination>
                     </div>
                   }
                 }
@@ -1104,31 +1212,11 @@ import {
                     </div>
 
                     <!-- Server-Backed Pagination Controls (10 items/page) -->
-                    @if (authService.moderationTotalPages() > 1) {
-                      <div class="pt-2 flex items-center justify-between gap-2">
-                        <button
-                          type="button"
-                          [disabled]="authService.moderationPage() <= 1"
-                          (click)="onChangeModerationPage(authService.moderationPage() - 1)"
-                          class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
-                          <svg lucideChevronLeft class="w-3.5 h-3.5"></svg>
-                          <span>{{ 'profile.prevPage' | translate }}</span>
-                        </button>
-
-                        <span class="text-[11px] font-mono text-slate-300">
-                          {{ 'profile.pageLabel' | translate }} {{ authService.moderationPage() }} / {{ authService.moderationTotalPages() }}
-                        </span>
-
-                        <button
-                          type="button"
-                          [disabled]="authService.moderationPage() >= authService.moderationTotalPages()"
-                          (click)="onChangeModerationPage(authService.moderationPage() + 1)"
-                          class="px-3 py-1.5 rounded-xl glass-btn disabled:opacity-40 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition cursor-pointer">
-                          <span>{{ 'profile.nextPage' | translate }}</span>
-                          <svg lucideChevronRight class="w-3.5 h-3.5"></svg>
-                        </button>
-                      </div>
-                    }
+                    <app-drawer-pagination
+                      [currentPage]="authService.moderationPage()"
+                      [totalPages]="authService.moderationTotalPages()"
+                      (pageChange)="onChangeModerationPage($event)">
+                    </app-drawer-pagination>
                   }
                 </div>
               }
@@ -1998,7 +2086,14 @@ export class ProfileDrawerComponent implements OnInit {
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
 
+  @ViewChild('myPackagesSectionTop') myPackagesSectionTop?: ElementRef<HTMLElement>;
+
   readonly activeTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions'>('packages');
+  readonly selectedPackageCategory = signal<DrawerPackageCategoryFilter>('all');
+  readonly packagesSortBy = signal<SortOption>('downloads');
+  readonly packagesSearchTerm = signal<string>('');
+  readonly packagesCurrentPage = signal<number>(1);
+  readonly favoritesCurrentPage = signal<number>(1);
 
   // Admin Promotional Slide & Package Row #1 Form State
   readonly showPromoForm = signal(false);
@@ -2240,6 +2335,67 @@ export class ProfileDrawerComponent implements OnInit {
     const favIds = new Set(this.settingsService.favorites().map(id => id.toLowerCase()));
     return this.packageService.packages().filter(p => favIds.has(p.id.toLowerCase()));
   });
+
+  readonly userGameCount = computed(() => this.userPackages().filter(p => p.type === 'game').length);
+  readonly userModCount = computed(() => this.userPackages().filter(p => p.type === 'mod').length);
+  readonly userTxpCount = computed(() => this.userPackages().filter(p => p.type === 'txp').length);
+  readonly userGitCount = computed(() =>
+    this.userPackages().filter(p => p.sources?.includes('git') || p.source === 'git').length
+  );
+
+  readonly filteredUserPackages = computed<LuantiPackage[]>(() =>
+    filterAndSortDrawerPackages(this.userPackages(), {
+      category: this.selectedPackageCategory(),
+      searchTerm: this.packagesSearchTerm(),
+      sortBy: this.packagesSortBy()
+    })
+  );
+
+  readonly packagesTotalPages = computed(() =>
+    computeDrawerTotalPages(this.filteredUserPackages().length)
+  );
+
+  readonly pagedUserPackages = computed<LuantiPackage[]>(() =>
+    sliceDrawerPage(this.filteredUserPackages(), this.packagesCurrentPage())
+  );
+
+  readonly favoritesTotalPages = computed(() =>
+    computeDrawerTotalPages(this.favoritePackages().length)
+  );
+
+  readonly pagedFavoritePackages = computed<LuantiPackage[]>(() =>
+    sliceDrawerPage(this.favoritePackages(), this.favoritesCurrentPage())
+  );
+
+  selectPackageCategory(cat: DrawerPackageCategoryFilter): void {
+    this.selectedPackageCategory.set(cat);
+    this.packagesCurrentPage.set(1);
+  }
+
+  onPackagesSortChange(nextSort: SortOption): void {
+    this.packagesSortBy.set(nextSort);
+    this.packagesCurrentPage.set(1);
+  }
+
+  onPackagesSearchInput(term: string): void {
+    this.packagesSearchTerm.set(term);
+    this.packagesCurrentPage.set(1);
+  }
+
+  setPackagesPage(nextPage: number): void {
+    const clamped = Math.min(Math.max(1, nextPage), this.packagesTotalPages());
+    this.packagesCurrentPage.set(clamped);
+    try {
+      this.myPackagesSectionTop?.nativeElement?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch {
+      // Ignore scrollIntoView errors in headless tests
+    }
+  }
+
+  setFavoritesPage(nextPage: number): void {
+    const clamped = Math.min(Math.max(1, nextPage), this.favoritesTotalPages());
+    this.favoritesCurrentPage.set(clamped);
+  }
 
   ngOnInit(): void {
     const user = this.authService.currentUser();

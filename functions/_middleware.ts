@@ -250,11 +250,10 @@ export async function onRequest(context: {
   const isApiRoute = pathname.startsWith('/api/');
   const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
-  // Redirect legacy *.pages.dev web/crawler requests to canonical https://luantihub.org
-  // while keeping www.luantihub.org, /api/*, and /download endpoints served in-place
-  // so installed PWAs on www.luantihub.org never trigger Chrome's out-of-scope URL bar.
+  // Redirect legacy *.pages.dev and www.luantihub.org web/crawler requests to canonical https://luantihub.org
+  // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
   const lowerHost = url.hostname.toLowerCase();
-  if (lowerHost === 'luanti-hub.pages.dev' && !isApiRoute && !isDownloadRoute) {
+  if ((lowerHost === 'luanti-hub.pages.dev' || lowerHost === 'www.luantihub.org') && !isApiRoute && !isDownloadRoute) {
     return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
   }
 

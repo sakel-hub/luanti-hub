@@ -9099,15 +9099,18 @@ supported_games = minetest_game, voxelibre
     expect(d1WaySigns.latest_commit_sha).toBe('3333333333333333');
     expect(d1WaySigns.updated_at).toBe('2026-11-05T14:30:00.000Z');
 
-    // 5. Serve www.luantihub.org in-place (200 OK) so installed PWAs on www.luantihub.org never trigger Chrome's out-of-scope top URL bar
-    const wwwInPlaceRes = await edgeMiddleware({
+    // 5. Canonicalize www.luantihub.org -> https://luantihub.org at the Edge Middleware so Service Worker & notification state never split across origins
+    const wwwRedirectRes = await edgeMiddleware({
       request: new Request('https://www.luantihub.org/packages/SaKeL/waysigns?tab=releases', {
         method: 'GET'
       }),
       next: async () => new Response('OK', { status: 200 }),
       env: {}
     });
-    expect(wwwInPlaceRes.status).toBe(200);
+    expect(wwwRedirectRes.status).toBe(301);
+    expect(wwwRedirectRes.headers.get('location')).toBe(
+      'https://luantihub.org/packages/SaKeL/waysigns?tab=releases'
+    );
   });
 
   it('should render HeroBillboardComponent artwork-derived ambient backlight glow using LCP-safe 32x18 dual-canvas crossfade with zero extra img elements', () => {
@@ -9191,5 +9194,69 @@ supported_games = minetest_game, voxelibre
     } finally {
       getContextSpy.mockRestore();
     }
+  });
+
+  it('should paginate, filter, and sort My Packages (8 per page) in ProfileDrawerComponent using the shared DrawerPaginationComponent', () => {
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+
+    const twentyPackages = Array.from({ length: 20 }, (_, i) =>
+      (pkgService as any).normalizePackage({
+        id: `SaKeL/mod_${i + 1}`,
+        author: 'SaKeL',
+        name: `mod_${i + 1}`,
+        title: `Mod ${i + 1}`,
+        type: i === 0 ? 'game' : 'mod',
+        short_desc: `Description for mod ${i + 1}`,
+        downloads: (20 - i) * 100,
+        score: 4.8,
+        source: i % 2 === 0 ? 'git' : 'official',
+        sources: i % 2 === 0 ? ['git', 'official'] : ['official']
+      })
+    );
+
+    (pkgService as any)._packages.set(twentyPackages);
+    (authService as any)._currentUser.set({
+      id: 'user-sakel',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'admin',
+      identities: [
+        { provider: 'github', username: 'sakel-hub', verified: true },
+        { provider: 'contentdb', username: 'SaKeL', verified: true }
+      ],
+      packages: []
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+
+    const fixture = TestBed.createComponent(ProfileDrawerComponent);
+    const comp = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(comp.userPackages().length).toBe(20);
+    expect(comp.packagesTotalPages()).toBe(3);
+    expect(comp.pagedUserPackages().length).toBe(8);
+    expect(comp.pagedUserPackages()[0].title).toBe('Mod 1');
+
+    const el = fixture.nativeElement as HTMLElement;
+    const paginationBar = el.querySelector('[data-testid="drawer-pagination-bar"]');
+    expect(paginationBar).toBeTruthy();
+    expect(paginationBar?.textContent).toContain('Page 1 / 3 (20)');
+
+    // Advance to Page 3 -> 4 remaining packages
+    comp.setPackagesPage(3);
+    fixture.detectChanges();
+    expect(comp.packagesCurrentPage()).toBe(3);
+    expect(comp.pagedUserPackages().length).toBe(4);
+    expect(paginationBar?.textContent).toContain('Page 3 / 3 (20)');
+
+    // Filter by 'git' category -> 10 git packages (2 pages) and resets page to 1
+    comp.selectPackageCategory('git');
+    fixture.detectChanges();
+    expect(comp.filteredUserPackages().length).toBe(10);
+    expect(comp.packagesTotalPages()).toBe(2);
+    expect(comp.packagesCurrentPage()).toBe(1);
+    expect(comp.pagedUserPackages().length).toBe(8);
   });
 });
