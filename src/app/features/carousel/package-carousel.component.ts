@@ -21,8 +21,7 @@ import {
   LucideChevronLeft,
   LucideChevronRight,
   LucideArrowRight,
-  LucideInfo,
-  LucidePlus
+  LucideInfo
 } from '@lucide/angular';
 
 @Component({
@@ -38,8 +37,7 @@ import {
     LucideChevronLeft,
     LucideChevronRight,
     LucideArrowRight,
-    LucideInfo,
-    LucidePlus
+    LucideInfo
   ],
   template: `
     @if (packages.length > 0 || showWhenEmpty) {
@@ -145,8 +143,8 @@ import {
                   {{ emptyStateDesc || ('carousel.promoEmptyDesc' | translate) }}
                 </p>
               </div>
-              <div class="flex items-center gap-2.5 flex-wrap flex-shrink-0">
-                @if (promoCtaUrl) {
+              @if (promoCtaUrl) {
+                <div class="flex items-center gap-2.5 flex-wrap flex-shrink-0">
                   <button
                     type="button"
                     (click)="promoCtaClicked.emit(promoCtaUrl)"
@@ -154,15 +152,8 @@ import {
                     <span>{{ promoCtaLabel || ('hero.learnMore' | translate) }}</span>
                     <svg lucideArrowRight class="w-3.5 h-3.5"></svg>
                   </button>
-                }
-                <button
-                  type="button"
-                  (click)="promoCtaClicked.emit('/submit')"
-                  class="px-4 py-2.5 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center gap-2 whitespace-nowrap transition cursor-pointer">
-                  <svg lucidePlus class="w-4 h-4 text-amber-400"></svg>
-                  <span>{{ 'header.submitRepo' | translate }}</span>
-                </button>
-              </div>
+                </div>
+              }
             </div>
           </div>
         }
