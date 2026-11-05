@@ -255,13 +255,17 @@ function setIsolateCache(key: string, data: any, ttlSeconds: number): void {
 }
 
 /**
- * Fetches JSON from upstream ContentDB / mirror with Cloudflare Edge Cache API + Isolate Memory Cache support
+ * Fetches JSON from upstream ContentDB / mirror with Cloudflare Edge Cache API + Isolate Memory Cache support.
+ * Optionally negotiates localized package metadata via `Accept-Language` when `options.lang` is provided.
  */
 export async function fetchUpstreamJsonCached<T = any>(
   path: string,
-  ttlSeconds = 300
+  ttlSeconds = 300,
+  options?: { lang?: string }
 ): Promise<T | null> {
-  const cacheKeyUrl = `https://cache.luantihub.internal${path}`;
+  const cleanLang = String(options?.lang || '').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2);
+  const langSegment = cleanLang && cleanLang !== 'en' ? `/__lang_${cleanLang}` : '';
+  const cacheKeyUrl = `https://cache.luantihub.internal${langSegment}${path}`;
   const memHit = getIsolateCache<T>(cacheKeyUrl);
   if (memHit !== null) {
     return memHit;
@@ -284,7 +288,11 @@ export async function fetchUpstreamJsonCached<T = any>(
   }
 
   try {
-    const res = await fetchWithFailover(path);
+    const fetchOpts: RequestInit =
+      cleanLang && cleanLang !== 'en'
+        ? { headers: { 'Accept-Language': `${cleanLang}, en;q=0.8` } }
+        : {};
+    const res = await fetchWithFailover(path, fetchOpts);
     if (!res.ok) return null;
     const data = await res.json() as T;
 
@@ -443,6 +451,11 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${a}/${n}`);
+      for (const loc of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
+        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${loc}/${a}/${n}`);
+      }
     }
   }
 
@@ -584,7 +597,19 @@ import {
   buildReverseDependencyCountMap,
   isApiOrLibraryPackage,
   computeDependencyPrioritizationMultiplier,
-  isPrimarilyDependencyPackage
+  isPrimarilyDependencyPackage,
+  LUANTIHUB_ENGINE_VERSIONS,
+  LUANTIHUB_DEV_STATES,
+  LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_POPULAR_GAMES,
+  parseGameSupportArray,
+  inferGameSupportFromDependencies,
+  mergeLuantiHubAndContentDbGameSupport,
+  computeLuantiHubFrecencyMetrics,
+  parsePackageTranslations,
+  resolveLocalizedPackageText,
+  parseScreenshotMetaArray,
+  findReverseDependenciesForPackage
 } from '../../../src/app/core/config/package-utils.config';
 import {
   normalizeRepoComparisonKey,
@@ -604,6 +629,18 @@ export {
   isApiOrLibraryPackage,
   computeDependencyPrioritizationMultiplier,
   isPrimarilyDependencyPackage,
+  LUANTIHUB_ENGINE_VERSIONS,
+  LUANTIHUB_DEV_STATES,
+  LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_POPULAR_GAMES,
+  parseGameSupportArray,
+  inferGameSupportFromDependencies,
+  mergeLuantiHubAndContentDbGameSupport,
+  computeLuantiHubFrecencyMetrics,
+  parsePackageTranslations,
+  resolveLocalizedPackageText,
+  parseScreenshotMetaArray,
+  findReverseDependenciesForPackage,
   normalizeRepoComparisonKey,
   normalizeRepoKey
 };
@@ -763,7 +800,10 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
     ['maintainers', 'TEXT'],
     ['latest_commit_sha', 'TEXT'],
     ['screenshots', 'TEXT'],
+    ['screenshot_meta', 'TEXT'],
+    ['supports_all_games', 'INTEGER DEFAULT 0'],
     ['game_support', 'TEXT'],
+    ['translations', 'TEXT'],
     ['review_thread_counts', 'TEXT']
   ];
   try {

@@ -41,7 +41,10 @@ import {
   getUnifiedCatalogTags,
   isValidActivePromotionRow,
   fetchRecentContentDbReviewsCached,
-  normalizeUtcIsoTimestamp
+  normalizeUtcIsoTimestamp,
+  computeLuantiHubFrecencyMetrics,
+  mergeLuantiHubAndContentDbGameSupport,
+  parsePackageTranslations
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
 
@@ -464,31 +467,39 @@ function buildTop10FromCatalog(
         const updB = Date.parse(String(b.updated_at || '')) || 0;
         const recencyA = updA > 0 && nowMs - updA <= 30 * 86400000 ? 180 : 0;
         const recencyB = updB > 0 && nowMs - updB <= 30 * 86400000 ? 180 : 0;
+        const velA = Number(a.score_downloads ?? a.luantihub_score_downloads ?? 0);
+        const velB = Number(b.score_downloads ?? b.luantihub_score_downloads ?? 0);
         const scoreA =
-          ((Number(a.contentdb_score ?? a.score) || 0) * 10 +
+          ((Number(a.contentdb_score ?? a.score) || 0) * 8 +
+            velA * 14 +
             Math.log10((Number(a.downloads) || 1) + 1) * 50 +
             convA * 120 +
-            favA * 25 +
+            favA * 35 +
             recencyA) *
           depMultA;
         const scoreB =
-          ((Number(b.contentdb_score ?? b.score) || 0) * 10 +
+          ((Number(b.contentdb_score ?? b.score) || 0) * 8 +
+            velB * 14 +
             Math.log10((Number(b.downloads) || 1) + 1) * 50 +
             convB * 120 +
-            favB * 25 +
+            favB * 35 +
             recencyB) *
           depMultB;
         return scoreB - scoreA;
       }
+      const velWeekA = Number(a.score_downloads ?? a.luantihub_score_downloads ?? 0);
+      const velWeekB = Number(b.score_downloads ?? b.luantihub_score_downloads ?? 0);
       const scoreA =
         ((Number(a.downloads) || 0) * (1 + convA * 0.25) +
+          velWeekA * 25 +
           (Number(a.contentdb_score) || 0) * 3 +
-          favA * 150) *
+          favA * 180) *
         depMultA;
       const scoreB =
         ((Number(b.downloads) || 0) * (1 + convB * 0.25) +
+          velWeekB * 25 +
           (Number(b.contentdb_score) || 0) * 3 +
-          favB * 150) *
+          favB * 180) *
         depMultB;
       return scoreB - scoreA;
     });
@@ -715,7 +726,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
   const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19';
-  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}`;
+  const extraFilterSig = [
+    url.searchParams.getAll('hide').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
+    url.searchParams.getAll('flag').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
+    url.searchParams.getAll('tag').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
+    (url.searchParams.get('game') || '').trim().toLowerCase(),
+    (url.searchParams.get('engine_version') || '').trim().toLowerCase(),
+    (url.searchParams.get('sort') || '').trim().toLowerCase(),
+    (url.searchParams.get('order') || '').trim().toLowerCase(),
+    (url.searchParams.get('limit') || '').trim(),
+    (url.searchParams.get('license') || '').trim().toLowerCase()
+  ].some(Boolean)
+    ? `&h=${url.searchParams.getAll('hide').map(s => s.trim().toLowerCase()).sort().join(',')}&fl=${url.searchParams.getAll('flag').map(s => s.trim().toLowerCase()).sort().join(',')}&tg=${url.searchParams.getAll('tag').map(s => s.trim().toLowerCase()).sort().join(',')}&gm=${(url.searchParams.get('game') || '').trim().toLowerCase()}&ev=${(url.searchParams.get('engine_version') || '').trim().toLowerCase()}&s=${(url.searchParams.get('sort') || '').trim().toLowerCase()}&o=${(url.searchParams.get('order') || '').trim().toLowerCase()}&lm=${(url.searchParams.get('limit') || '').trim()}&lc=${(url.searchParams.get('license') || '').trim().toLowerCase()}`
+    : '';
+  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
     : `https://cache.luantihub.internal/__catalog_edge_v9_${encodeURIComponent(normalizedCatalogKey)}`;
@@ -1274,6 +1298,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         if (typeof s.score === 'number') {
           item.score = Math.round(s.score * 10) / 10;
         }
+        if (typeof s.score_downloads === 'number') {
+          item.score_downloads = Math.round(s.score_downloads * 10) / 10;
+        }
+        if (typeof s.score_reviews === 'number') {
+          item.score_reviews = Math.round(s.score_reviews * 10) / 10;
+        }
         if (s.reviews && typeof s.reviews === 'object') {
           item.reviews = s.reviews;
         }
@@ -1496,6 +1526,44 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       matchedUpstream?.author
     );
 
+    const itemStarScore = computeCatalogStarRating(
+      {
+        ...(matchedUpstream || {}),
+        review_thread_counts: effectiveReviewThreadCounts,
+        score: p.score ?? matchedUpstream?.score
+      },
+      d1StarAvg
+    );
+    const itemDailyDl = velocity.get(canonicalKey)?.todayDl ?? velocity.get(d1Key)?.todayDl;
+    const itemWeeklyDl = velocity.get(canonicalKey)?.weekDl ?? velocity.get(d1Key)?.weekDl;
+    const itemConvRate = velocity.get(canonicalKey)?.conversionRate ?? velocity.get(d1Key)?.conversionRate;
+    const itemFavCount = favoritesMap.get(canonicalKey) ?? favoritesMap.get(d1Key);
+    const frecency = computeLuantiHubFrecencyMetrics({
+      dailyDownloads: itemDailyDl,
+      weeklyDownloads: itemWeeklyDl,
+      luantihubDownloads: lhDownloads,
+      conversionRate: itemConvRate,
+      score: itemStarScore,
+      reviewThreadCounts: effectiveReviewThreadCounts,
+      favoritesCount: itemFavCount,
+      contentdbScore: Number(matchedUpstream?.score || 0),
+      contentdbScoreDownloads: Number(matchedUpstream?.score_downloads || 0),
+      contentdbScoreReviews: Number(matchedUpstream?.score_reviews || 0)
+    });
+    const mergedGameSupport = mergeLuantiHubAndContentDbGameSupport(
+      p.game_support,
+      matchedUpstream?.game_support,
+      parsedDeps,
+      parsedOptDeps
+    );
+    const mergedContentWarnings = Array.from(
+      new Set([
+        ...parseJsonArray(p.content_warnings),
+        ...parseJsonArray(matchedUpstream?.content_warnings)
+      ])
+    );
+    const parsedTranslations = parsePackageTranslations(p.translations);
+
     merged.push({
       ...(matchedUpstream || {}),
       id: `${canonicalAuthor}/${canonicalName}`,
@@ -1504,10 +1572,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       author_id: authorMeta.author_id,
       name: canonicalName,
       aliases: aliases.length > 0 ? aliases : undefined,
-      title: matchedUpstream?.title || p.title || canonicalName,
+      title: p.title || matchedUpstream?.title || canonicalName,
       type: p.type === 'modpack' ? 'mod' : (p.type || matchedUpstream?.type || 'mod'),
       short_desc: shortDescText,
       short_description: shortDescText,
+      ...(parsedTranslations ? { translations: parsedTranslations } : {}),
       release: releaseId,
       latest_commit_sha: p.latest_commit_sha || undefined,
       updated_at: isGitSource
@@ -1520,15 +1589,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       banner: resolvedBanner,
       screenshots: mergedCatalogScreenshots.length > 0 ? mergedCatalogScreenshots : undefined,
       review_thread_counts: effectiveReviewThreadCounts,
-      score: computeCatalogStarRating(
-        {
-          ...(matchedUpstream || {}),
-          review_thread_counts: effectiveReviewThreadCounts,
-          score: p.score ?? matchedUpstream?.score
-        },
-        d1StarAvg
-      ),
+      score: itemStarScore,
       contentdb_score: Number(matchedUpstream?.score || 0),
+      luantihub_score_downloads: frecency.luantihub_score_downloads,
+      contentdb_score_downloads: frecency.contentdb_score_downloads,
+      score_downloads: frecency.score_downloads,
+      score_reviews: frecency.score_reviews,
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
       downloads: combinedDownloads,
@@ -1538,21 +1604,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       video_url: p.video_url || matchedUpstream?.video_url || undefined,
       video_thumbnail_url: p.video_thumbnail_url || matchedUpstream?.video_thumbnail_url || undefined,
       dev_state: p.dev_state || matchedUpstream?.dev_state || undefined,
+      ...(mergedContentWarnings.length > 0 ? { content_warnings: mergedContentWarnings } : {}),
+      ...(p.supports_all_games ? { supports_all_games: true } : typeof matchedUpstream?.supports_all_games === 'boolean' ? { supports_all_games: matchedUpstream.supports_all_games } : {}),
+      ...(mergedGameSupport.length > 0 ? { game_support: mergedGameSupport } : {}),
       download_size: Number(p.download_size) > 0 ? Number(p.download_size) : undefined,
       file_size: p.file_size || undefined,
       provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
       min_minetest_version: p.min_minetest_version || matchedUpstream?.min_minetest_version || '5.0.0',
+      ...(p.max_minetest_version || matchedUpstream?.max_minetest_version ? { max_minetest_version: p.max_minetest_version || matchedUpstream?.max_minetest_version } : {}),
       tags: combinedTags.length > 0 ? combinedTags : [p.type || 'mod'],
       dependencies: parsedDeps.length > 0 ? parsedDeps : matchedUpstream?.dependencies,
       optional_dependencies: parsedOptDeps.length > 0 ? parsedOptDeps : matchedUpstream?.optional_dependencies,
-      daily_downloads: velocity.get(canonicalKey)?.todayDl ?? velocity.get(d1Key)?.todayDl,
-      weekly_downloads: velocity.get(canonicalKey)?.weekDl ?? velocity.get(d1Key)?.weekDl,
+      daily_downloads: itemDailyDl,
+      weekly_downloads: itemWeeklyDl,
       weekly_views: velocity.get(canonicalKey)?.weekViews ?? velocity.get(d1Key)?.weekViews,
-      conversion_rate: velocity.get(canonicalKey)?.conversionRate ?? velocity.get(d1Key)?.conversionRate,
+      conversion_rate: itemConvRate,
       dependency_ratio:
         (velocity.get(canonicalKey)?.dependencyRatio ?? velocity.get(d1Key)?.dependencyRatio) || undefined,
       rating_checked: Boolean(effectiveReviewThreadCounts || d1StarAvg > 0),
-      favorites_count: favoritesMap.get(canonicalKey) ?? favoritesMap.get(d1Key),
+      favorites_count: itemFavCount,
       url: `/api/packages/${canonicalAuthor}/${canonicalName}/`,
       source: isGitSource ? 'git' : 'official',
       sources
@@ -1593,6 +1663,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         sanitizedItemThumb
       ) || sanitizedItemThumb;
     const upstreamAuthorMeta = resolveAuthorMeta(undefined, item.author);
+    const upstreamFrecency = computeLuantiHubFrecencyMetrics({
+      dailyDownloads: vel?.todayDl,
+      weeklyDownloads: vel?.weekDl,
+      luantihubDownloads: lhDl,
+      conversionRate: vel?.conversionRate,
+      score: resolvedScore,
+      reviewThreadCounts: upstreamRevCounts,
+      favoritesCount: favCnt,
+      contentdbScore: Number(item.score || 0),
+      contentdbScoreDownloads: Number(item.score_downloads || 0),
+      contentdbScoreReviews: Number(item.score_reviews || 0)
+    });
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
@@ -1605,6 +1687,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ...(upstreamRevCounts ? { review_thread_counts: upstreamRevCounts, rating_checked: true } : {}),
       score: resolvedScore,
       contentdb_score: Number(item.score || 0),
+      luantihub_score_downloads: upstreamFrecency.luantihub_score_downloads,
+      contentdb_score_downloads: upstreamFrecency.contentdb_score_downloads,
+      score_downloads: upstreamFrecency.score_downloads,
+      score_reviews: upstreamFrecency.score_reviews,
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: cdbDl + lhDl,

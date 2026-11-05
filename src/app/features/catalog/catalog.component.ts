@@ -7,6 +7,7 @@ import { PackageCarouselComponent } from '../carousel/package-carousel.component
 import { PackageCardComponent } from '../card/package-card.component';
 import { Top10RowComponent } from '../top10/top10-row.component';
 import { PackageService } from '../../core/services/package.service';
+import { SettingsService } from '../../core/services/settings.service';
 import { SortOption } from '../../core/models/package.model';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -221,8 +222,38 @@ import {
             <p class="text-xs text-slate-400">{{ 'catalog.resultsSubtitle' | translate }}</p>
           </div>
 
-          <!-- Sort Selector & Clear Filters -->
+          <!-- Game Ecosystem Filter, Sort Selector & Clear Filters -->
           <div class="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              (click)="settingsService.hideWipDeprecated.set(!settingsService.hideWipDeprecated())"
+              [class]="settingsService.hideWipDeprecated() ? 'px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-bold transition cursor-pointer' : 'px-3 py-1.5 rounded-xl glass-panel text-slate-400 hover:text-white text-xs font-medium transition cursor-pointer'"
+              title="Hide Work-in-Progress & Deprecated packages">
+              Hide WIP/Deprecated
+            </button>
+
+            <button
+              type="button"
+              (click)="settingsService.hideContentWarnings.set(!settingsService.hideContentWarnings())"
+              [class]="settingsService.hideContentWarnings() ? 'px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-400/50 text-rose-200 text-xs font-bold transition cursor-pointer' : 'px-3 py-1.5 rounded-xl glass-panel text-slate-400 hover:text-white text-xs font-medium transition cursor-pointer'"
+              title="Hide packages with mature content warnings">
+              Safe Filter
+            </button>
+
+            <div class="flex items-center gap-2 glass-panel rounded-xl px-3 py-1.5 text-xs">
+              <span class="text-slate-400 font-medium">Game:</span>
+              <select
+                [ngModel]="packageService.selectedGame()"
+                (ngModelChange)="packageService.setGameFilter($event)"
+                aria-label="Filter by compatible game"
+                class="bg-transparent text-white font-bold focus:outline-none cursor-pointer">
+                <option value="all" class="bg-slate-900 text-white">All Games</option>
+                @for (g of packageService.availableGames(); track g.name) {
+                  <option [value]="g.name" class="bg-slate-900 text-white">{{ g.title }}</option>
+                }
+              </select>
+            </div>
+
             <div class="flex items-center gap-2 glass-panel rounded-xl px-3 py-1.5 text-xs">
               <svg lucideSlidersHorizontal class="w-3.5 h-3.5 text-sky-400"></svg>
               <span class="text-slate-400 font-medium">{{ 'catalog.sortBy' | translate }}:</span>
@@ -389,6 +420,17 @@ import {
           [packages]="packageService.recentlyAddedPackages()"
           (viewAll)="packageService.viewAllRecentlyAdded()">
         </app-package-carousel>
+
+        <!-- Personalized Swimlane: Recommended From Your Favorites (LuantiHub-First Favorites Integration) -->
+        @if (packageService.recommendedFromFavorites().length > 0) {
+          <app-package-carousel
+            icon="sparkles"
+            title="Recommended From Your Favorites"
+            infoTooltip="Personalized recommendations based on your Luanti Hub Favorites, shared tags, dependencies, and compatible games."
+            [packages]="packageService.recommendedFromFavorites()"
+            (viewAll)="packageService.selectPrimaryNavTab('favorites')">
+          </app-package-carousel>
+        }
 
         <!-- Swimlane 1: Trending Engine Mods -->
         <app-package-carousel
@@ -577,6 +619,7 @@ import {
 })
 export class CatalogComponent {
   readonly packageService = inject(PackageService);
+  readonly settingsService = inject(SettingsService);
   private readonly router = inject(Router, { optional: true });
   readonly isTagsExpanded = signal(false);
 

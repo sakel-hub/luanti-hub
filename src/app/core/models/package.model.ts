@@ -92,8 +92,19 @@ export interface LuantiPackage {
   thumbnail: string;
   banner?: string;
   screenshots?: string[];
+  screenshot_meta?: Array<{
+    url: string;
+    title?: string;
+    width?: number;
+    height?: number;
+    is_cover_image?: boolean;
+  }>;
   score: number; // 1.0 - 5.0 star rating (when reviews exist)
   contentdb_score?: number; // Raw ContentDB composite popularity + review score (e.g. 15 - 4000+)
+  luantihub_score_downloads?: number; // Native Luanti Hub rolling download velocity/frecency score
+  contentdb_score_downloads?: number; // Upstream ContentDB 15-day frecency download velocity (complementary)
+  score_downloads?: number; // Unified Luanti Hub + ContentDB rolling download velocity score
+  score_reviews?: number; // Unified Luanti Hub + ContentDB review & favorites sentiment score
   downloads: number; // Total aggregated downloads (contentdb_downloads + luantihub_downloads)
   contentdb_downloads?: number; // Upstream ContentDB downloads count
   luantihub_downloads?: number; // Native Luanti Hub downloads count
@@ -148,6 +159,11 @@ export interface LuantiPackage {
   }>;
   min_minetest_version?: string;
   max_minetest_version?: string;
+  translations?: Record<string, {
+    title?: string;
+    short_desc?: string;
+    desc?: string;
+  }>;
   featured?: boolean;
   dependencies?: string[];
   optional_dependencies?: string[];

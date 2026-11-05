@@ -6,7 +6,8 @@ import {
   formatByteSize,
   fetchRepoSizeEstimateFromUrl,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  resolveLocalizedPackageText
 } from '../../../lib/upstream';
 
 interface Env {
@@ -122,12 +123,18 @@ export async function onRequestGet(context: { request: Request; params: { author
   const pkgId = `${author}/${name}`;
 
   const reqUrl = context.request ? new URL(context.request.url) : new URL(`https://luantihub.org/api/packages/${encAuthor}/${encName}/for-client/`);
+  const rawLang =
+    reqUrl.searchParams.get('lang') ||
+    (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
+    'en';
+  const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
   const forwardParams = new URLSearchParams(reqUrl.searchParams);
+  forwardParams.delete('lang');
   if (!forwardParams.has('formspec_version')) {
     forwardParams.set('formspec_version', '8');
   }
   const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
-  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v3/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
+  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v4/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
   const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
   if (cachedClient) {
     if (context.env.DB) {
@@ -212,7 +219,8 @@ export async function onRequestGet(context: { request: Request; params: { author
   const data = !isPureGitPkg
     ? await fetchUpstreamJsonCached<any>(
         `/packages/${encAuthor}/${encName}/for-client/${querySuffix}`,
-        300
+        300,
+        { lang: normalizedLang }
       )
     : null;
 
@@ -238,9 +246,23 @@ export async function onRequestGet(context: { request: Request; params: { author
       (d1Pkg?.download_size && Number(d1Pkg.download_size) > 0 ? formatByteSize(d1Pkg.download_size) : null) ||
       (d1Pkg?.file_size && String(d1Pkg.file_size).trim() ? String(d1Pkg.file_size).trim() : null) ||
       '< 1 MB';
+    const d1Warnings = parseJsonArray(d1Pkg?.content_warnings);
+    const cdbWarnings = parseJsonArray(data.content_warnings);
+    const mergedWarnings = Array.from(new Set([...d1Warnings, ...cdbWarnings]));
+    const d1Loc = d1Pkg ? resolveLocalizedPackageText(d1Pkg, normalizedLang) : null;
+    const hasD1LocOverride = Boolean(
+      normalizedLang !== 'en' &&
+      d1Pkg?.translations &&
+      d1Loc &&
+      (d1Loc.title !== (d1Pkg.title || d1Pkg.name) || d1Loc.short_desc !== (d1Pkg.short_desc || ''))
+    );
     const enriched = {
       ...data,
       name: name || data.name,
+      ...(hasD1LocOverride && d1Loc?.title ? { title: d1Loc.title } : {}),
+      ...(hasD1LocOverride && d1Loc?.short_desc ? { short_description: d1Loc.short_desc } : {}),
+      ...(d1Pkg?.dev_state ? { dev_state: d1Pkg.dev_state } : {}),
+      content_warnings: mergedWarnings,
       download_size: resolvedDownloadSize,
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
@@ -304,11 +326,12 @@ export async function onRequestGet(context: { request: Request; params: { author
       screenshots.push({ url: String(d1Pkg.thumbnail_url) });
     }
 
+    const localizedD1 = resolveLocalizedPackageText(d1Pkg, normalizedLang);
     const descLinksMap: Record<string, string> = {};
     const bodyHypertext = markdownToLuantiHypertext(
-      d1Pkg.long_desc || d1Pkg.short_desc || '',
+      localizedD1.desc || d1Pkg.long_desc || localizedD1.short_desc || d1Pkg.short_desc || '',
       descLinksMap,
-      d1Pkg.title || d1Pkg.name
+      localizedD1.title || d1Pkg.title || d1Pkg.name
     );
 
     const infoLinksMap: Record<string, string> = {};
@@ -338,9 +361,9 @@ export async function onRequestGet(context: { request: Request; params: { author
     const clientPayload = {
       author: d1Pkg.author_name || author,
       name: name || d1Pkg.name,
-      title: d1Pkg.title || d1Pkg.name || name,
+      title: localizedD1.title || d1Pkg.title || d1Pkg.name || name,
       type: d1Pkg.type === 'modpack' ? 'mod' : (d1Pkg.type || 'mod'),
-      short_description: d1Pkg.short_desc || '',
+      short_description: localizedD1.short_desc || d1Pkg.short_desc || '',
       long_description: {
         head: HYPERTEXT_HEAD,
         body: bodyHypertext,
@@ -377,7 +400,7 @@ export async function onRequestGet(context: { request: Request; params: { author
       tags,
       provides: provides.length > 0 ? provides : [d1Pkg.name || name],
       maintainers: [d1Pkg.author_name || author],
-      content_warnings: [],
+      content_warnings: parseJsonArray(d1Pkg.content_warnings),
       ai_disclosures: [],
       created_at: d1Pkg.created_at || new Date().toISOString()
     };

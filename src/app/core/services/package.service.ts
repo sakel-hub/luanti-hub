@@ -57,7 +57,18 @@ import {
   buildReverseDependencyCountMap,
   isApiOrLibraryPackage,
   computeDependencyPrioritizationMultiplier,
-  isPrimarilyDependencyPackage
+  isPrimarilyDependencyPackage,
+  LUANTIHUB_POPULAR_GAMES,
+  LUANTIHUB_DEV_STATES,
+  LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_ENGINE_VERSIONS,
+  parseGameSupportArray,
+  inferGameSupportFromDependencies,
+  mergeLuantiHubAndContentDbGameSupport,
+  parsePackageTranslations,
+  resolveLocalizedPackageText,
+  parseScreenshotMetaArray,
+  findReverseDependenciesForPackage
 } from '../config/package-utils.config';
 
 const PAGE_SIZE = 32;
@@ -139,6 +150,7 @@ export class PackageService {
   private readonly _selectedType = signal<string>('all');
   private readonly _selectedSource = signal<string>('all');
   private readonly _selectedTag = signal<string>('all');
+  private readonly _selectedGame = signal<string>('all');
   private readonly _availableTags = signal<ContentDbTag[]>(DEFAULT_CONTENTDB_TAGS);
   private readonly _sortBy = signal<SortOption>('downloads');
   private readonly _showFavoritesOnly = signal<boolean>(false);
@@ -211,7 +223,12 @@ export class PackageService {
   readonly selectedType = this._selectedType.asReadonly();
   readonly selectedSource = this._selectedSource.asReadonly();
   readonly selectedTag = this._selectedTag.asReadonly();
+  readonly selectedGame = this._selectedGame.asReadonly();
   readonly availableTags = this._availableTags.asReadonly();
+  readonly availableGames = signal(LUANTIHUB_POPULAR_GAMES).asReadonly();
+  readonly availableDevStates = signal(LUANTIHUB_DEV_STATES).asReadonly();
+  readonly availableContentWarnings = signal(LUANTIHUB_CONTENT_WARNINGS).asReadonly();
+  readonly availableEngineVersions = signal(LUANTIHUB_ENGINE_VERSIONS).asReadonly();
   readonly sortBy = this._sortBy.asReadonly();
   readonly showFavoritesOnly = this._showFavoritesOnly.asReadonly();
   readonly visibleCount = this._visibleCount.asReadonly();
@@ -458,6 +475,7 @@ export class PackageService {
       this._selectedType() !== 'all' ||
       this._selectedSource() !== 'all' ||
       this._selectedTag() !== 'all' ||
+      this._selectedGame() !== 'all' ||
       this._sortBy() === 'created' ||
       this._showFavoritesOnly()
     );
@@ -1150,12 +1168,48 @@ export class PackageService {
     }
   }
 
+  doesPackageSupportGame(pkg: Partial<LuantiPackage> | null | undefined, rawGameSlug: string): boolean {
+    const gameSlug = String(rawGameSlug || '').trim().toLowerCase();
+    if (!pkg || !gameSlug || gameSlug === 'all') return true;
+    const pkgName = String(pkg.name || '').toLowerCase();
+    const pkgId = String(pkg.id || '').toLowerCase();
+    if (pkgName === gameSlug || pkgId === gameSlug || pkgId.endsWith('/' + gameSlug)) return true;
+
+    const supportList = Array.isArray(pkg.game_support) ? pkg.game_support : [];
+    const explicitIncompatible = supportList.some(gs => {
+      if (gs?.supports !== false) return false;
+      const gName = String(gs?.game?.name || '').toLowerCase();
+      const gId = String(gs?.game?.id || '').toLowerCase();
+      return gName === gameSlug || gId === gameSlug || gId.endsWith('/' + gameSlug);
+    });
+    if (explicitIncompatible) return false;
+
+    if (pkg.supports_all_games || pkg.type === 'txp') return true;
+
+    const explicitCompatible = supportList.some(gs => {
+      if (gs?.supports === false) return false;
+      const gName = String(gs?.game?.name || '').toLowerCase();
+      const gId = String(gs?.game?.id || '').toLowerCase();
+      return gName === gameSlug || gId === gameSlug || gId.endsWith('/' + gameSlug);
+    });
+    if (explicitCompatible) return true;
+
+    const inferred = inferGameSupportFromDependencies([
+      ...(pkg.dependencies || []),
+      ...(pkg.optional_dependencies || [])
+    ]);
+    return inferred.some(gs => gs.supports !== false && gs.game.name.toLowerCase() === gameSlug);
+  }
+
   // High-performance O(1) per-package filtered & sorted list
   readonly filteredPackages = computed<LuantiPackage[]>(() => {
     const q = this._searchQuery().trim().toLowerCase();
     const type = this._selectedType();
     const source = this._selectedSource();
     const tag = this._selectedTag().toLowerCase();
+    const game = this._selectedGame().toLowerCase();
+    const hideWipDeprecated = this.settingsService.hideWipDeprecated();
+    const hideWarnings = this.settingsService.hideContentWarnings();
     const sortBy = this._sortBy();
     const favsOnly = this._showFavoritesOnly();
     const favSet = favsOnly
@@ -1170,12 +1224,21 @@ export class PackageService {
       if (favSet && !favSet.has(pkg.id.toLowerCase()) && !favSet.has(pkg.name.toLowerCase())) {
         return false;
       }
+      if (hideWipDeprecated && (pkg.dev_state === 'WIP' || this.isPackageDeprecated(pkg))) {
+        return false;
+      }
+      if (hideWarnings && Array.isArray(pkg.content_warnings) && pkg.content_warnings.length > 0) {
+        return false;
+      }
       if (type !== 'all' && pkg.type !== type) return false;
       if (
         source !== 'all' &&
         pkg.source !== source &&
         !pkg.sources?.includes(source as PackageSource)
       ) {
+        return false;
+      }
+      if (game !== 'all' && !this.doesPackageSupportGame(pkg, game)) {
         return false;
       }
 
@@ -1587,6 +1650,80 @@ export class PackageService {
   readonly texturePacks = computed(() => {
     return this.sortByRelevanceDesc(
       this._packages().filter(p => p.type === 'txp')
+    );
+  });
+
+  /**
+   * LuantiHub-first personalized discovery swimlane ("Recommended From Your Favorites")
+   * computed directly from the user's favorited packages (`user_favorites` in D1 + localStorage),
+   * matching tags, authors, dependency graphs, and game ecosystems.
+   */
+  readonly recommendedFromFavorites = computed<LuantiPackage[]>(() => {
+    const rawFavs = this.settingsService.favorites();
+    if (!Array.isArray(rawFavs) || rawFavs.length === 0) return [];
+    const catalog = this._packages();
+    if (catalog.length === 0) return [];
+
+    const favLowerSet = new Set(rawFavs.map(id => String(id || '').toLowerCase().trim()).filter(Boolean));
+    if (favLowerSet.size === 0) return [];
+
+    const favPackages = catalog.filter(
+      p => favLowerSet.has(p.id.toLowerCase()) || favLowerSet.has(p.name.toLowerCase())
+    );
+    if (favPackages.length === 0) return [];
+
+    const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'mesehub', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const favTagCounts = new Map<string, number>();
+    const favAuthors = new Set<string>();
+    const favDepsAndNames = new Set<string>();
+    const favGames = new Set<string>();
+
+    for (const fp of favPackages) {
+      if (fp.author) favAuthors.add(fp.author.toLowerCase());
+      if (fp.name) favDepsAndNames.add(fp.name.toLowerCase());
+      if (fp.type === 'game' && fp.name) favGames.add(fp.name.toLowerCase());
+      for (const t of fp.tags || []) {
+        const clean = String(t || '').toLowerCase().trim();
+        if (clean && !systemTagSet.has(clean)) {
+          favTagCounts.set(clean, (favTagCounts.get(clean) || 0) + 1);
+        }
+      }
+      for (const d of [...(fp.dependencies || []), ...(fp.optional_dependencies || [])]) {
+        const clean = String(d || '').toLowerCase().trim();
+        if (clean && clean !== 'default') favDepsAndNames.add(clean);
+      }
+      for (const gs of fp.game_support || []) {
+        if (gs?.supports !== false && gs?.game?.name) {
+          favGames.add(gs.game.name.toLowerCase());
+        }
+      }
+    }
+
+    return this.sortByRelevanceDesc(
+      catalog.filter(cand => {
+        if (!cand || cand.status === 'delisted' || cand.status === 'flagged') return false;
+        if (this.isPackageDeprecated(cand)) return false;
+        if (favLowerSet.has(cand.id.toLowerCase()) || favLowerSet.has(cand.name.toLowerCase())) return false;
+        const hasSharedTag = (cand.tags || []).some(t => favTagCounts.has(String(t || '').toLowerCase()));
+        const hasSameAuthor = favAuthors.has(String(cand.author || '').toLowerCase());
+        const hasSharedDep =
+          favDepsAndNames.has(String(cand.name || '').toLowerCase()) ||
+          (cand.dependencies || []).some(d => favDepsAndNames.has(String(d || '').toLowerCase()));
+        const hasSharedGame = Array.from(favGames).some(g => this.doesPackageSupportGame(cand, g));
+        return hasSharedTag || hasSameAuthor || hasSharedDep || hasSharedGame;
+      }),
+      CAROUSEL_CAP,
+      cand => {
+        let bonus = 0;
+        for (const t of cand.tags || []) {
+          const count = favTagCounts.get(String(t || '').toLowerCase()) || 0;
+          if (count > 0) bonus += 18 + count * 6;
+        }
+        if (favAuthors.has(String(cand.author || '').toLowerCase())) bonus += 24;
+        if ((cand.dependencies || []).some(d => favDepsAndNames.has(String(d || '').toLowerCase()))) bonus += 22;
+        if (Array.from(favGames).some(g => this.doesPackageSupportGame(cand, g))) bonus += 16;
+        return bonus;
+      }
     );
   });
 
@@ -2021,6 +2158,14 @@ export class PackageService {
     const rawAuthorDisplayName = String(item.author_display_name || cachedMeta?.author_display_name || '').trim();
     const resolvedAuthorDisplayName = rawAuthorDisplayName || undefined;
 
+    const parsedTranslations = parsePackageTranslations(item.translations ?? cachedMeta?.translations);
+    const parsedGameSupport = mergeLuantiHubAndContentDbGameSupport(
+      item.game_support,
+      cachedMeta?.game_support,
+      [...deps, ...optDeps]
+    );
+    const parsedScreenshotMeta = parseScreenshotMetaArray(item.screenshot_meta ?? cachedMeta?.screenshot_meta);
+
     const pkg: LuantiPackage = {
       id: pkgId,
       author: resolvedAuthor,
@@ -2035,6 +2180,7 @@ export class PackageService {
       thumbnail,
       banner: banner || thumbnail,
       screenshots,
+      ...(parsedScreenshotMeta ? { screenshot_meta: parsedScreenshotMeta } : {}),
       score,
       contentdb_score: contentdbScore,
       contentdb_downloads: contentdbDownloads,
@@ -2045,6 +2191,11 @@ export class PackageService {
       weekly_views: item.weekly_views !== undefined ? Number(item.weekly_views) || 0 : undefined,
       conversion_rate: item.conversion_rate !== undefined ? Number(item.conversion_rate) || 0 : undefined,
       favorites_count: item.favorites_count !== undefined ? Number(item.favorites_count) || 0 : undefined,
+      luantihub_score_downloads: item.luantihub_score_downloads !== undefined ? Number(item.luantihub_score_downloads) || 0 : undefined,
+      contentdb_score_downloads: item.contentdb_score_downloads !== undefined ? Number(item.contentdb_score_downloads) || 0 : undefined,
+      score_downloads: item.score_downloads !== undefined ? Number(item.score_downloads) || 0 : undefined,
+      score_reviews: item.score_reviews !== undefined ? Number(item.score_reviews) || 0 : undefined,
+      ...(parsedTranslations ? { translations: parsedTranslations } : {}),
       license: resolvedLic,
       media_license: resolvedMediaLic,
       repo_url: repoUrl,
@@ -2062,6 +2213,8 @@ export class PackageService {
       ai_disclosures: aiDisclosures.length > 0 ? aiDisclosures : undefined,
       maintainers: maintainers.length > 0 ? maintainers : undefined,
       review_thread_counts: reviewThreadCounts,
+      supports_all_games: item.supports_all_games !== undefined ? Boolean(item.supports_all_games) : cachedMeta?.supports_all_games,
+      ...(parsedGameSupport.length > 0 ? { game_support: parsedGameSupport } : {}),
       rating_checked: Boolean(
         reviewThreadCounts ||
           score > 0 ||
@@ -2260,6 +2413,18 @@ export class PackageService {
       weekly_views: Math.max(primary.weekly_views || 0, secondary.weekly_views || 0) || undefined,
       conversion_rate: primary.conversion_rate ?? secondary.conversion_rate,
       favorites_count: Math.max(primary.favorites_count || 0, secondary.favorites_count || 0) || undefined,
+      luantihub_score_downloads: Math.max(primary.luantihub_score_downloads || 0, secondary.luantihub_score_downloads || 0) || undefined,
+      contentdb_score_downloads: Math.max(primary.contentdb_score_downloads || 0, secondary.contentdb_score_downloads || 0) || undefined,
+      score_downloads: Math.max(primary.score_downloads || 0, secondary.score_downloads || 0) || undefined,
+      score_reviews: Math.max(primary.score_reviews || 0, secondary.score_reviews || 0) || undefined,
+      screenshot_meta: primary.screenshot_meta || secondary.screenshot_meta,
+      translations: secondary.translations || primary.translations,
+      supports_all_games: Boolean(secondary.supports_all_games ?? primary.supports_all_games),
+      game_support: mergeLuantiHubAndContentDbGameSupport(
+        secondary.game_support,
+        primary.game_support,
+        [...mergedDeps, ...mergedOptDeps]
+      ),
       score: primary.score || secondary.score || 0,
       contentdb_score: Math.max(primary.contentdb_score || 0, secondary.contentdb_score || 0),
       license: primary.license || secondary.license || '',
@@ -2560,6 +2725,7 @@ export class PackageService {
       type: !isImplicitTypeRoute && this._selectedType() !== 'all' ? this._selectedType() : null,
       source: !isImplicitSourceRoute && this._selectedSource() !== 'all' ? this._selectedSource() : null,
       tag: this._selectedTag() !== 'all' ? this._selectedTag() : null,
+      game: this._selectedGame() !== 'all' ? this._selectedGame() : null,
       sort: this._sortBy() !== 'downloads' ? this._sortBy() : null,
       favs: this._showFavoritesOnly() ? '1' : null
     };
@@ -2630,6 +2796,7 @@ export class PackageService {
         const type = params.get('type') || defaultTypeForPath;
         const source = params.get('source') || defaultSourceForPath;
         const tag = params.get('tag') || 'all';
+        const game = params.get('game') || 'all';
         const sort = (params.get('sort') as SortOption) || 'downloads';
         const favs = params.get('favs') === '1';
 
@@ -2638,6 +2805,7 @@ export class PackageService {
         this._selectedType.set(type);
         this._selectedSource.set(source);
         this._selectedTag.set(tag);
+        this._selectedGame.set(game);
         this._sortBy.set(sort);
         this._showFavoritesOnly.set(favs);
       } else if (!isModalRoute) {
@@ -2646,6 +2814,7 @@ export class PackageService {
         this._selectedType.set(defaultTypeForPath);
         this._selectedSource.set(defaultSourceForPath);
         this._selectedTag.set('all');
+        this._selectedGame.set('all');
         this._sortBy.set('downloads');
         this._showFavoritesOnly.set(false);
       }
@@ -4795,11 +4964,13 @@ export class PackageService {
       this._selectedType.set('all');
       this._selectedSource.set('all');
       this._selectedTag.set('all');
+      this._selectedGame.set('all');
       this._sortBy.set('downloads');
       this._showFavoritesOnly.set(false);
     } else if (tab === 'game' || tab === 'mod' || tab === 'txp') {
       this._selectedType.set(tab);
       this._selectedSource.set('all');
+      this._selectedGame.set('all');
       this._showFavoritesOnly.set(false);
     } else if (tab === 'git') {
       const isAlreadyGit =
@@ -4808,6 +4979,7 @@ export class PackageService {
         !this._showFavoritesOnly();
       this._selectedType.set('all');
       this._selectedSource.set(isAlreadyGit ? 'all' : 'git');
+      this._selectedGame.set('all');
       this._showFavoritesOnly.set(false);
     } else if (tab === 'favorites') {
       const isAlreadyFavs =
@@ -4815,6 +4987,7 @@ export class PackageService {
         this._selectedType() === 'all' &&
         this._selectedSource() === 'all' &&
         this._selectedTag() === 'all' &&
+        this._selectedGame() === 'all' &&
         !this._searchQuery().trim();
       if (this.searchDebounceTimer) {
         clearTimeout(this.searchDebounceTimer);
@@ -4824,6 +4997,7 @@ export class PackageService {
       this._selectedType.set('all');
       this._selectedSource.set('all');
       this._selectedTag.set('all');
+      this._selectedGame.set('all');
       this._showFavoritesOnly.set(!isAlreadyFavs);
     }
 
@@ -4856,6 +5030,7 @@ export class PackageService {
     this._selectedType.set('all');
     this._selectedSource.set('all');
     this._selectedTag.set('all');
+    this._selectedGame.set('all');
     this._showFavoritesOnly.set(false);
     this._searchInput.set(clean);
     this._searchQuery.set(clean);
@@ -4893,6 +5068,7 @@ export class PackageService {
     this._searchQuery.set('');
     this._selectedType.set('all');
     this._selectedSource.set('all');
+    this._selectedGame.set('all');
     this._showFavoritesOnly.set(false);
     this._selectedTag.set(tag);
     this._visibleCount.set(PAGE_SIZE);
@@ -4910,6 +5086,51 @@ export class PackageService {
     this._selectedTag.set(next);
     this._visibleCount.set(PAGE_SIZE);
     this.syncQueryParamsToUrl();
+  }
+
+  setGameFilter(game: string): void {
+    const clean = String(game || 'all').trim();
+    const current = this._selectedGame();
+    const next = clean === 'all' || !clean ? 'all' : (current.toLowerCase() === clean.toLowerCase() ? 'all' : clean);
+    this._selectedGame.set(next);
+    this._visibleCount.set(PAGE_SIZE);
+    this.syncQueryParamsToUrl();
+  }
+
+  filterByGameFromModal(gameSlug: string): void {
+    const clean = String(gameSlug || '').trim();
+    if (!clean) return;
+    if (this.searchDebounceTimer) {
+      clearTimeout(this.searchDebounceTimer);
+    }
+    this.modalOpenRequestSeq++;
+    this.inAppModalHistoryDepth = 0;
+    this.pendingRoutePackage = null;
+    this.returnToPackageAfterModal = null;
+    this.returnToPackageAfterAuthorDrawer = null;
+    this.returnToAuthorAfterPackageModal = null;
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._activeVideoTheater.set(null);
+    this._activeBlogArticle.set(null);
+    this._isLoadingAuthorProfile.set(false);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this._searchInput.set('');
+    this._searchQuery.set('');
+    this._selectedType.set('all');
+    this._selectedSource.set('all');
+    this._selectedTag.set('all');
+    this._selectedGame.set(clean);
+    this._showFavoritesOnly.set(false);
+    this._visibleCount.set(PAGE_SIZE);
+    this.seoService?.resetToHome();
+    if (this.router) {
+      this.router.navigate(['/'], {
+        queryParams: this.buildActiveQueryParams()
+      });
+    }
   }
 
   setSortBy(sort: SortOption, updateUrl = true): void {
@@ -4930,6 +5151,7 @@ export class PackageService {
     this._selectedType.set('all');
     this._selectedSource.set('all');
     this._selectedTag.set('all');
+    this._selectedGame.set('all');
     this._showFavoritesOnly.set(false);
     this._sortBy.set('created');
     this._visibleCount.set(PAGE_SIZE);
@@ -4948,6 +5170,7 @@ export class PackageService {
     this._selectedType.set('all');
     this._selectedSource.set('all');
     this._selectedTag.set('all');
+    this._selectedGame.set('all');
     this._sortBy.set('downloads');
     this._showFavoritesOnly.set(false);
     this._visibleCount.set(PAGE_SIZE);
@@ -4976,6 +5199,7 @@ export class PackageService {
             type: null,
             source: null,
             tag: null,
+            game: null,
             sort: null,
             favs: null
           },
@@ -5076,6 +5300,10 @@ export class PackageService {
     const typeWeights: Record<string, number> = { mod: 0, game: 0, txp: 0, modpack: 0 };
     const ecosystemNames = new Set<string>();
     const preferredGames = new Set<string>();
+    const explicitPrefGame = String(this.settingsService.preferredGame() || 'all').trim().toLowerCase();
+    if (explicitPrefGame && explicitPrefGame !== 'all') {
+      preferredGames.add(explicitPrefGame);
+    }
     let totalTypeWeight = 0;
 
     const matchedKeys = new Set<string>();
@@ -5147,7 +5375,7 @@ export class PackageService {
     }
 
     return {
-      hasHistory: pkgWeights.size > 0,
+      hasHistory: pkgWeights.size > 0 || preferredGames.size > 0,
       pkgWeights,
       authorWeights,
       tagWeights,
@@ -5162,9 +5390,10 @@ export class PackageService {
   /**
    * Computes a personalized Match % (64%–99%) combining:
    * - LuantiHub D1 star reviews (`pkg.score`), LuantiHub downloads (`pkg.downloads`), ContentDB composite `contentdb_score`,
+   *   LuantiHub-first velocity (`pkg.score_downloads`, `pkg.luantihub_score_downloads`), community favorites (`pkg.favorites_count`),
    *   7-day momentum (`pkg.weekly_downloads`), and unified Web + In-Game conversion rate (`pkg.conversion_rate`)
    * - Personalized user taste profile from Favorites, Per-Package Download Counts, Recently Viewed Packages,
-   *   Game Ecosystem Compatibility (`pkg.game_support`), and Engine Version Compatibility
+   *   Game Ecosystem Compatibility (`pkg.game_support`, including `supports === false` penalty), and Engine Version Compatibility
    */
   getMatchScore(pkg: LuantiPackage): number {
     if (!pkg) return 85;
@@ -5194,6 +5423,15 @@ export class PackageService {
 
     if (pkg.downloads > 0) {
       score += Math.min(3.0, Math.log10(pkg.downloads + 1) * 0.7);
+    }
+
+    // LuantiHub-first download velocity (`score_downloads` / `luantihub_score_downloads`) & community favorites
+    const velocityDl = Number(pkg.score_downloads ?? pkg.luantihub_score_downloads ?? 0);
+    if (velocityDl > 0) {
+      score += Math.min(2.5, Math.log10(velocityDl + 1) * 0.85);
+    }
+    if (pkg.favorites_count && pkg.favorites_count > 0) {
+      score += Math.min(2.0, Math.log10(pkg.favorites_count + 1) * 0.9);
     }
 
     // Conversion rate & 7-day momentum signal (up to +3.5%)
@@ -5239,11 +5477,22 @@ export class PackageService {
         score += Math.min(12, matchedTagScore);
       }
 
+      // Explicit Incompatible Game Penalty (-12% if package explicitly declares supports: false for user's preferred game)
+      const isIncompatibleWithPreferredGame =
+        profile.preferredGames.size > 0 &&
+        (pkg.game_support || []).some(
+          gs =>
+            gs?.supports === false &&
+            ((gs?.game?.name && profile.preferredGames.has(gs.game.name.toLowerCase())) ||
+              (gs?.game?.title && profile.preferredGames.has(gs.game.title.toLowerCase())))
+        );
+
       // Dependency & Game Ecosystem Compatibility boost (+3.5%–5% if this package extends or supports a game/mod in your ecosystem)
       const inDepEcosystem =
         (pkg.dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase())) ||
         (pkg.optional_dependencies || []).some(d => profile.ecosystemNames.has(d.toLowerCase()));
       const inGameEcosystem =
+        !isIncompatibleWithPreferredGame &&
         profile.preferredGames.size > 0 && (
           profile.preferredGames.has(pkgNameLower) ||
           (pkg.game_support || []).some(gs =>
@@ -5270,6 +5519,18 @@ export class PackageService {
         const typeShare = (profile.typeWeights[pkg.type] || 0) / profile.totalTypeWeight;
         score += typeShare * 3.5;
       }
+
+      // 3. Dampen Match % for pure dependency / API / library packages unless the user explicitly favors #library / #api
+      if (isPrimarilyDependencyPackage(pkg)) {
+        const likesLibrary =
+          (profile.tagWeights.get('library') || 0) > 0 || (profile.tagWeights.get('api') || 0) > 0;
+        if (!likesLibrary) {
+          score -= isApiOrLibraryPackage(pkg) ? 14 : 10;
+        }
+      }
+
+      const clamped = Math.min(99, Math.max(64, Math.round(score)));
+      return isIncompatibleWithPreferredGame ? Math.max(64, clamped - 12) : clamped;
     }
 
     // 3. Dampen Match % for pure dependency / API / library packages unless the user explicitly favors #library / #api
@@ -5282,6 +5543,56 @@ export class PackageService {
     }
 
     return Math.min(99, Math.max(64, Math.round(score)));
+  }
+
+  /**
+   * Toggles a package in the user's LuantiHub Favorites (`SettingsService`) and optimistically updates
+   * `favorites_count` on both `_activePackage` and `_packages` in real time.
+   */
+  togglePackageFavorite(pkg: LuantiPackage): boolean {
+    if (!pkg || !pkg.id) return false;
+    const added = this.settingsService.toggleFavorite(pkg.id);
+    const delta = added ? 1 : -1;
+    const targetLower = pkg.id.toLowerCase();
+    const bumpFavs = (item: LuantiPackage): LuantiPackage => ({
+      ...item,
+      favorites_count: Math.max(0, Number(item.favorites_count || 0) + delta)
+    });
+    this._activePackage.update(curr =>
+      curr && curr.id.toLowerCase() === targetLower ? bumpFavs(curr) : curr
+    );
+    this._packages.update(list =>
+      list.map(item => (item.id.toLowerCase() === targetLower ? bumpFavs(item) : item))
+    );
+    return added;
+  }
+
+  /**
+   * Resolves reverse dependencies ("Used By X Packages") across the unified LuantiHub catalog.
+   */
+  getReverseDependencies(pkg: LuantiPackage | null | undefined, limit = 16) {
+    return findReverseDependenciesForPackage(pkg, this._packages(), limit);
+  }
+
+  /**
+   * LuantiHub-first localized package title/short_desc/desc helper.
+   */
+  getLocalizedPackageText(pkg: Partial<LuantiPackage> | null | undefined): {
+    title: string;
+    short_desc: string;
+    desc?: string;
+  } {
+    if (!pkg) return { title: '', short_desc: '' };
+    const lang = this.i18n.currentLocale();
+    return resolveLocalizedPackageText(
+      {
+        title: pkg.title || pkg.name || '',
+        short_desc: pkg.short_desc || '',
+        desc: pkg.desc
+      },
+      pkg.translations,
+      lang
+    );
   }
 
   /**
@@ -6438,7 +6749,14 @@ export class PackageService {
         let edgeResolved = false;
         if (this.edgeApiAvailable) {
           try {
-            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${deepFetch ? '' : '?lite=1'}`).catch(() => null);
+            const currentLang = this.i18n.currentLocale();
+            const qsParts: string[] = [];
+            if (!deepFetch) qsParts.push('lite=1');
+            if (deepFetch && currentLang && currentLang !== 'en') {
+              qsParts.push(`lang=${encodeURIComponent(currentLang)}`);
+            }
+            const qsSuffix = qsParts.length > 0 ? `?${qsParts.join('&')}` : '';
+            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${qsSuffix}`).catch(() => null);
             if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
               const resJson = await res.json().catch(() => null);
               if (resJson && typeof resJson === 'object' && Object.keys(resJson).length > 0) {
@@ -7041,21 +7359,13 @@ export class PackageService {
           readmeText
         );
 
-        const rawGameSupport = Array.isArray(data.game_support) ? data.game_support : [];
-        const gameSupport = rawGameSupport
-          .filter((gs: any) => gs && gs.game && gs.supports !== false)
-          .map((gs: any) => ({
-            supports: Boolean(gs.supports ?? true),
-            confidence: typeof gs.confidence === 'number' ? gs.confidence : undefined,
-            game: {
-              id: `${gs.game.author}/${gs.game.name}`,
-              author: String(gs.game.author || ''),
-              name: String(gs.game.name || ''),
-              title: String(gs.game.title || gs.game.name || ''),
-              thumbnail: gs.game.thumbnail || undefined,
-              short_description: gs.game.short_description || gs.game.short_desc || undefined
-            }
-          }));
+        const gameSupport = mergeLuantiHubAndContentDbGameSupport(
+          data.game_support,
+          pkg.game_support,
+          [...deps, ...optDeps]
+        );
+        const screenshotMeta = parseScreenshotMetaArray(data.screenshot_meta ?? pkg.screenshot_meta);
+        const translations = parsePackageTranslations(data.translations ?? pkg.translations);
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -7067,6 +7377,7 @@ export class PackageService {
 
         const updatedFields: Partial<LuantiPackage> = {
           ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
+          ...(data.title ? { title: String(data.title) } : {}),
           license: resolvedLicense,
           media_license: resolvedMediaLicense,
           desc: extractedLongDesc,
@@ -7074,9 +7385,16 @@ export class PackageService {
           contentdb_downloads: resolvedCdbDownloads,
           luantihub_downloads: resolvedLhDownloads,
           downloads: resolvedDownloads,
+          favorites_count: data.favorites_count !== undefined ? Number(data.favorites_count) || 0 : pkg.favorites_count,
+          luantihub_score_downloads: data.luantihub_score_downloads !== undefined ? Number(data.luantihub_score_downloads) || 0 : pkg.luantihub_score_downloads,
+          contentdb_score_downloads: data.contentdb_score_downloads !== undefined ? Number(data.contentdb_score_downloads) || 0 : pkg.contentdb_score_downloads,
+          score_downloads: data.score_downloads !== undefined ? Number(data.score_downloads) || 0 : pkg.score_downloads,
+          score_reviews: data.score_reviews !== undefined ? Number(data.score_reviews) || 0 : pkg.score_reviews,
           score: resolvedScore,
           tags: rawTags.length > 0 ? rawTags : pkg.tags,
           screenshots,
+          ...(screenshotMeta ? { screenshot_meta: screenshotMeta } : {}),
+          ...(translations ? { translations } : {}),
           download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : undefined,
           file_size: sizeFormatted,
           release_id: data.release || data.release_id || pkg.release_id,
@@ -8136,10 +8454,37 @@ export class PackageService {
   }
 
   async updatePackageTags(pkg: LuantiPackage, customTags: string[]): Promise<{ success: boolean; tags?: string[]; message?: string }> {
+    return this.updatePackageMetadata(pkg, { tags: customTags });
+  }
+
+  async updatePackageMetadata(
+    pkg: LuantiPackage,
+    payload: {
+      tags?: string[];
+      dev_state?: string;
+      content_warnings?: string[];
+      min_minetest_version?: string | null;
+      max_minetest_version?: string | null;
+      supports_all_games?: boolean;
+      game_support?: any[];
+      translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+    }
+  ): Promise<{
+    success: boolean;
+    tags?: string[];
+    dev_state?: string;
+    content_warnings?: string[];
+    min_minetest_version?: string | null;
+    max_minetest_version?: string | null;
+    supports_all_games?: boolean;
+    game_support?: any[];
+    translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+    message?: string;
+  }> {
     if (!this.authService.canManagePackage(pkg)) {
       return {
         success: false,
-        message: 'Access denied: Only a verified package owner or administrator can edit package tags.'
+        message: 'Access denied: Only a verified package owner or administrator can edit package metadata.'
       };
     }
 
@@ -8153,27 +8498,71 @@ export class PackageService {
       const res = await fetch(`/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tags: customTags })
+        body: JSON.stringify(payload)
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { success: false, message: sanitizeUserFacingError(data.error, 'Could not update package tags.') };
+        return { success: false, message: sanitizeUserFacingError(data.error, 'Could not update package metadata.') };
       }
 
-      const updatedTags: string[] = Array.isArray(data.tags) ? data.tags : customTags;
+      const updatedTags: string[] = Array.isArray(data.tags) ? data.tags : (payload.tags ?? pkg.tags ?? []);
+      const updatedDevState: string | undefined = typeof data.dev_state === 'string' ? data.dev_state : (payload.dev_state ?? pkg.dev_state);
+      const updatedContentWarnings: string[] = Array.isArray(data.content_warnings)
+        ? data.content_warnings
+        : (payload.content_warnings ?? pkg.content_warnings ?? []);
+      const updatedMinVersion: string | undefined =
+        data.min_minetest_version !== undefined
+          ? (data.min_minetest_version || undefined)
+          : (payload.min_minetest_version !== undefined ? (payload.min_minetest_version || undefined) : pkg.min_minetest_version);
+      const updatedMaxVersion: string | undefined =
+        data.max_minetest_version !== undefined
+          ? (data.max_minetest_version || undefined)
+          : (payload.max_minetest_version !== undefined ? (payload.max_minetest_version || undefined) : pkg.max_minetest_version);
+      const updatedSupportsAllGames: boolean | undefined =
+        typeof data.supports_all_games === 'boolean'
+          ? data.supports_all_games
+          : (payload.supports_all_games ?? pkg.supports_all_games);
+      const updatedGameSupport = Array.isArray(data.game_support)
+        ? data.game_support
+        : (payload.game_support ?? pkg.game_support);
+      const updatedTranslations =
+        data.translations && typeof data.translations === 'object'
+          ? data.translations
+          : (payload.translations ?? pkg.translations);
+
       this.deepHydratedIds.delete(cacheKey);
       this.clearBootCache();
 
       this._activePackage.update(current => {
         if (current && current.id.toLowerCase() === cacheKey) {
-          return { ...current, tags: updatedTags };
+          return {
+            ...current,
+            tags: updatedTags,
+            dev_state: updatedDevState,
+            content_warnings: updatedContentWarnings,
+            min_minetest_version: updatedMinVersion,
+            max_minetest_version: updatedMaxVersion,
+            supports_all_games: updatedSupportsAllGames,
+            game_support: updatedGameSupport,
+            translations: updatedTranslations
+          };
         }
         return current;
       });
 
       this._packages.update(list => list.map(item => {
         if (item.id.toLowerCase() === cacheKey) {
-          const merged = { ...item, tags: updatedTags };
+          const merged: LuantiPackage = {
+            ...item,
+            tags: updatedTags,
+            dev_state: updatedDevState,
+            content_warnings: updatedContentWarnings,
+            min_minetest_version: updatedMinVersion,
+            max_minetest_version: updatedMaxVersion,
+            supports_all_games: updatedSupportsAllGames,
+            game_support: updatedGameSupport,
+            translations: updatedTranslations
+          };
           merged._searchBlob = this.buildSearchBlob(merged);
           return merged;
         }
@@ -8183,9 +8572,19 @@ export class PackageService {
       this.authService.clearAuthCache();
       this.authService.initAuth(true);
 
-      return { success: true, tags: updatedTags };
+      return {
+        success: true,
+        tags: updatedTags,
+        dev_state: updatedDevState,
+        content_warnings: updatedContentWarnings,
+        min_minetest_version: updatedMinVersion ?? null,
+        max_minetest_version: updatedMaxVersion ?? null,
+        supports_all_games: updatedSupportsAllGames,
+        game_support: updatedGameSupport,
+        translations: updatedTranslations
+      };
     } catch (err: any) {
-      return { success: false, message: err.message || 'Network error updating package tags.' };
+      return { success: false, message: err.message || 'Network error updating package metadata.' };
     }
   }
 

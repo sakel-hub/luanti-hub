@@ -253,6 +253,7 @@
   }
 
   // === BEGIN SHARED NOTIF ENGINE ===
+  "use strict";
   const NOTIFICATION_MAX_EVENT_AGE_MS = 12 * 3600 * 1000; // 12 hours max age for event notifications
   const NOTIFICATION_PACKAGE_COOLDOWN_MS = 12 * 3600 * 1000; // 12 hours per-package update cooldown
   const NOTIFICATION_BASELINE_SKEW_GRACE_MS = 15 * 60 * 1000; // 15 minutes grace for clock skew on newly seeded baselines

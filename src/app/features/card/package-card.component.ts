@@ -249,11 +249,11 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 [href]="packageUrl"
                 (click)="onTitleLinkClick($event)"
                 class="text-inherit hover:text-sky-300 no-underline focus:outline-none">
-                {{ package.title }}
+                {{ packageService.getLocalizedPackageText(package).title || package.title }}
               </a>
             </h3>
             <p class="text-[11px] text-slate-400 line-clamp-2 min-h-[2.25rem] leading-relaxed mt-0.5">
-              {{ package.short_desc }}
+              {{ packageService.getLocalizedPackageText(package).short_desc || package.short_desc }}
             </p>
           </div>
         </div>
@@ -680,7 +680,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onFavoriteClick(event: MouseEvent): void {
     event.stopPropagation();
-    this.settingsService.toggleFavorite(this.package.id);
+    this.packageService.togglePackageFavorite(this.package);
   }
 
   onTagClick(event: MouseEvent, tag: string): void {

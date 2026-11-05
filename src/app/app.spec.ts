@@ -40,8 +40,19 @@ import {
   getUnifiedCatalogTags,
   upsertCustomAppTags,
   normalizeContentDbReviewItem,
-  normalizeUtcIsoTimestamp
+  normalizeUtcIsoTimestamp,
+  LUANTIHUB_ENGINE_VERSIONS,
+  LUANTIHUB_CONTENT_WARNINGS,
+  inferGameSupportFromDependencies,
+  mergeLuantiHubAndContentDbGameSupport,
+  computeLuantiHubFrecencyMetrics,
+  resolveLocalizedPackageText,
+  parseScreenshotMetaArray,
+  findReverseDependenciesForPackage
 } from '../../functions/api/lib/upstream';
+import { onRequestGet as minetestVersionsOnRequestGet } from '../../functions/api/minetest_versions';
+import { onRequestGet as contentWarningsOnRequestGet } from '../../functions/api/content_warnings';
+import { onRequestPatch as packageDetailOnRequestPatch } from '../../functions/api/packages/[author]/[name]/index';
 import {
   syncActivePromotionRowPackages,
   overlayPromotionRowDeltaOnCatalog
@@ -9258,5 +9269,308 @@ supported_games = minetest_game, voxelibre
     expect(comp.packagesTotalPages()).toBe(2);
     expect(comp.packagesCurrentPage()).toBe(1);
     expect(comp.pagedUserPackages().length).toBe(8);
+  });
+
+  it('should compute LuantiHub-first velocity/frecency metrics, infer and merge game support (preserving supports: false), resolve multi-language translations, and find reverse dependencies', async () => {
+    const pkgService = TestBed.inject(PackageService);
+    const settingsService = TestBed.inject(SettingsService);
+    const i18n = TestBed.inject(TranslationService);
+
+    // 1. LuantiHub-First Frecency & Velocity Metrics
+    const frecency = computeLuantiHubFrecencyMetrics({
+      luantihubDownloads: 400,
+      dailyDownloads: 10,
+      weeklyDownloads: 50,
+      favoritesCount: 12,
+      score: 4.8,
+      reviewThreadCounts: { positive: 5, neutral: 1, negative: 0 },
+      contentdbScoreDownloads: 120,
+      contentdbScoreReviews: 45
+    });
+    expect(frecency.luantihub_score_downloads).toBeGreaterThan(200);
+    expect(frecency.contentdb_score_downloads).toBe(120);
+    expect(frecency.score_downloads).toBe(frecency.luantihub_score_downloads + 120);
+    expect(frecency.score_reviews).toBeGreaterThan(45);
+
+    // 2. Game Support Inference from Git mod.conf dependencies + Merge preserving supports: false
+    const inferredGames = inferGameSupportFromDependencies(['default', 'mcl_core', 'nc_api_all']);
+    expect(inferredGames.map(g => g.game.name)).toEqual(['minetest_game', 'mineclone2', 'mineclonia', 'nodecore']);
+    expect(inferredGames.every(g => g.supports === true)).toBe(true);
+
+    const mergedGames = mergeLuantiHubAndContentDbGameSupport(
+      [
+        {
+          confidence: 11,
+          supports: false,
+          game: { id: 'Wuzzy/mineclone2', author: 'Wuzzy', name: 'mineclone2', title: 'VoxeLibre' }
+        }
+      ],
+      [
+        {
+          confidence: 10,
+          supports: true,
+          game: { id: 'Wuzzy/mineclone2', author: 'Wuzzy', name: 'mineclone2', title: 'VoxeLibre' }
+        },
+        {
+          confidence: 10,
+          supports: true,
+          game: { id: 'Minetest/minetest_game', author: 'Minetest', name: 'minetest_game', title: 'Minetest Game' }
+        }
+      ],
+      ['default']
+    );
+    const voxeLibreEntry = mergedGames.find(g => g.game.name === 'mineclone2');
+    expect(voxeLibreEntry?.supports).toBe(false); // LuantiHub author override wins over ContentDB
+    const mtgEntry = mergedGames.find(g => g.game.name === 'minetest_game');
+    expect(mtgEntry?.supports).toBe(true);
+
+    // 3. Multi-Language Package Metadata Resolution (LuantiHub D1 translations first)
+    const localizedPkg = (pkgService as any).normalizePackage({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Explore new biomes and dimensions.',
+      desc: 'Full English description.',
+      translations: {
+        de: {
+          title: 'Everness (Deutsch)',
+          short_desc: 'Entdecke neue Biome und Dimensionen.'
+        },
+        sk: {
+          title: 'Everness (SK)',
+          short_desc: 'Preskúmajte nové biómy a dimenzie.'
+        }
+      }
+    });
+    expect(resolveLocalizedPackageText(localizedPkg, 'de').title).toBe('Everness (Deutsch)');
+    i18n.setLocale('sk');
+    expect(pkgService.getLocalizedPackageText(localizedPkg).short_desc).toBe('Preskúmajte nové biómy a dimenzie.');
+    i18n.setLocale('en');
+    expect(pkgService.getLocalizedPackageText(localizedPkg).title).toBe('Everness');
+
+    // 4. Screenshot Metadata Captions (`parseScreenshotMetaArray`)
+    const parsedMeta = parseScreenshotMetaArray([
+      { url: 'https://content.luanti.org/uploads/shot1.png', title: 'Crystal Forest Biome', width: 1920, height: 1080 }
+    ]);
+    expect(parsedMeta.length).toBe(1);
+    expect(parsedMeta[0].title).toBe('Crystal Forest Biome');
+
+    // 5. Reverse Dependencies ("Used By / Ecosystem Add-ons") & Favorites Recommendations
+    const baseLib = (pkgService as any).normalizePackage({
+      id: 'mt-mods/mesecons',
+      author: 'mt-mods',
+      name: 'mesecons',
+      title: 'Mesecons',
+      type: 'mod',
+      short_desc: 'Digital circuitry and logic gates',
+      provides: ['mesecons', 'mesecons_torch'],
+      tags: ['technology'],
+      downloads: 120000,
+      score: 4.9,
+      favorites_count: 5,
+      score_downloads: 450,
+      game_support: mergedGames
+    });
+    const reqAddon = (pkgService as any).normalizePackage({
+      id: 'mt-mods/pipeworks',
+      author: 'mt-mods',
+      name: 'pipeworks',
+      title: 'Pipeworks',
+      type: 'mod',
+      short_desc: 'Item transport tubes and mesecons integration',
+      dependencies: ['mesecons'],
+      tags: ['technology', 'transport'],
+      downloads: 80000,
+      score: 4.8
+    });
+    const optAddon = (pkgService as any).normalizePackage({
+      id: 'mt-mods/technic',
+      author: 'mt-mods',
+      name: 'technic',
+      title: 'Technic',
+      type: 'mod',
+      short_desc: 'Industrial machines and power networks',
+      optional_dependencies: ['mesecons_torch'],
+      tags: ['technology'],
+      downloads: 95000,
+      score: 4.8
+    });
+    (pkgService as any)._packages.set([baseLib, reqAddon, optAddon]);
+
+    const revDeps = pkgService.getReverseDependencies(baseLib);
+    expect(revDeps.totalCount).toBe(2);
+    expect(revDeps.requiredBy.map((p: LuantiPackage) => p.name)).toEqual(['pipeworks']);
+    expect(revDeps.optionalFor.map((p: LuantiPackage) => p.name)).toEqual(['technic']);
+
+    // 6. First-Class LuantiHub Favorites Integration & Optimistic Counter Updates
+    if (settingsService.isFavorite(baseLib.id)) {
+      settingsService.removeFavorite(baseLib.id);
+    }
+    pkgService.togglePackageFavorite(baseLib);
+    expect(settingsService.isFavorite(baseLib.id)).toBe(true);
+    const updatedBaseLib = pkgService.packages().find(p => p.id === baseLib.id)!;
+    expect(updatedBaseLib.favorites_count).toBe(6);
+
+    // Recommended From Your Favorites swimlane surfaces pipeworks & technic (shared tags + reverse dependency)
+    const favRecs = pkgService.recommendedFromFavorites();
+    expect(favRecs.length).toBe(2);
+    expect(favRecs.map(p => p.name)).toContain('pipeworks');
+
+    // Game Ecosystem Filter & Match Score Penalty for Incompatible Games
+    settingsService.preferredGame.set('mineclone2');
+    const scoreIncompatible = pkgService.getMatchScore(updatedBaseLib);
+    settingsService.preferredGame.set('minetest_game');
+    const scoreCompatible = pkgService.getMatchScore(updatedBaseLib);
+    expect(scoreCompatible).toBeGreaterThan(scoreIncompatible);
+    settingsService.preferredGame.set('all');
+
+    pkgService.setGameFilter('minetest_game');
+    expect(pkgService.filteredPackages().map(p => p.name)).toContain('mesecons');
+    pkgService.setGameFilter('mineclone2');
+    expect(pkgService.filteredPackages().map(p => p.name)).not.toContain('mesecons');
+    pkgService.resetFilters();
+
+    // 7. LuantiHub-First /api/minetest_versions & /api/content_warnings Endpoints
+    expect(LUANTIHUB_ENGINE_VERSIONS.length).toBeGreaterThan(5);
+    expect(LUANTIHUB_CONTENT_WARNINGS.length).toBeGreaterThanOrEqual(5);
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('[]', { status: 200 })) as typeof fetch;
+    try {
+      const verRes = await minetestVersionsOnRequestGet({
+        request: new Request('https://luantihub.org/api/minetest_versions'),
+        env: {}
+      });
+      expect(verRes.status).toBe(200);
+      const verJson = await verRes.json();
+      expect(Array.isArray(verJson)).toBe(true);
+      expect(verJson.some((v: any) => v.name === '5.11.0')).toBe(true);
+
+      const cwRes = await contentWarningsOnRequestGet({
+        request: new Request('https://luantihub.org/api/content_warnings'),
+        env: {}
+      });
+      expect(cwRes.status).toBe(200);
+      const cwJson = await cwRes.json();
+      expect(Array.isArray(cwJson)).toBe(true);
+      expect(cwJson.some((w: any) => w.name === 'violence')).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 8. Author-Editable Package Metadata via PATCH /api/packages/:author/:name
+    const token = await createSessionToken(
+      'user-sakel',
+      'test-secret-key-for-metadata-patch',
+      {
+        username: 'sakel-hub',
+        displayName: 'SaKeL',
+        avatarUrl: 'logo.svg',
+        provider: 'github',
+        role: 'admin',
+        verified: true
+      }
+    );
+    const savedColumns: Record<string, any> = {};
+    const mockDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM users')) {
+                  return {
+                    id: 'user-sakel',
+                    username: 'sakel-hub',
+                    display_name: 'SaKeL',
+                    role: 'admin',
+                    verified: 1
+                  };
+                }
+                if (sql.includes('FROM packages')) {
+                  return {
+                    id: 'SaKeL/everness',
+                    author: 'SaKeL',
+                    author_name: 'SaKeL',
+                    name: 'everness',
+                    title: 'Everness',
+                    type: 'mod',
+                    short_desc: 'Explore new biomes',
+                    tags: '["mod","environment"]',
+                    dev_state: 'ACTIVELY_DEVELOPED',
+                    content_warnings: '[]',
+                    min_minetest_version: '5.8.0',
+                    max_minetest_version: null,
+                    supports_all_games: 0,
+                    game_support: '[]',
+                    translations: '{}'
+                  };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM user_identities')) {
+                  return {
+                    results: [{ provider: 'github', username: 'sakel-hub', verified: 1 }]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                if (sql.includes('UPDATE packages')) {
+                  savedColumns['args'] = args;
+                }
+                return { success: true };
+              }
+            };
+          },
+          async run() {
+            return { success: true };
+          }
+        };
+      }
+    };
+
+    const patchRes = await packageDetailOnRequestPatch({
+      request: new Request('https://luantihub.org/api/packages/SaKeL/everness', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `lh_session=${token}`
+        },
+        body: JSON.stringify({
+          tags: ['worldgen', 'biomes'],
+          dev_state: 'ACTIVELY_DEVELOPED',
+          content_warnings: [' spiders_and_insects '],
+          min_minetest_version: '5.10.0',
+          max_minetest_version: '5.11.0',
+          supports_all_games: true,
+          game_support: [
+            {
+              confidence: 11,
+              supports: true,
+              game: { id: 'Minetest/minetest_game', author: 'Minetest', name: 'minetest_game', title: 'Minetest Game' }
+            }
+          ],
+          translations: {
+            de: { title: 'Everness DE', short_desc: 'Neue Biome' }
+          }
+        })
+      }),
+      env: { DB: mockDb, SESSION_SECRET: 'test-secret-key-for-metadata-patch', ADMIN_USERS: 'sakel-hub' },
+      params: { author: 'SaKeL', name: 'everness' }
+    });
+    expect(patchRes.status).toBe(200);
+    const patchData = await patchRes.json();
+    expect(patchData.ok).toBe(true);
+    expect(patchData.dev_state).toBe('ACTIVELY_DEVELOPED');
+    expect(patchData.content_warnings).toEqual(['spiders_and_insects']);
+    expect(patchData.min_minetest_version).toBe('5.10.0');
+    expect(patchData.max_minetest_version).toBe('5.11.0');
+    expect(patchData.supports_all_games).toBe(true);
+    expect(patchData.game_support.length).toBe(1);
+    expect(patchData.translations.de.title).toBe('Everness DE');
   });
 });

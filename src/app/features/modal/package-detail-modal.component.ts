@@ -203,7 +203,7 @@ import {
 
               <!-- Title -->
               <h2 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
-                {{ package.title }}
+                {{ packageService.getLocalizedPackageText(package).title || package.title }}
               </h2>
 
               <!-- Action Buttons Row -->
@@ -533,6 +533,11 @@ import {
                                   class="absolute top-3 right-3 p-2 rounded-xl glass-btn text-slate-200 hover:text-white opacity-85 group-hover:opacity-100 transition cursor-pointer z-20">
                                   <svg lucideMaximize2 class="w-4 h-4"></svg>
                                 </button>
+                                @if (slide.caption) {
+                                  <div class="absolute bottom-11 left-3 right-3 sm:right-auto sm:max-w-[75%] px-3 py-1 rounded-xl bg-slate-950/80 backdrop-blur-md border border-white/10 text-[11px] font-medium text-slate-200 truncate pointer-events-none z-20">
+                                    {{ slide.caption }}
+                                  </div>
+                                }
                               </div>
                             }
                           </div>
@@ -776,6 +781,89 @@ import {
                     </p>
                   }
                 </div>
+
+                <!-- Source-Agnostic Reverse Dependencies ("Used By / Ecosystem Add-ons") -->
+                @if (reverseDependencies().totalCount > 0) {
+                  <div class="space-y-3 p-4 rounded-2xl glass-panel" data-testid="package-reverse-dependencies-section">
+                    <button
+                      type="button"
+                      (click)="toggleReverseDependencies()"
+                      [attr.aria-expanded]="isReverseDepsExpanded()"
+                      class="w-full flex items-center justify-between gap-2 text-left group cursor-pointer">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <h3 class="text-xs font-bold text-slate-200 group-hover:text-sky-300 uppercase tracking-wider truncate transition">
+                          Used By &amp; Ecosystem Add-ons
+                        </h3>
+                        <span class="px-2 py-0.5 rounded-md glass-pill text-[10px] font-semibold text-emerald-300 flex-shrink-0">
+                          {{ reverseDependencies().totalCount }}
+                        </span>
+                      </div>
+                      <div class="flex items-center gap-2 flex-shrink-0">
+                        @if (!isReverseDepsExpanded()) {
+                          <div class="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
+                            @if (reverseDependencies().requiredBy.length > 0) {
+                              <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-400/20">
+                                {{ reverseDependencies().requiredBy.length }} req
+                              </span>
+                            }
+                            @if (reverseDependencies().optionalFor.length > 0) {
+                              <span class="px-1.5 py-0.5 rounded glass-pill text-slate-300">
+                                {{ reverseDependencies().optionalFor.length }} opt
+                              </span>
+                            }
+                          </div>
+                        }
+                        <svg
+                          lucideChevronDown
+                          class="w-4 h-4 text-slate-400 group-hover:text-sky-300 transition-transform duration-200 flex-shrink-0"
+                          [class.rotate-180]="isReverseDepsExpanded()">
+                        </svg>
+                      </div>
+                    </button>
+
+                    @if (isReverseDepsExpanded()) {
+                      <div class="space-y-3 pt-2 border-t border-white/10">
+                        @if (reverseDependencies().requiredBy.length > 0) {
+                          <div>
+                            <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">
+                              Required By ({{ reverseDependencies().requiredBy.length }})
+                            </span>
+                            <div class="flex flex-wrap gap-1.5">
+                              @for (depPkg of reverseDependencies().requiredBy; track depPkg.id) {
+                                <button
+                                  type="button"
+                                  (click)="packageService.openPackageModal(depPkg, true)"
+                                  class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 hover:text-white text-[11px] font-medium border border-emerald-400/30 flex items-center gap-1.5 transition cursor-pointer">
+                                  <span class="truncate max-w-[160px]">{{ depPkg.title }}</span>
+                                  <span class="text-[10px] font-mono text-emerald-300/75">({{ depPkg.name }})</span>
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        }
+
+                        @if (reverseDependencies().optionalFor.length > 0) {
+                          <div>
+                            <span class="text-slate-400 font-semibold text-[11px] block mb-1.5">
+                              Optional Integration In ({{ reverseDependencies().optionalFor.length }})
+                            </span>
+                            <div class="flex flex-wrap gap-1.5">
+                              @for (optPkg of reverseDependencies().optionalFor; track optPkg.id) {
+                                <button
+                                  type="button"
+                                  (click)="packageService.openPackageModal(optPkg, true)"
+                                  class="px-2.5 py-1 rounded-lg glass-pill hover:border-sky-400/40 text-slate-300 hover:text-white text-[11px] font-medium flex items-center gap-1.5 transition cursor-pointer">
+                                  <span class="truncate max-w-[160px]">{{ optPkg.title }}</span>
+                                  <span class="text-[10px] font-mono text-slate-400">({{ optPkg.name }})</span>
+                                </button>
+                              }
+                            </div>
+                          </div>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
 
                 <!-- Collapsible Repository README.md Markdown Section (Collapsed by Default, Fetched on Demand) -->
                 @if (hasValidGitRepo || renderedReadme() || isHydratingDetails()) {
@@ -1036,10 +1124,10 @@ import {
                   }
                 </div>
 
-                <!-- Downloads & Community Score (With ContentDB + Luanti Hub Dual-Counter Breakdown & Review Sentiment) -->
+                <!-- Downloads, Community Score & LuantiHub Favorites Counter -->
                 <div
-                  [class.grid-cols-2]="package.score > 0"
-                  [class.grid-cols-1]="package.score <= 0"
+                  [class.grid-cols-2]="package.score > 0 || (package.favorites_count || 0) > 0 || settingsService.isFavorite(package.id)"
+                  [class.grid-cols-1]="package.score <= 0 && (package.favorites_count || 0) <= 0 && !settingsService.isFavorite(package.id)"
                   class="grid gap-2 p-3 rounded-xl glass-panel">
                   <div>
                     <span class="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
@@ -1051,6 +1139,12 @@ import {
                     @if ((package.contentdb_downloads || 0) > 0 || (package.luantihub_downloads || 0) > 0) {
                       <span class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
                         ContentDB: {{ (package.contentdb_downloads || 0) | compactNumber }} • Hub: {{ (package.luantihub_downloads || 0) | compactNumber }}
+                      </span>
+                    }
+                    @if ((package.favorites_count || 0) > 0 || settingsService.isFavorite(package.id)) {
+                      <span class="text-[10px] text-rose-300 font-semibold flex items-center gap-1 mt-1 leading-tight">
+                        <svg lucideHeart class="w-2.5 h-2.5 fill-rose-400 text-rose-400"></svg>
+                        <span>{{ (package.favorites_count || 1) | compactNumber }} Favorites</span>
                       </span>
                     }
                   </div>
@@ -1201,17 +1295,22 @@ import {
                   </div>
                 </div>
 
-                <!-- Supported Games (from ContentDB game_support) -->
-                @if (package.game_support && package.game_support.length > 0) {
-                  <div class="space-y-1.5">
+                <!-- Supported & Incompatible Games (LuantiHub-First + ContentDB Game Support) -->
+                @if (package.supports_all_games || compatibleGames().length > 0 || incompatibleGames().length > 0) {
+                  <div class="space-y-2">
                     <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                       Supported Games
                     </span>
                     <div class="flex flex-wrap gap-1.5">
-                      @for (gs of package.game_support.slice(0, 6); track gs.game.id) {
+                      @if (package.supports_all_games) {
+                        <span class="px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-400/35 text-emerald-300 text-[10px] font-semibold flex items-center gap-1">
+                          <span>Universal (All Games)</span>
+                        </span>
+                      }
+                      @for (gs of compatibleGames().slice(0, 6); track gs.game.id) {
                         <button
                           type="button"
-                          (click)="packageService.openPackageModalById(gs.game.author, gs.game.name, true)"
+                          (click)="gs.game.author ? packageService.openPackageModalById(gs.game.author, gs.game.name, true) : packageService.filterByGameFromModal(gs.game.name)"
                           class="px-2 py-1 rounded-lg glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-semibold flex items-center gap-1.5 transition cursor-pointer">
                           @if (gs.game.thumbnail) {
                             <img [src]="gs.game.thumbnail" appImgFallback [alt]="gs.game.title" class="w-3.5 h-3.5 rounded object-cover" />
@@ -1220,10 +1319,25 @@ import {
                         </button>
                       }
                     </div>
+                    @if (incompatibleGames().length > 0) {
+                      <div class="pt-1 space-y-1">
+                        <span class="text-rose-400 font-semibold uppercase tracking-wider block text-[9px]">
+                          Incompatible With
+                        </span>
+                        <div class="flex flex-wrap gap-1.5">
+                          @for (gs of incompatibleGames(); track gs.game.id) {
+                            <span
+                              class="px-2 py-0.5 rounded-lg bg-rose-500/15 border border-rose-400/35 text-rose-300 text-[10px] font-semibold flex items-center gap-1">
+                              <span>✕ {{ gs.game.title }}</span>
+                            </span>
+                          }
+                        </div>
+                      </div>
+                    }
                   </div>
                 }
 
-                <!-- Content Warnings (When present on ContentDB / D1) -->
+                <!-- Content Warnings (When present on LuantiHub D1 / ContentDB) -->
                 @if (package.content_warnings && package.content_warnings.length > 0) {
                   <div class="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-2 text-[11px]">
                     <div>
@@ -1241,7 +1355,7 @@ import {
                   </div>
                 }
 
-                <!-- Tags Pills (Clickable to filter by ContentDB Tag, with inline Tag Editor for Author/Admin) -->
+                <!-- Tags & LuantiHub-First Author Metadata Editor (Tags, Dev State, Engine Range, Game Support, Content Warnings, Translations) -->
                 @if ((package.tags && package.tags.length > 0) || canModerate()) {
                   <div class="space-y-2">
                     <div class="flex items-center justify-between gap-2">
@@ -1254,36 +1368,179 @@ import {
                           (click)="openEditTags()"
                           class="text-[11px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
                           <svg lucideTag class="w-3 h-3"></svg>
-                          <span>Edit Tags</span>
+                          <span>Edit Metadata &amp; Tags</span>
                         </button>
                       }
                     </div>
 
                     @if (isEditingTags()) {
-                      <div class="p-3 rounded-xl bg-slate-950/85 border border-sky-500/30 space-y-2.5 text-xs">
-                        <div class="flex items-center justify-between">
-                          <span class="text-[11px] font-semibold text-sky-300">
-                            Select Tags ({{ editableTags().length }}/5)
-                          </span>
-                          <button
-                            type="button"
-                            (click)="editableTags.set([])"
-                            class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
-                            Clear
-                          </button>
-                        </div>
-                        <div class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
-                          @for (t of packageService.availableTags(); track t.name) {
+                      <div class="p-3.5 rounded-xl bg-slate-950/90 border border-sky-500/30 space-y-3 text-xs">
+                        <!-- 1. Tags (up to 5) -->
+                        <div class="space-y-1.5">
+                          <div class="flex items-center justify-between">
+                            <span class="text-[11px] font-semibold text-sky-300">
+                              Select Tags ({{ editableTags().length }}/5)
+                            </span>
                             <button
                               type="button"
-                              (click)="toggleEditableTag(t.name)"
-                              [class]="isEditableTagSelected(t.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/60' : 'glass-pill text-slate-300 hover:text-white'"
-                              class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
-                              #{{ t.title }}
+                              (click)="editableTags.set([])"
+                              class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
+                              Clear
                             </button>
-                          }
+                          </div>
+                          <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto pr-1">
+                            @for (t of packageService.availableTags(); track t.name) {
+                              <button
+                                type="button"
+                                (click)="toggleEditableTag(t.name)"
+                                [class]="isEditableTagSelected(t.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/60' : 'glass-pill text-slate-300 hover:text-white'"
+                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
+                                #{{ t.title }}
+                              </button>
+                            }
+                          </div>
                         </div>
-                        <div class="flex items-center justify-end gap-2 pt-1 border-t border-white/10">
+
+                        <!-- 2. Development Status & Engine Versions -->
+                        <div class="pt-2 border-t border-white/10 space-y-2">
+                          <div>
+                            <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                              Development Status
+                            </label>
+                            <select
+                              [ngModel]="editableDevState()"
+                              (ngModelChange)="editableDevState.set($event)"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                              <option value="" class="bg-slate-900">Auto / Default</option>
+                              @for (ds of packageService.availableDevStates(); track ds.code) {
+                                <option [value]="ds.code" class="bg-slate-900">{{ ds.label }}</option>
+                              }
+                            </select>
+                          </div>
+
+                          <div class="grid grid-cols-2 gap-2">
+                            <div>
+                              <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                                Min Engine
+                              </label>
+                              <select
+                                [ngModel]="editableMinEngineVersion()"
+                                (ngModelChange)="editableMinEngineVersion.set($event)"
+                                class="w-full glass-input rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none">
+                                <option value="" class="bg-slate-900">Any</option>
+                                @for (ev of packageService.availableEngineVersions(); track ev.name) {
+                                  <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
+                                }
+                              </select>
+                            </div>
+                            <div>
+                              <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                                Max Engine
+                              </label>
+                              <select
+                                [ngModel]="editableMaxEngineVersion()"
+                                (ngModelChange)="editableMaxEngineVersion.set($event)"
+                                class="w-full glass-input rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none">
+                                <option value="" class="bg-slate-900">Latest</option>
+                                @for (ev of packageService.availableEngineVersions(); track ev.name) {
+                                  <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
+                                }
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+
+                        <!-- 3. Game Support (Universal + Compatible / Incompatible Games) -->
+                        <div class="pt-2 border-t border-white/10 space-y-1.5">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Game Support (Click to cycle ✓ / ✕)
+                            </span>
+                            <label class="inline-flex items-center gap-1.5 text-[10px] text-emerald-300 font-semibold cursor-pointer">
+                              <input
+                                type="checkbox"
+                                [checked]="editableSupportsAllGames()"
+                                (change)="editableSupportsAllGames.set(!editableSupportsAllGames())"
+                                class="rounded border-white/20 bg-slate-900 text-emerald-500" />
+                              <span>All Games</span>
+                            </label>
+                          </div>
+                          <div class="flex flex-wrap gap-1 max-h-24 overflow-y-auto pr-1">
+                            @for (g of packageService.availableGames(); track g.name) {
+                              <button
+                                type="button"
+                                (click)="cycleEditableGameSupport(g)"
+                                [class]="getEditableGameState(g.name) === 'compatible'
+                                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60'
+                                  : getEditableGameState(g.name) === 'incompatible'
+                                    ? 'bg-rose-500/25 text-rose-300 border-rose-400/60'
+                                    : 'glass-pill text-slate-400 hover:text-white'"
+                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
+                                @if (getEditableGameState(g.name) === 'compatible') { ✓ }
+                                @if (getEditableGameState(g.name) === 'incompatible') { ✕ }
+                                {{ g.title }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 4. Content Warnings -->
+                        <div class="pt-2 border-t border-white/10 space-y-1.5">
+                          <span class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Content Warnings
+                          </span>
+                          <div class="flex flex-wrap gap-1">
+                            @for (cw of packageService.availableContentWarnings(); track cw.name) {
+                              <button
+                                type="button"
+                                (click)="toggleEditableContentWarning(cw.name)"
+                                [class]="isEditableContentWarningSelected(cw.name) ? 'bg-amber-500/25 text-amber-300 border-amber-400/60' : 'glass-pill text-slate-400 hover:text-white'"
+                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
+                                {{ cw.title }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 5. Multi-Language Translations (Title & Short Description) -->
+                        <div class="pt-2 border-t border-white/10 space-y-1.5">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Localized Text
+                            </span>
+                            <select
+                              [ngModel]="editableTranslationLang()"
+                              (ngModelChange)="onChangeEditableTranslationLang($event)"
+                              class="glass-input rounded px-1.5 py-0.5 text-[10px] text-white focus:outline-none">
+                              <option value="de" class="bg-slate-900">Deutsch (de)</option>
+                              <option value="fr" class="bg-slate-900">Français (fr)</option>
+                              <option value="es" class="bg-slate-900">Español (es)</option>
+                              <option value="it" class="bg-slate-900">Italiano (it)</option>
+                              <option value="pt" class="bg-slate-900">Português (pt)</option>
+                              <option value="pl" class="bg-slate-900">Polski (pl)</option>
+                              <option value="ru" class="bg-slate-900">Русский (ru)</option>
+                              <option value="uk" class="bg-slate-900">Українська (uk)</option>
+                              <option value="sk" class="bg-slate-900">Slovenčina (sk)</option>
+                              <option value="cs" class="bg-slate-900">Čeština (cs)</option>
+                              <option value="ja" class="bg-slate-900">日本語 (ja)</option>
+                              <option value="zh_CN" class="bg-slate-900">中文 (zh_CN)</option>
+                            </select>
+                          </div>
+                          <input
+                            type="text"
+                            [ngModel]="editableTranslatedTitle()"
+                            (ngModelChange)="editableTranslatedTitle.set($event)"
+                            [placeholder]="'Localized title (' + editableTranslationLang() + ')...'"
+                            class="w-full glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                          <input
+                            type="text"
+                            [ngModel]="editableTranslatedShortDesc()"
+                            (ngModelChange)="editableTranslatedShortDesc.set($event)"
+                            [placeholder]="'Localized summary (' + editableTranslationLang() + ')...'"
+                            class="w-full glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                        </div>
+
+                        <div class="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
                           <button
                             type="button"
                             (click)="cancelEditTags()"
@@ -1295,7 +1552,7 @@ import {
                             [disabled]="isSavingTags()"
                             (click)="onSaveTags()"
                             class="px-3 py-1 rounded-lg glass-btn-sky text-white font-bold text-[11px] disabled:opacity-50 transition cursor-pointer">
-                            {{ isSavingTags() ? 'Saving...' : 'Save Tags' }}
+                            {{ isSavingTags() ? 'Saving...' : 'Save Metadata' }}
                           </button>
                         </div>
                       </div>
@@ -1883,13 +2140,26 @@ import {
                                 </span>
                               }
                               @if (rel.commit_sha) {
-                                <code class="text-[10px] text-sky-400 bg-slate-950/80 px-1.5 py-0.5 rounded font-mono border border-white/10">
+                                <code
+                                  [appTooltip]="'Git Commit: ' + rel.commit_sha"
+                                  class="text-[10px] text-sky-400 bg-slate-950/80 px-1.5 py-0.5 rounded font-mono border border-white/10">
                                   {{ rel.commit_sha | slice:0:8 }}
                                 </code>
                               }
-                              @if (rel.min_minetest_version) {
+                              @if (rel.sha256) {
+                                <code
+                                  [appTooltip]="'SHA-256: ' + rel.sha256"
+                                  class="text-[10px] text-emerald-300 bg-emerald-950/50 px-1.5 py-0.5 rounded font-mono border border-emerald-400/25">
+                                  sha256:{{ rel.sha256 | slice:0:8 }}
+                                </code>
+                              }
+                              @if (rel.min_minetest_version || rel.max_minetest_version) {
                                 <span class="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[10px] text-slate-300">
-                                  Engine {{ rel.min_minetest_version }}+
+                                  @if (rel.min_minetest_version && rel.max_minetest_version && rel.min_minetest_version !== rel.max_minetest_version) {
+                                    Engine {{ rel.min_minetest_version }}–{{ rel.max_minetest_version }}
+                                  } @else {
+                                    Engine {{ rel.min_minetest_version || rel.max_minetest_version }}+
+                                  }
                                 </span>
                               }
                             </div>
@@ -2162,6 +2432,11 @@ import {
                 (click)="toggleLightboxZoom($event)"
                 [class]="isLightboxZoomed() ? 'max-w-none w-[165%] sm:w-[150%] h-auto object-contain cursor-zoom-out transition-transform duration-300' : 'max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl cursor-zoom-in transition-transform duration-300'"
               />
+              @if (getScreenshotCaption(zoomImg); as lbCaption) {
+                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-xs font-medium text-slate-200 max-w-[85%] truncate pointer-events-none">
+                  {{ lbCaption }}
+                </div>
+              }
             </div>
 
             @if (activeScreenshots().length > 1) {
@@ -2238,6 +2513,34 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   toggleDependencies(): void {
     this.dependenciesManualOverride.set(!this.isDependenciesExpanded());
   }
+
+  readonly reverseDepsManualOverride = signal<boolean | null>(null);
+  readonly reverseDependencies = computed(() => {
+    const pkg = this.packageService.activePackage() ?? this.package;
+    return this.packageService.getReverseDependencies(pkg, 24);
+  });
+
+  readonly isReverseDepsExpanded = computed<boolean>(() => {
+    const manual = this.reverseDepsManualOverride();
+    if (manual !== null) return manual;
+    return this.reverseDependencies().totalCount <= 12;
+  });
+
+  toggleReverseDependencies(): void {
+    this.reverseDepsManualOverride.set(!this.isReverseDepsExpanded());
+  }
+
+  readonly compatibleGames = computed(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    const gsList = Array.isArray(pkg?.game_support) ? pkg.game_support : [];
+    return gsList.filter(gs => gs && gs.game && gs.supports !== false);
+  });
+
+  readonly incompatibleGames = computed(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    const gsList = Array.isArray(pkg?.game_support) ? pkg.game_support : [];
+    return gsList.filter(gs => gs && gs.game && gs.supports === false);
+  });
   readonly isHydratingDetails = computed<boolean>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return false;
@@ -2382,10 +2685,25 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return merged.filter(u => !failed.has(u));
   });
 
-  readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string }>>(() => {
+  getScreenshotCaption(url?: string | null): string | undefined {
+    if (!url) return undefined;
+    const pkg = this.packageService.activePackage() || this.package;
+    const metaList = Array.isArray(pkg?.screenshot_meta) ? pkg.screenshot_meta : [];
+    if (metaList.length === 0) return undefined;
+    const direct = metaList.find(m => m && m.url === url && m.title);
+    if (direct?.title) return direct.title;
+    const shots = this.activeScreenshots();
+    const idx = shots.indexOf(url);
+    if (idx >= 0 && idx < metaList.length && metaList[idx]?.title) {
+      return metaList[idx].title;
+    }
+    return undefined;
+  }
+
+  readonly mediaSlides = computed<Array<{ type: 'video' | 'image'; url: string; thumbnail: string; caption?: string }>>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return [];
-    const slides: Array<{ type: 'video' | 'image'; url: string; thumbnail: string }> = [];
+    const slides: Array<{ type: 'video' | 'image'; url: string; thumbnail: string; caption?: string }> = [];
     if (pkg.video_url) {
       slides.push({
         type: 'video',
@@ -2394,11 +2712,15 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       });
     }
     const shots = this.activeScreenshots();
-    for (const shot of shots) {
+    const metaList = Array.isArray(pkg.screenshot_meta) ? pkg.screenshot_meta : [];
+    for (let i = 0; i < shots.length; i++) {
+      const shot = shots[i];
+      const matchedMeta = metaList.find(m => m && m.url === shot && m.title) || metaList[i];
       slides.push({
         type: 'image',
         url: shot,
-        thumbnail: formatContentDbCdnUrl(shot, 'tile') || shot
+        thumbnail: formatContentDbCdnUrl(shot, 'tile') || shot,
+        caption: matchedMeta?.title || undefined
       });
     }
     return slides;
@@ -2504,9 +2826,19 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly isModerating = signal(false);
   readonly isConfirmingRemove = signal(false);
 
-  // Author Tag Editing state
+  // Author Metadata & Tag Editing state (LuantiHub-First)
   readonly isEditingTags = signal(false);
   readonly editableTags = signal<string[]>([]);
+  readonly editableDevState = signal<string>('');
+  readonly editableMinEngineVersion = signal<string>('');
+  readonly editableMaxEngineVersion = signal<string>('');
+  readonly editableSupportsAllGames = signal<boolean>(false);
+  readonly editableGameSupportMap = signal<Record<string, 'compatible' | 'incompatible'>>({});
+  readonly editableContentWarnings = signal<string[]>([]);
+  readonly editableTranslationLang = signal<string>('de');
+  readonly editableTranslatedTitle = signal<string>('');
+  readonly editableTranslatedShortDesc = signal<string>('');
+  readonly editableTranslationsMap = signal<Record<string, { title?: string; short_desc?: string; desc?: string }>>({});
   readonly isSavingTags = signal(false);
 
   // Expandable Release Notes & Live Git Tag Sync state
@@ -2609,9 +2941,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly renderedDescription = computed<SafeHtml | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return null;
-    const rawDesc = (pkg.desc || '').trim();
+    const localized = this.packageService.getLocalizedPackageText(pkg);
+    const rawDesc = (localized.desc || pkg.desc || '').trim();
     const rawReadme = (pkg.readme || '').trim();
-    const shortDesc = (pkg.short_desc || '').trim();
+    const shortDesc = (localized.short_desc || pkg.short_desc || '').trim();
     const isPureGit = pkg.source === 'git' && (!pkg.sources || !pkg.sources.includes('official'));
 
     // Only deduplicate description against README when the README accordion is actively expanded
@@ -3153,6 +3486,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isReadmeExpanded.set(false);
     this.isLoadingReadme.set(false);
     this.dependenciesManualOverride.set(null);
+    this.reverseDepsManualOverride.set(null);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
     if (initialCachedReviews !== undefined && initialCachedReviews.length > 0) {
@@ -3438,6 +3772,35 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       .map(t => String(t).toLowerCase())
       .filter(t => Boolean(t) && !systemTagSet.has(t));
     this.editableTags.set(currentCustom.slice(0, 5));
+    this.editableDevState.set((pkg?.dev_state || '').trim().toUpperCase());
+    this.editableMinEngineVersion.set((pkg?.min_minetest_version || '').trim());
+    this.editableMaxEngineVersion.set((pkg?.max_minetest_version || '').trim());
+    this.editableSupportsAllGames.set(Boolean(pkg?.supports_all_games));
+
+    const gameMap: Record<string, 'compatible' | 'incompatible'> = {};
+    for (const gs of Array.isArray(pkg?.game_support) ? pkg.game_support : []) {
+      const gName = (gs?.game?.name || '').trim().toLowerCase();
+      if (!gName) continue;
+      gameMap[gName] = gs.supports === false ? 'incompatible' : 'compatible';
+    }
+    this.editableGameSupportMap.set(gameMap);
+    this.editableContentWarnings.set(
+      (Array.isArray(pkg?.content_warnings) ? pkg.content_warnings : []).map(w => String(w).trim().toLowerCase())
+    );
+
+    const translationsClone: Record<string, { title?: string; short_desc?: string; desc?: string }> = {};
+    if (pkg?.translations && typeof pkg.translations === 'object') {
+      for (const [lang, entry] of Object.entries(pkg.translations)) {
+        if (entry && typeof entry === 'object') {
+          translationsClone[lang] = { ...entry };
+        }
+      }
+    }
+    this.editableTranslationsMap.set(translationsClone);
+    const defaultLang = this.editableTranslationLang() || 'de';
+    const currentLangEntry = translationsClone[defaultLang] || {};
+    this.editableTranslatedTitle.set(currentLangEntry.title || '');
+    this.editableTranslatedShortDesc.set(currentLangEntry.short_desc || '');
     this.isEditingTags.set(true);
   }
 
@@ -3459,19 +3822,132 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     }
   }
 
+  getEditableGameState(gameName: string): 'compatible' | 'incompatible' | 'none' {
+    return this.editableGameSupportMap()[gameName.toLowerCase()] || 'none';
+  }
+
+  cycleEditableGameSupport(game: { name: string; title: string; author?: string }): void {
+    const key = game.name.toLowerCase();
+    const current = { ...this.editableGameSupportMap() };
+    const state = current[key];
+    if (!state) {
+      current[key] = 'compatible';
+    } else if (state === 'compatible') {
+      current[key] = 'incompatible';
+    } else {
+      delete current[key];
+    }
+    this.editableGameSupportMap.set(current);
+  }
+
+  isEditableContentWarningSelected(warningName: string): boolean {
+    return this.editableContentWarnings().includes(warningName.toLowerCase());
+  }
+
+  toggleEditableContentWarning(warningName: string): void {
+    const key = warningName.toLowerCase();
+    const current = this.editableContentWarnings();
+    if (current.includes(key)) {
+      this.editableContentWarnings.set(current.filter(w => w !== key));
+    } else {
+      this.editableContentWarnings.set([...current, key]);
+    }
+  }
+
+  onChangeEditableTranslationLang(nextLang: string): void {
+    const prevLang = this.editableTranslationLang();
+    const map = { ...this.editableTranslationsMap() };
+    const prevTitle = this.editableTranslatedTitle().trim();
+    const prevShortDesc = this.editableTranslatedShortDesc().trim();
+    if (prevTitle || prevShortDesc) {
+      map[prevLang] = {
+        ...(map[prevLang] || {}),
+        ...(prevTitle ? { title: prevTitle } : {}),
+        ...(prevShortDesc ? { short_desc: prevShortDesc } : {})
+      };
+    } else {
+      delete map[prevLang];
+    }
+    this.editableTranslationsMap.set(map);
+    this.editableTranslationLang.set(nextLang);
+    const nextEntry = map[nextLang] || {};
+    this.editableTranslatedTitle.set(nextEntry.title || '');
+    this.editableTranslatedShortDesc.set(nextEntry.short_desc || '');
+  }
+
   async onSaveTags(): Promise<void> {
     if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
+
+    // Persist current translation inputs into map before saving
+    const currentLang = this.editableTranslationLang();
+    const translationsPayload = { ...this.editableTranslationsMap() };
+    const cleanTitle = this.editableTranslatedTitle().trim();
+    const cleanShortDesc = this.editableTranslatedShortDesc().trim();
+    if (cleanTitle || cleanShortDesc) {
+      translationsPayload[currentLang] = {
+        ...(translationsPayload[currentLang] || {}),
+        ...(cleanTitle ? { title: cleanTitle } : {}),
+        ...(cleanShortDesc ? { short_desc: cleanShortDesc } : {})
+      };
+    } else {
+      delete translationsPayload[currentLang];
+    }
+
+    // Build game_support array from editableGameSupportMap
+    const availableGames = this.packageService.availableGames();
+    const existingGames = Array.isArray(pkg.game_support) ? pkg.game_support : [];
+    const gameSupportPayload: Array<{
+      confidence: number;
+      supports: boolean;
+      game: { id: string; author: string; name: string; title: string; thumbnail?: string };
+    }> = [];
+    for (const [gName, status] of Object.entries(this.editableGameSupportMap())) {
+      const existing = existingGames.find(gs => gs?.game?.name?.toLowerCase() === gName);
+      const popular = availableGames.find(g => g.name.toLowerCase() === gName);
+      const author = existing?.game?.author || popular?.author || '';
+      const name = existing?.game?.name || popular?.name || gName;
+      const title = existing?.game?.title || popular?.title || gName;
+      gameSupportPayload.push({
+        confidence: 11,
+        supports: status === 'compatible',
+        game: {
+          id: existing?.game?.id || (author ? `${author}/${name}` : name),
+          author,
+          name,
+          title,
+          thumbnail: existing?.game?.thumbnail
+        }
+      });
+    }
+
     this.isSavingTags.set(true);
-    const res = await this.packageService.updatePackageTags(pkg, this.editableTags());
+    const res = await this.packageService.updatePackageMetadata(pkg, {
+      tags: this.editableTags(),
+      dev_state: this.editableDevState() || undefined,
+      content_warnings: this.editableContentWarnings(),
+      min_minetest_version: this.editableMinEngineVersion() || null,
+      max_minetest_version: this.editableMaxEngineVersion() || null,
+      supports_all_games: this.editableSupportsAllGames(),
+      game_support: gameSupportPayload,
+      translations: translationsPayload
+    });
     this.isSavingTags.set(false);
     if (res.success) {
-      if (res.tags) {
-        this.package = { ...this.package, tags: res.tags };
-      }
+      this.package = {
+        ...this.package,
+        tags: res.tags ?? this.package.tags,
+        dev_state: res.dev_state ?? this.package.dev_state,
+        content_warnings: res.content_warnings ?? this.package.content_warnings,
+        min_minetest_version: res.min_minetest_version ?? undefined,
+        max_minetest_version: res.max_minetest_version ?? undefined,
+        supports_all_games: res.supports_all_games ?? this.package.supports_all_games,
+        game_support: res.game_support ?? this.package.game_support,
+        translations: res.translations ?? this.package.translations
+      };
       this.isEditingTags.set(false);
-      this.pwaService.showToast('Package tags updated!');
+      this.pwaService.showToast('Package metadata updated!');
     } else if (res.message) {
       this.pwaService.showToast(res.message);
     }
@@ -3658,7 +4134,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onFavoriteClick(): void {
-    this.settingsService.toggleFavorite(this.package.id);
+    this.packageService.togglePackageFavorite(this.package);
   }
 
   filterByTerm(term: string): void {

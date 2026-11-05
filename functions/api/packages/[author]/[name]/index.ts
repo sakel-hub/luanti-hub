@@ -45,7 +45,15 @@ import {
   selectSharpPackageBanner,
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
-  upsertCustomAppTags
+  upsertCustomAppTags,
+  LUANTIHUB_DEV_STATES,
+  LUANTIHUB_CONTENT_WARNINGS,
+  parseGameSupportArray,
+  mergeLuantiHubAndContentDbGameSupport,
+  computeLuantiHubFrecencyMetrics,
+  parsePackageTranslations,
+  resolveLocalizedPackageText,
+  parseScreenshotMetaArray
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
@@ -429,7 +437,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v19/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const rawLang =
+    reqUrl?.searchParams.get('lang') ||
+    (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
+    'en';
+  const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
+  const langKeySegment = normalizedLang && normalizedLang !== 'en' ? `${normalizedLang}/` : '';
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v19/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${langKeySegment}${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -461,6 +475,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1Releases: any[] = [];
   let d1Reviews: any[] = [];
   let d1DailyDownloadsSum = 0;
+  let d1FavoritesCount = 0;
   if (context.env.DB) {
     d1Pkg = await context.env.DB.prepare(
       `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
@@ -651,13 +666,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
     try {
       if (isLite) {
-        const [revAvgRow, dailyDlRow] = await Promise.all([
+        const [revAvgRow, dailyDlRow, favRow] = await Promise.all([
           context.env.DB.prepare(
             `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
           ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
           context.env.DB.prepare(
             `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 }))
+          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+          context.env.DB.prepare(
+            `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))
         ]);
         if (revAvgRow && Number(revAvgRow.cnt) > 0 && revAvgRow.avg_rating != null) {
           d1ReviewAvg = Number(revAvgRow.avg_rating);
@@ -666,8 +684,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
         }
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
+        d1FavoritesCount = Number(favRow?.cnt || 0);
       } else {
-        const [revRowsRes, relRowsRes, dailyDlRow] = await Promise.all([
+        const [revRowsRes, relRowsRes, dailyDlRow, favRow] = await Promise.all([
           context.env.DB.prepare(`
             SELECT r.id, r.rating, r.title, r.comment, r.created_at,
                    u.username, u.display_name, u.avatar_url
@@ -681,7 +700,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           ).bind(effectivePkgId, effectivePkgIdLower).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
             `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 }))
+          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+          context.env.DB.prepare(
+            `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))
         ]);
 
         d1Reviews = revRowsRes?.results || [];
@@ -695,6 +717,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         }
         d1Releases = relRowsRes?.results || [];
         d1DailyDownloadsSum = Number(dailyDlRow?.total_lh || 0);
+        d1FavoritesCount = Number(favRow?.cnt || 0);
 
         // D1-First Full Detail Fast Path: when D1 already holds genuinely hydrated full detail metadata + screenshots, serve directly in <15ms
         const d1Screenshots = d1Pkg ? parseJsonArray(d1Pkg.screenshots) : [];
@@ -953,20 +976,53 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             d1Pkg.short_desc ||
             '';
           const fastRepoUrl = d1Pkg.repo_url || fastCdbDetail?.repo || fastCdbDetail?.repo_url || undefined;
+          const fastHardDeps = parseJsonArray(d1Pkg.dependencies);
+          const fastSoftDeps = parseJsonArray(d1Pkg.optional_dependencies);
+          const fastMergedGameSupport = mergeLuantiHubAndContentDbGameSupport(
+            d1Pkg.game_support,
+            fastCdbDetail?.game_support,
+            fastHardDeps,
+            fastSoftDeps
+          );
+          const fastTranslations = parsePackageTranslations(d1Pkg.translations);
+          const fastLocalized = resolveLocalizedPackageText(
+            {
+              title: d1Pkg.title || fastCdbDetail?.title || name,
+              short_desc: d1Pkg.short_desc || fastCdbDetail?.short_desc || fastCdbDetail?.short_description || '',
+              desc: fastLongDesc,
+              translations: fastTranslations
+            },
+            normalizedLang
+          );
+          const fastScreenshotMeta = parseScreenshotMetaArray(
+            d1Pkg.screenshot_meta || fastCdbDetail?.screenshots_dict || fastCdbDetail?.screenshots,
+            fastMergedScreenshots
+          );
+          const fastFrecency = computeLuantiHubFrecencyMetrics({
+            luantihubDownloads: lhDl,
+            score: fastScore,
+            reviewThreadCounts: parsedRevCounts,
+            favoritesCount: d1FavoritesCount,
+            contentdbScore: Number(fastCdbDetail?.score || 0),
+            contentdbScoreDownloads: Number(fastCdbDetail?.score_downloads || 0),
+            contentdbScoreReviews: Number(fastCdbDetail?.score_reviews || 0)
+          });
 
           const fastFullPayload = {
             id: effectivePkgId,
             author: d1Pkg.author_name || author,
             author_id: d1Pkg.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
             name: d1Pkg.name || name,
-            title: d1Pkg.title || fastCdbDetail?.title || name,
+            title: fastLocalized.title,
             type: d1Pkg.type || fastCdbDetail?.type || 'mod',
-            short_desc: d1Pkg.short_desc || fastCdbDetail?.short_desc || fastCdbDetail?.short_description || '',
-            long_description: fastLongDesc,
-            desc: fastLongDesc,
+            short_desc: fastLocalized.short_desc,
+            long_description: fastLocalized.desc || fastLongDesc,
+            desc: fastLocalized.desc || fastLongDesc,
+            ...(fastTranslations ? { translations: fastTranslations } : {}),
             thumbnail: fastThumb,
             banner: fastBanner,
             screenshots: fastMergedScreenshots,
+            ...(fastScreenshotMeta.length > 0 ? { screenshot_meta: fastScreenshotMeta } : {}),
             license: d1Pkg.license || fastCdbDetail?.license,
             media_license: d1Pkg.media_license || d1Pkg.license || fastCdbDetail?.media_license || fastCdbDetail?.license,
             min_minetest_version: d1Pkg.min_minetest_version || extractEngineVersionString(fastCdbDetail?.min_minetest_version) || '5.0.0',
@@ -987,7 +1043,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             ai_disclosures: parseJsonArray(d1Pkg.ai_disclosures),
             maintainers: parseJsonArray(d1Pkg.maintainers),
             review_thread_counts: parsedRevCounts,
-            game_support: d1GameSupport.length > 0 ? d1GameSupport : undefined,
+            supports_all_games: Boolean(d1Pkg.supports_all_games || fastCdbDetail?.supports_all_games) || undefined,
+            game_support: fastMergedGameSupport.length > 0 ? fastMergedGameSupport : undefined,
             created_at: d1Pkg.created_at || fastCdbDetail?.created_at || undefined,
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
@@ -995,11 +1052,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
+            favorites_count: d1FavoritesCount,
             score: fastScore,
+            luantihub_score_downloads: fastFrecency.luantihub_score_downloads,
+            contentdb_score_downloads: fastFrecency.contentdb_score_downloads,
+            score_downloads: fastFrecency.score_downloads,
+            score_reviews: fastFrecency.score_reviews,
             download_size: Number(d1Pkg.download_size || 0) > 0 ? Number(d1Pkg.download_size) : undefined,
             file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size) || undefined,
-            dependencies: parseJsonArray(d1Pkg.dependencies),
-            optional_dependencies: parseJsonArray(d1Pkg.optional_dependencies),
+            dependencies: fastHardDeps,
+            optional_dependencies: fastSoftDeps,
             status: d1Pkg.status || 'active',
             source: isGitFast ? 'git' : 'official',
             sources: fastSources,
@@ -1032,7 +1094,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const encAuthor = encodeURIComponent(author);
   const encName = encodeURIComponent(name);
   let [upstreamData, depsPayload, releasesPayload, upstreamReviewsPayload] = await Promise.all([
-    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600),
+    fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600, { lang: normalizedLang }),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/dependencies/`, 600),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
@@ -1463,16 +1525,44 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         ).run().catch(() => {});
       }
 
+      const pureGitTranslations = parsePackageTranslations(d1Pkg?.translations);
+      const pureGitLocalized = resolveLocalizedPackageText(
+        {
+          title: mergedTitle,
+          short_desc: mergedShortDesc,
+          desc: rawLongDesc || mergedShortDesc,
+          translations: pureGitTranslations
+        },
+        normalizedLang
+      );
+      const pureGitGameSupport = mergeLuantiHubAndContentDbGameSupport(
+        d1Pkg?.game_support,
+        undefined,
+        mergedHardDeps,
+        mergedSoftDeps
+      );
+      const pureGitScreenshotMeta = parseScreenshotMetaArray(
+        d1Pkg?.screenshot_meta || gitScan?.cdbMeta?.screenshots,
+        mergedGitScreenshots
+      );
+      const pureGitStarScore = d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : Number(d1Pkg?.score || 0);
+      const pureGitFrecency = computeLuantiHubFrecencyMetrics({
+        luantihubDownloads: lhDownloads,
+        score: pureGitStarScore,
+        favoritesCount: d1FavoritesCount
+      });
+
       const pureGitPayload = {
         id: `${resolvedAuthor}/${resolvedName}`,
         author: resolvedAuthor,
         author_id: d1Pkg?.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
         name: resolvedName,
-        title: mergedTitle,
+        title: pureGitLocalized.title,
         type: resolvedType,
-        short_desc: mergedShortDesc,
-        long_description: rawLongDesc || mergedShortDesc,
-        desc: rawLongDesc || mergedShortDesc,
+        short_desc: pureGitLocalized.short_desc,
+        long_description: pureGitLocalized.desc || rawLongDesc || mergedShortDesc,
+        desc: pureGitLocalized.desc || rawLongDesc || mergedShortDesc,
+        ...(pureGitTranslations ? { translations: pureGitTranslations } : {}),
         readme: readme || fallbackReadme || undefined,
         thumbnail: toProxiedGitImageIfNeeded(
           nonGitPureThumb ||
@@ -1487,12 +1577,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           (d1Pkg?.thumbnail_url && d1Pkg.thumbnail_url !== 'logo.svg' ? d1Pkg.thumbnail_url : undefined)
         ) || 'logo.svg',
         screenshots: mergedGitScreenshots,
+        ...(pureGitScreenshotMeta.length > 0 ? { screenshot_meta: pureGitScreenshotMeta } : {}),
         license: mergedLicense,
         media_license: mergedMediaLicense,
-        score: d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : Number(d1Pkg?.score || 0),
+        score: pureGitStarScore,
+        luantihub_score_downloads: pureGitFrecency.luantihub_score_downloads,
+        contentdb_score_downloads: 0,
+        score_downloads: pureGitFrecency.score_downloads,
+        score_reviews: pureGitFrecency.score_reviews,
         contentdb_downloads: cdbDownloads,
         luantihub_downloads: lhDownloads,
         downloads: totalDownloads,
+        favorites_count: d1FavoritesCount,
         repo: resolvedRepo,
         repo_url: resolvedRepo,
         git_repo_status: gitScan?.gitRepoStatus || (resolvedRepo ? 'verified' : 'unverified'),
@@ -1515,6 +1611,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             ? parseJsonArray(d1Pkg?.ai_disclosures)
             : (gitScan?.cdbMeta?.ai_disclosures || []),
         maintainers: parseJsonArray(d1Pkg?.maintainers),
+        supports_all_games: Boolean(d1Pkg?.supports_all_games) || undefined,
+        game_support: pureGitGameSupport.length > 0 ? pureGitGameSupport : undefined,
         created_at: d1Pkg?.created_at || undefined,
         updated_at: d1Pkg?.updated_at || undefined,
         latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
@@ -1555,16 +1653,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let repoUrl = normalizeDefunctGitHost(upstreamData.repo || upstreamData.repo_url || d1Pkg?.repo_url || undefined);
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = repoUrl ? 'verified' : 'unverified';
   let minVersion =
+    (d1Pkg?.min_minetest_version && d1Pkg.min_minetest_version !== '5.0.0'
+      ? extractEngineVersionString(d1Pkg.min_minetest_version)
+      : undefined) ||
     extractEngineVersionString(upstreamData.min_minetest_version) ||
     extractEngineVersionString(forClientData?.min_minetest_version) ||
     extractEngineVersionString(Array.isArray(releasesPayload) && releasesPayload[0]?.min_minetest_version) ||
     extractEngineVersionString(d1Pkg?.min_minetest_version) ||
     undefined;
   let maxVersion =
+    extractEngineVersionString(d1Pkg?.max_minetest_version) ||
     extractEngineVersionString(upstreamData.max_minetest_version) ||
     extractEngineVersionString(forClientData?.max_minetest_version) ||
     extractEngineVersionString(Array.isArray(releasesPayload) && releasesPayload[0]?.max_minetest_version) ||
-    extractEngineVersionString(d1Pkg?.max_minetest_version) ||
     undefined;
 
   // Probe Git repository when license, video_url, or Git screenshot is missing on a repository-backed package
@@ -1789,7 +1890,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   );
   const videoUrl = resolvedVideo.video_url;
   const videoThumbnailUrl = resolvedVideo.video_thumbnail_url;
-  const devState = upstreamData.dev_state || forClientData?.dev_state || probedCdbMeta?.dev_state || d1Pkg?.dev_state || undefined;
+  const devState = d1Pkg?.dev_state || probedCdbMeta?.dev_state || upstreamData.dev_state || forClientData?.dev_state || undefined;
 
   const rawProvides = Array.isArray(upstreamData.provides)
     ? upstreamData.provides
@@ -1798,14 +1899,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     .map((p: any) => (typeof p === 'string' ? p : p?.name || ''))
     .filter(Boolean);
 
-  const rawWarnings = Array.isArray(upstreamData.content_warnings)
+  const d1Warnings = parseJsonArray(d1Pkg?.content_warnings);
+  const rawCdbWarnings = Array.isArray(upstreamData.content_warnings)
     ? upstreamData.content_warnings
     : (Array.isArray(forClientData?.content_warnings)
         ? forClientData.content_warnings
-        : (probedCdbMeta?.content_warnings?.length ? probedCdbMeta.content_warnings : parseJsonArray(d1Pkg?.content_warnings)));
-  const contentWarnings = rawWarnings
+        : (probedCdbMeta?.content_warnings || []));
+  const cdbWarnings = rawCdbWarnings
     .map((w: any) => (typeof w === 'string' ? w : w?.name || w?.title || ''))
     .filter(Boolean);
+  const contentWarnings = Array.from(new Set([...d1Warnings, ...cdbWarnings]));
 
   const rawAiDisclosures = Array.isArray(upstreamData.ai_disclosures)
     ? upstreamData.ai_disclosures
@@ -1870,20 +1973,34 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const rawGameSupport = Array.isArray(upstreamData.game_support)
     ? upstreamData.game_support
     : (Array.isArray(forClientData?.game_support) ? forClientData.game_support : []);
-  const gameSupport = rawGameSupport
-    .filter((gs: any) => gs && gs.game && gs.supports !== false)
-    .map((gs: any) => ({
-      supports: Boolean(gs.supports ?? true),
-      confidence: typeof gs.confidence === 'number' ? gs.confidence : undefined,
-      game: {
-        id: `${gs.game.author}/${gs.game.name}`,
-        author: String(gs.game.author || ''),
-        name: String(gs.game.name || ''),
-        title: String(gs.game.title || gs.game.name || ''),
-        thumbnail: gs.game.thumbnail || undefined,
-        short_description: gs.game.short_description || gs.game.short_desc || undefined
-      }
-    }));
+  const gameSupport = mergeLuantiHubAndContentDbGameSupport(
+    d1Pkg?.game_support,
+    rawGameSupport,
+    resolvedHardDeps,
+    resolvedSoftDeps
+  );
+  const supportsAllGames = Boolean(
+    d1Pkg?.supports_all_games ||
+    (typeof upstreamData.supports_all_games === 'boolean' && upstreamData.supports_all_games)
+  ) || undefined;
+  const screenshotMeta = parseScreenshotMetaArray(
+    d1Pkg?.screenshot_meta ||
+      probedCdbMeta?.screenshots ||
+      upstreamData.screenshots_dict ||
+      upstreamData.screenshots ||
+      forClientData?.screenshots,
+    screenshots
+  );
+  const parsedD1Translations = parsePackageTranslations(d1Pkg?.translations);
+  const localizedMeta = resolveLocalizedPackageText(
+    {
+      title: upstreamData.title || d1Pkg?.title || name,
+      short_desc: shortDesc,
+      desc: extractedLongDesc || shortDesc,
+      translations: parsedD1Translations
+    },
+    normalizedLang
+  );
 
   const mergedTags = Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
   const resolvedScore = computeStarRating(
@@ -1996,9 +2113,20 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     }
   }
 
+  const enrichedFrecency = computeLuantiHubFrecencyMetrics({
+    luantihubDownloads,
+    score: resolvedScore,
+    reviewThreadCounts,
+    favoritesCount: d1FavoritesCount,
+    contentdbScore: Number(upstreamData.score || 0),
+    contentdbScoreDownloads: Number(upstreamData.score_downloads || 0),
+    contentdbScoreReviews: Number(upstreamData.score_reviews || 0)
+  });
+
   const enriched = {
     ...upstreamData,
     id: canonicalId,
+    title: localizedMeta.title || upstreamData.title || d1Pkg?.title || name,
     author_id: d1Pkg?.author_id && !String(d1Pkg.author_id).startsWith('ext_') ? String(d1Pkg.author_id) : undefined,
     thumbnail: resolvedThumb || sanitizePackageImageUrl(upstreamData.thumbnail) || undefined,
     banner: resolvedBanner || sanitizePackageImageUrl(upstreamData.banner) || undefined,
@@ -2006,9 +2134,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     media_license: resolvedMediaLicense,
     min_minetest_version: minVersion,
     max_minetest_version: maxVersion,
-    short_desc: shortDesc,
-    long_description: extractedLongDesc || shortDesc,
-    desc: extractedLongDesc || shortDesc,
+    short_desc: localizedMeta.short_desc || shortDesc,
+    long_description: localizedMeta.desc || extractedLongDesc || shortDesc,
+    desc: localizedMeta.desc || extractedLongDesc || shortDesc,
+    ...(parsedD1Translations ? { translations: parsedD1Translations } : {}),
     readme: readmeText || undefined,
     repo_url: repoUrl,
     git_repo_status: gitRepoStatus,
@@ -2026,17 +2155,23 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ai_disclosures: aiDisclosures,
     maintainers: maintainersList,
     review_thread_counts: reviewThreadCounts,
-    supports_all_games: typeof upstreamData.supports_all_games === 'boolean' ? upstreamData.supports_all_games : undefined,
+    supports_all_games: supportsAllGames,
     game_support: gameSupport.length > 0 ? gameSupport : undefined,
     created_at: createdAt,
     updated_at: updatedAt,
     latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
     screenshots,
+    ...(screenshotMeta.length > 0 ? { screenshot_meta: screenshotMeta } : {}),
     tags: mergedTags,
     contentdb_downloads: contentdbDownloads,
     luantihub_downloads: luantihubDownloads,
     downloads: totalDownloads,
+    favorites_count: d1FavoritesCount,
     score: resolvedScore,
+    luantihub_score_downloads: enrichedFrecency.luantihub_score_downloads,
+    contentdb_score_downloads: enrichedFrecency.contentdb_score_downloads,
+    score_downloads: enrichedFrecency.score_downloads,
+    score_reviews: enrichedFrecency.score_reviews,
     download_size: downloadSizeBytes > 0 ? downloadSizeBytes : undefined,
     file_size: resolvedHeadSize || undefined,
     dependencies: finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps,
@@ -2061,7 +2196,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   });
 }
 
-// PATCH /api/packages/:author/:name — Allow package author or admin to edit package tags
+// PATCH /api/packages/:author/:name — Allow package author or admin to edit package metadata & tags (LuantiHub-first)
 export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   try {
     const author = safeDecodeParam(context.params.author);
@@ -2074,104 +2209,281 @@ export async function onRequestPatch(context: { request: Request; params: { auth
 
     await ensureExtendedPackageColumns(context.env.DB);
 
-  const cookies = parseCookies(context.request);
-  const sessionToken = cookies['lh_session'];
-  if (!sessionToken) {
-    return Response.json({ error: 'Authentication required to edit package.' }, { status: 401 });
-  }
+    const cookies = parseCookies(context.request);
+    const sessionToken = cookies['lh_session'];
+    if (!sessionToken) {
+      return Response.json({ error: 'Authentication required to edit package.' }, { status: 401 });
+    }
 
-  const rawUserId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
-  if (!rawUserId) {
-    return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
-  }
+    const rawUserId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
+    if (!rawUserId) {
+      return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
+    }
 
-  const user = await reconcileAndMergeUserAccount(context.env.DB, rawUserId);
-  if (!user) {
-    return Response.json({ error: 'User account not found.' }, { status: 401 });
-  }
-  const resolvedUserId = String(user.id);
+    const user = await reconcileAndMergeUserAccount(context.env.DB, rawUserId);
+    if (!user) {
+      return Response.json({ error: 'User account not found.' }, { status: 401 });
+    }
+    const resolvedUserId = String(user.id);
 
-  const [identitiesRes, pkgRow] = await Promise.all([
-    context.env.DB.prepare(
-      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
-    ).bind(resolvedUserId).all().catch(() => ({ results: [] })),
-    context.env.DB.prepare(
-      `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, author, name).first()
-  ]);
+    let [identitiesRes, pkgRow] = await Promise.all([
+      context.env.DB.prepare(
+        `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
+      ).bind(resolvedUserId).all().catch(() => ({ results: [] })),
+      context.env.DB.prepare(
+        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+      ).bind(pkgId, author, name).first()
+    ]);
 
-  if (!pkgRow) {
-    return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
-  }
+    const identities = (identitiesRes.results || []).map((id: any) => ({
+      provider: String(id.provider || '').toLowerCase(),
+      username: String(id.username || ''),
+      verified: Boolean(id.verified)
+    }));
 
-  const identities = (identitiesRes.results || []).map((id: any) => ({
-    provider: String(id.provider || '').toLowerCase(),
-    username: String(id.username || ''),
-    verified: Boolean(id.verified)
-  }));
+    const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
 
-  const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
-  const isOwner =
-    isAdmin ||
-    verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author);
+    // If package is not yet in D1 (e.g., ContentDB-sourced package being customized on LuantiHub),
+    // verify ownership against upstream metadata or verified identity and seed a D1 row.
+    if (!pkgRow) {
+      const encodedAuthor = encodeURIComponent(author);
+      const encodedName = encodeURIComponent(name);
+      const upstreamPkg = await fetchUpstreamJsonCached(`/api/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
+      if (!upstreamPkg) {
+        return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
+      }
+      const virtualPkgRow = {
+        id: `${upstreamPkg.author || author}/${upstreamPkg.name || name}`,
+        author_name: upstreamPkg.author || author,
+        name: upstreamPkg.name || name,
+        repo_url: upstreamPkg.repo || '',
+        provider: 'contentdb',
+        type: upstreamPkg.type || 'mod',
+        tags: JSON.stringify(Array.isArray(upstreamPkg.tags) ? upstreamPkg.tags : [])
+      };
+      const canSeed = isAdmin || verifyStrictPackageAuthorOwnership(user, identities, virtualPkgRow, author);
+      if (!canSeed) {
+        return Response.json({
+          error: 'Forbidden: Only an administrator or the cryptographically verified package author on the hosting Git forge can edit this package.'
+        }, { status: 403 });
+      }
+      await context.env.DB.prepare(
+        `INSERT OR IGNORE INTO packages (
+          id, author_id, author_name, name, title, type, short_desc, long_desc,
+          repo_url, provider, license, media_license, thumbnail_url, tags,
+          dev_state, content_warnings, min_minetest_version, max_minetest_version,
+          supports_all_games, game_support, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+      ).bind(
+        virtualPkgRow.id,
+        resolvedUserId,
+        virtualPkgRow.author_name,
+        virtualPkgRow.name,
+        upstreamPkg.title || virtualPkgRow.name,
+        virtualPkgRow.type,
+        upstreamPkg.short_description || '',
+        upstreamPkg.long_description || '',
+        virtualPkgRow.repo_url || null,
+        'contentdb',
+        upstreamPkg.license || 'MIT',
+        upstreamPkg.media_license || upstreamPkg.license || 'CC-BY-SA-4.0',
+        upstreamPkg.thumbnail || null,
+        virtualPkgRow.tags,
+        upstreamPkg.dev_state || 'ACTIVELY_DEVELOPED',
+        JSON.stringify(Array.isArray(upstreamPkg.content_warnings) ? upstreamPkg.content_warnings : []),
+        upstreamPkg.min_minetest_version ? String(upstreamPkg.min_minetest_version) : null,
+        upstreamPkg.max_minetest_version ? String(upstreamPkg.max_minetest_version) : null,
+        upstreamPkg.supports_all_games ? 1 : 0,
+        JSON.stringify(parseGameSupportArray(upstreamPkg.game_support))
+      ).run();
+      pkgRow = await context.env.DB.prepare(
+        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+      ).bind(virtualPkgRow.id).first();
+    }
 
-  if (!isOwner) {
-    return Response.json({
-      error: 'Forbidden: Only an administrator or the cryptographically verified package author on the hosting Git forge can edit this package.'
-    }, { status: 403 });
-  }
+    if (!pkgRow) {
+      return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
+    }
 
-  const body = await context.request.json().catch(() => ({})) as { tags?: string[] };
-  const rawInputTags = Array.isArray(body.tags) ? body.tags : [];
+    const isOwner =
+      isAdmin ||
+      verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author);
 
-  const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
-  const cleanedCustomTags = rawInputTags
-    .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
-    .filter(t => Boolean(t) && !systemTagSet.has(t))
-    .slice(0, 8);
+    if (!isOwner) {
+      return Response.json({
+        error: 'Forbidden: Only an administrator or the cryptographically verified package author on the hosting Git forge can edit this package.'
+      }, { status: 403 });
+    }
 
-  const existingTags = parseJsonArray(pkgRow.tags);
-  const preservedSystemTags = existingTags.filter((t: string) => systemTagSet.has(String(t).toLowerCase()));
-  if (pkgRow.provider && pkgRow.provider !== 'contentdb' && !preservedSystemTags.includes('git')) {
-    preservedSystemTags.push('git');
-  }
-  if (pkgRow.provider && !preservedSystemTags.includes(pkgRow.provider)) {
-    preservedSystemTags.push(pkgRow.provider);
-  }
-  if (pkgRow.type && !preservedSystemTags.includes(pkgRow.type)) {
-    preservedSystemTags.push(pkgRow.type);
-  }
+    const body = await context.request.json().catch(() => ({})) as {
+      tags?: string[];
+      dev_state?: string;
+      content_warnings?: string[];
+      min_minetest_version?: string | null;
+      max_minetest_version?: string | null;
+      supports_all_games?: boolean;
+      game_support?: any[];
+      translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+    };
 
-  const finalTags = Array.from(new Set([...cleanedCustomTags, ...preservedSystemTags]));
+    const existingTags = parseJsonArray(pkgRow.tags);
+    let finalTags = existingTags;
+    let cleanedCustomTags: string[] = [];
 
-  await context.env.DB.prepare(
-    `UPDATE packages SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(JSON.stringify(finalTags), pkgRow.id).run();
+    if (Array.isArray(body.tags)) {
+      const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+      cleanedCustomTags = body.tags
+        .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
+        .filter(t => Boolean(t) && !systemTagSet.has(t))
+        .slice(0, 8);
 
-  if (cleanedCustomTags.length > 0) {
-    await upsertCustomAppTags(context.env.DB, cleanedCustomTags, 'custom');
-  }
+      const preservedSystemTags = existingTags.filter((t: string) => systemTagSet.has(String(t).toLowerCase()));
+      if (pkgRow.provider && pkgRow.provider !== 'contentdb' && !preservedSystemTags.includes('git')) {
+        preservedSystemTags.push('git');
+      }
+      if (pkgRow.provider && !preservedSystemTags.includes(pkgRow.provider)) {
+        preservedSystemTags.push(pkgRow.provider);
+      }
+      if (pkgRow.type && !preservedSystemTags.includes(pkgRow.type)) {
+        preservedSystemTags.push(pkgRow.type);
+      }
 
-  const lowerA = encodeURIComponent(author.toLowerCase());
-  const lowerN = encodeURIComponent(name.toLowerCase());
-  await invalidateEdgeCacheKeys([
-    '/__api_packages_v2',
-    '/__api_packages_v2?boot=1',
-    '/__api_boot_catalog_bundle_v3',
-    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
-    `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
-    `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
-    `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
-    `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
-  ]);
+      finalTags = Array.from(new Set([...cleanedCustomTags, ...preservedSystemTags]));
+    }
+
+    // Validate dev_state (LuantiHub-first taxonomy)
+    const validDevStates = new Set(LUANTIHUB_DEV_STATES.map((d) => d.name));
+    let finalDevState = pkgRow.dev_state ? String(pkgRow.dev_state) : 'ACTIVELY_DEVELOPED';
+    if (typeof body.dev_state === 'string') {
+      const normalizedDevState = body.dev_state.trim().toUpperCase();
+      if (validDevStates.has(normalizedDevState)) {
+        finalDevState = normalizedDevState;
+      }
+    }
+
+    // Validate content_warnings (LuantiHub-first taxonomy, excluding AI disclosures)
+    const validWarnings = new Set(LUANTIHUB_CONTENT_WARNINGS.map((w) => w.name));
+    let finalContentWarnings = parseJsonArray(pkgRow.content_warnings);
+    if (Array.isArray(body.content_warnings)) {
+      finalContentWarnings = Array.from(
+        new Set(
+          body.content_warnings
+            .map((w) => String(w || '').trim().toLowerCase())
+            .filter((w) => (validWarnings.has(w) || /^[a-z0-9_]{2,40}$/.test(w)) && !w.startsWith('ai_'))
+        )
+      ).slice(0, 12);
+    }
+
+    // Validate engine versions
+    let finalMinEngine = pkgRow.min_minetest_version ? String(pkgRow.min_minetest_version) : null;
+    if (body.min_minetest_version !== undefined) {
+      const cleaned = String(body.min_minetest_version || '').trim();
+      finalMinEngine = cleaned && /^[0-9]+\.[0-9]+(\.[0-9]+)?(-dev)?$/.test(cleaned) ? cleaned : null;
+    }
+
+    let finalMaxEngine = pkgRow.max_minetest_version ? String(pkgRow.max_minetest_version) : null;
+    if (body.max_minetest_version !== undefined) {
+      const cleaned = String(body.max_minetest_version || '').trim();
+      finalMaxEngine = cleaned && /^[0-9]+\.[0-9]+(\.[0-9]+)?(-dev)?$/.test(cleaned) ? cleaned : null;
+    }
+
+    // Validate supports_all_games & game_support (including supports: false)
+    let finalSupportsAllGames = Boolean(pkgRow.supports_all_games);
+    if (typeof body.supports_all_games === 'boolean') {
+      finalSupportsAllGames = body.supports_all_games;
+    }
+
+    let finalGameSupport = parseGameSupportArray(pkgRow.game_support);
+    if (Array.isArray(body.game_support)) {
+      finalGameSupport = parseGameSupportArray(body.game_support).slice(0, 20);
+    }
+
+    // Validate translations (LuantiHub-first localized title/short_desc/desc)
+    let finalTranslations = parsePackageTranslations(pkgRow.translations) || {};
+    if (body.translations && typeof body.translations === 'object') {
+      const mergedTranslations = { ...finalTranslations };
+      for (const [rawLang, rawEntry] of Object.entries(body.translations)) {
+        const lang = String(rawLang || '').trim();
+        if (!lang || !/^[a-z]{2,3}(?:[_-][a-z0-9]{2,4})?$/i.test(lang)) continue;
+        if (!rawEntry || typeof rawEntry !== 'object') {
+          delete mergedTranslations[lang];
+          delete mergedTranslations[lang.toLowerCase()];
+          continue;
+        }
+        const entryObj = rawEntry as any;
+        const title = typeof entryObj.title === 'string' ? entryObj.title.trim().slice(0, 100) : undefined;
+        const short_desc = typeof entryObj.short_desc === 'string' ? entryObj.short_desc.trim().slice(0, 260) : undefined;
+        const desc = typeof entryObj.desc === 'string' ? entryObj.desc.trim().slice(0, 20000) : undefined;
+        if (title || short_desc || desc) {
+          mergedTranslations[lang] = {
+            ...(title ? { title } : {}),
+            ...(short_desc ? { short_desc } : {}),
+            ...(desc ? { desc } : {})
+          };
+        } else {
+          delete mergedTranslations[lang];
+          delete mergedTranslations[lang.toLowerCase()];
+        }
+      }
+      finalTranslations = mergedTranslations;
+    }
+
+    await context.env.DB.prepare(
+      `UPDATE packages SET
+        tags = ?,
+        dev_state = ?,
+        content_warnings = ?,
+        min_minetest_version = ?,
+        max_minetest_version = ?,
+        supports_all_games = ?,
+        game_support = ?,
+        translations = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`
+    ).bind(
+      JSON.stringify(finalTags),
+      finalDevState,
+      JSON.stringify(finalContentWarnings),
+      finalMinEngine,
+      finalMaxEngine,
+      finalSupportsAllGames ? 1 : 0,
+      JSON.stringify(finalGameSupport),
+      Object.keys(finalTranslations).length > 0 ? JSON.stringify(finalTranslations) : null,
+      pkgRow.id
+    ).run();
+
+    if (cleanedCustomTags.length > 0) {
+      await upsertCustomAppTags(context.env.DB, cleanedCustomTags, 'custom');
+    }
+
+    const lowerA = encodeURIComponent(author.toLowerCase());
+    const lowerN = encodeURIComponent(name.toLowerCase());
+    await invalidateEdgeCacheKeys([
+      '/__api_packages_v2',
+      '/__api_packages_v2?boot=1',
+      '/__api_boot_catalog_bundle_v3',
+      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
+    ]);
 
     return Response.json({
       success: true,
-      tags: finalTags
+      ok: true,
+      tags: finalTags,
+      dev_state: finalDevState,
+      content_warnings: finalContentWarnings,
+      min_minetest_version: finalMinEngine,
+      max_minetest_version: finalMaxEngine,
+      supports_all_games: finalSupportsAllGames,
+      game_support: finalGameSupport,
+      translations: Object.keys(finalTranslations).length > 0 ? finalTranslations : undefined
     });
   } catch (err: any) {
     return Response.json(
-      { error: sanitizePublicErrorMessage(err, 'Could not update package tags.') },
+      { error: sanitizePublicErrorMessage(err, 'Could not update package metadata.') },
       { status: 500 }
     );
   }

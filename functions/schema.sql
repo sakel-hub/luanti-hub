@@ -71,7 +71,10 @@ CREATE TABLE IF NOT EXISTS packages (
     ai_disclosures TEXT,                 -- JSON array of AI disclosure identifiers
     maintainers TEXT,                    -- JSON array of maintainer handles
     screenshots TEXT,                    -- JSON array of screenshot URLs
-    game_support TEXT,                   -- JSON array of supported games
+    screenshot_meta TEXT,                -- JSON array of screenshot metadata { url, title, width, height }
+    supports_all_games INTEGER DEFAULT 0,-- Boolean flag when mod supports all Luanti games
+    game_support TEXT,                   -- JSON array of compatible/incompatible games
+    translations TEXT,                   -- JSON object of localized package metadata { [lang]: { title, short_desc, desc } }
     review_thread_counts TEXT,           -- JSON object { positive, neutral, negative }
     latest_commit_sha TEXT,              -- Latest Git commit SHA for update notification tracking
     score REAL DEFAULT 0,

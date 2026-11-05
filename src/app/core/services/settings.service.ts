@@ -12,7 +12,10 @@ export class SettingsService {
       ? window.location.origin
       : 'https://luantihub.org'
   );
-  readonly preferredEngine = signal<string>('5.9.0');
+  readonly preferredEngine = signal<string>('5.11.0');
+  readonly preferredGame = signal<string>('all');
+  readonly hideWipDeprecated = signal<boolean>(false);
+  readonly hideContentWarnings = signal<boolean>(false);
   readonly favorites = signal<string[]>([]);
   readonly downloadedPackages = signal<Record<string, number>>({});
   readonly recentlyViewedPackages = signal<string[]>([]);
@@ -36,6 +39,9 @@ export class SettingsService {
       try {
         localStorage.setItem('lh_contentdb_url', this.contentDbUrl());
         localStorage.setItem('lh_preferred_engine', this.preferredEngine());
+        localStorage.setItem('lh_preferred_game', this.preferredGame());
+        localStorage.setItem('lh_hide_wip_deprecated', String(this.hideWipDeprecated()));
+        localStorage.setItem('lh_hide_content_warnings', String(this.hideContentWarnings()));
         localStorage.setItem('lh_favorites', JSON.stringify(this.favorites()));
         localStorage.setItem('lh_downloaded_packages', JSON.stringify(this.downloadedPackages()));
         localStorage.setItem('lh_recently_viewed_v1', JSON.stringify(this.recentlyViewedPackages()));
@@ -77,6 +83,19 @@ export class SettingsService {
 
       const savedEngine = localStorage.getItem('lh_preferred_engine');
       if (savedEngine) this.preferredEngine.set(savedEngine);
+
+      const savedGame = localStorage.getItem('lh_preferred_game');
+      if (savedGame) this.preferredGame.set(savedGame);
+
+      const savedHideWip = localStorage.getItem('lh_hide_wip_deprecated');
+      if (savedHideWip === 'true' || savedHideWip === 'false') {
+        this.hideWipDeprecated.set(savedHideWip === 'true');
+      }
+
+      const savedHideWarnings = localStorage.getItem('lh_hide_content_warnings');
+      if (savedHideWarnings === 'true' || savedHideWarnings === 'false') {
+        this.hideContentWarnings.set(savedHideWarnings === 'true');
+      }
 
       const savedFavs = localStorage.getItem('lh_favorites');
       if (savedFavs) {
