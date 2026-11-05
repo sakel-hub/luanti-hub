@@ -9573,4 +9573,55 @@ supported_games = minetest_game, voxelibre
     expect(patchData.game_support.length).toBe(1);
     expect(patchData.translations.de.title).toBe('Everness DE');
   });
+
+  it('should hide the package Report button in Package Detail Modal when viewing own package', () => {
+    const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+
+    const pkg = (pkgService as any).normalizePackage({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      source: 'git',
+      provider: 'github',
+      repo_url: 'https://github.com/SaKeL/everness'
+    });
+
+    (pkgService as any)._activePackage.set(pkg);
+    modalComp.package = pkg;
+
+    // 1. Non-author user sees the Report Package button
+    (authService as any)._currentUser.set({
+      id: 'u_other',
+      username: 'other_user',
+      identities: [{ provider: 'github', username: 'other_user', verified: true }]
+    });
+    modalFixture.detectChanges();
+
+    const reportBtnForOther = modalFixture.nativeElement.querySelector('button[aria-label="Report or Flag Package"]');
+    expect(reportBtnForOther).not.toBeNull();
+
+    // 2. Author of the package does not see the Report Package button and cannot open the report form
+    (authService as any)._currentUser.set({
+      id: 'u_sakel',
+      username: 'SaKeL',
+      identities: [{ provider: 'github', username: 'SaKeL', verified: true }]
+    });
+    modalFixture.detectChanges();
+
+    const reportBtnForAuthor = modalFixture.nativeElement.querySelector('button[aria-label="Report or Flag Package"]');
+    expect(reportBtnForAuthor).toBeNull();
+
+    modalComp.toggleReportForm();
+    expect(modalComp.isReportOpen()).toBe(false);
+
+    // 3. "Edit Metadata & Tags" button and editor live in the wider left column (lg:col-span-2) above Screenshots & Media
+    const leftCol = modalFixture.nativeElement.querySelector('.lg\\:col-span-2');
+    expect(leftCol).not.toBeNull();
+    expect(leftCol.textContent).toContain('Edit Metadata & Tags');
+  });
 });

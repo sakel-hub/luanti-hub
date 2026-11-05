@@ -257,17 +257,19 @@ import {
                   <svg lucideShare2 class="w-4 h-4"></svg>
                 </button>
 
-                <!-- Report / Flag Button -->
-                <button
-                  type="button"
-                  (click)="toggleReportForm()"
-                  [appTooltip]="'modal.reportPackage' | translate"
-                  [attr.aria-label]="'modal.reportPackage' | translate"
-                  [class]="isReportOpen()
-                    ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber-active text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
-                    : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber text-amber-200/90 hover:text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
-                  <svg lucideFlag class="w-4 h-4"></svg>
-                </button>
+                <!-- Report / Flag Button (Hidden for the package's own author) -->
+                @if (!isPackageAuthor()) {
+                  <button
+                    type="button"
+                    (click)="toggleReportForm()"
+                    [appTooltip]="'modal.reportPackage' | translate"
+                    [attr.aria-label]="'modal.reportPackage' | translate"
+                    [class]="isReportOpen()
+                      ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber-active text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
+                      : 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber text-amber-200/90 hover:text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'">
+                    <svg lucideFlag class="w-4 h-4"></svg>
+                  </button>
+                }
 
                 <!-- Author / Admin Package Analytics Button -->
                 @if (canModerate()) {
@@ -331,7 +333,7 @@ import {
           }
 
           <!-- Inline Community Report Form -->
-          @if (isReportOpen()) {
+          @if (isReportOpen() && !isPackageAuthor()) {
             <form (ngSubmit)="onSubmitReport()" class="mx-5 sm:mx-8 mt-5 p-4 rounded-2xl bg-rose-950/55 border border-rose-500/30 space-y-3 text-xs luanti-tab-enter">
               <div class="flex items-center justify-between">
                 <h3 class="font-bold text-rose-300 flex items-center gap-1.5">
@@ -430,6 +432,218 @@ import {
                     </span>
                   }
                 </div>
+
+                <!-- LuantiHub-First Author Metadata & Tags Editor (Placed above Screenshots & Media for wider layout) -->
+                @if (canModerate()) {
+                  <div>
+                    @if (!isEditingTags()) {
+                      <button
+                        type="button"
+                        (click)="openEditTags()"
+                        class="text-xs font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1.5 transition cursor-pointer">
+                        <svg lucideTag class="w-3.5 h-3.5"></svg>
+                        <span>Edit Metadata &amp; Tags</span>
+                      </button>
+                    } @else {
+                      <div class="p-4 sm:p-5 rounded-2xl bg-slate-950/90 border border-sky-500/30 space-y-4 text-xs luanti-tab-enter">
+                        <div class="flex items-center justify-between border-b border-white/10 pb-2.5">
+                          <h3 class="font-bold text-sky-300 flex items-center gap-1.5 text-xs uppercase tracking-wider">
+                            <svg lucideTag class="w-3.5 h-3.5 text-sky-400"></svg>
+                            <span>Edit Metadata &amp; Tags</span>
+                          </h3>
+                          <button
+                            type="button"
+                            (click)="cancelEditTags()"
+                            class="text-slate-400 hover:text-white transition cursor-pointer">
+                            <svg lucideX class="w-4 h-4"></svg>
+                          </button>
+                        </div>
+
+                        <!-- 1. Tags (up to 5) -->
+                        <div class="space-y-1.5">
+                          <div class="flex items-center justify-between">
+                            <span class="text-[11px] font-semibold text-sky-300">
+                              Select Tags ({{ editableTags().length }}/5)
+                            </span>
+                            <button
+                              type="button"
+                              (click)="editableTags.set([])"
+                              class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
+                              Clear
+                            </button>
+                          </div>
+                          <div class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1">
+                            @for (t of packageService.availableTags(); track t.name) {
+                              <button
+                                type="button"
+                                (click)="toggleEditableTag(t.name)"
+                                [class]="isEditableTagSelected(t.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/60' : 'glass-pill text-slate-300 hover:text-white'"
+                                class="px-2.5 py-1 rounded-full border text-[11px] font-medium transition cursor-pointer">
+                                #{{ t.title }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 2. Development Status & Engine Versions -->
+                        <div class="pt-3 border-t border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                              Development Status
+                            </label>
+                            <select
+                              [ngModel]="editableDevState()"
+                              (ngModelChange)="editableDevState.set($event)"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                              <option value="" class="bg-slate-900">Auto / Default</option>
+                              @for (ds of packageService.availableDevStates(); track ds.code) {
+                                <option [value]="ds.code" class="bg-slate-900">{{ ds.label }}</option>
+                              }
+                            </select>
+                          </div>
+
+                          <div>
+                            <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                              Min Engine
+                            </label>
+                            <select
+                              [ngModel]="editableMinEngineVersion()"
+                              (ngModelChange)="editableMinEngineVersion.set($event)"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                              <option value="" class="bg-slate-900">Any</option>
+                              @for (ev of packageService.availableEngineVersions(); track ev.name) {
+                                <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
+                              }
+                            </select>
+                          </div>
+
+                          <div>
+                            <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                              Max Engine
+                            </label>
+                            <select
+                              [ngModel]="editableMaxEngineVersion()"
+                              (ngModelChange)="editableMaxEngineVersion.set($event)"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
+                              <option value="" class="bg-slate-900">Latest</option>
+                              @for (ev of packageService.availableEngineVersions(); track ev.name) {
+                                <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
+                              }
+                            </select>
+                          </div>
+                        </div>
+
+                        <!-- 3. Game Support (Universal + Compatible / Incompatible Games) -->
+                        <div class="pt-3 border-t border-white/10 space-y-2">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Game Support (Click to cycle ✓ / ✕)
+                            </span>
+                            <label class="inline-flex items-center gap-1.5 text-[10px] text-emerald-300 font-semibold cursor-pointer">
+                              <input
+                                type="checkbox"
+                                [checked]="editableSupportsAllGames()"
+                                (change)="editableSupportsAllGames.set(!editableSupportsAllGames())"
+                                class="rounded border-white/20 bg-slate-900 text-emerald-500" />
+                              <span>All Games</span>
+                            </label>
+                          </div>
+                          <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto pr-1">
+                            @for (g of packageService.availableGames(); track g.name) {
+                              <button
+                                type="button"
+                                (click)="cycleEditableGameSupport(g)"
+                                [class]="getEditableGameState(g.name) === 'compatible'
+                                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60'
+                                  : getEditableGameState(g.name) === 'incompatible'
+                                    ? 'bg-rose-500/25 text-rose-300 border-rose-400/60'
+                                    : 'glass-pill text-slate-400 hover:text-white'"
+                                class="px-2.5 py-1 rounded-full border text-[11px] font-medium transition cursor-pointer">
+                                @if (getEditableGameState(g.name) === 'compatible') { ✓ }
+                                @if (getEditableGameState(g.name) === 'incompatible') { ✕ }
+                                {{ g.title }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 4. Content Warnings -->
+                        <div class="pt-3 border-t border-white/10 space-y-2">
+                          <span class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Content Warnings
+                          </span>
+                          <div class="flex flex-wrap gap-1.5">
+                            @for (cw of packageService.availableContentWarnings(); track cw.name) {
+                              <button
+                                type="button"
+                                (click)="toggleEditableContentWarning(cw.name)"
+                                [class]="isEditableContentWarningSelected(cw.name) ? 'bg-amber-500/25 text-amber-300 border-amber-400/60' : 'glass-pill text-slate-400 hover:text-white'"
+                                class="px-2.5 py-1 rounded-full border text-[11px] font-medium transition cursor-pointer">
+                                {{ cw.title }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 5. Multi-Language Translations (Title & Short Description) -->
+                        <div class="pt-3 border-t border-white/10 space-y-2">
+                          <div class="flex items-center justify-between gap-2">
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Localized Text
+                            </span>
+                            <select
+                              [ngModel]="editableTranslationLang()"
+                              (ngModelChange)="onChangeEditableTranslationLang($event)"
+                              class="glass-input rounded px-2 py-1 text-[11px] text-white focus:outline-none">
+                              <option value="de" class="bg-slate-900">Deutsch (de)</option>
+                              <option value="fr" class="bg-slate-900">Français (fr)</option>
+                              <option value="es" class="bg-slate-900">Español (es)</option>
+                              <option value="it" class="bg-slate-900">Italiano (it)</option>
+                              <option value="pt" class="bg-slate-900">Português (pt)</option>
+                              <option value="pl" class="bg-slate-900">Polski (pl)</option>
+                              <option value="ru" class="bg-slate-900">Русский (ru)</option>
+                              <option value="uk" class="bg-slate-900">Українська (uk)</option>
+                              <option value="sk" class="bg-slate-900">Slovenčina (sk)</option>
+                              <option value="cs" class="bg-slate-900">Čeština (cs)</option>
+                              <option value="ja" class="bg-slate-900">日本語 (ja)</option>
+                              <option value="zh_CN" class="bg-slate-900">中文 (zh_CN)</option>
+                            </select>
+                          </div>
+                          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <input
+                              type="text"
+                              [ngModel]="editableTranslatedTitle()"
+                              (ngModelChange)="editableTranslatedTitle.set($event)"
+                              [placeholder]="'Localized title (' + editableTranslationLang() + ')...'"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                            <input
+                              type="text"
+                              [ngModel]="editableTranslatedShortDesc()"
+                              (ngModelChange)="editableTranslatedShortDesc.set($event)"
+                              [placeholder]="'Localized summary (' + editableTranslationLang() + ')...'"
+                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                          </div>
+                        </div>
+
+                        <div class="flex items-center justify-end gap-2 pt-3 border-t border-white/10">
+                          <button
+                            type="button"
+                            (click)="cancelEditTags()"
+                            class="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-slate-400 hover:text-white transition cursor-pointer">
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            [disabled]="isSavingTags()"
+                            (click)="onSaveTags()"
+                            class="px-3.5 py-1.5 rounded-lg glass-btn-sky text-white font-bold text-[11px] disabled:opacity-50 transition cursor-pointer">
+                            {{ isSavingTags() ? 'Saving...' : 'Save Metadata' }}
+                          </button>
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
 
                 <!-- Media & Screenshots Carousel (Placed above Description, with Skeleton Preloader) -->
                 @if (mediaSlides().length > 0) {
@@ -1355,208 +1569,16 @@ import {
                   </div>
                 }
 
-                <!-- Tags & LuantiHub-First Author Metadata Editor (Tags, Dev State, Engine Range, Game Support, Content Warnings, Translations) -->
-                @if ((package.tags && package.tags.length > 0) || canModerate()) {
+                <!-- Tags -->
+                @if ((package.tags && package.tags.length > 0) || isHydratingDetails()) {
                   <div class="space-y-2">
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
                         {{ 'modal.tags' | translate }}
                       </span>
-                      @if (canModerate() && !isEditingTags()) {
-                        <button
-                          type="button"
-                          (click)="openEditTags()"
-                          class="text-[11px] font-semibold text-sky-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer">
-                          <svg lucideTag class="w-3 h-3"></svg>
-                          <span>Edit Metadata &amp; Tags</span>
-                        </button>
-                      }
                     </div>
 
-                    @if (isEditingTags()) {
-                      <div class="p-3.5 rounded-xl bg-slate-950/90 border border-sky-500/30 space-y-3 text-xs">
-                        <!-- 1. Tags (up to 5) -->
-                        <div class="space-y-1.5">
-                          <div class="flex items-center justify-between">
-                            <span class="text-[11px] font-semibold text-sky-300">
-                              Select Tags ({{ editableTags().length }}/5)
-                            </span>
-                            <button
-                              type="button"
-                              (click)="editableTags.set([])"
-                              class="text-[10px] text-slate-400 hover:text-white transition cursor-pointer">
-                              Clear
-                            </button>
-                          </div>
-                          <div class="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto pr-1">
-                            @for (t of packageService.availableTags(); track t.name) {
-                              <button
-                                type="button"
-                                (click)="toggleEditableTag(t.name)"
-                                [class]="isEditableTagSelected(t.name) ? 'bg-sky-500/25 text-sky-300 border-sky-400/60' : 'glass-pill text-slate-300 hover:text-white'"
-                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
-                                #{{ t.title }}
-                              </button>
-                            }
-                          </div>
-                        </div>
-
-                        <!-- 2. Development Status & Engine Versions -->
-                        <div class="pt-2 border-t border-white/10 space-y-2">
-                          <div>
-                            <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                              Development Status
-                            </label>
-                            <select
-                              [ngModel]="editableDevState()"
-                              (ngModelChange)="editableDevState.set($event)"
-                              class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none">
-                              <option value="" class="bg-slate-900">Auto / Default</option>
-                              @for (ds of packageService.availableDevStates(); track ds.code) {
-                                <option [value]="ds.code" class="bg-slate-900">{{ ds.label }}</option>
-                              }
-                            </select>
-                          </div>
-
-                          <div class="grid grid-cols-2 gap-2">
-                            <div>
-                              <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                                Min Engine
-                              </label>
-                              <select
-                                [ngModel]="editableMinEngineVersion()"
-                                (ngModelChange)="editableMinEngineVersion.set($event)"
-                                class="w-full glass-input rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none">
-                                <option value="" class="bg-slate-900">Any</option>
-                                @for (ev of packageService.availableEngineVersions(); track ev.name) {
-                                  <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
-                                }
-                              </select>
-                            </div>
-                            <div>
-                              <label class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
-                                Max Engine
-                              </label>
-                              <select
-                                [ngModel]="editableMaxEngineVersion()"
-                                (ngModelChange)="editableMaxEngineVersion.set($event)"
-                                class="w-full glass-input rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none">
-                                <option value="" class="bg-slate-900">Latest</option>
-                                @for (ev of packageService.availableEngineVersions(); track ev.name) {
-                                  <option [value]="ev.name" class="bg-slate-900">{{ ev.label }}</option>
-                                }
-                              </select>
-                            </div>
-                          </div>
-                        </div>
-
-                        <!-- 3. Game Support (Universal + Compatible / Incompatible Games) -->
-                        <div class="pt-2 border-t border-white/10 space-y-1.5">
-                          <div class="flex items-center justify-between gap-2">
-                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                              Game Support (Click to cycle ✓ / ✕)
-                            </span>
-                            <label class="inline-flex items-center gap-1.5 text-[10px] text-emerald-300 font-semibold cursor-pointer">
-                              <input
-                                type="checkbox"
-                                [checked]="editableSupportsAllGames()"
-                                (change)="editableSupportsAllGames.set(!editableSupportsAllGames())"
-                                class="rounded border-white/20 bg-slate-900 text-emerald-500" />
-                              <span>All Games</span>
-                            </label>
-                          </div>
-                          <div class="flex flex-wrap gap-1 max-h-24 overflow-y-auto pr-1">
-                            @for (g of packageService.availableGames(); track g.name) {
-                              <button
-                                type="button"
-                                (click)="cycleEditableGameSupport(g)"
-                                [class]="getEditableGameState(g.name) === 'compatible'
-                                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60'
-                                  : getEditableGameState(g.name) === 'incompatible'
-                                    ? 'bg-rose-500/25 text-rose-300 border-rose-400/60'
-                                    : 'glass-pill text-slate-400 hover:text-white'"
-                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
-                                @if (getEditableGameState(g.name) === 'compatible') { ✓ }
-                                @if (getEditableGameState(g.name) === 'incompatible') { ✕ }
-                                {{ g.title }}
-                              </button>
-                            }
-                          </div>
-                        </div>
-
-                        <!-- 4. Content Warnings -->
-                        <div class="pt-2 border-t border-white/10 space-y-1.5">
-                          <span class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                            Content Warnings
-                          </span>
-                          <div class="flex flex-wrap gap-1">
-                            @for (cw of packageService.availableContentWarnings(); track cw.name) {
-                              <button
-                                type="button"
-                                (click)="toggleEditableContentWarning(cw.name)"
-                                [class]="isEditableContentWarningSelected(cw.name) ? 'bg-amber-500/25 text-amber-300 border-amber-400/60' : 'glass-pill text-slate-400 hover:text-white'"
-                                class="px-2 py-0.5 rounded-full border text-[10px] font-medium transition cursor-pointer">
-                                {{ cw.title }}
-                              </button>
-                            }
-                          </div>
-                        </div>
-
-                        <!-- 5. Multi-Language Translations (Title & Short Description) -->
-                        <div class="pt-2 border-t border-white/10 space-y-1.5">
-                          <div class="flex items-center justify-between gap-2">
-                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                              Localized Text
-                            </span>
-                            <select
-                              [ngModel]="editableTranslationLang()"
-                              (ngModelChange)="onChangeEditableTranslationLang($event)"
-                              class="glass-input rounded px-1.5 py-0.5 text-[10px] text-white focus:outline-none">
-                              <option value="de" class="bg-slate-900">Deutsch (de)</option>
-                              <option value="fr" class="bg-slate-900">Français (fr)</option>
-                              <option value="es" class="bg-slate-900">Español (es)</option>
-                              <option value="it" class="bg-slate-900">Italiano (it)</option>
-                              <option value="pt" class="bg-slate-900">Português (pt)</option>
-                              <option value="pl" class="bg-slate-900">Polski (pl)</option>
-                              <option value="ru" class="bg-slate-900">Русский (ru)</option>
-                              <option value="uk" class="bg-slate-900">Українська (uk)</option>
-                              <option value="sk" class="bg-slate-900">Slovenčina (sk)</option>
-                              <option value="cs" class="bg-slate-900">Čeština (cs)</option>
-                              <option value="ja" class="bg-slate-900">日本語 (ja)</option>
-                              <option value="zh_CN" class="bg-slate-900">中文 (zh_CN)</option>
-                            </select>
-                          </div>
-                          <input
-                            type="text"
-                            [ngModel]="editableTranslatedTitle()"
-                            (ngModelChange)="editableTranslatedTitle.set($event)"
-                            [placeholder]="'Localized title (' + editableTranslationLang() + ')...'"
-                            class="w-full glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
-                          <input
-                            type="text"
-                            [ngModel]="editableTranslatedShortDesc()"
-                            (ngModelChange)="editableTranslatedShortDesc.set($event)"
-                            [placeholder]="'Localized summary (' + editableTranslationLang() + ')...'"
-                            class="w-full glass-input rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
-                        </div>
-
-                        <div class="flex items-center justify-end gap-2 pt-2 border-t border-white/10">
-                          <button
-                            type="button"
-                            (click)="cancelEditTags()"
-                            class="px-2.5 py-1 rounded-lg text-[11px] font-semibold text-slate-400 hover:text-white transition cursor-pointer">
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            [disabled]="isSavingTags()"
-                            (click)="onSaveTags()"
-                            class="px-3 py-1 rounded-lg glass-btn-sky text-white font-bold text-[11px] disabled:opacity-50 transition cursor-pointer">
-                            {{ isSavingTags() ? 'Saving...' : 'Save Metadata' }}
-                          </button>
-                        </div>
-                      </div>
-                    } @else if (isHydratingDetails() && (!package.tags || package.tags.length <= 1)) {
+                    @if (isHydratingDetails() && (!package.tags || package.tags.length <= 1)) {
                       <div class="flex flex-wrap gap-1.5" aria-busy="true">
                         <div class="w-14 h-5 rounded-full skeleton-shimmer"></div>
                         <div class="w-20 h-5 rounded-full skeleton-shimmer"></div>
@@ -4265,6 +4287,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   toggleReportForm(): void {
+    if (this.isPackageAuthor()) return;
     const next = !this.isReportOpen();
     this.isReportOpen.set(next);
     if (next) {
@@ -4282,7 +4305,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   async onSubmitReport(): Promise<void> {
-    if (!this.reportDetails.trim()) return;
+    if (this.isPackageAuthor() || !this.reportDetails.trim()) return;
     this.isReporting.set(true);
     const res = await this.packageService.reportPackage(this.package, this.reportReason, this.reportDetails.trim());
     this.isReporting.set(false);
