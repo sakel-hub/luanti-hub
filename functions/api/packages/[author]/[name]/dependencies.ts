@@ -56,9 +56,16 @@ export async function onRequestGet(context: {
   if (context.env?.DB) {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const baseAuthor = author.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
       d1Pkg = await context.env.DB.prepare(
-        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
-      ).bind(pkgId, author, name, sanitizedName).first();
+        `SELECT * FROM packages
+         WHERE LOWER(id) = LOWER(?)
+            OR (
+                 (LOWER(author_name) = LOWER(?) OR LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = ?)
+                 AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+               )
+         LIMIT 1`
+      ).bind(pkgId, author, baseAuthor, name, sanitizedName).first();
     } catch {
       // Proceed below
     }
@@ -116,7 +123,7 @@ export async function onRequestGet(context: {
         context.env.DB.prepare(
           `SELECT author_name, name, dependencies, optional_dependencies, provides FROM packages WHERE status = 'active'`
         ).all().then((r: any) => r.results || []).catch(() => []),
-        fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600).catch(() => [])
+        fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => [])
       ]);
 
       const registerProvider = (modName: string, idStr: string) => {

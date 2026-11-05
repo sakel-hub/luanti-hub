@@ -7,7 +7,8 @@ import {
   fetchRepoSizeEstimateFromUrl,
   readEdgeCacheJson,
   writeEdgeCacheJson,
-  resolveLocalizedPackageText
+  resolveLocalizedPackageText,
+  toLegacyLuantiClientThumbnailUrl
 } from '../../../lib/upstream';
 
 interface Env {
@@ -134,7 +135,7 @@ export async function onRequestGet(context: { request: Request; params: { author
     forwardParams.set('formspec_version', '8');
   }
   const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
-  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v4/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
+  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v5/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
   const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
   if (cachedClient) {
     if (context.env.DB) {
@@ -238,7 +239,14 @@ export async function onRequestGet(context: { request: Request; params: { author
       negative: (Number(baseReviews.negative) || 0) + d1ReviewsCount.negative
     };
     const normalizedScreenshots = Array.isArray(data.screenshots)
-      ? data.screenshots.map((s: any) => (typeof s === 'string' ? { url: s } : s)).filter((s: any) => Boolean(s?.url))
+      ? data.screenshots
+          .map((s: any) => {
+            const rawObj = typeof s === 'string' ? { url: s } : s;
+            if (!rawObj?.url) return null;
+            const normalizedUrl = toLegacyLuantiClientThumbnailUrl(rawObj.url) || rawObj.url;
+            return { ...rawObj, url: normalizedUrl };
+          })
+          .filter((s: any) => Boolean(s?.url))
       : [];
     const resolvedDownloadSize =
       (typeof data.download_size === 'string' && data.download_size.trim() ? data.download_size.trim() : null) ||
@@ -320,10 +328,12 @@ export async function onRequestGet(context: { request: Request; params: { author
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
     const softDeps = parseJsonArray(d1Pkg.optional_dependencies);
     const screenshots: Array<{ url: string }> = [];
-    if (d1Pkg.banner_url && String(d1Pkg.banner_url).startsWith('http')) {
-      screenshots.push({ url: String(d1Pkg.banner_url) });
-    } else if (d1Pkg.thumbnail_url && String(d1Pkg.thumbnail_url).startsWith('http')) {
-      screenshots.push({ url: String(d1Pkg.thumbnail_url) });
+    const d1BannerClientUrl = toLegacyLuantiClientThumbnailUrl(d1Pkg.banner_url);
+    const d1ThumbClientUrl = toLegacyLuantiClientThumbnailUrl(d1Pkg.thumbnail_url);
+    if (d1BannerClientUrl) {
+      screenshots.push({ url: d1BannerClientUrl });
+    } else if (d1ThumbClientUrl) {
+      screenshots.push({ url: d1ThumbClientUrl });
     }
 
     const localizedD1 = resolveLocalizedPackageText(d1Pkg, normalizedLang);

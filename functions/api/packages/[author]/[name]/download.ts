@@ -251,10 +251,10 @@ export async function onRequest(context: {
     const lowerA = encodeURIComponent(effectiveAuthor.toLowerCase());
     const lowerN = encodeURIComponent(effectiveName.toLowerCase());
     await invalidateEdgeCacheKeys([
-      '/__api_boot_catalog_bundle_v3',
-      `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
-      `https://cache.luantihub.internal/__for_client_v3/${lowerA}/${lowerN}/%3Fformspec_version%3D8`
+      '/__api_boot_catalog_bundle_v19',
+      `https://edge-cache.luantihub.local/pkg-detail-v19/full/${lowerA}/${lowerN}`,
+      `https://edge-cache.luantihub.local/pkg-detail-v19/lite/${lowerA}/${lowerN}`,
+      `https://cache.luantihub.internal/__for_client_v5/${lowerA}/${lowerN}/en/%3Fformspec_version%3D8`
     ]).catch(() => {});
   };
 
@@ -278,25 +278,41 @@ export async function onRequest(context: {
   const reqUrl = new URL(request.url, 'https://luantihub.local');
   const requestedTag = (reqUrl.searchParams.get('tag') || reqUrl.searchParams.get('ref') || '').trim();
   const queryRelease = (reqUrl.searchParams.get('release') || '').trim();
+  const rawReason = (reqUrl.searchParams.get('reason') || '').trim().toLowerCase();
 
   const encAuthor = encodeURIComponent(effectiveAuthor);
   const encName = encodeURIComponent(effectiveName);
   let resolvedReleaseId =
     (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
     (/^\d+$/.test(queryRelease) ? queryRelease : '');
+  const isPureGitPkg = Boolean(pkgRecord && pkgRecord.provider && pkgRecord.provider !== 'contentdb');
+  const d1VersionFingerprint = isPureGitPkg
+    ? String(pkgRecord?.latest_commit_sha || pkgRecord?.updated_at || '').trim()
+    : '';
 
-  // Check Shared Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary
-  const edgeZipCacheKey = buildSharedZipCacheKey(
+  // Check Shared Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary.
+  // When `reason=update` is passed by the Luanti client for an upstream ContentDB package without an explicit
+  // release ID in the URL, resolve the latest upstream release ID first so updates never return a stale `latest` zip.
+  const latestEdgeZipCacheKey = buildSharedZipCacheKey(effectiveAuthor, effectiveName, 'latest');
+  const initialEdgeZipCacheKey = buildSharedZipCacheKey(
     effectiveAuthor,
     effectiveName,
-    requestedTag || resolvedReleaseId || 'latest'
+    requestedTag || resolvedReleaseId || d1VersionFingerprint || 'latest'
   );
-  const cachedZipHit = await getCachedNormalizedZip(edgeZipCacheKey, request);
-  if (cachedZipHit) {
-    if (!requestedTag && cachedZipHit.byteLength > 0) {
-      await scheduleBackground(healPackageDownloadSizeIfChanged(cachedZipHit.byteLength));
+  const canUseFastPreResolutionCache =
+    rawReason !== 'update' || Boolean(requestedTag || resolvedReleaseId || isPureGitPkg);
+  if (canUseFastPreResolutionCache) {
+    const cachedZipHit =
+      (await getCachedNormalizedZip(initialEdgeZipCacheKey, request)) ||
+      (!requestedTag && !resolvedReleaseId && rawReason !== 'update' && initialEdgeZipCacheKey !== latestEdgeZipCacheKey
+        ? await getCachedNormalizedZip(latestEdgeZipCacheKey, request)
+        : null);
+    if (cachedZipHit) {
+      if (!requestedTag && cachedZipHit.byteLength > 0) {
+        await scheduleBackground(healPackageDownloadSizeIfChanged(cachedZipHit.byteLength));
+      }
+      return cachedZipHit.response;
     }
-    return cachedZipHit.response;
   }
 
   let d1Releases: any[] = [];
@@ -315,19 +331,20 @@ export async function onRequest(context: {
   let upstreamCommitSha = '';
   let effectiveRepoUrl = String(pkgRecord?.repo_url || '').trim();
   let effectiveType = String(pkgRecord?.type || 'mod').toLowerCase();
-  const isPureGitPkg = Boolean(pkgRecord && pkgRecord.provider && pkgRecord.provider !== 'contentdb');
 
   // Fetch ContentDB releases, package metadata & for-client metadata (cached at Edge, with milcho.org JSON failover)
-  // to discover `repo_url`, release ID, commit SHA, and fallback `.zip` upload URLs when not already in D1
+  // to discover `repo_url`, release ID, commit SHA, and fallback `.zip` upload URLs when not already in D1.
+  // When `rawReason === 'update'`, bypass the 5-minute `/releases/` cache (ttl=0) so newly published releases are discovered immediately.
+  const releaseMetadataTtl = rawReason === 'update' ? 0 : 300;
   const [upstreamReleases, upstreamPkg, forClient] = await Promise.all([
     !isPureGitPkg
-      ? fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300).catch(() => null)
+      ? fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null),
     (!effectiveRepoUrl && !isPureGitPkg)
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600).catch(() => null)
       : Promise.resolve(null),
     (!resolvedReleaseId || !effectiveRepoUrl) && !isPureGitPkg
-      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, 300).catch(() => null)
+      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null)
   ]);
 
@@ -377,7 +394,7 @@ export async function onRequest(context: {
   }
 
   if (!effectiveRepoUrl) {
-    const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600).catch(() => null);
+    const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
     if (Array.isArray(bulkCatalog)) {
       const lowerA = effectiveAuthor.toLowerCase();
       const lowerN = effectiveName.toLowerCase();
@@ -424,6 +441,21 @@ export async function onRequest(context: {
     }
     if (Array.isArray(forClient.provides) && forClient.provides.length > 1) {
       effectiveType = 'modpack';
+    }
+  }
+
+  const edgeZipCacheKey = buildSharedZipCacheKey(
+    effectiveAuthor,
+    effectiveName,
+    requestedTag || resolvedReleaseId || upstreamCommitSha || d1VersionFingerprint || 'latest'
+  );
+  if (edgeZipCacheKey !== initialEdgeZipCacheKey || !canUseFastPreResolutionCache) {
+    const resolvedZipHit = await getCachedNormalizedZip(edgeZipCacheKey);
+    if (resolvedZipHit) {
+      if (!requestedTag && resolvedZipHit.byteLength > 0) {
+        await scheduleBackground(healPackageDownloadSizeIfChanged(resolvedZipHit.byteLength));
+      }
+      return resolvedZipHit.response;
     }
   }
 
@@ -571,6 +603,9 @@ export async function onRequest(context: {
 
       const normalizedZip = normalizeLuantiPackageZip(rawBytes, safeFileName, effectiveType);
       const zipResponse = await setCachedNormalizedZip(edgeZipCacheKey, normalizedZip, safeFileName, request);
+      if (!requestedTag && edgeZipCacheKey !== latestEdgeZipCacheKey) {
+        await setCachedNormalizedZip(latestEdgeZipCacheKey, normalizedZip, safeFileName).catch(() => {});
+      }
 
       // Auto-persist exact zip size to packages table in D1 & purge stale detail/boot Edge Caches
       if (!requestedTag && normalizedZip.byteLength > 0) {

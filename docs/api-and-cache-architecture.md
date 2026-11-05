@@ -230,20 +230,20 @@ Inbound Request
 
 | Endpoint & Method | Upstream / Source | Edge Cache Key | Edge TTL | HTTP `Cache-Control` Header | Invalidation Triggers |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`GET /api/packages/?boot=1`** | D1 + ContentDB + Hero Promos + Luanti Blog RSS | `/__api_boot_catalog_bundle_v9` | 1,800s (30m) | `public, max-age=300, s-maxage=1800, stale-while-revalidate=3600` | Package published, tag modified, promotion edited, or moderation action taken. |
-| **`GET /api/packages/?q=...`** | D1 SQL + ContentDB search with mirror failover | `/__catalog_edge_v5_{query}` | 900s (15m) | `public, max-age=120, s-maxage=900, stale-while-revalidate=1800` | Package mutation in D1. |
+| **`GET /api/packages/?boot=1`** | D1 + ContentDB + Hero Promos + Luanti Blog RSS | `/__api_boot_catalog_bundle_v19` | 1,800s (30m) | `public, max-age=300, s-maxage=1800, stale-while-revalidate=3600` | Package published, tag modified, promotion edited, or moderation action taken. |
+| **`GET /api/packages/?type=...`** *(In-Game Client)* | Shared from `/__api_boot_catalog_bundle_v19` (`HIT-BOOT-SHARED`) or D1 + ContentDB `/packages/?fmt=vcs` (30m TTL + 24h fallback; skips `/scores/`) | `/__catalog_edge_v10_{query}` | 1,800s (30m) | `public, max-age=120, s-maxage=1800, stale-while-revalidate=3600` | Package mutation in D1. |
 | **`GET /api/packages/:author/:name/?lite=1`** | D1 SQL + ContentDB (fast preview payload) | `/__api_pkg_detail_v*/lite/...` | 1,800s (30m) | `public, max-age=300, s-maxage=1800, stale-while-revalidate=600` | Package edit, moderation, or release update. |
 | **`GET /api/packages/:author/:name/`** | D1 SQL + ContentDB + Git metadata | `/__api_pkg_detail_v*/full/...` | 600s (10m) | `public, max-age=120, s-maxage=600, stale-while-revalidate=86400` | Package edit, moderation, or release update. |
 | **`GET /api/packages/:author/:name/readme`** | Git raw README (GitHub / GitLab / Codeberg / Mesehub) | `/__api_pkg_readme_v4/...` | 86,400s (24h) | `public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400` | Package metadata update. |
 | **`GET /api/packages/:author/:name/releases`** | Git smart HTTP refs & forge releases API | `/__git_releases_tags_v3/...` | 120s (2m) | `public, max-age=60, s-maxage=120` *(Bypassed with `?force=1`)* | Time expiration or forced user refresh. |
-| **`GET /api/packages/:author/:name/download`** | Upstream ContentDB or Git `.zip` archive | `/__normalized_zip_v2/...` | 604,800s (7d) | `public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400` | New Git tag or release published. |
-| **`GET /api/packages/:author/:name/dependencies`** | ContentDB `/dependencies/` or Git `mod.conf` | `/__api_pkg_deps_v3/...` | 600s (10m) | `public, max-age=300, s-maxage=600, stale-while-revalidate=600` | Package dependencies update. |
+| **`GET /api/packages/:author/:name/download`** | Upstream ContentDB or Git `.zip` archive | `/__pkg_zip_v3/<author>/<name>/<versionOrLatest>` | 604,800s (7d) | `public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400` | New Git tag, commit SHA, or ContentDB release published (`?reason=update` resolves latest release ID). |
+| **`GET /api/packages/:author/:name/dependencies`** | ContentDB `/dependencies/` or Git `mod.conf` | `/__pkg_deps_v2/...` | 600s (10m) | `public, max-age=300, s-maxage=600, stale-while-revalidate=600` | Package dependencies update. |
 | **`GET /api/packages/:author/:name/reviews`** | D1 `reviews` table + ContentDB `/reviews/` | Direct D1 + ContentDB Proxy | 0s (Live) | `no-store, no-cache, must-revalidate` | Always real-time. |
 | **`POST /api/packages/:author/:name/reviews`** | D1 write mutation | None | N/A | `no-store` | Evicts package detail and boot bundle caches. |
 | **`GET /api/packages/top10`** | D1 `package_daily_downloads` + ContentDB scores | Direct D1 Aggregation | 60s (1m) | `public, max-age=60, s-maxage=300, stale-while-revalidate=60` | Re-aggregated per window. |
 | **`POST /api/packages/hydrate`** | Batch D1 queries for grid package IDs | `/__api_hydrate_v3_{hash}` | 3,600s (1h) | `public, max-age=300, s-maxage=3600` | Time expiration. |
 | **`GET /api/tags`** | ContentDB `/tags/` with static fallback | `/__api_tags_v1` | 3,600s (1h) | `public, max-age=1800, s-maxage=3600` | Hourly upstream refresh. |
-| **`GET /api/updates`** | ContentDB `/updates/` + active D1 packages | `/__api_updates_v2_{query}` | 180s (3m) | `public, max-age=120, s-maxage=300, stale-while-revalidate=600` | Evicted on D1 write mutation. |
+| **`GET /api/updates`** | ContentDB `/updates/` + active D1 packages | `/__api_updates_v3_{query}` | 180s (3m) | `public, max-age=120, s-maxage=300, stale-while-revalidate=600` | Evicted on D1 write mutation. |
 | **`GET /api/authors/:username`** | D1 users/identities + ContentDB `/users/` | `/__author_profile_v2/...` | 120s (2m) | `public, max-age=60, s-maxage=120, stale-while-revalidate=300` | User profile update or identity link. |
 | **`GET /api/promotions`** | D1 `hero_promotions` table | `/__active_promotions_v1` | 21,600s (6h) | `public, max-age=300, s-maxage=1800` | Admin promotion create/update/delete. |
 | **`GET /package/:author/:name`** *(SSR)* | Cloudflare `HTMLRewriter` (JSON-LD + meta) | Per-URL Edge Cache | 3,600s (1h) | `public, max-age=300, s-maxage=3600, stale-while-revalidate=86400` | Package metadata update. |
@@ -272,7 +272,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
 External requests to ContentDB are managed by `fetchWithFailover()` (`functions/api/lib/upstream.ts`):
 - **Primary Host:** `https://content.luanti.org/api`
 - **Mirror Host:** `https://contentdb.milcho.org/api`
-- **Timeout Strategy:** 7,500ms for bulk endpoints (`/scores/`, `?fmt=vcs`, `/packages/`), 5,500ms for standard endpoints.
+- **Timeout Strategy:** 4,500ms for bulk endpoints (`/scores/`, `?fmt=vcs`, `/packages/`), 4,000ms for standard endpoints, backed by a 24-hour last-known-good Edge Cache fallback (`/__upstream_fallback_packages_vcs_v1`) for `/packages/?fmt=vcs`.
 - **Failover Conditions:** Triggered if primary is offline, times out, or returns `5xx` / `429 Too Many Requests`.
 - **404 Guard:** Genuine `404 Not Found` responses from the primary are not retried against the mirror, preventing redundant latency.
 - **Client Emulation Protection:** Custom `User-Agent: LuantiHub/1.0 (+https://luantihub.org)` avoids triggering ContentDB in-game view counter write operations.

@@ -30,6 +30,7 @@ import {
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
+  toLegacyLuantiClientThumbnailUrl,
   selectSharpPackageBanner,
   mergeScreenshotsPreferringGit,
   toProxiedGitImageIfNeeded,
@@ -726,23 +727,126 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
   const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19';
-  const extraFilterSig = [
-    url.searchParams.getAll('hide').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
-    url.searchParams.getAll('flag').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
-    url.searchParams.getAll('tag').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(','),
-    (url.searchParams.get('game') || '').trim().toLowerCase(),
-    (url.searchParams.get('engine_version') || '').trim().toLowerCase(),
-    (url.searchParams.get('sort') || '').trim().toLowerCase(),
-    (url.searchParams.get('order') || '').trim().toLowerCase(),
-    (url.searchParams.get('limit') || '').trim(),
-    (url.searchParams.get('license') || '').trim().toLowerCase()
-  ].some(Boolean)
-    ? `&h=${url.searchParams.getAll('hide').map(s => s.trim().toLowerCase()).sort().join(',')}&fl=${url.searchParams.getAll('flag').map(s => s.trim().toLowerCase()).sort().join(',')}&tg=${url.searchParams.getAll('tag').map(s => s.trim().toLowerCase()).sort().join(',')}&gm=${(url.searchParams.get('game') || '').trim().toLowerCase()}&ev=${(url.searchParams.get('engine_version') || '').trim().toLowerCase()}&s=${(url.searchParams.get('sort') || '').trim().toLowerCase()}&o=${(url.searchParams.get('order') || '').trim().toLowerCase()}&lm=${(url.searchParams.get('limit') || '').trim()}&lc=${(url.searchParams.get('license') || '').trim().toLowerCase()}`
+  const rawHideAndFlags = [
+    ...url.searchParams.getAll('hide'),
+    ...url.searchParams.getAll('flag')
+  ]
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  const normalizedHideFlags = new Set<string>();
+  for (const f of rawHideAndFlags) {
+    if (f === 'nonfree') continue;
+    if (f === 'desktop_default') {
+      normalizedHideFlags.add('deprecated');
+    } else if (f === 'android_default') {
+      normalizedHideFlags.add('deprecated');
+      normalizedHideFlags.add('*');
+    } else {
+      normalizedHideFlags.add(f);
+    }
+  }
+  const normalizedHideSig = Array.from(normalizedHideFlags).sort().join(',');
+  const tagFilterSig = url.searchParams.getAll('tag').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(',');
+  const gameFilterSig = (url.searchParams.get('game') || '').trim().toLowerCase();
+  const sortFilterSig = (url.searchParams.get('sort') || '').trim().toLowerCase();
+  const orderFilterSig = (url.searchParams.get('order') || '').trim().toLowerCase();
+  const limitFilterSig = (url.searchParams.get('limit') || '').trim();
+  const licenseFilterSig = (url.searchParams.get('license') || '').trim().toLowerCase();
+  const hasCustomUpstreamFilters = Boolean(
+    tagFilterSig || gameFilterSig || sortFilterSig || orderFilterSig || limitFilterSig || licenseFilterSig
+  );
+  const effectiveEngineSig = hasCustomUpstreamFilters
+    ? (url.searchParams.get('engine_version') || '').trim().toLowerCase()
     : '';
-  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${sortedUniqueTypes.join(',')}&p=${protocolVersion}&fmt=${requestedFmt}${extraFilterSig}`;
+  const effectiveProtoSig = hasCustomUpstreamFilters ? protocolVersion : '';
+  const effectiveTypesSig = isAllStandardTypes ? 'all' : sortedUniqueTypes.join(',');
+  const extraFilterSig = [
+    normalizedHideSig,
+    tagFilterSig,
+    gameFilterSig,
+    effectiveEngineSig,
+    sortFilterSig,
+    orderFilterSig,
+    limitFilterSig,
+    licenseFilterSig
+  ].some(Boolean)
+    ? `&h=${normalizedHideSig}&tg=${tagFilterSig}&gm=${gameFilterSig}&ev=${effectiveEngineSig}&s=${sortFilterSig}&o=${orderFilterSig}&lm=${limitFilterSig}&lc=${licenseFilterSig}`
+    : '';
+  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v9_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v10_${encodeURIComponent(normalizedCatalogKey)}`;
+
+  const buildInGameClientCatalogResponse = (packagesList: any[]): any => {
+    const filtered = (Array.isArray(packagesList) ? packagesList : []).filter((pkg: any) => {
+      if (!pkg || !pkg.author || !pkg.name) return false;
+      const pkgType = pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod');
+      if (sortedUniqueTypes.length > 0 && !isAllStandardTypes && !sortedUniqueTypes.includes(pkgType)) {
+        return false;
+      }
+      if (normalizedHideFlags.size > 0) {
+        if (normalizedHideFlags.has('deprecated') && isPackageDeprecated(pkg)) {
+          return false;
+        }
+        if (normalizedHideFlags.has('wip') && String(pkg.dev_state || '').trim().toUpperCase() === 'WIP') {
+          return false;
+        }
+        const warnings = parseJsonArray(pkg.content_warnings);
+        if (warnings.length > 0) {
+          if (normalizedHideFlags.has('*')) return false;
+          if (warnings.some((w: string) => normalizedHideFlags.has(String(w || '').trim().toLowerCase()))) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+
+    const slimList = filtered.map((pkg: any) => {
+      const item: Record<string, any> = {
+        author: pkg.author,
+        name: pkg.name,
+        title: pkg.title || pkg.name,
+        type: pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod'),
+        short_description: pkg.short_desc || pkg.short_description || '',
+        release: Number(pkg.release) || 1,
+        thumbnail: toLegacyLuantiClientThumbnailUrl(pkg.thumbnail || pkg.thumbnail_url) || null
+      };
+      if (pkg.aliases) item['aliases'] = pkg.aliases;
+      if (pkg.featured) item['featured'] = true;
+      return item;
+    });
+
+    if (requestedFmt === 'keys') {
+      const keys = [
+        'author',
+        'name',
+        'title',
+        'type',
+        'short_description',
+        'release',
+        'thumbnail',
+        'featured'
+      ];
+      const rows = slimList.map((it: any) => [
+        it.author,
+        it.name,
+        it.title,
+        it.type,
+        it.short_description,
+        it.release,
+        it.thumbnail,
+        Boolean(it.featured)
+      ]);
+      return {
+        keys,
+        pkgs: rows,
+        values: rows
+      };
+    }
+
+    return slimList;
+  };
 
   const enrichRecentReviewsWithCatalog = (reviews: any[], catalogPackages: any[]): any[] => {
     if (!Array.isArray(reviews) || reviews.length === 0) return [];
@@ -943,21 +1047,46 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': isBootBundle
             ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
-            : 'public, max-age=120, s-maxage=900, stale-while-revalidate=1800',
+            : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
       });
     }
+
+    // Share the already-warmed Web Boot Bundle (`bootEdgeCacheKey`) with in-game Luanti C++ client requests
+    // (`GET /api/packages/?type=mod&type=game&type=txp...`) so in-game Content tab opens in < 5ms with zero D1 or upstream calls.
+    if (!isBootBundle && !q && !author && !hasCustomUpstreamFilters) {
+      const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
+      if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
+        const sharedClientPayload = buildInGameClientCatalogResponse(cachedBoot.packages);
+        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 1800);
+        return new Response(JSON.stringify(sharedClientPayload), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
+            'X-LuantiHub-Cache': 'HIT-BOOT-SHARED'
+          }
+        });
+      }
+    }
   }
 
   // 1. Fetch Upstream Packages + Bulk Scores/Downloads + Newest ContentDB Packages (with Cloudflare Edge Cache + mirror failover)
-  const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, 300)
+  // Cache `/packages/?fmt=vcs` for 30 minutes (1800s) and never block non-boot in-game client requests on `/scores/` network fetches
+  // (ContentDB's `/api/scores/` runs 3,700+ N+1 SQL queries on cache miss and Luanti's `contentdb.lua` never reads `score` or `downloads`).
+  const upstreamTtl = upstreamPath === '/packages/?fmt=vcs' ? 1800 : 300;
+  const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, upstreamTtl)
     .then(list => Array.isArray(list) ? list : [])
     .catch(() => []);
 
-  const scoresPromise = fetchUpstreamJsonCached<any[]>('/scores/', 900)
-    .then(list => Array.isArray(list) ? list : [])
-    .catch(() => []);
+  const scoresPromise = isBootBundle
+    ? fetchUpstreamJsonCached<any[]>('/scores/', 900)
+        .then(list => Array.isArray(list) ? list : [])
+        .catch(() => [])
+    : readEdgeCacheJson<any[]>('/scores/')
+        .then(list => Array.isArray(list) ? list : [])
+        .catch(() => []);
 
   const recentUpstreamPromise = isBootBundle
     ? fetchUpstreamJsonCached<any[]>('/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs', 900)
@@ -1033,7 +1162,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       })
       .catch(() => {});
 
-    let query = `SELECT * FROM packages WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
+    const selectCols = isBootBundle
+      ? '*'
+      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, release, updated_at, created_at, dev_state, tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts';
+    let query = `SELECT ${selectCols} FROM packages WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
     const params: any[] = [];
 
     if (types.length === 1) {
@@ -1066,78 +1198,78 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       .then((res: any) => new Set<string>((res.results || []).map((r: any) => String(r.id).toLowerCase())))
       .catch(() => new Set<string>());
 
-    // Real Star Review Averages from Cloudflare D1 `reviews` table
-    reviewRatingsPromise = env.DB.prepare(
-      `SELECT LOWER(package_id) as pkg_id, AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews GROUP BY LOWER(package_id)`
-    ).all()
-      .then((res: any) => {
-        const map = new Map<string, number>();
-        for (const r of (res.results || [])) {
-          if (r && r.pkg_id && Number(r.cnt) > 0 && r.avg_rating != null) {
-            map.set(String(r.pkg_id).toLowerCase(), Number(Number(r.avg_rating).toFixed(1)));
-          }
-        }
-        return map;
-      })
-      .catch(() => new Map<string, number>());
-
     // Avoid scanning all historical package_daily_downloads rows on every catalog build;
     // packages.luantihub_downloads already tracks all-time LuantiHub downloads, and velocityPromise covers the 7-day window.
     lhDownloadsMapPromise = Promise.resolve(new Map<string, number>());
 
-    // Community Favorites count per package from `user_favorites`
-    favoritesMapPromise = env.DB.prepare(
-      `SELECT LOWER(package_id) as pkg_id, COUNT(*) as fav_cnt FROM user_favorites GROUP BY LOWER(package_id)`
-    ).all()
-      .then((res: any) => {
-        const map = new Map<string, number>();
-        for (const r of (res.results || [])) {
-          if (r?.pkg_id && Number(r.fav_cnt) > 0) {
-            map.set(String(r.pkg_id).toLowerCase(), Number(r.fav_cnt));
-          }
-        }
-        return map;
-      })
-      .catch(() => new Map<string, number>());
-
-    // Registered Creator Display Names & Linked Identities from `users` / `user_identities`
-    authorDisplayMapPromise = env.DB.prepare(`
-      SELECT u.id AS user_id, u.username, u.display_name, ui.provider_username, ui.verified
-      FROM users u
-      LEFT JOIN user_identities ui ON ui.user_id = u.id
-      WHERE u.display_name IS NOT NULL AND TRIM(u.display_name) != ''
-    `).all()
-      .then((res: any) => {
-        const byUserId = new Map<string, string>();
-        const byHandle = new Map<string, { userId: string; displayName: string }>();
-        for (const row of (res.results || [])) {
-          const userId = String(row?.user_id || '').trim();
-          const displayName = String(row?.display_name || '').trim();
-          if (!userId || !displayName) continue;
-          byUserId.set(userId, displayName);
-          const uname = String(row?.username || '').trim().toLowerCase();
-          if (uname) {
-            byHandle.set(uname, { userId, displayName });
-          }
-          const displayLower = displayName.toLowerCase();
-          if (displayLower && !byHandle.has(displayLower)) {
-            byHandle.set(displayLower, { userId, displayName });
-          }
-          if (row?.verified && row?.provider_username) {
-            const provHandle = String(row.provider_username).trim().toLowerCase();
-            if (provHandle) {
-              byHandle.set(provHandle, { userId, displayName });
+    if (isBootBundle) {
+      // Real Star Review Averages from Cloudflare D1 `reviews` table
+      reviewRatingsPromise = env.DB.prepare(
+        `SELECT LOWER(package_id) as pkg_id, AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews GROUP BY LOWER(package_id)`
+      ).all()
+        .then((res: any) => {
+          const map = new Map<string, number>();
+          for (const r of (res.results || [])) {
+            if (r && r.pkg_id && Number(r.cnt) > 0 && r.avg_rating != null) {
+              map.set(String(r.pkg_id).toLowerCase(), Number(Number(r.avg_rating).toFixed(1)));
             }
           }
-        }
-        return { byUserId, byHandle };
-      })
-      .catch(() => ({
-        byUserId: new Map<string, string>(),
-        byHandle: new Map<string, { userId: string; displayName: string }>()
-      }));
+          return map;
+        })
+        .catch(() => new Map<string, number>());
 
-    if (isBootBundle) {
+      // Community Favorites count per package from `user_favorites`
+      favoritesMapPromise = env.DB.prepare(
+        `SELECT LOWER(package_id) as pkg_id, COUNT(*) as fav_cnt FROM user_favorites GROUP BY LOWER(package_id)`
+      ).all()
+        .then((res: any) => {
+          const map = new Map<string, number>();
+          for (const r of (res.results || [])) {
+            if (r?.pkg_id && Number(r.fav_cnt) > 0) {
+              map.set(String(r.pkg_id).toLowerCase(), Number(r.fav_cnt));
+            }
+          }
+          return map;
+        })
+        .catch(() => new Map<string, number>());
+
+      // Registered Creator Display Names & Linked Identities from `users` / `user_identities`
+      authorDisplayMapPromise = env.DB.prepare(`
+        SELECT u.id AS user_id, u.username, u.display_name, ui.provider_username, ui.verified
+        FROM users u
+        LEFT JOIN user_identities ui ON ui.user_id = u.id
+        WHERE u.display_name IS NOT NULL AND TRIM(u.display_name) != ''
+      `).all()
+        .then((res: any) => {
+          const byUserId = new Map<string, string>();
+          const byHandle = new Map<string, { userId: string; displayName: string }>();
+          for (const row of (res.results || [])) {
+            const userId = String(row?.user_id || '').trim();
+            const displayName = String(row?.display_name || '').trim();
+            if (!userId || !displayName) continue;
+            byUserId.set(userId, displayName);
+            const uname = String(row?.username || '').trim().toLowerCase();
+            if (uname) {
+              byHandle.set(uname, { userId, displayName });
+            }
+            const displayLower = displayName.toLowerCase();
+            if (displayLower && !byHandle.has(displayLower)) {
+              byHandle.set(displayLower, { userId, displayName });
+            }
+            if (row?.verified && row?.provider_username) {
+              const provHandle = String(row.provider_username).trim().toLowerCase();
+              if (provHandle) {
+                byHandle.set(provHandle, { userId, displayName });
+              }
+            }
+          }
+          return { byUserId, byHandle };
+        })
+        .catch(() => ({
+          byUserId: new Map<string, string>(),
+          byHandle: new Map<string, { userId: string; displayName: string }>()
+        }));
+
       velocityPromise = env.DB.prepare(`
         SELECT
           LOWER(package_id) as pkg_id,
@@ -1629,7 +1761,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     });
   }
 
-  const sharedEdgeRatings = await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, SharedEdgeRatingEntry>));
+  const sharedEdgeRatings = isBootBundle
+    ? await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, SharedEdgeRatingEntry>))
+    : ({} as Record<string, SharedEdgeRatingEntry>);
 
   // 5. Append Upstream ContentDB packages (excluding duplicates and D1 Kill-Switch delisted items)
   for (const item of upstreamList) {
@@ -1708,21 +1842,23 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   // Compute reverse-dependency counts across the catalog for dependency-aware Home/Top 10 prioritization
-  const reverseDepCountMap = buildReverseDependencyCountMap(merged);
-  for (const pkg of merged) {
-    const revCnt = reverseDepCountMap.get(String(pkg.name || '').trim().toLowerCase()) || 0;
-    if (revCnt > 0) {
-      pkg.reverse_dep_count = revCnt;
-    }
-    const lowerKey = String(pkg.id || '').toLowerCase();
-    const sharedEntry = sharedEdgeRatings[lowerKey];
-    if (sharedEntry) {
-      if (!(pkg.score > 0) && sharedEntry.score > 0) {
-        pkg.score = sharedEntry.score;
+  if (isBootBundle) {
+    const reverseDepCountMap = buildReverseDependencyCountMap(merged);
+    for (const pkg of merged) {
+      const revCnt = reverseDepCountMap.get(String(pkg.name || '').trim().toLowerCase()) || 0;
+      if (revCnt > 0) {
+        pkg.reverse_dep_count = revCnt;
       }
-      if (!pkg.review_thread_counts && sharedEntry.review_thread_counts) {
-        pkg.review_thread_counts = sharedEntry.review_thread_counts;
-        pkg.rating_checked = true;
+      const lowerKey = String(pkg.id || '').toLowerCase();
+      const sharedEntry = sharedEdgeRatings[lowerKey];
+      if (sharedEntry) {
+        if (!(pkg.score > 0) && sharedEntry.score > 0) {
+          pkg.score = sharedEntry.score;
+        }
+        if (!pkg.review_thread_counts && sharedEntry.review_thread_counts) {
+          pkg.review_thread_counts = sharedEntry.review_thread_counts;
+          pkg.rating_checked = true;
+        }
       }
     }
   }
@@ -2147,61 +2283,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   } else {
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
-    const slimList = merged.map((pkg: any) => {
-      const item: Record<string, any> = {
-        author: pkg.author,
-        name: pkg.name,
-        title: pkg.title || pkg.name,
-        type: pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod'),
-        short_description: pkg.short_desc || pkg.short_description || '',
-        short_desc: pkg.short_desc || pkg.short_description || '',
-        release: Number(pkg.release) || 1,
-        thumbnail: pkg.thumbnail || null,
-        tags: Array.isArray(pkg.tags) ? pkg.tags : []
-      };
-      if (pkg.aliases) item['aliases'] = pkg.aliases;
-      if (pkg.featured) item['featured'] = true;
-      if (typeof pkg.score === 'number') item['score'] = pkg.score;
-      if (typeof pkg.downloads === 'number') item['downloads'] = pkg.downloads;
-      if (pkg.license) item['license'] = pkg.license;
-      return item;
-    });
-
-    if (requestedFmt === 'keys') {
-      const keys = [
-        'author',
-        'name',
-        'title',
-        'type',
-        'short_description',
-        'release',
-        'thumbnail',
-        'tags',
-        'featured'
-      ];
-      const rows = slimList.map((it: any) => [
-        it.author,
-        it.name,
-        it.title,
-        it.type,
-        it.short_description,
-        it.release,
-        it.thumbnail,
-        it.tags,
-        Boolean(it.featured)
-      ]);
-      responsePayload = {
-        keys,
-        pkgs: rows,
-        values: rows
-      };
-    } else {
-      responsePayload = slimList;
-    }
+    responsePayload = buildInGameClientCatalogResponse(merged);
   }
 
   if (!isBootBundle && !noCache && catalogEdgeCacheKey) {
-    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 900);
+    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 1800);
   }
 
   return new Response(JSON.stringify(responsePayload), {
@@ -2211,7 +2297,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       'Cache-Control': !noCache
         ? (isBootBundle
             ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
-            : 'public, max-age=120, s-maxage=900, stale-while-revalidate=1800')
+            : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600')
         : 'no-cache, no-store, must-revalidate',
       'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
     }

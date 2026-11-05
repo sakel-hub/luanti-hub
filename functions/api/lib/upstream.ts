@@ -23,10 +23,10 @@ export function safeDecodeParam(value: unknown, maxIterations = 16): string {
 
 export async function fetchWithFailover(path: string, options: RequestInit = {}): Promise<Response> {
   // Primary ContentDB (https://content.luanti.org/api) is online and serves as our primary source of truth.
-  // Give bulk endpoints (/scores/, ?fmt=vcs) 7500ms and standard endpoints 5500ms before failing over to the mirror.
+  // Give bulk endpoints (/scores/, ?fmt=vcs) and standard endpoints 4500ms before failing over to the mirror.
   const isBulkEndpoint = path.startsWith('/scores') || path.includes('fmt=vcs') || path === '/packages/' || path.startsWith('/packages/?');
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), isBulkEndpoint ? 7500 : 5500);
+  const timeoutId = setTimeout(() => controller.abort(), isBulkEndpoint ? 4500 : 4000);
 
   // Use a transparent Web User-Agent so ContentDB does not mistake automated proxy fetches
   // for in-game Luanti client views (which would trigger PackageDailyStats.notify_view DB writes on ContentDB).
@@ -274,7 +274,7 @@ export async function fetchUpstreamJsonCached<T = any>(
   const cacheReq = new Request(cacheKeyUrl, { method: 'GET' });
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
 
-  if (edgeCache) {
+  if (edgeCache && ttlSeconds > 0) {
     try {
       const cached = await edgeCache.match(cacheReq);
       if (cached) {
@@ -287,26 +287,51 @@ export async function fetchUpstreamJsonCached<T = any>(
     }
   }
 
+  const fallbackCacheKeyUrl =
+    path === '/packages/?fmt=vcs' && (!cleanLang || cleanLang === 'en')
+      ? 'https://cache.luantihub.internal/__upstream_fallback_packages_vcs_v1'
+      : null;
+
   try {
     const fetchOpts: RequestInit =
       cleanLang && cleanLang !== 'en'
         ? { headers: { 'Accept-Language': `${cleanLang}, en;q=0.8` } }
         : {};
     const res = await fetchWithFailover(path, fetchOpts);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (fallbackCacheKeyUrl) {
+        return await readEdgeCacheJson<T>(fallbackCacheKeyUrl);
+      }
+      return null;
+    }
     const data = await res.json() as T;
 
     if (data) {
       setIsolateCache(cacheKeyUrl, data, ttlSeconds);
+      if (fallbackCacheKeyUrl) {
+        setIsolateCache(fallbackCacheKeyUrl, data, 86400);
+      }
       if (edgeCache) {
         try {
-          const cacheRes = new Response(JSON.stringify(data), {
+          const bodyStr = JSON.stringify(data);
+          const cacheRes = new Response(bodyStr, {
             headers: {
               'Content-Type': 'application/json',
               'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
             }
           });
           await edgeCache.put(cacheReq, cacheRes);
+          if (fallbackCacheKeyUrl) {
+            await edgeCache.put(
+              new Request(fallbackCacheKeyUrl, { method: 'GET' }),
+              new Response(bodyStr, {
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Cache-Control': 'public, max-age=86400, s-maxage=86400'
+                }
+              })
+            );
+          }
         } catch {
           // Ignore cache write errors
         }
@@ -315,6 +340,9 @@ export async function fetchUpstreamJsonCached<T = any>(
 
     return data;
   } catch {
+    if (fallbackCacheKeyUrl) {
+      return await readEdgeCacheJson<T>(fallbackCacheKeyUrl);
+    }
     return null;
   }
 }
@@ -455,6 +483,17 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/%3Fformspec_version%3D8`);
+        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/`);
+      }
+      expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/latest`);
+      expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/hard`);
+      expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/all`);
+      const zipPrefix = `https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/`;
+      for (const zk of Array.from(sharedIsolateZipCache.keys())) {
+        if (zk.startsWith(zipPrefix)) {
+          sharedIsolateZipCache.delete(zk);
+        }
       }
     }
   }
@@ -465,8 +504,10 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     for (const k of Array.from(isolateJsonCache.keys())) {
       if (
         k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
-        k.startsWith('https://cache.luantihub.internal/__api_updates_v2_') ||
-        k.startsWith('https://cache.luantihub.internal/__for_client_v2/') ||
+        k.startsWith('https://cache.luantihub.internal/__api_updates_v') ||
+        k.startsWith('https://cache.luantihub.internal/__for_client_v') ||
+        k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
+        k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
         k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v1_') ||
         k.startsWith('https://cache.luantihub.internal/__unified_tags_v1')
       ) {
@@ -1759,9 +1800,11 @@ export async function getCachedNormalizedZip(
   try {
     const cache = (globalThis as any).caches?.default;
     if (cache) {
+      const isUnversionedLatestKey = cacheKey.endsWith('/latest');
+      const isUpdateReq = Boolean(request?.url && /[?&]reason=update\b/i.test(request.url));
       const cachedZip =
-        (request ? await cache.match(request) : null) ||
-        (await cache.match(new Request(cacheKey, { method: 'GET' })));
+        (await cache.match(new Request(cacheKey, { method: 'GET' }))) ||
+        (request && isUnversionedLatestKey && !isUpdateReq ? await cache.match(request) : null);
       if (cachedZip && cachedZip.ok) {
         const cl = Number(cachedZip.headers.get('content-length') || 0);
         return {
@@ -3275,6 +3318,7 @@ import {
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
+  toLegacyLuantiClientThumbnailUrl,
   selectSharpPackageBanner,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,
@@ -3300,6 +3344,7 @@ export {
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl,
+  toLegacyLuantiClientThumbnailUrl,
   selectSharpPackageBanner,
   getCanonicalScreenshotKey,
   mergeScreenshotsPreferringGit,

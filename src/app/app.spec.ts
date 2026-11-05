@@ -4334,8 +4334,17 @@ supported_games = minetest_game, voxelibre
               type: 'game',
               short_description: 'Survival sandbox game',
               release: 29410,
-              thumbnail: 'https://content.luanti.org/uploads/mcl2.png',
+              thumbnail: 'https://cdn.content.luanti.org/uploads/mcl2.jpg?width=500&aspect_ratio=3:2&format=png',
               tags: ['survival', 'sandbox']
+            },
+            {
+              author: 'OldDev',
+              name: 'legacy_abandoned_mod',
+              title: 'Legacy Abandoned Mod',
+              type: 'mod',
+              short_description: 'Old mod',
+              dev_state: 'DEPRECATED',
+              release: 100
             }
           ]),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -4345,24 +4354,35 @@ supported_games = minetest_game, voxelibre
     }) as typeof fetch;
 
     try {
-      // 1. Test non-boot in-game Luanti client catalog request with protocol_version & engine_version
+      // 1. Test non-boot in-game Luanti client catalog request with protocol_version, engine_version & hide=desktop_default
       const clientRes = await packagesIndexGet({
         request: new Request(
-          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.11.0&hide=nonfree&nocache=1'
+          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.11.0&hide=nonfree&hide=desktop_default&nocache=1'
         ),
         env: { DB: mockDb }
       } as any);
       expect(clientRes.status).toBe(200);
+      // Verify non-boot in-game client catalog request NEVER blocks on upstream ContentDB /api/scores/
+      expect(upstreamCalledUrls.some(u => u.includes('/scores/'))).toBe(false);
       const clientList = await clientRes.json();
       expect(Array.isArray(clientList)).toBe(true);
+      // Deprecated package (`legacy_abandoned_mod`) is filtered out by `hide=desktop_default`
       expect(clientList.length).toBe(2);
-      // Verify compact ContentDB-compatible fields without redundant web-only bloat
+      expect(clientList.some((x: any) => x.name === 'legacy_abandoned_mod')).toBe(false);
+      // Verify compact ContentDB-compatible fields without redundant web-only bloat (`short_desc`, `tags`, `score`, `downloads`, `license`)
       const pixieItem = clientList.find((x: any) => x.name === 'pixie');
       expect(pixieItem).toBeTruthy();
       expect(pixieItem.author).toBe('sakel-hub');
       expect(pixieItem.short_description).toBe('A mystical fairy companion');
+      expect(pixieItem.short_desc).toBeUndefined();
+      expect(pixieItem.tags).toBeUndefined();
       expect(typeof pixieItem.release).toBe('number');
       expect(pixieItem.video_thumbnail_url).toBeUndefined();
+
+      const mcl2Item = clientList.find((x: any) => x.name === 'mineclone2');
+      expect(mcl2Item).toBeTruthy();
+      // ContentDB thumbnail is formatted as `https://content.luanti.org/thumbnails/1/<file>.png` so Luanti's `screenshots.lua` never 404s on `cdn.content.luanti.org/thumbnails/2/`
+      expect(mcl2Item.thumbnail).toBe('https://content.luanti.org/thumbnails/1/mcl2.jpg.png');
 
       // 2. Test fmt=keys columnar response
       const keysRes = await packagesIndexGet({
@@ -9719,5 +9739,306 @@ supported_games = minetest_game, voxelibre
     );
     expect(handlePopupSpy).not.toHaveBeenCalled();
     handlePopupSpy.mockRestore();
+  });
+
+  it('should share warm boot catalog with in-game client (HIT-BOOT-SHARED), isolate release IDs across authors in /api/updates/, and refresh .zip archives on in-game ?reason=update', async () => {
+    const { onRequestGet: onPackagesGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: onUpdatesGet } = await import('../../functions/api/updates');
+    const { onRequest: onDownloadGet } = await import('../../functions/api/packages/[author]/[name]/download');
+    const { invalidateEdgeCacheKeys } = await import('../../functions/api/lib/upstream');
+
+    await invalidateEdgeCacheKeys([
+      '/__api_boot_catalog_bundle_v19',
+      'https://cache.luantihub.internal/__api_updates_v3_',
+      'https://edge-cache.luantihub.local/pkg-detail-v19/full/tenplus1/farming'
+    ]);
+
+    const encodeAscii = (str: string) => {
+      const out = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xff;
+      return out;
+    };
+    const buildZip = (files: Array<{ path: string; content: string }>): Uint8Array => {
+      const crcTable = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        crcTable[n] = c >>> 0;
+      }
+      const crc32 = (buf: Uint8Array) => {
+        let crc = 0xffffffff;
+        for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+        return (crc ^ 0xffffffff) >>> 0;
+      };
+      const localParts: Uint8Array[] = [];
+      const centralParts: Uint8Array[] = [];
+      let localOffset = 0;
+      for (const f of files) {
+        const nameBytes = encodeAscii(f.path);
+        const dataBytes = encodeAscii(f.content);
+        const crc = crc32(dataBytes);
+        const lfh = new Uint8Array(30 + nameBytes.length);
+        const lfhView = new DataView(lfh.buffer);
+        lfhView.setUint32(0, 0x04034b50, true);
+        lfhView.setUint16(4, 20, true);
+        lfhView.setUint32(14, crc, true);
+        lfhView.setUint32(18, dataBytes.length, true);
+        lfhView.setUint32(22, dataBytes.length, true);
+        lfhView.setUint16(26, nameBytes.length, true);
+        lfh.set(nameBytes, 30);
+        localParts.push(lfh, dataBytes);
+
+        const cdh = new Uint8Array(46 + nameBytes.length);
+        const cdhView = new DataView(cdh.buffer);
+        cdhView.setUint32(0, 0x02014b50, true);
+        cdhView.setUint16(4, 20, true);
+        cdhView.setUint16(6, 20, true);
+        cdhView.setUint32(16, crc, true);
+        cdhView.setUint32(20, dataBytes.length, true);
+        cdhView.setUint32(24, dataBytes.length, true);
+        cdhView.setUint16(28, nameBytes.length, true);
+        cdhView.setUint32(42, localOffset, true);
+        cdh.set(nameBytes, 46);
+        centralParts.push(cdh);
+        localOffset += lfh.length + dataBytes.length;
+      }
+      let cdSize = 0;
+      for (const p of centralParts) cdSize += p.length;
+      const eocd = new Uint8Array(22);
+      const eocdView = new DataView(eocd.buffer);
+      eocdView.setUint32(0, 0x06054b50, true);
+      eocdView.setUint16(8, files.length, true);
+      eocdView.setUint16(10, files.length, true);
+      eocdView.setUint32(12, cdSize, true);
+      eocdView.setUint32(16, localOffset, true);
+      const out = new Uint8Array(localOffset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...centralParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const zipV1 = buildZip([
+      { path: 'farming-v1/mod.conf', content: 'name = farming\ntitle = Farming Redo v1\n' },
+      { path: 'farming-v1/init.lua', content: '-- v1\n' }
+    ]);
+    const zipV2 = buildZip([
+      { path: 'farming-v2/mod.conf', content: 'name = farming\ntitle = Farming Redo v2 Updated\ndescription = New crops added\n' },
+      { path: 'farming-v2/init.lua', content: '-- v2 with new crops and mechanics\n' }
+    ]);
+
+    let currentUpstreamReleaseId = 28100;
+    let currentUpstreamCommit = '1111111a';
+
+    const edgeStore = new Map<string, Response>();
+    const origCaches = (globalThis as any).caches;
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = edgeStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          edgeStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return edgeStore.delete(k);
+        }
+      }
+    };
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/packages/?fmt=vcs') || url.includes('/api/packages?fmt=vcs')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'TenPlus1',
+              name: 'farming',
+              title: 'Farming Redo',
+              type: 'mod',
+              short_description: 'Adds many new crops',
+              release: currentUpstreamReleaseId,
+              thumbnail: 'https://content.luanti.org/thumbnails/1/farming_shot.png.png',
+              downloads: 120000,
+              score: 450
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/scores/')) {
+        return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/api/updates/')) {
+        return new Response(
+          JSON.stringify({
+            'TenPlus1/farming': currentUpstreamReleaseId,
+            'SaKeL/everness': 29500
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/packages/TenPlus1/farming/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: currentUpstreamReleaseId,
+              title: currentUpstreamReleaseId === 28200 ? 'v2.0' : 'v1.0',
+              commit: currentUpstreamCommit,
+              url: `/uploads/farming_${currentUpstreamReleaseId}.zip`
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/packages/TenPlus1/farming/for-client/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'TenPlus1',
+            name: 'farming',
+            release: currentUpstreamReleaseId,
+            repo: 'https://codeberg.org/tenplus1/farming'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('1111111a.zip') || url.includes('farming_28100.zip')) {
+        return new Response(zipV1 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (url.includes('2222222b.zip') || url.includes('farming_28200.zip')) {
+        return new Response(zipV2 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            all: async () => ({ results: [] }),
+            first: async () => null,
+            run: async () => ({ success: true })
+          }),
+          all: async () => {
+            if (sql.includes('FROM packages')) {
+              return {
+                results: [
+                  {
+                    id: 'Alice/farming',
+                    author_name: 'Alice',
+                    name: 'farming',
+                    title: 'Alice Custom Farming',
+                    type: 'mod',
+                    provider: 'github',
+                    repo_url: 'https://github.com/Alice/farming',
+                    updated_at: '2026-10-20T00:00:00Z',
+                    created_at: '2026-10-01T00:00:00Z',
+                    status: 'active'
+                  },
+                  {
+                    id: 'sakel-hub/everness',
+                    author_name: 'sakel-hub',
+                    name: 'everness',
+                    title: 'Everness',
+                    type: 'mod',
+                    provider: 'bitbucket',
+                    repo_url: 'https://bitbucket.org/SaKeL/everness',
+                    updated_at: '2026-10-20T00:00:00Z',
+                    created_at: '2026-10-01T00:00:00Z',
+                    status: 'active'
+                  }
+                ]
+              };
+            }
+            return { results: [] };
+          },
+          first: async () => null,
+          run: async () => ({ success: true })
+        })
+      }
+    };
+
+    try {
+      // 1. Warm the PWA boot catalog (?boot=1) and verify PWA tiles/dialogs receive full BunnyCDN URLs & metadata
+      const bootRes = await onPackagesGet({
+        request: new Request('https://luantihub.org/api/packages/?boot=1'),
+        env: mockEnv
+      });
+      expect(bootRes.status).toBe(200);
+      const bootJson: any = await bootRes.json();
+      const bootFarming = bootJson.packages.find((p: any) => p.name === 'farming' && p.author === 'TenPlus1');
+      expect(bootFarming).toBeTruthy();
+      expect(bootFarming.thumbnail).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png');
+      expect(bootFarming.banner).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png?width=1100&aspect_ratio=16:9&format=png');
+      expect(bootFarming.downloads).toBe(120000);
+
+      // 2. Subsequent in-game Luanti client request immediately hits HIT-BOOT-SHARED with compact slimList & legacy thumbnail URL
+      const clientRes = await onPackagesGet({
+        request: new Request('https://luantihub.org/api/packages/?protocol_version=49&engine_version=5.11.0&hide=desktop_default&hide=nonfree'),
+        env: mockEnv
+      });
+      expect(clientRes.status).toBe(200);
+      expect(clientRes.headers.get('X-LuantiHub-Cache')).toBe('HIT-BOOT-SHARED');
+      const clientPackages: any[] = await clientRes.json();
+      const clientFarming = clientPackages.find((p: any) => p.name === 'farming' && p.author === 'TenPlus1');
+      expect(clientFarming).toBeTruthy();
+      expect(clientFarming.thumbnail).toBe('https://content.luanti.org/thumbnails/1/farming_shot.png');
+      expect(clientFarming.short_desc).toBeUndefined();
+
+      // 3. Verify /api/updates/ aligns SaKeL/everness (29500) with sakel-hub/everness (29500),
+      // while keeping Alice/farming's Git timestamp distinct from TenPlus1/farming (28100)
+      const updatesRes = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/'),
+        env: mockEnv
+      });
+      expect(updatesRes.status).toBe(200);
+      const updatesJson: Record<string, number> = await updatesRes.json();
+      expect(updatesJson['TenPlus1/farming']).toBe(28100);
+      expect(updatesJson['SaKeL/everness']).toBe(29500);
+      expect(updatesJson['sakel-hub/everness']).toBe(29500);
+      expect(updatesJson['Alice/farming']).toBeGreaterThan(1700000000);
+      expect(updatesJson['Alice/farming']).not.toBe(28100);
+
+      // 4. Download v1 in-game (?reason=new) and verify it caches v1
+      const dlNewRes = await onDownloadGet({
+        request: new Request('https://luantihub.org/api/packages/TenPlus1/farming/download/?reason=new'),
+        env: mockEnv,
+        params: { author: 'TenPlus1', name: 'farming' }
+      } as any);
+      expect(dlNewRes.status).toBe(200);
+      const dlNewBytes = new Uint8Array(await dlNewRes.arrayBuffer());
+      expect(dlNewBytes.byteLength).toBeGreaterThan(50);
+
+      // 5. Simulate upstream release update (28100 -> 28200, commit 1111111a -> 2222222b)
+      currentUpstreamReleaseId = 28200;
+      currentUpstreamCommit = '2222222b';
+      await invalidateEdgeCacheKeys(['https://edge-cache.luantihub.local/pkg-detail-v19/full/tenplus1/farming']);
+
+      // In-game update (?reason=update) resolves release 28200 and fetches the new zipV2 archive (larger byteLength)
+      const dlUpdateRes = await onDownloadGet({
+        request: new Request('https://luantihub.org/api/packages/TenPlus1/farming/download/?reason=update'),
+        env: mockEnv,
+        params: { author: 'TenPlus1', name: 'farming' }
+      } as any);
+      expect(dlUpdateRes.status).toBe(200);
+      const dlUpdateBytes = new Uint8Array(await dlUpdateRes.arrayBuffer());
+      expect(dlUpdateBytes.byteLength).toBeGreaterThan(dlNewBytes.byteLength);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+    }
   });
 });

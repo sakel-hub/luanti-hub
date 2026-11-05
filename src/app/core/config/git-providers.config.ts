@@ -703,6 +703,82 @@ export function upgradeContentDbThumbnailUrl(
 }
 
 /**
+ * Formats an image URL (thumbnail or screenshot) for the in-game Luanti C++ client
+ * (`builtin/mainmenu/content/screenshots.lua`):
+ * 1. ContentDB assets (`cdn.content.luanti.org/uploads/...` or `/thumbnails/...`) are formatted as
+ *    `https://content.luanti.org/thumbnails/1/<filename>.png` (matching ContentDB's `get_legacy_thumbnail_url(1)`).
+ *    Why: `screenshots.lua` runs `screenshot_url:gsub("/uploads/", "/thumbnails/" .. level .. "/")`, which
+ *    returns HTTP 404 if the host is `cdn.content.luanti.org` (since `/thumbnails/<level>/` only exists on
+ *    `content.luanti.org`).
+ * 2. Relative `/api/packages?proxy_image=...` URLs are unwrapped to absolute `https://` URLs because
+ *    `core.download_file()` in the C++ engine requires an absolute `http(s)://` URL.
+ * 3. Query strings are stripped from image URLs (rewriting Gitea `/api/v1/repos/<owner>/<repo>/raw/<path>?ref=<branch>`
+ *    to `/<owner>/<repo>/raw/branch/<branch>/<path>`) because `screenshots.lua`'s `get_file_extension()` and
+ *    `get_filename()` split on `.` and `/` without stripping `?query`, which otherwise corrupts the URL or fails
+ *    to save on Windows filesystems.
+ */
+export function toLegacyLuantiClientThumbnailUrl(rawUrl?: string | null): string | undefined {
+  if (!rawUrl || typeof rawUrl !== 'string') return undefined;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed === 'logo.svg' || isDeadMirrorScreenshotUrl(trimmed)) {
+    return undefined;
+  }
+
+  const canonicalUpload = toCanonicalContentDbUploadUrl(trimmed);
+  if (canonicalUpload) {
+    const filePart = canonicalUpload.replace(/^https?:\/\/[^/]+\/uploads\//i, '').split(/[?#]/)[0];
+    if (filePart) {
+      const legacyFile = filePart.toLowerCase().endsWith('.png') ? filePart : `${filePart}.png`;
+      return `https://content.luanti.org/thumbnails/1/${legacyFile}`;
+    }
+  }
+
+  const unwrapped = unwrapProxiedImageUrl(trimmed);
+  if (!unwrapped || !/^https?:\/\//i.test(unwrapped) || isDeadMirrorScreenshotUrl(unwrapped)) {
+    return undefined;
+  }
+
+  try {
+    const u = new URL(unwrapped);
+    const host = u.hostname.toLowerCase();
+    if (isContentDbHost(host)) {
+      const thumbMatch = u.pathname.match(/^\/thumbnails\/[^/]+\/([^/?#]+)$/i);
+      if (thumbMatch?.[1]) {
+        const file = thumbMatch[1];
+        const legacyFile = file.toLowerCase().endsWith('.png') ? file : `${file}.png`;
+        return `https://content.luanti.org/thumbnails/1/${legacyFile}`;
+      }
+      const uploadMatch = u.pathname.match(/^\/uploads\/([^/?#]+)$/i);
+      if (uploadMatch?.[1]) {
+        const realFile = removeContentDbPngHack(decodeURIComponent(uploadMatch[1]));
+        const legacyFile = realFile.toLowerCase().endsWith('.png') ? realFile : `${realFile}.png`;
+        return `https://content.luanti.org/thumbnails/1/${legacyFile}`;
+      }
+    }
+
+    // Rewrite Gitea/Codeberg `/api/v1/repos/<owner>/<repo>/raw/<path>?ref=<branch>` to branch path without query string
+    const giteaRawMatch = u.pathname.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/raw\/(.+)$/i);
+    if (giteaRawMatch) {
+      const ref = (u.searchParams.get('ref') || 'HEAD').trim();
+      u.pathname = `/${giteaRawMatch[1]}/${giteaRawMatch[2]}/raw/branch/${encodeURIComponent(ref)}/${giteaRawMatch[3]}`;
+      u.search = '';
+      u.hash = '';
+      return u.toString();
+    }
+
+    if (/\.(?:png|jpe?g)$/i.test(u.pathname)) {
+      u.search = '';
+      u.hash = '';
+      return u.toString();
+    }
+
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Single source of truth for selecting the sharpest valid banner image across backend and frontend:
  * 1. Verified Git repository screenshot (`preferredGitShot`, e.g. `screenshot.png` / `.cdb.json`)
  * 2. First full-resolution screenshot from `screenshots` (`https://cdn.content.luanti.org/uploads/...?width=1100&aspect_ratio=16:9&format=png` or Git screenshot)
