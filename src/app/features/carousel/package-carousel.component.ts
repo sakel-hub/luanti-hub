@@ -22,7 +22,6 @@ import {
   LucideChevronRight,
   LucideArrowRight,
   LucideInfo,
-  LucideExternalLink,
   LucidePlus
 } from '@lucide/angular';
 
@@ -40,7 +39,6 @@ import {
     LucideChevronRight,
     LucideArrowRight,
     LucideInfo,
-    LucideExternalLink,
     LucidePlus
   ],
   template: `
@@ -80,23 +78,6 @@ import {
           </div>
 
           <div class="flex items-center gap-2 flex-wrap">
-            @if (promoSecondaryCtaLabel && promoSecondaryCtaUrl) {
-              <button
-                type="button"
-                (click)="promoCtaClicked.emit(promoSecondaryCtaUrl)"
-                class="text-xs font-semibold text-slate-300 hover:text-white transition px-2.5 py-1 rounded-lg glass-btn flex items-center gap-1 cursor-pointer">
-                <span>{{ promoSecondaryCtaLabel }}</span>
-              </button>
-            }
-            @if (promoCtaLabel && promoCtaUrl) {
-              <button
-                type="button"
-                (click)="promoCtaClicked.emit(promoCtaUrl)"
-                class="text-xs font-bold text-amber-300 hover:text-white transition px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/35 flex items-center gap-1 cursor-pointer">
-                <span>{{ promoCtaLabel }}</span>
-                <svg lucideExternalLink class="w-3 h-3"></svg>
-              </button>
-            }
             @if (packages.length > 0) {
               <button
                 type="button"
@@ -197,8 +178,6 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   @Input() promoBadge?: string;
   @Input() promoCtaLabel?: string;
   @Input() promoCtaUrl?: string;
-  @Input() promoSecondaryCtaLabel?: string;
-  @Input() promoSecondaryCtaUrl?: string;
   @Input() showWhenEmpty = false;
   @Input() emptyStateTitle?: string;
   @Input() emptyStateDesc?: string;

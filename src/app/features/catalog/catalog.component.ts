@@ -403,8 +403,6 @@ import {
             [promoBadge]="promoRow.badgeText"
             [promoCtaLabel]="promoRow.ctaLabel"
             [promoCtaUrl]="promoRow.ctaUrl"
-            [promoSecondaryCtaLabel]="promoRow.secondaryCtaLabel || undefined"
-            [promoSecondaryCtaUrl]="promoRow.secondaryCtaUrl || undefined"
             [showWhenEmpty]="promoRow.showEmptyCta"
             [packages]="promoRow.packages"
             (viewAll)="packageService.explorePromotionalRow(promoRow)"
