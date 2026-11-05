@@ -4603,6 +4603,7 @@ supported_games = minetest_game, voxelibre
       return true;
     };
     try {
+      const t0 = Date.now();
       // Seed branch-only package
       await pwaService.checkAndNotifyUpdatedPackages([
         {
@@ -4612,7 +4613,7 @@ supported_games = minetest_game, voxelibre
           title: 'Branch Only Mod',
           type: 'mod',
           latest_commit_sha: '1111111111111111111111111111111111111111',
-          updated_at: new Date().toISOString()
+          updated_at: new Date(t0 - 2000).toISOString()
         }
       ]);
       expect(capturedNotifs.length).toBe(0);
@@ -4626,7 +4627,7 @@ supported_games = minetest_game, voxelibre
           title: 'Branch Only Mod',
           type: 'mod',
           latest_commit_sha: '2222222222222222222222222222222222222222',
-          updated_at: new Date().toISOString()
+          updated_at: new Date(t0 - 1000).toISOString()
         }
       ]);
       expect(capturedNotifs.length).toBe(1);
@@ -4641,7 +4642,7 @@ supported_games = minetest_game, voxelibre
           title: 'Branch Only Mod',
           type: 'mod',
           latest_commit_sha: '3333333333333333333333333333333333333333',
-          updated_at: new Date().toISOString()
+          updated_at: new Date(t0).toISOString()
         }
       ]);
       expect(capturedNotifs.length).toBe(1);
@@ -9110,5 +9111,88 @@ supported_games = minetest_game, voxelibre
     expect(wwwRedirectRes.headers.get('location')).toBe(
       'https://luantihub.org/packages/SaKeL/waysigns?tab=releases'
     );
+  });
+
+  it('should render HeroBillboardComponent artwork-derived ambient backlight glow using LCP-safe 32x18 dual-canvas crossfade with zero extra img elements', () => {
+    const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+    const heroComp = heroFixture.componentInstance;
+    heroFixture.detectChanges();
+
+    const heroEl = heroFixture.nativeElement as HTMLElement;
+    const glowContainer = heroEl.querySelector('[data-testid="hero-ambient-glow"]') as HTMLElement;
+    expect(glowContainer).toBeTruthy();
+    expect(glowContainer.getAttribute('style')).toContain('ellipse 72% 48% at 50% 46%');
+    expect(glowContainer.className).toContain('block');
+    expect(glowContainer.className).not.toContain('hidden');
+    expect(glowContainer.className).toContain('-bottom-28');
+    expect(glowContainer.className).toContain('sm:-bottom-48');
+
+    // 1. Ensure ZERO <img> elements exist inside the oversized ambient glow container so Chromium/Lighthouse LCP never picks the glow layer
+    expect(glowContainer.querySelectorAll('img').length).toBe(0);
+
+    // 2. Ensure two full-size 32x18 <canvas> buffers are mounted for smooth crossfading
+    const canvases = glowContainer.querySelectorAll('canvas');
+    expect(canvases.length).toBe(2);
+    expect(canvases[0].getAttribute('width')).toBe('32');
+    expect(canvases[0].getAttribute('height')).toBe('18');
+    expect(canvases[0].className).toContain('w-full');
+    expect(canvases[0].className).toContain('h-full');
+    expect(canvases[1].getAttribute('width')).toBe('32');
+    expect(canvases[1].getAttribute('height')).toBe('18');
+    expect(canvases[1].className).toContain('w-full');
+    expect(canvases[1].className).toContain('h-full');
+
+    // 3. Verify paintGlowFromImage draws into the 32x18 canvas and crossfades activeGlowBuffer between 0 and 1
+    const drawnImages: Array<{ src: string; w: number; h: number }> = [];
+    const mockCtx = {
+      clearRect: vi.fn(),
+      drawImage: vi.fn((img: HTMLImageElement, _x: number, _y: number, w: number, h: number) => {
+        drawnImages.push({ src: img.currentSrc || img.src, w, h });
+      })
+    } as unknown as CanvasRenderingContext2D;
+
+    const getContextSpy = vi
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(mockCtx as any);
+
+    try {
+      const fakeImg1 = {
+        complete: true,
+        naturalWidth: 1280,
+        currentSrc: 'https://luantihub.org/banners/slide-1.png',
+        src: 'https://luantihub.org/banners/slide-1.png'
+      } as HTMLImageElement;
+
+      expect(heroComp.paintGlowFromImage(fakeImg1)).toBe(true);
+      expect(heroComp.activeGlowBuffer()).toBe(0);
+      expect(drawnImages.length).toBe(1);
+      expect(drawnImages[0]).toEqual({
+        src: 'https://luantihub.org/banners/slide-1.png',
+        w: 32,
+        h: 18
+      });
+
+      // Painting the same image again is a no-op
+      expect(heroComp.paintGlowFromImage(fakeImg1)).toBe(false);
+      expect(drawnImages.length).toBe(1);
+
+      // Painting the next slide's image swaps to buffer 1 and crossfades opacity
+      const fakeImg2 = {
+        complete: true,
+        naturalWidth: 1280,
+        currentSrc: 'https://luantihub.org/banners/slide-2.png',
+        src: 'https://luantihub.org/banners/slide-2.png'
+      } as HTMLImageElement;
+
+      expect(heroComp.paintGlowFromImage(fakeImg2)).toBe(true);
+      expect(heroComp.activeGlowBuffer()).toBe(1);
+      expect(drawnImages.length).toBe(2);
+      heroFixture.detectChanges();
+
+      expect(canvases[0].className).toContain('opacity-0');
+      expect(canvases[1].className).toContain('opacity-55');
+    } finally {
+      getContextSpy.mockRestore();
+    }
   });
 });

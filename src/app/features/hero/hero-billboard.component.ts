@@ -6,8 +6,13 @@ import {
   computed,
   effect,
   OnInit,
+  AfterViewInit,
   OnDestroy,
-  NgZone
+  NgZone,
+  ViewChild,
+  ViewChildren,
+  ElementRef,
+  QueryList
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -50,11 +55,26 @@ import {
   ],
   template: `
     <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4">
-      <!-- Netflix-Style Natural Ambient Backlight Glow (Pure GPU CSS Radial Aura — Zero Extra Image Downloads & Preserves Primary Hero LCP Element) -->
+      <!-- Netflix-Style Natural Ambient Backlight Glow Derived from Active Hero Artwork (LCP-Safe 32x18 Dual-Canvas Crossfade — All Viewports, Zero Extra Network Requests & Never Flagged as LCP) -->
       <div
         aria-hidden="true"
-        style="background: radial-gradient(ellipse 68% 60% at 50% 50%, rgba(56, 189, 248, 0.22) 0%, rgba(99, 102, 241, 0.14) 48%, rgba(2, 6, 23, 0) 100%);"
-        class="hidden sm:block pointer-events-none select-none absolute inset-0 z-0 rounded-[3rem] blur-[64px] opacity-80">
+        data-testid="hero-ambient-glow"
+        style="-webkit-mask-image: radial-gradient(ellipse 72% 48% at 50% 46%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.65) 62%, rgba(0,0,0,0.18) 84%, rgba(0,0,0,0) 100%); mask-image: radial-gradient(ellipse 72% 48% at 50% 46%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.65) 62%, rgba(0,0,0,0.18) 84%, rgba(0,0,0,0) 100%); background: radial-gradient(ellipse 70% 46% at 50% 46%, rgba(56, 189, 248, 0.22) 0%, rgba(99, 102, 241, 0.14) 48%, rgba(2, 6, 23, 0) 96%);"
+        class="block pointer-events-none select-none absolute -inset-x-6 sm:-inset-x-20 -top-10 sm:-top-14 -bottom-28 sm:-bottom-48 z-0 overflow-visible blur-[56px] sm:blur-[110px] saturate-[1.85]">
+        <canvas
+          #glowCanvasA
+          width="32"
+          height="18"
+          [class]="activeGlowBuffer() === 0 ? 'opacity-55' : 'opacity-0'"
+          class="absolute inset-0 w-full h-full rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
+        ></canvas>
+        <canvas
+          #glowCanvasB
+          width="32"
+          height="18"
+          [class]="activeGlowBuffer() === 1 ? 'opacity-55' : 'opacity-0'"
+          class="absolute inset-0 w-full h-full rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
+        ></canvas>
       </div>
 
       <div
@@ -72,12 +92,14 @@ import {
 
         <!-- Persistent High-Priority Hero Backdrop (Paints on FCP and Remains Mounted Across Catalog Load for Sub-Second LCP) -->
         <img
+          #backdropImg
           src="/banners/luanti-5-18-0.png"
           alt=""
           aria-hidden="true"
           fetchpriority="high"
           loading="eager"
           decoding="sync"
+          (load)="onBackdropImageLoad($event)"
           class="absolute inset-0 w-full h-full object-cover object-center pointer-events-none select-none z-0"
         />
 
@@ -95,6 +117,7 @@ import {
                 <!-- Slide Background Image with Subtle Ken-Burns Scale Transition -->
                 <div class="absolute inset-0">
                   <img
+                    #slideImg
                     [src]="getSlideBanner(slidePkg)"
                     [fallbackThumbnail]="slidePkg.thumbnail"
                     appImgFallback
@@ -102,6 +125,7 @@ import {
                     [attr.fetchpriority]="idx === 0 ? 'high' : 'low'"
                     [attr.loading]="idx === 0 || idx === currentIndex() ? 'eager' : 'lazy'"
                     [attr.decoding]="idx === 0 ? 'sync' : 'async'"
+                    (load)="onSlideImageLoad($event, idx)"
                     [class]="idx === currentIndex() ? 'w-full h-full object-cover object-center scale-100 transition-transform duration-1000 ease-out' : 'w-full h-full object-cover object-center scale-105 transition-transform duration-1000 ease-out'"
                   />
                   <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/40 to-transparent w-full md:w-3/5"></div>
@@ -337,14 +361,20 @@ import {
     </div>
   `
 })
-export class HeroBillboardComponent implements OnInit, OnDestroy {
+export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly packageService = inject(PackageService);
   private readonly router = inject(Router, { optional: true });
   private readonly ngZone = inject(NgZone);
 
+  @ViewChild('glowCanvasA') glowCanvasARef?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('glowCanvasB') glowCanvasBRef?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('backdropImg') backdropImgRef?: ElementRef<HTMLImageElement>;
+  @ViewChildren('slideImg') slideImgRefs?: QueryList<ElementRef<HTMLImageElement>>;
+
   readonly showcase = this.packageService.heroShowcasePackages;
   readonly currentIndex = signal<number>(0);
   readonly isPaused = signal<boolean>(false);
+  readonly activeGlowBuffer = signal<0 | 1>(0);
 
   readonly currentPkg = computed<LuantiPackage | null>(() => {
     const list = this.showcase();
@@ -358,6 +388,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
   private intervalTimer: any = null;
   private touchStartX = 0;
   private lastTouchTime = 0;
+  private lastGlowSrc = '';
 
   constructor() {
     effect(() => {
@@ -393,6 +424,64 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
       }
       this.activeSlidePkgId = list[safeIdx]?.id || null;
     });
+
+    effect(() => {
+      // Track active slide index and showcase list to synchronize the 32x18 ambient backlight canvas
+      this.currentIndex();
+      this.showcase();
+      queueMicrotask(() => this.syncActiveSlideGlow());
+    });
+  }
+
+  ngAfterViewInit(): void {
+    this.syncActiveSlideGlow();
+  }
+
+  onBackdropImageLoad(event: Event): void {
+    if (this.showcase().length === 0 || this.lastGlowSrc === '') {
+      this.paintGlowFromImage(event.target as HTMLImageElement | null);
+    }
+  }
+
+  onSlideImageLoad(event: Event, idx: number): void {
+    if (idx === this.currentIndex()) {
+      this.paintGlowFromImage(event.target as HTMLImageElement | null);
+    }
+  }
+
+  syncActiveSlideGlow(): void {
+    const slides = this.slideImgRefs?.toArray() || [];
+    const activeIdx = this.currentIndex();
+    const activeSlideImg = slides[activeIdx]?.nativeElement;
+    if (activeSlideImg && this.paintGlowFromImage(activeSlideImg)) {
+      return;
+    }
+    if (this.lastGlowSrc === '' && this.backdropImgRef?.nativeElement) {
+      this.paintGlowFromImage(this.backdropImgRef.nativeElement);
+    }
+  }
+
+  paintGlowFromImage(img: HTMLImageElement | null | undefined): boolean {
+    if (!img || !img.complete || img.naturalWidth === 0) return false;
+    const src = img.currentSrc || img.src || '';
+    if (!src || src === this.lastGlowSrc) return false;
+    const isFirstPaint = this.lastGlowSrc === '';
+    const targetBuffer: 0 | 1 = isFirstPaint ? 0 : (this.activeGlowBuffer() === 0 ? 1 : 0);
+    const canvas = targetBuffer === 0
+      ? this.glowCanvasARef?.nativeElement
+      : this.glowCanvasBRef?.nativeElement;
+    if (!canvas || typeof canvas.getContext !== 'function') return false;
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return false;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      this.lastGlowSrc = src;
+      this.activeGlowBuffer.set(targetBuffer);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   isInternalPromoUrl(url?: string | null): boolean {
