@@ -2043,7 +2043,8 @@ export async function syncDebouncedGitVersionStamp(
   db: any,
   d1Pkg: any,
   latestFingerprint?: string | null,
-  isTaggedRelease = false
+  isTaggedRelease = false,
+  observedReleaseDateIso?: string | null
 ): Promise<boolean> {
   if (!db || !d1Pkg?.id || !latestFingerprint) return false;
   const cleanNext = String(latestFingerprint).trim();
@@ -2083,9 +2084,23 @@ export async function syncDebouncedGitVersionStamp(
     return false;
   }
 
+  const prevUpdatedMs = Date.parse(String(d1Pkg.updated_at || '')) || 0;
+  const obsMs = observedReleaseDateIso ? (Date.parse(String(observedReleaseDateIso)) || 0) : 0;
+
+  // If the observed release/tag timestamp is not newer than the package's existing updated_at,
+  // record the normalized commit SHA in D1 without bumping updated_at to Date.now().
+  if (obsMs > 0 && prevUpdatedMs > 0 && obsMs <= prevUpdatedMs) {
+    try {
+      await db.prepare(`UPDATE packages SET latest_commit_sha = ? WHERE id = ?`).bind(cleanNext, d1Pkg.id).run();
+      d1Pkg.latest_commit_sha = cleanNext;
+    } catch {
+      // Non-fatal
+    }
+    return false;
+  }
+
   // For branch-only commit updates (non-tag), enforce a 6-hour server debounce window
   if (!isTaggedRelease) {
-    const prevUpdatedMs = Date.parse(String(d1Pkg.updated_at || '')) || 0;
     const DEBOUNCE_WINDOW_MS = 6 * 3600 * 1000;
     if (prevUpdatedMs > 0 && Date.now() - prevUpdatedMs < DEBOUNCE_WINDOW_MS) {
       // Hold `latest_commit_sha` at `prev` until the 6h window elapses so trailing-edge coalescing triggers cleanly
@@ -2094,13 +2109,13 @@ export async function syncDebouncedGitVersionStamp(
   }
 
   try {
-    const nowIso = new Date().toISOString();
+    const nextUpdatedIso = obsMs > 0 ? new Date(obsMs).toISOString() : new Date().toISOString();
     await db
       .prepare(`UPDATE packages SET latest_commit_sha = ?, updated_at = ? WHERE id = ?`)
-      .bind(cleanNext, nowIso, d1Pkg.id)
+      .bind(cleanNext, nextUpdatedIso, d1Pkg.id)
       .run();
     d1Pkg.latest_commit_sha = cleanNext;
-    d1Pkg.updated_at = nowIso;
+    d1Pkg.updated_at = nextUpdatedIso;
     return true;
   } catch {
     return false;

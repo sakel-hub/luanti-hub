@@ -282,19 +282,23 @@ export async function onRequestGet(context: { request: Request; params: { author
               await stmt.run();
             }
           }
-          const newestRelTime = Date.parse(String(topMerged?.released_at || topMerged?.release_date || '')) || 0;
+          const observedRelIso = topMerged?.released_at || topMerged?.release_date || null;
+          const newestRelTime = Date.parse(String(observedRelIso || '')) || 0;
           const prevPkgTime = Date.parse(String(d1Pkg.updated_at || '')) || 0;
-          if (newestRelTime > prevPkgTime) {
-            await context.env.DB.prepare(
-              `UPDATE packages SET updated_at = ? WHERE id = ?`
-            ).bind(new Date(newestRelTime).toISOString(), d1Pkg.id).run();
-          }
           await syncDebouncedGitVersionStamp(
             context.env.DB,
             d1Pkg,
             topMerged?.commit_sha || topMerged?.tag_name,
-            true
+            true,
+            observedRelIso
           );
+          if (newestRelTime > prevPkgTime) {
+            const nextIso = new Date(newestRelTime).toISOString();
+            await context.env.DB.prepare(
+              `UPDATE packages SET updated_at = ? WHERE id = ?`
+            ).bind(nextIso, d1Pkg.id).run();
+            d1Pkg.updated_at = nextIso;
+          }
 
           const lowerA = encodeURIComponent(author.toLowerCase());
           const lowerN = encodeURIComponent(name.toLowerCase());

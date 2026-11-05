@@ -1085,7 +1085,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             context.env.DB,
             d1Pkg,
             d1Releases[0]?.commit_sha || d1Releases[0]?.tag_name,
-            true
+            true,
+            d1Releases[0]?.released_at || null
           );
         } catch {
           // Non-fatal D1 sync error
@@ -1098,8 +1099,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         d1Pkg.name || name,
         noCache
       );
-      if (context.env.DB && d1Pkg && smartRefs?.headSha) {
-        await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
+      if (context.env.DB && d1Pkg) {
+        const latestTagSha = smartRefs?.tags?.[0]?.commitSha || smartRefs?.tags?.[0]?.tagName || '';
+        if (latestTagSha) {
+          await syncDebouncedGitVersionStamp(
+            context.env.DB,
+            d1Pkg,
+            latestTagSha,
+            true,
+            d1Pkg.updated_at || d1Pkg.created_at || null
+          );
+        } else if (smartRefs?.headSha) {
+          await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
+        }
       }
       const branch = d1Pkg.default_branch || smartRefs?.defaultBranch || 'main';
       const fallbackUrl = buildGitBranchArchiveUrl(
@@ -1176,7 +1188,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           context.env.DB,
           d1Pkg,
           bundledReleases[0]?.commit_sha || bundledReleases[0]?.tag_name,
-          true
+          true,
+          bundledReleases[0]?.released_at || null
         );
       }
     } catch {

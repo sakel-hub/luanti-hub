@@ -8796,4 +8796,319 @@ supported_games = minetest_game, voxelibre
     fetchSpy.mockRestore();
     sendNotifSpy.mockRestore();
   });
+
+  it('prevents stale WaySigns update notifications across foreground and Service Worker via unified notification-engine, stamp merging, 12h recency watermark, and release-date-aware syncDebouncedGitVersionStamp', async () => {
+    const {
+      NOTIFICATION_MAX_EVENT_AGE_MS,
+      NOTIFICATION_PACKAGE_COOLDOWN_MS,
+      evaluateCatalogNotificationsBatch,
+      evaluatePackageStampAdvancement,
+      mergeNotificationPersistenceStates,
+      mergePackageVersionStamps
+    } = await import('./core/utils/notification-engine');
+    const { syncDebouncedGitVersionStamp } = await import('../../functions/api/lib/upstream');
+
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyPackageUpdates.set(true);
+    settingsService.notifyNewGitPackages.set(true);
+    settingsService.notifyNewReviews.set(true);
+
+    const nowMs = Date.parse('2026-11-05T15:00:00.000Z');
+    const yesterdayIso = new Date(nowMs - 24 * 3600 * 1000).toISOString(); // 24h ago (> 12h window)
+    const freshUpdateIso = new Date(nowMs - 10 * 60 * 1000).toISOString(); // 10m ago
+
+    expect(NOTIFICATION_MAX_EVENT_AGE_MS).toBe(12 * 3600 * 1000);
+    expect(NOTIFICATION_PACKAGE_COOLDOWN_MS).toBe(12 * 3600 * 1000);
+
+    // 1. Regression: Backfilling missing fields ("" -> value) or reverting from hydrated to unhydrated must NOT notify
+    // Stamp format is `rel|upd|sha`
+    expect(mergePackageVersionStamps('35412||', `35412|${yesterdayIso}|a1b2c3d4e5f60718`)).toBe(
+      `35412|${yesterdayIso}|a1b2c3d4e5f60718`
+    );
+    expect(mergePackageVersionStamps(`35412|${yesterdayIso}|a1b2c3d4e5f60718`, '35412||')).toBe(
+      `35412|${yesterdayIso}|a1b2c3d4e5f60718`
+    );
+
+    // Case A: Detail hydration backfills latest_commit_sha & yesterday's updated_at (both prevUpd and prevSha were "")
+    const backfillEval = evaluatePackageStampAdvancement(
+      '35412||',
+      `35412|${yesterdayIso}|a1b2c3d4e5f60718`,
+      { nowMs, baselineSeededAt: nowMs - 2 * 3600 * 1000 }
+    );
+    expect(backfillEval.genuinelyAdvanced).toBe(false);
+    expect(backfillEval.mergedStamp).toBe(`35412|${yesterdayIso}|a1b2c3d4e5f60718`);
+
+    // Case B: Subsequent catalog poll returns unhydrated row without latest_commit_sha -> stamp is preserved, 0 notifications
+    const unhydratedEval = evaluatePackageStampAdvancement(
+      backfillEval.mergedStamp,
+      '35412||',
+      { nowMs, baselineSeededAt: nowMs - 2 * 3600 * 1000 }
+    );
+    expect(unhydratedEval.genuinelyAdvanced).toBe(false);
+    expect(unhydratedEval.mergedStamp).toBe(`35412|${yesterdayIso}|a1b2c3d4e5f60718`);
+
+    // Case B2: SHA flip-flop (branch head vs tag SHA) with the exact same updated_at and same release_id must NOT be treated as a new release
+    const shaFlipFlopSameTime = evaluatePackageStampAdvancement(
+      `35412|${freshUpdateIso}|a1b2c3d4e5f60718`,
+      `35412|${freshUpdateIso}|b2c3d4e5f6071829`,
+      { nowMs, baselineSeededAt: nowMs - 2 * 3600 * 1000 }
+    );
+    expect(shaFlipFlopSameTime.genuinelyAdvanced).toBe(false);
+
+    // Case C: Even if SHA and release_id advanced, an event from yesterday (24h ago > 12h max age) is rejected as not recent
+    const staleReleaseEval = evaluatePackageStampAdvancement(
+      backfillEval.mergedStamp,
+      `35413|${yesterdayIso}|b2c3d4e5f6071829`,
+      { nowMs, baselineSeededAt: nowMs - 36 * 3600 * 1000 }
+    );
+    expect(staleReleaseEval.genuinelyAdvanced).toBe(true);
+    expect(staleReleaseEval.isRecent).toBe(false);
+    expect(staleReleaseEval.mergedStamp).toBe(`35413|${yesterdayIso}|b2c3d4e5f6071829`);
+
+    const staleSwBatch = evaluateCatalogNotificationsBatch(
+      {
+        packages: [
+          {
+            id: 'SaKeL/waysigns',
+            author: 'SaKeL',
+            name: 'waysigns',
+            title: 'WaySigns',
+            type: 'mod',
+            short_desc: 'Dynamic in-world HUD signboards, waypoints, and inscription marker with zero entity lag.',
+            release_id: 35413,
+            latest_commit_sha: 'b2c3d4e5f6071829',
+            updated_at: yesterdayIso
+          }
+        ]
+      },
+      {
+        prefs: {
+          notificationsEnabled: true,
+          notifyPackageUpdates: true,
+          notifyNewGitPackages: true,
+          notifyNewReviews: true
+        },
+        baselineSeededAt: nowMs - 36 * 3600 * 1000,
+        knownPackageVersions: { 'sakel/waysigns': backfillEval.mergedStamp },
+        packageUpdateCooldowns: {}
+      },
+      nowMs
+    );
+    expect(staleSwBatch.notifications.length).toBe(0);
+    expect(staleSwBatch.stateUpdates.knownPackageVersions?.['sakel/waysigns']).toBe(
+      `35413|${yesterdayIso}|b2c3d4e5f6071829`
+    );
+
+    // 2. DRY Foreground (PwaService) & Background (Service Worker evaluateCatalogNotificationsBatch) Parity
+    const freshWaySignsPkg = {
+      id: 'SaKeL/waysigns',
+      author: 'SaKeL',
+      name: 'waysigns',
+      title: 'WaySigns',
+      type: 'mod' as const,
+      short_desc: 'Dynamic in-world HUD signboards, waypoints, and inscription marker with zero entity lag.',
+      thumbnail: 'https://cdn.content.luanti.org/uploads/waysigns.png',
+      release_id: 35500,
+      latest_commit_sha: 'c3d4e5f60718293a',
+      updated_at: freshUpdateIso
+    };
+
+    const swState = {
+      prefs: {
+        notificationsEnabled: true,
+        notifyPackageUpdates: true,
+        notifyNewGitPackages: true,
+        notifyNewReviews: true
+      },
+      baselineSeededAt: nowMs - 2 * 3600 * 1000,
+      lastBootFetchAt: nowMs - 20 * 60 * 1000,
+      knownGitPackages: ['sakel/waysigns'],
+      seenReviewIds: ['cdb_1'],
+      seenTags: [],
+      knownPackageVersions: { 'sakel/waysigns': `35413|${yesterdayIso}|b2c3d4e5f6071829` },
+      packageUpdateCooldowns: {}
+    };
+
+    const swBatchResult = evaluateCatalogNotificationsBatch(
+      { packages: [freshWaySignsPkg], recentReviews: [] },
+      swState,
+      nowMs
+    );
+    expect(swBatchResult.notifications.length).toBe(1);
+    const swNotif = swBatchResult.notifications[0];
+    expect(swNotif.title).toBe('Package Updated · [MOD] WaySigns');
+    expect(swNotif.body).toContain('(c3d4e5f)');
+    expect(swNotif.body).toContain('by SaKeL');
+    expect(swNotif.tag).toBe(`lh-pkg-update-sakel/waysigns-35500|${freshUpdateIso}|c3d4e5f60718293a`);
+    expect(swNotif.timestamp).toBe(Date.parse(freshUpdateIso));
+
+    // Verify 12h cooldown prevents duplicate notification on immediate re-evaluation
+    const swRepeatResult = evaluateCatalogNotificationsBatch(
+      {
+        packages: [
+          {
+            ...freshWaySignsPkg,
+            release_id: 35501,
+            latest_commit_sha: 'd4e5f60718293a4b',
+            updated_at: new Date(nowMs - 5 * 60 * 1000).toISOString()
+          }
+        ],
+        recentReviews: []
+      },
+      { ...swState, ...swBatchResult.stateUpdates },
+      nowMs
+    );
+    expect(swRepeatResult.notifications.length).toBe(0);
+
+    // Verify PwaService produces the exact same notification payload
+    const realRecentIso = new Date(Date.now() - 60_000).toISOString();
+    const realWaySignsPkg = {
+      ...freshWaySignsPkg,
+      updated_at: realRecentIso
+    };
+    const expectedSwForReal = evaluateCatalogNotificationsBatch(
+      { packages: [realWaySignsPkg], recentReviews: [] },
+      {
+        ...swState,
+        baselineSeededAt: Date.now() - 2 * 3600 * 1000
+      },
+      Date.now()
+    ).notifications[0];
+
+    localStorage.setItem(
+      'lh_notif_baseline_seeded_at_v1',
+      String(Date.now() - 2 * 3600 * 1000)
+    );
+    localStorage.setItem(
+      'lh_known_package_versions_v1',
+      JSON.stringify({
+        'sakel/waysigns': `35413|${yesterdayIso}|b2c3d4e5f6071829`
+      })
+    );
+    localStorage.removeItem('lh_package_update_cooldown_v1');
+
+    const sentForegroundPayloads: any[] = [];
+    const origSend = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      sentForegroundPayloads.push(payload);
+      return true;
+    };
+    try {
+      const fgCount = await pwaService.checkAndNotifyUpdatedPackages([realWaySignsPkg], {
+        isBaselineSeedAllowed: false
+      });
+      expect(fgCount).toBe(1);
+      expect(sentForegroundPayloads[0].title).toBe(expectedSwForReal.title);
+      expect(sentForegroundPayloads[0].body).toBe(expectedSwForReal.body);
+      expect(sentForegroundPayloads[0].tag).toBe(expectedSwForReal.tag);
+      expect(sentForegroundPayloads[0].timestamp).toBe(expectedSwForReal.timestamp);
+    } finally {
+      pwaService.sendNativeNotification = origSend;
+      localStorage.removeItem('lh_known_package_versions_v1');
+      localStorage.removeItem('lh_notif_baseline_seeded_at_v1');
+      localStorage.removeItem('lh_package_update_cooldown_v1');
+    }
+
+    // 3. Startup IndexedDB State Merge preserves Service Worker seenTags, cooldowns, and lastBootFetchAt
+    const mergedState = mergeNotificationPersistenceStates(
+      {
+        baselineSeededAt: nowMs - 3600 * 1000,
+        lastBootFetchAt: 0,
+        knownGitPackages: ['sakel/waysigns'],
+        seenReviewIds: [],
+        seenTags: ['lh-fg-tag-1'],
+        knownPackageVersions: { 'sakel/waysigns': '35412||' },
+        packageUpdateCooldowns: {}
+      },
+      {
+        baselineSeededAt: nowMs - 7200 * 1000,
+        lastBootFetchAt: nowMs - 300 * 1000,
+        knownGitPackages: ['sakel/pixie'],
+        seenReviewIds: ['cdb_99'],
+        seenTags: ['lh-pkg-update-sakel/waysigns-35500'],
+        knownPackageVersions: { 'sakel/waysigns': `35500|${freshUpdateIso}|c3d4e5f60718293a` },
+        packageUpdateCooldowns: { 'sakel/waysigns': nowMs - 60_000 }
+      }
+    );
+    expect(mergedState.baselineSeededAt).toBe(nowMs - 7200 * 1000);
+    expect(mergedState.lastBootFetchAt).toBe(nowMs - 300 * 1000);
+    expect(mergedState.seenTags).toContain('lh-pkg-update-sakel/waysigns-35500');
+    expect(mergedState.seenTags).toContain('lh-fg-tag-1');
+    expect(mergedState.knownPackageVersions?.['sakel/waysigns']).toBe(
+      `35500|${freshUpdateIso}|c3d4e5f60718293a`
+    );
+    expect(mergedState.packageUpdateCooldowns?.['sakel/waysigns']).toBe(nowMs - 60_000);
+
+    // 4. Server-side syncDebouncedGitVersionStamp preserves updated_at when observed release date is not newer
+    const executedQueries: Array<{ sql: string; args: any[] }> = [];
+    const mockDb = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async run() {
+                executedQueries.push({ sql, args });
+                return { success: true };
+              },
+              async all() {
+                return { results: [] };
+              }
+            };
+          },
+          async all() {
+            return { results: [] };
+          },
+          async run() {
+            return { success: true };
+          }
+        };
+      }
+    };
+
+    const d1WaySigns = {
+      id: 'SaKeL/waysigns',
+      latest_commit_sha: '1111111111111111',
+      updated_at: '2026-11-04T12:00:00.000Z'
+    };
+
+    // Syncing a tag whose released_at is equal to or older than d1Pkg.updated_at updates latest_commit_sha WITHOUT bumping updated_at
+    const didBumpStaleTag = await syncDebouncedGitVersionStamp(
+      mockDb,
+      d1WaySigns,
+      '2222222222222222',
+      true,
+      '2026-11-04T10:00:00.000Z'
+    );
+    expect(didBumpStaleTag).toBe(false);
+    expect(d1WaySigns.latest_commit_sha).toBe('2222222222222222');
+    expect(d1WaySigns.updated_at).toBe('2026-11-04T12:00:00.000Z');
+    expect(executedQueries.some(q => q.sql.includes('updated_at = ?'))).toBe(false);
+
+    // Syncing a tag with a newer released_at sets updated_at to that release timestamp (not Date.now())
+    const didBumpNewTag = await syncDebouncedGitVersionStamp(
+      mockDb,
+      d1WaySigns,
+      '3333333333333333',
+      true,
+      '2026-11-05T14:30:00.000Z'
+    );
+    expect(didBumpNewTag).toBe(true);
+    expect(d1WaySigns.latest_commit_sha).toBe('3333333333333333');
+    expect(d1WaySigns.updated_at).toBe('2026-11-05T14:30:00.000Z');
+
+    // 5. Canonicalize www.luantihub.org -> https://luantihub.org at the Edge Middleware so Service Worker & notification state never split across origins
+    const wwwRedirectRes = await edgeMiddleware({
+      request: new Request('https://www.luantihub.org/packages/SaKeL/waysigns?tab=releases', {
+        method: 'GET'
+      }),
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(wwwRedirectRes.status).toBe(301);
+    expect(wwwRedirectRes.headers.get('location')).toBe(
+      'https://luantihub.org/packages/SaKeL/waysigns?tab=releases'
+    );
+  });
 });

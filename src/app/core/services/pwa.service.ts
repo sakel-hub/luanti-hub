@@ -3,6 +3,23 @@ import { SwUpdate, SwPush, VersionReadyEvent } from '@angular/service-worker';
 import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
 import { HeroPromotion, LuantiBlogPost } from '../models/package.model';
+import {
+  NOTIFICATION_BASELINE_SKEW_GRACE_MS,
+  NOTIFICATION_MAX_EVENT_AGE_MS,
+  NOTIFICATION_PACKAGE_COOLDOWN_MS,
+  NotificationPersistenceState,
+  buildNewGitPackageNotificationSpec,
+  buildPackageUpdateNotificationSpec,
+  buildReviewNotificationSpec,
+  computePackageVersionStamp,
+  deduplicateNotificationPackageCandidates,
+  evaluatePackageStampAdvancement,
+  mergeNotificationPersistenceStates,
+  parseNotificationTimestampMs,
+  resolveCanonicalPackageIdentity,
+  resolveReviewCleanId,
+  resolveReviewPackageId
+} from '../utils/notification-engine';
 
 export type NotificationVariant =
   | 'resolved'
@@ -30,6 +47,8 @@ export interface NativeNotificationPayload {
   variant?: NotificationVariant;
   icon?: string;
   image?: string;
+  timestamp?: number;
+  renotify?: boolean;
   data?: {
     targetTab?: 'moderation' | 'account' | 'packages' | 'promotions';
     packageId?: string;
@@ -43,10 +62,13 @@ const SEEN_NOTIFICATION_TAGS_KEY = 'lh_seen_notification_tags';
 const KNOWN_GIT_PACKAGES_KEY = 'lh_known_git_packages_v1';
 const KNOWN_PACKAGE_VERSIONS_KEY = 'lh_known_package_versions_v1';
 const SEEN_REVIEWS_KEY = 'lh_seen_reviews_v1';
+const LEGACY_SEEN_REVIEWS_KEY = 'luantihub_seen_review_ids_v1';
 const SEEN_PROMOTIONS_KEY = 'lh_seen_promotions_v1';
 const SEEN_BLOG_POSTS_KEY = 'lh_seen_blog_posts_v1';
 const PACKAGE_UPDATE_COOLDOWN_KEY = 'luantihub_pkg_notify_cooldown_v1';
-const PACKAGE_UPDATE_COOLDOWN_MS = 12 * 3600 * 1000;
+const PACKAGE_UPDATE_COOLDOWN_MS = NOTIFICATION_PACKAGE_COOLDOWN_MS;
+const BASELINE_SEEDED_AT_KEY = 'lh_notif_baseline_seeded_at_v1';
+const LAST_BOOT_FETCH_AT_KEY = 'lh_last_boot_fetch_at_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 const MAX_SEEN_TAGS = 100;
 
@@ -401,6 +423,10 @@ export class PwaService {
   private navHistoryCursor = 0;
   private navHistoryMaxCursor = 0;
   private readonly localAssetDataUrlCache = new Map<string, string>();
+  private idbReconciliationPromise: Promise<void> | null = null;
+  private idbSyncInFlight: Promise<void> | null = null;
+  private idbSyncPending = false;
+  private idbSyncPendingPrefs: Record<string, any> | undefined = undefined;
 
   constructor() {
     this.initSwUpdate();
@@ -412,7 +438,7 @@ export class PwaService {
     this.initBroadcastChannelSyncWatcher();
     this.initBackgroundAndPeriodicSync();
     this.initLocalNotificationIconsCache();
-    this.reconcileNotifStateFromIndexedDb().catch(() => {});
+    this.idbReconciliationPromise = this.reconcileNotifStateFromIndexedDb().catch(() => {});
 
     effect(() => {
       const prefs = {
@@ -425,152 +451,211 @@ export class PwaService {
         favorites: this.settingsService.favorites(),
         downloadedPackages: this.settingsService.downloadedPackages()
       };
-      this.syncNotificationStateToIndexedDb(prefs).catch(() => {});
+      const waitReconcile = this.idbReconciliationPromise || Promise.resolve();
+      waitReconcile
+        .catch(() => {})
+        .then(() => this.syncNotificationStateToIndexedDb(prefs))
+        .catch(() => {});
     });
+  }
+
+  private readLocalNotificationState(customPrefs?: Record<string, any>): NotificationPersistenceState {
+    const parseJsonSafe = (key: string, fallback: any) => {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch {
+        return fallback;
+      }
+    };
+    const prefs = customPrefs || {
+      notificationsEnabled: this.settingsService.notificationsEnabled(),
+      notifyAppUpdates: this.settingsService.notifyAppUpdates(),
+      notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
+      notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
+      notifyNewReviews: this.settingsService.notifyNewReviews(),
+      notifyPromotions: this.settingsService.notifyPromotions(),
+      favorites: this.settingsService.favorites(),
+      downloadedPackages: this.settingsService.downloadedPackages()
+    };
+    const seenReviews =
+      parseJsonSafe(SEEN_REVIEWS_KEY, null) ?? parseJsonSafe(LEGACY_SEEN_REVIEWS_KEY, null);
+    const packageUpdateCooldown = parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {});
+    const baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
+    const lastBootFetchAt = Number(localStorage.getItem(LAST_BOOT_FETCH_AT_KEY) || 0) || 0;
+    return {
+      prefs,
+      seenTags: parseJsonSafe(SEEN_NOTIFICATION_TAGS_KEY, []),
+      knownGitPackages: parseJsonSafe(KNOWN_GIT_PACKAGES_KEY, null),
+      knownPackageVersions: parseJsonSafe(KNOWN_PACKAGE_VERSIONS_KEY, null),
+      seenPromotions: parseJsonSafe(SEEN_PROMOTIONS_KEY, []),
+      seenBlogPosts: parseJsonSafe(SEEN_BLOG_POSTS_KEY, []),
+      seenReviews,
+      seenReviewIds: seenReviews,
+      packageUpdateCooldown,
+      packageUpdateCooldowns: packageUpdateCooldown,
+      ...(this.bootManifestSignature ? { bootManifestSignature: this.bootManifestSignature } : {}),
+      ...(baselineSeededAt > 0 ? { baselineSeededAt } : {}),
+      ...(lastBootFetchAt > 0 ? { lastBootFetchAt } : {})
+    };
   }
 
   /**
    * Synchronizes notification preferences and deduplication stamps from `localStorage` into
    * IndexedDB (`lh_pwa_notif_state_db`) so the Service Worker can evaluate and dispatch
    * background notifications when all app windows are minimized, unfocused, or closed.
+   * Always merges with existing IndexedDB entries and coalesces concurrent calls so background
+   * SW stamps are never overwritten and rapid updates do not spawn overlapping IDB transactions.
    */
   async syncNotificationStateToIndexedDb(customPrefs?: Record<string, any>): Promise<void> {
     if (typeof localStorage === 'undefined') return;
-    try {
-      const parseJsonSafe = (key: string, fallback: any) => {
-        try {
-          const raw = localStorage.getItem(key);
-          return raw ? JSON.parse(raw) : fallback;
-        } catch {
-          return fallback;
-        }
-      };
-      const prefs = customPrefs || {
-        notificationsEnabled: this.settingsService.notificationsEnabled(),
-        notifyAppUpdates: this.settingsService.notifyAppUpdates(),
-        notifyPackageUpdates: this.settingsService.notifyPackageUpdates(),
-        notifyNewGitPackages: this.settingsService.notifyNewGitPackages(),
-        notifyNewReviews: this.settingsService.notifyNewReviews(),
-        notifyPromotions: this.settingsService.notifyPromotions(),
-        favorites: this.settingsService.favorites(),
-        downloadedPackages: this.settingsService.downloadedPackages()
-      };
-      const seenReviews = parseJsonSafe(SEEN_REVIEWS_KEY, null);
-      const packageUpdateCooldown = parseJsonSafe(PACKAGE_UPDATE_COOLDOWN_KEY, {});
-      const entries: Record<string, any> = {
-        prefs,
-        seenTags: parseJsonSafe(SEEN_NOTIFICATION_TAGS_KEY, []),
-        knownGitPackages: parseJsonSafe(KNOWN_GIT_PACKAGES_KEY, null),
-        knownPackageVersions: parseJsonSafe(KNOWN_PACKAGE_VERSIONS_KEY, null),
-        seenPromotions: parseJsonSafe(SEEN_PROMOTIONS_KEY, []),
-        seenBlogPosts: parseJsonSafe(SEEN_BLOG_POSTS_KEY, []),
-        seenReviews,
-        seenReviewIds: seenReviews,
-        packageUpdateCooldown,
-        packageUpdateCooldowns: packageUpdateCooldown
-      };
-      if (this.bootManifestSignature) {
-        entries['bootManifestSignature'] = this.bootManifestSignature;
-      }
-      await writeNotifStateEntries(entries);
-    } catch {
-      // Ignore IndexedDB sync errors
+    if (customPrefs !== undefined) {
+      this.idbSyncPendingPrefs = customPrefs;
     }
+    if (this.idbSyncInFlight) {
+      this.idbSyncPending = true;
+      return this.idbSyncInFlight;
+    }
+
+    const runSyncPass = async () => {
+      do {
+        this.idbSyncPending = false;
+        const prefsToUse = this.idbSyncPendingPrefs;
+        this.idbSyncPendingPrefs = undefined;
+        try {
+          const localState = this.readLocalNotificationState(prefsToUse);
+          const idbState = await readAllNotifStateEntries();
+          const merged = mergeNotificationPersistenceStates(localState, idbState);
+          const entries: Record<string, any> = {
+            prefs: localState.prefs,
+            seenTags: merged.seenTags || [],
+            knownGitPackages: merged.knownGitPackages ?? null,
+            knownPackageVersions: merged.knownPackageVersions ?? null,
+            seenPromotions: merged.seenPromotions || [],
+            seenBlogPosts: merged.seenBlogPosts || [],
+            seenReviews: merged.seenReviews ?? null,
+            seenReviewIds: merged.seenReviewIds ?? null,
+            packageUpdateCooldown: merged.packageUpdateCooldown || {},
+            packageUpdateCooldowns: merged.packageUpdateCooldowns || {}
+          };
+          if (merged.bootManifestSignature) {
+            entries['bootManifestSignature'] = merged.bootManifestSignature;
+          }
+          if (merged.baselineSeededAt && merged.baselineSeededAt > 0) {
+            entries['baselineSeededAt'] = merged.baselineSeededAt;
+          }
+          if (merged.lastBootFetchAt && merged.lastBootFetchAt > 0) {
+            entries['lastBootFetchAt'] = merged.lastBootFetchAt;
+          }
+          await writeNotifStateEntries(entries);
+        } catch {
+          // Ignore IndexedDB sync errors
+        }
+      } while (this.idbSyncPending);
+    };
+
+    const p = runSyncPass().finally(() => {
+      this.idbSyncInFlight = null;
+    });
+    this.idbSyncInFlight = p;
+    return p;
   }
 
   /**
-   * Reconciles any notification tags or package stamps recorded by the Service Worker in
+   * Reconciles any notification tags, package stamps, or cooldowns recorded by the Service Worker in
    * IndexedDB (`lh_pwa_notif_state_db`) back into `localStorage` so focusing/restoring a
    * minimized window never re-fires duplicate notifications.
    */
   async reconcileNotifStateFromIndexedDb(): Promise<void> {
     if (typeof localStorage === 'undefined') return;
     try {
-      const state = await readAllNotifStateEntries();
-      if (!state || Object.keys(state).length === 0) return;
+      const idbState = await readAllNotifStateEntries();
+      if (!idbState || Object.keys(idbState).length === 0) return;
 
-      if (Array.isArray(state['seenTags']) && state['seenTags'].length > 0) {
-        for (const tag of state['seenTags']) {
-          if (typeof tag === 'string' && tag) {
-            this.markNotificationTagSeen(tag, false);
-          }
-        }
-      }
+      const localState = this.readLocalNotificationState();
+      const merged = mergeNotificationPersistenceStates(localState, idbState);
 
-      if (Array.isArray(state['seenPromotions']) && state['seenPromotions'].length > 0) {
+      if (Array.isArray(merged.seenTags) && merged.seenTags.length > 0) {
         try {
-          const raw = localStorage.getItem(SEEN_PROMOTIONS_KEY);
-          const existing = raw ? JSON.parse(raw) : [];
-          const merged = Array.from(
-            new Set([
-              ...(Array.isArray(existing) ? existing : []),
-              ...state['seenPromotions'].filter((id: any) => typeof id === 'string')
-            ])
-          ).slice(-100);
-          localStorage.setItem(SEEN_PROMOTIONS_KEY, JSON.stringify(merged));
+          localStorage.setItem(
+            SEEN_NOTIFICATION_TAGS_KEY,
+            JSON.stringify(merged.seenTags.slice(-MAX_SEEN_TAGS))
+          );
         } catch {}
       }
 
-      if (Array.isArray(state['seenBlogPosts']) && state['seenBlogPosts'].length > 0) {
+      if (Array.isArray(merged.seenPromotions) && merged.seenPromotions.length > 0) {
         try {
-          const raw = localStorage.getItem(SEEN_BLOG_POSTS_KEY);
-          const existing = raw ? JSON.parse(raw) : [];
-          const merged = Array.from(
-            new Set([
-              ...(Array.isArray(existing) ? existing : []),
-              ...state['seenBlogPosts'].filter((id: any) => typeof id === 'string')
-            ])
-          ).slice(-50);
-          localStorage.setItem(SEEN_BLOG_POSTS_KEY, JSON.stringify(merged));
+          localStorage.setItem(
+            SEEN_PROMOTIONS_KEY,
+            JSON.stringify(merged.seenPromotions.slice(-100))
+          );
         } catch {}
       }
 
-      const swSeenReviews = Array.isArray(state['seenReviewIds'])
-        ? state['seenReviewIds']
-        : Array.isArray(state['seenReviews'])
-          ? state['seenReviews']
-          : null;
-      if (swSeenReviews && swSeenReviews.length > 0) {
+      if (Array.isArray(merged.seenBlogPosts) && merged.seenBlogPosts.length > 0) {
         try {
-          const raw = localStorage.getItem(SEEN_REVIEWS_KEY);
-          const existing = raw ? JSON.parse(raw) : [];
-          const merged = Array.from(
-            new Set([
-              ...(Array.isArray(existing) ? existing : []),
-              ...swSeenReviews.filter((id: any) => typeof id === 'string')
-            ])
-          ).slice(-500);
-          localStorage.setItem(SEEN_REVIEWS_KEY, JSON.stringify(merged));
+          localStorage.setItem(
+            SEEN_BLOG_POSTS_KEY,
+            JSON.stringify(merged.seenBlogPosts.slice(-50))
+          );
         } catch {}
       }
 
-      if (Array.isArray(state['knownGitPackages']) && state['knownGitPackages'].length > 0) {
+      if (Array.isArray(merged.seenReviewIds) && merged.seenReviewIds.length > 0) {
         try {
-          const raw = localStorage.getItem(KNOWN_GIT_PACKAGES_KEY);
-          const existing = raw ? JSON.parse(raw) : [];
-          const merged = Array.from(
-            new Set([
-              ...(Array.isArray(existing) ? existing : []),
-              ...state['knownGitPackages'].filter((id: any) => typeof id === 'string')
-            ])
-          ).slice(-2000);
-          localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(merged));
+          localStorage.setItem(
+            SEEN_REVIEWS_KEY,
+            JSON.stringify(merged.seenReviewIds.slice(-500))
+          );
+        } catch {}
+      }
+
+      if (Array.isArray(merged.knownGitPackages) && merged.knownGitPackages.length > 0) {
+        try {
+          localStorage.setItem(
+            KNOWN_GIT_PACKAGES_KEY,
+            JSON.stringify(merged.knownGitPackages.slice(-2000))
+          );
         } catch {}
       }
 
       if (
-        state['knownPackageVersions'] &&
-        typeof state['knownPackageVersions'] === 'object' &&
-        !Array.isArray(state['knownPackageVersions'])
+        merged.knownPackageVersions &&
+        typeof merged.knownPackageVersions === 'object' &&
+        !Array.isArray(merged.knownPackageVersions) &&
+        Object.keys(merged.knownPackageVersions).length > 0
       ) {
         try {
-          const raw = localStorage.getItem(KNOWN_PACKAGE_VERSIONS_KEY);
-          const existing = raw ? JSON.parse(raw) : {};
-          const merged = {
-            ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
-            ...state['knownPackageVersions']
-          };
-          localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(merged));
+          localStorage.setItem(
+            KNOWN_PACKAGE_VERSIONS_KEY,
+            JSON.stringify(merged.knownPackageVersions)
+          );
+        } catch {}
+      }
+
+      if (
+        merged.packageUpdateCooldowns &&
+        typeof merged.packageUpdateCooldowns === 'object' &&
+        Object.keys(merged.packageUpdateCooldowns).length > 0
+      ) {
+        try {
+          localStorage.setItem(
+            PACKAGE_UPDATE_COOLDOWN_KEY,
+            JSON.stringify(merged.packageUpdateCooldowns)
+          );
+        } catch {}
+      }
+
+      if (merged.baselineSeededAt && merged.baselineSeededAt > 0) {
+        try {
+          localStorage.setItem(BASELINE_SEEDED_AT_KEY, String(merged.baselineSeededAt));
+        } catch {}
+      }
+
+      if (merged.lastBootFetchAt && merged.lastBootFetchAt > 0) {
+        try {
+          localStorage.setItem(LAST_BOOT_FETCH_AT_KEY, String(merged.lastBootFetchAt));
         } catch {}
       }
     } catch {
@@ -968,10 +1053,6 @@ export class PwaService {
               }
             });
         }
-      });
-
-      window.addEventListener('blur', () => {
-        handoffToServiceWorker(false);
       });
 
       window.addEventListener('focus', () => {
@@ -1570,7 +1651,7 @@ export class PwaService {
    * Tracks known community Git package IDs in localStorage (`lh_known_git_packages_v1`).
    * On the very first catalog load, seeds the baseline set silently without spamming notifications.
    * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
-   * formatted as `New Git Package · [MOD] Title` for genuinely new community Git packages (published <= 48h).
+   * formatted as `New Git Package · [MOD] Title` for genuinely new community Git packages (published <= 12h).
    */
   checkAndNotifyNewGitPackages(
     candidates: Array<{
@@ -1596,20 +1677,23 @@ export class PwaService {
     if (!Array.isArray(candidates) || candidates.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
 
+    const nowMs = Date.now();
     const forceSet = new Set(
       (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
     );
 
+    const dedupedCandidates =
+      forceSet.size === 0 ? deduplicateNotificationPackageCandidates(candidates) : candidates;
+
     // 1. Identify all eligible Git packages (including dual-indexed ones) for baseline seeding
-    const allGitCandidates = candidates.filter(pkg => {
+    const allGitCandidates = dedupedCandidates.filter(pkg => {
       if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
-      const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
-      const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
-      if (!author || !name) return false;
+      const idInfo = resolveCanonicalPackageIdentity(pkg);
+      if (!idInfo) return false;
       return (
         pkg.source === 'git' ||
         (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
-        forceSet.has(`${author}/${name}`.toLowerCase())
+        forceSet.has(idInfo.lowerId)
       );
     });
 
@@ -1630,14 +1714,15 @@ export class PwaService {
       try {
         const initialIds = Array.from(
           new Set(
-            allGitCandidates.map(pkg => {
-              const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-              const name = pkg.name || String(pkg.id).split('/')[1];
-              return (pkg.id || `${author}/${name}`).toLowerCase();
-            })
+            allGitCandidates
+              .map(pkg => resolveCanonicalPackageIdentity(pkg)?.lowerId || '')
+              .filter(Boolean)
           )
         ).slice(-2000);
         localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(initialIds));
+        if (!localStorage.getItem(BASELINE_SEEDED_AT_KEY)) {
+          localStorage.setItem(BASELINE_SEEDED_AT_KEY, String(nowMs));
+        }
         this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage quota errors
@@ -1658,38 +1743,51 @@ export class PwaService {
     }
 
     const knownSet = new Set<string>(knownList.map(id => id.toLowerCase()));
+    let baselineSeededAt = 0;
+    try {
+      baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
+    } catch {
+      baselineSeededAt = 0;
+    }
 
     // 2. Strict Filter for Notifications: Only notify for genuine community Git packages
     // Exclude established ContentDB packages that simply linked a Git repo (dual-indexed: sources.includes('official'))
-    // And exclude packages published more than 48 hours ago
-    const newlyDiscovered: typeof allGitCandidates = [];
+    // And exclude packages published more than 12 hours ago (NOTIFICATION_MAX_EVENT_AGE_MS) or before baselineSeededAt
+    const newlyDiscovered: Array<{ pkg: (typeof allGitCandidates)[number]; resolvedId: string; createdMs?: number }> = [];
 
     for (const pkg of allGitCandidates) {
-      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-      const name = pkg.name || String(pkg.id).split('/')[1];
-      const resolvedId = pkg.id || `${author}/${name}`;
-      const lowerId = resolvedId.toLowerCase();
+      const idInfo = resolveCanonicalPackageIdentity(pkg);
+      if (!idInfo) continue;
+      const { resolvedId, lowerId } = idInfo;
       const isForced = forceSet.has(lowerId);
 
-      const isOfficial = Array.isArray(pkg.sources) ? pkg.sources.includes('official') : pkg.source === 'official';
+      const isOfficial = Array.isArray(pkg.sources)
+        ? pkg.sources.includes('official')
+        : pkg.source === 'official';
       const isPureGit = !isOfficial || isForced;
 
-      // Check recency: must be created within the last 48 hours
       let isRecent = true;
+      let createdMs: number | undefined;
       if (!isForced && (pkg.created_at || pkg.updated_at)) {
-        const timeMs = new Date(pkg.created_at || pkg.updated_at!).getTime();
-        if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
-          isRecent = false;
+        const timeMs = parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
+        if (timeMs !== null) {
+          createdMs = timeMs;
+          const withinMaxAge = nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS;
+          const afterBaseline =
+            baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS;
+          if (!withinMaxAge || !afterBaseline) {
+            isRecent = false;
+          }
         }
       }
 
       if (!knownSet.has(lowerId)) {
         knownSet.add(lowerId);
         if (isPureGit && isRecent) {
-          newlyDiscovered.push(pkg);
+          newlyDiscovered.push({ pkg, resolvedId, createdMs });
         }
       } else if (isForced) {
-        newlyDiscovered.push(pkg);
+        newlyDiscovered.push({ pkg, resolvedId, createdMs });
       }
     }
 
@@ -1704,25 +1802,19 @@ export class PwaService {
     }
 
     // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
-    for (const pkg of newlyDiscovered.slice(0, 3)) {
-      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-      const name = pkg.name || String(pkg.id).split('/')[1];
-      const resolvedId = pkg.id || `${author}/${name}`;
-      const typeLabel = String(pkg.type || 'mod').toUpperCase();
-      const displayTitle = pkg.title || name;
-      const thumb = pkg.banner || pkg.banner_url || pkg.thumbnail || pkg.thumbnail_url;
-
+    for (const item of newlyDiscovered.slice(0, 3)) {
+      const spec = buildNewGitPackageNotificationSpec(item.pkg, item.resolvedId, item.createdMs);
       this.sendNativeNotification({
-        title: `New Git Package · [${typeLabel}] ${displayTitle}`,
-        body: `by ${author} — ${pkg.short_desc || 'New community Git repository published on LuantiHub.'}`,
-        icon: thumb,
-        image: thumb,
-        tag: `lh-new-git-pkg-${resolvedId.toLowerCase()}`,
+        title: spec.title,
+        body: spec.body,
+        icon: spec.icon,
+        image: spec.image,
+        tag: spec.tag,
         category: 'new_git_package',
         variant: 'new_git_package',
-        data: {
-          packageId: resolvedId
-        }
+        timestamp: spec.timestamp,
+        renotify: spec.renotify,
+        data: spec.data
       });
     }
 
@@ -1730,11 +1822,11 @@ export class PwaService {
   }
 
   /**
-   * Tracks known package release IDs and `updated_at` timestamps in `localStorage` (`lh_known_package_versions_v1`).
+   * Tracks known package release IDs, `updated_at` timestamps, and commit SHAs in `localStorage` (`lh_known_package_versions_v1`).
    * On the very first catalog load, seeds the version baseline silently without spamming notifications.
    * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
    * formatted as `Package Updated · [MOD] Title` with the package thumbnail image when a package's
-   * `release_id` or `updated_at` advances (within the last 48h), prioritizing Favorites and Downloaded packages.
+   * version stamp strictly advances (within the last 12h), prioritizing Favorites and Downloaded packages.
    */
   checkAndNotifyUpdatedPackages(
     candidates: Array<{
@@ -1765,18 +1857,20 @@ export class PwaService {
     if (!Array.isArray(candidates) || candidates.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
 
+    const nowMs = Date.now();
     const forceSet = new Set(
       (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
     );
     const effectiveCooldownMs = options?.cooldownMs ?? PACKAGE_UPDATE_COOLDOWN_MS;
 
-    const validCandidates = candidates.filter(pkg => {
+    const dedupedCandidates =
+      forceSet.size === 0 ? deduplicateNotificationPackageCandidates(candidates) : candidates;
+
+    const validCandidates = dedupedCandidates.filter(pkg => {
       if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
-      const author = pkg.author || pkg.author_name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[0] : '');
-      const name = pkg.name || (typeof pkg.id === 'string' && pkg.id.includes('/') ? pkg.id.split('/')[1] : '');
-      if (!author || !name) return false;
-      const rel = pkg.release_id ?? pkg.release ?? pkg.latest_commit_sha ?? pkg.commit_sha;
-      return Boolean(rel !== undefined && rel !== null && String(rel).trim() !== '') || Boolean(pkg.updated_at);
+      const idInfo = resolveCanonicalPackageIdentity(pkg);
+      if (!idInfo) return false;
+      return computePackageVersionStamp(pkg) !== '||';
     });
 
     if (validCandidates.length === 0) return 0;
@@ -1788,25 +1882,7 @@ export class PwaService {
       return 0;
     }
 
-    const normalizeReleaseStampPart = (rawRel: unknown): string => {
-      const trimmed = String(rawRel ?? '').trim();
-      if (!trimmed || trimmed === '0') return '';
-      const num = Number(trimmed);
-      // Synthetic Unix epoch timestamps (>= 1_000_000_000, i.e. 10+ digits) are not sequential
-      // ContentDB release IDs (~1..99_999_999); normalize them to '' so dual-source packages
-      // never oscillate between a 5-digit ContentDB release ID and a 10-digit epoch timestamp.
-      if (Number.isFinite(num) && num >= 1_000_000_000) return '';
-      return trimmed;
-    };
-
-    const computeStamp = (pkg: (typeof validCandidates)[number]): string => {
-      const rel = normalizeReleaseStampPart(pkg.release_id ?? pkg.release ?? '');
-      const upd = pkg.updated_at || '';
-      const sha = pkg.latest_commit_sha || pkg.commit_sha || '';
-      return `${rel}|${String(upd).trim()}|${String(sha).trim()}`;
-    };
-
-    // First-time baseline seed: record current release_id|updated_at stamps silently without notification flood
+    // First-time baseline seed: record current release_id|updated_at|latest_commit_sha stamps silently without notification flood
     if (rawKnown === null && forceSet.size === 0) {
       if (options?.isBaselineSeedAllowed === false) {
         return 0;
@@ -1814,12 +1890,13 @@ export class PwaService {
       try {
         const initialMap: Record<string, string> = {};
         for (const pkg of validCandidates) {
-          const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-          const name = pkg.name || String(pkg.id).split('/')[1];
-          const lowerId = (pkg.id || `${author}/${name}`).toLowerCase();
-          initialMap[lowerId] = computeStamp(pkg);
+          const idInfo = resolveCanonicalPackageIdentity(pkg);
+          if (!idInfo) continue;
+          initialMap[idInfo.lowerId] = computePackageVersionStamp(pkg);
         }
         localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(initialMap));
+        localStorage.setItem(BASELINE_SEEDED_AT_KEY, String(nowMs));
+        localStorage.setItem(LAST_BOOT_FETCH_AT_KEY, String(nowMs));
         this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {
         // ignore storage quota errors
@@ -1839,6 +1916,14 @@ export class PwaService {
       }
     }
 
+    let baselineSeededAt = 0;
+    try {
+      baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
+      localStorage.setItem(LAST_BOOT_FETCH_AT_KEY, String(nowMs));
+    } catch {
+      baselineSeededAt = 0;
+    }
+
     let cooldownMap: Record<string, number> = {};
     try {
       const rawCooldown = localStorage.getItem(PACKAGE_UPDATE_COOLDOWN_KEY);
@@ -1852,15 +1937,19 @@ export class PwaService {
       cooldownMap = {};
     }
 
-    const updatedPackages: Array<{ pkg: (typeof validCandidates)[number]; resolvedId: string; stamp: string }> = [];
+    const updatedPackages: Array<{
+      pkg: (typeof validCandidates)[number];
+      resolvedId: string;
+      stamp: string;
+      eventTimestampMs: number;
+    }> = [];
     let mapChanged = false;
 
     for (const pkg of validCandidates) {
-      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-      const name = pkg.name || String(pkg.id).split('/')[1];
-      const resolvedId = pkg.id || `${author}/${name}`;
-      const lowerId = resolvedId.toLowerCase();
-      const newStamp = computeStamp(pkg);
+      const idInfo = resolveCanonicalPackageIdentity(pkg);
+      if (!idInfo) continue;
+      const { resolvedId, lowerId } = idInfo;
+      const newStamp = computePackageVersionStamp(pkg);
       const prevStamp = knownMap[lowerId];
       const isForced = forceSet.has(lowerId);
 
@@ -1868,96 +1957,44 @@ export class PwaService {
         knownMap[lowerId] = newStamp;
         mapChanged = true;
         if (isForced) {
-          updatedPackages.push({ pkg, resolvedId, stamp: newStamp });
+          updatedPackages.push({
+            pkg,
+            resolvedId,
+            stamp: newStamp,
+            eventTimestampMs: parseNotificationTimestampMs(pkg.updated_at) ?? nowMs
+          });
         }
         continue;
       }
 
       if (prevStamp !== newStamp || isForced) {
-        const [rawPrevRel, prevUpd, prevSha = ''] = prevStamp.split('|');
-        const [rawNewRel, newUpd, newSha = ''] = newStamp.split('|');
-        const prevRel = normalizeReleaseStampPart(rawPrevRel);
-        const newRel = normalizeReleaseStampPart(rawNewRel);
+        const evalRes = evaluatePackageStampAdvancement(prevStamp, newStamp, {
+          isForced,
+          nowMs,
+          maxAgeMs: NOTIFICATION_MAX_EVENT_AGE_MS,
+          baselineSeededAt
+        });
 
-        let genuinelyAdvanced = isForced;
-        if (!genuinelyAdvanced) {
-          const prevRelNum = Number(prevRel);
-          const newRelNum = Number(newRel);
-          const hasConcretePrevSha = Boolean(prevSha && prevSha !== 'HEAD' && prevSha !== 'latest');
-          const hasConcreteNewSha = Boolean(newSha && newSha !== 'HEAD' && newSha !== 'latest');
-          const sameConcreteSha =
-            hasConcretePrevSha && hasConcreteNewSha && prevSha.toLowerCase() === newSha.toLowerCase();
-          const shaAdvanced =
-            hasConcretePrevSha && hasConcreteNewSha && prevSha.toLowerCase() !== newSha.toLowerCase();
-
-          if (sameConcreteSha) {
-            // If both stamps carry the exact same commit SHA, only notify if both also have
-            // real ContentDB release IDs (< 100_000_000) and the release ID strictly advanced.
-            if (
-              prevRel &&
-              newRel &&
-              prevRel !== newRel &&
-              Number.isFinite(prevRelNum) &&
-              Number.isFinite(newRelNum) &&
-              prevRelNum > 0 &&
-              newRelNum > 0 &&
-              newRelNum > prevRelNum
-            ) {
-              genuinelyAdvanced = true;
-            }
-          } else if (shaAdvanced) {
-            genuinelyAdvanced = true;
-          } else if (prevRel && newRel) {
-            // Both stamps have a real ContentDB release identifier: only notify when the release ID itself advanced.
-            // Never notify if `prevRel === newRel` (e.g. when `updated_at` was merely hydrated from D1 cache).
-            if (prevRel !== newRel) {
-              if (Number.isFinite(prevRelNum) && Number.isFinite(newRelNum)) {
-                genuinelyAdvanced = newRelNum > prevRelNum;
-              } else {
-                genuinelyAdvanced = true;
-              }
-            }
-          } else if (
-            !prevRel &&
-            !newRel &&
-            !hasConcretePrevSha &&
-            !hasConcreteNewSha &&
-            prevUpd &&
-            newUpd &&
-            newUpd !== prevUpd
-          ) {
-            // Pure timestamp-tracked package (no release ID and no commit SHA): require both timestamps to exist and advance.
-            const prevMs = new Date(prevUpd).getTime();
-            const newMs = new Date(newUpd).getTime();
-            if (!isNaN(newMs) && !isNaN(prevMs) && newMs > prevMs) {
-              genuinelyAdvanced = true;
-            }
-          }
-        }
-
-        // Recency guard: if updated_at is present and not forced, ensure it is within the last 48h
-        let isRecent = true;
-        if (!isForced && newUpd) {
-          const updMs = new Date(newUpd).getTime();
-          if (!isNaN(updMs) && Date.now() - updMs > 48 * 3600 * 1000) {
-            isRecent = false;
-          }
-        }
-
-        // Per-package debounce cooldown guard: prevent notification spam during rapid multi-commit bursts
         let withinCooldown = false;
         if (!isForced && effectiveCooldownMs > 0) {
           const lastNotifiedAt = Number(cooldownMap[lowerId] || 0);
-          if (lastNotifiedAt > 0 && Date.now() - lastNotifiedAt < effectiveCooldownMs) {
+          if (lastNotifiedAt > 0 && nowMs - lastNotifiedAt < effectiveCooldownMs) {
             withinCooldown = true;
           }
         }
 
-        knownMap[lowerId] = newStamp;
-        mapChanged = true;
+        if (knownMap[lowerId] !== evalRes.mergedStamp) {
+          knownMap[lowerId] = evalRes.mergedStamp;
+          mapChanged = true;
+        }
 
-        if (genuinelyAdvanced && isRecent && !withinCooldown) {
-          updatedPackages.push({ pkg, resolvedId, stamp: newStamp });
+        if (evalRes.genuinelyAdvanced && evalRes.isRecent && !withinCooldown) {
+          updatedPackages.push({
+            pkg,
+            resolvedId,
+            stamp: evalRes.mergedStamp,
+            eventTimestampMs: evalRes.eventTimestampMs
+          });
         }
       }
     }
@@ -1989,37 +2026,23 @@ export class PwaService {
     // Cap to at most 3 notifications per check so bulk refreshes never flood the OS tray
     let cooldownChanged = false;
     for (const item of updatedPackages.slice(0, 3)) {
-      const { pkg, resolvedId, stamp } = item;
+      const { pkg, resolvedId, stamp, eventTimestampMs } = item;
       const lowerId = resolvedId.toLowerCase();
-      cooldownMap[lowerId] = Date.now();
+      cooldownMap[lowerId] = nowMs;
       cooldownChanged = true;
 
-      const author = pkg.author || pkg.author_name || String(pkg.id).split('/')[0];
-      const name = pkg.name || String(pkg.id).split('/')[1];
-      const typeLabel = String(pkg.type || 'mod').toUpperCase();
-      const displayTitle = pkg.title || name;
-      const thumb = pkg.banner || pkg.banner_url || pkg.thumbnail || pkg.thumbnail_url;
-      const rawCommitSha = String(pkg.latest_commit_sha || pkg.commit_sha || '').trim();
-      const shortCommitLabel = /^[0-9a-f]{7,40}$/i.test(rawCommitSha) ? rawCommitSha.slice(0, 7) : '';
-      const relLabel = pkg.release_title
-        ? ` (${pkg.release_title})`
-        : shortCommitLabel
-          ? ` (${shortCommitLabel})`
-          : pkg.release_id || pkg.release
-            ? ` (#${pkg.release_id ?? pkg.release})`
-            : '';
-
+      const spec = buildPackageUpdateNotificationSpec(pkg, resolvedId, stamp, eventTimestampMs);
       this.sendNativeNotification({
-        title: `Package Updated · [${typeLabel}] ${displayTitle}`,
-        body: `by ${author}${relLabel} — ${pkg.short_desc || 'New release available on LuantiHub.'}`,
-        icon: thumb,
-        image: thumb,
-        tag: `lh-pkg-update-${resolvedId.toLowerCase()}-${stamp}`,
+        title: spec.title,
+        body: spec.body,
+        icon: spec.icon,
+        image: spec.image,
+        tag: spec.tag,
         category: 'package_update',
         variant: 'package_update',
-        data: {
-          packageId: resolvedId
-        }
+        timestamp: spec.timestamp,
+        renotify: spec.renotify,
+        data: spec.data
       });
     }
 
@@ -2046,7 +2069,8 @@ export class PwaService {
     const cleanId = String(reviewId).trim().replace(/^lh_/i, '');
     if (!cleanId) return;
     try {
-      const raw = localStorage.getItem(SEEN_REVIEWS_KEY);
+      const raw =
+        localStorage.getItem(SEEN_REVIEWS_KEY) ?? localStorage.getItem(LEGACY_SEEN_REVIEWS_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
       const list = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
       if (!list.includes(cleanId)) {
@@ -2063,7 +2087,7 @@ export class PwaService {
    * Tracks known LuantiHub community review IDs in `localStorage` (`lh_seen_reviews_v1`).
    * On the very first catalog load, seeds the baseline set silently without spamming notifications.
    * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
-   * formatted as `New Review · ★★★★★ Title` for newly posted community reviews (within <= 48h).
+   * formatted as `New Review · ★★★★★ Title` for newly posted community reviews (within <= 12h).
    */
   checkAndNotifyNewReviews(
     reviews: Array<{
@@ -2116,32 +2140,7 @@ export class PwaService {
     if (!Array.isArray(reviews) || reviews.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
 
-    const resolveReviewPkgId = (rev: (typeof reviews)[number]): string =>
-      String(
-        rev?.package_id ||
-          rev?.packageId ||
-          (rev?.package?.author && rev?.package?.name ? `${rev.package.author}/${rev.package.name}` : '') ||
-          ''
-      ).trim();
-
-    const resolveReviewCleanId = (rev: (typeof reviews)[number]): string => {
-      if (rev?.id !== undefined && rev?.id !== null && String(rev.id).trim() !== '') {
-        return String(rev.id).trim().replace(/^lh_/i, '');
-      }
-      if (rev?.thread?.id !== undefined && rev?.thread?.id !== null && String(rev.thread.id).trim() !== '') {
-        return `cdb_${String(rev.thread.id).trim()}`;
-      }
-      const pkgId = resolveReviewPkgId(rev);
-      const uname = String(
-        rev?.reviewer_username || rev?.username || rev?.user?.username || rev?.author?.username || ''
-      ).trim();
-      const created = String(rev?.created_at || rev?.createdAt || '').trim();
-      if (pkgId && uname && created) {
-        return `cdb_${pkgId.toLowerCase()}_${uname}_${created}`;
-      }
-      return '';
-    };
-
+    const nowMs = Date.now();
     const forceSet = new Set(
       (options?.forceNotifyIds || [])
         .map(id => String(id || '').trim().replace(/^lh_/i, ''))
@@ -2152,7 +2151,7 @@ export class PwaService {
     const validReviews = reviews.filter(rev => {
       if (!rev) return false;
       const cleanId = resolveReviewCleanId(rev);
-      const pkgId = resolveReviewPkgId(rev);
+      const pkgId = resolveReviewPackageId(rev);
       return Boolean(cleanId && pkgId);
     });
 
@@ -2160,7 +2159,8 @@ export class PwaService {
 
     let rawSeen: string | null = null;
     try {
-      rawSeen = localStorage.getItem(SEEN_REVIEWS_KEY);
+      rawSeen =
+        localStorage.getItem(SEEN_REVIEWS_KEY) ?? localStorage.getItem(LEGACY_SEEN_REVIEWS_KEY);
     } catch {
       return 0;
     }
@@ -2197,6 +2197,12 @@ export class PwaService {
     const seenSet = new Set<string>(seenList.map(id => id.replace(/^lh_/i, '')));
     const newlyDiscovered: typeof validReviews = [];
     let seenChanged = false;
+    let baselineSeededAt = 0;
+    try {
+      baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
+    } catch {
+      baselineSeededAt = 0;
+    }
 
     for (const rev of validReviews) {
       const cleanId = resolveReviewCleanId(rev);
@@ -2213,14 +2219,14 @@ export class PwaService {
       let isRecent = true;
       const createdRaw = rev.created_at || rev.createdAt;
       if (!isForced && createdRaw) {
-        const rawTrimmed = String(createdRaw).trim();
-        const normalizedIso =
-          /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(rawTrimmed)
-            ? `${rawTrimmed.replace(' ', 'T')}Z`
-            : rawTrimmed;
-        const timeMs = new Date(normalizedIso).getTime();
-        if (!isNaN(timeMs) && Date.now() - timeMs > 48 * 3600 * 1000) {
-          isRecent = false;
+        const timeMs = parseNotificationTimestampMs(createdRaw);
+        if (timeMs !== null) {
+          const withinMaxAge = nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS;
+          const afterBaseline =
+            baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS;
+          if (!withinMaxAge || !afterBaseline) {
+            isRecent = false;
+          }
         }
       }
 
@@ -2248,46 +2254,19 @@ export class PwaService {
 
     // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
     for (const rev of newlyDiscovered.slice(0, 3)) {
-      const cleanId = resolveReviewCleanId(rev);
-      const pkgId = resolveReviewPkgId(rev);
-      const pkgTitle = String(
-        rev.package_title || rev.packageTitle || rev.package?.title || pkgId.split('/')[1] || pkgId
-      ).trim();
-      const rawRating = Number(
-        rev.rating ?? (rev.is_positive === false || rev.recommends === false ? 1 : 5)
-      );
-      const rating = Math.max(1, Math.min(5, Number.isFinite(rawRating) ? Math.round(rawRating) : 5));
-      const stars = '★'.repeat(rating) + '☆'.repeat(5 - rating);
-      const reviewer =
-        String(
-          rev.reviewer_username ||
-            rev.username ||
-            rev.user?.username ||
-            rev.author?.username ||
-            rev.reviewer_display_name ||
-            rev.display_name ||
-            rev.user?.display_name ||
-            rev.author?.display_name ||
-            'community'
-        ).trim() || 'community';
-      const rawComment = String(rev.comment || rev.title || '').replace(/\s+/g, ' ').trim();
-      const excerpt =
-        rawComment.length > 90
-          ? `${rawComment.slice(0, 87)}...`
-          : rawComment || 'New community review posted on LuantiHub.';
-      const thumb = rev.package_thumbnail || rev.packageThumbnail || rev.package?.thumbnail || undefined;
-
+      const spec = buildReviewNotificationSpec(rev);
+      if (!spec) continue;
       this.sendNativeNotification({
-        title: `New Review · ${stars} ${pkgTitle}`,
-        body: `by @${reviewer} — "${excerpt}"`,
-        icon: thumb,
-        image: thumb,
-        tag: `lh-review-${cleanId}`,
+        title: spec.title,
+        body: spec.body,
+        icon: spec.icon,
+        image: spec.image,
+        tag: spec.tag,
         category: 'new_review',
         variant: 'new_review',
-        data: {
-          packageId: pkgId
-        }
+        timestamp: spec.timestamp,
+        renotify: spec.renotify,
+        data: spec.data
       });
     }
 
@@ -2755,11 +2734,15 @@ export class PwaService {
       }
     }
 
-    const options: NotificationOptions & { image?: string } = {
+    const options: NotificationOptions & { image?: string; timestamp?: number; renotify?: boolean } = {
       body: payload.body,
       icon: resolvedIcon,
       badge: defaultAppBadge,
       tag: payload.tag,
+      renotify: payload.renotify ?? false,
+      ...(typeof payload.timestamp === 'number' && payload.timestamp > 0
+        ? { timestamp: payload.timestamp }
+        : {}),
       data: payload.data || {}
     };
 
@@ -3088,7 +3071,8 @@ export class PwaService {
     if (
       typeof window !== 'undefined' &&
       window.location?.origin &&
-      !window.location.origin.includes('luanti-hub.pages.dev')
+      !window.location.origin.includes('luanti-hub.pages.dev') &&
+      !window.location.origin.includes('www.luantihub.org')
     ) {
       return window.location.origin;
     }
