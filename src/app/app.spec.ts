@@ -9141,26 +9141,35 @@ supported_games = minetest_game, voxelibre
     const heroEl = heroFixture.nativeElement as HTMLElement;
     const glowContainer = heroEl.querySelector('[data-testid="hero-ambient-glow"]') as HTMLElement;
     expect(glowContainer).toBeTruthy();
-    expect(glowContainer.getAttribute('style')).toContain('ellipse 72% 48% at 50% 46%');
+    expect(glowContainer.getAttribute('style') || '').not.toContain('mask-image');
+    expect(glowContainer.getAttribute('style') || '').toContain('linear-gradient');
     expect(glowContainer.className).toContain('block');
     expect(glowContainer.className).not.toContain('hidden');
-    expect(glowContainer.className).toContain('-bottom-28');
-    expect(glowContainer.className).toContain('sm:-bottom-48');
+    expect(glowContainer.className).toContain('rounded-2xl');
+    expect(glowContainer.className).toContain('sm:rounded-3xl');
+    expect(glowContainer.className).toContain('blur-[22px]');
+    expect(glowContainer.className).toContain('sm:blur-[36px]');
+    expect(glowContainer.className).toContain('lg:blur-[48px]');
+    expect(glowContainer.className).toContain('xl:blur-[60px]');
 
     // 1. Ensure ZERO <img> elements exist inside the oversized ambient glow container so Chromium/Lighthouse LCP never picks the glow layer
     expect(glowContainer.querySelectorAll('img').length).toBe(0);
 
-    // 2. Ensure two full-size 32x18 <canvas> buffers are mounted for smooth crossfading
+    // 2. Ensure two full-size 32x18 <canvas> buffers are mounted for smooth crossfading with matching rectangular corners
     const canvases = glowContainer.querySelectorAll('canvas');
     expect(canvases.length).toBe(2);
     expect(canvases[0].getAttribute('width')).toBe('32');
     expect(canvases[0].getAttribute('height')).toBe('18');
     expect(canvases[0].className).toContain('w-full');
     expect(canvases[0].className).toContain('h-full');
+    expect(canvases[0].className).toContain('rounded-2xl');
+    expect(canvases[0].className).toContain('sm:rounded-3xl');
     expect(canvases[1].getAttribute('width')).toBe('32');
     expect(canvases[1].getAttribute('height')).toBe('18');
     expect(canvases[1].className).toContain('w-full');
     expect(canvases[1].className).toContain('h-full');
+    expect(canvases[1].className).toContain('rounded-2xl');
+    expect(canvases[1].className).toContain('sm:rounded-3xl');
 
     // 3. Verify paintGlowFromImage draws into the 32x18 canvas and crossfades activeGlowBuffer between 0 and 1
     const drawnImages: Array<{ src: string; w: number; h: number }> = [];
@@ -9210,7 +9219,7 @@ supported_games = minetest_game, voxelibre
       heroFixture.detectChanges();
 
       expect(canvases[0].className).toContain('opacity-0');
-      expect(canvases[1].className).toContain('opacity-55');
+      expect(canvases[1].className).toContain('opacity-60');
     } finally {
       getContextSpy.mockRestore();
     }

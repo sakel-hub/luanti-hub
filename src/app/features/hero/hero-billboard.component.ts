@@ -55,30 +55,31 @@ import {
   ],
   template: `
     <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4">
-      <!-- Netflix-Style Natural Ambient Backlight Glow Derived from Active Hero Artwork (LCP-Safe 32x18 Dual-Canvas Crossfade — All Viewports, Zero Extra Network Requests & Never Flagged as LCP) -->
-      <div
-        aria-hidden="true"
-        data-testid="hero-ambient-glow"
-        style="-webkit-mask-image: radial-gradient(ellipse 72% 48% at 50% 46%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.65) 62%, rgba(0,0,0,0.18) 84%, rgba(0,0,0,0) 100%); mask-image: radial-gradient(ellipse 72% 48% at 50% 46%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.65) 62%, rgba(0,0,0,0.18) 84%, rgba(0,0,0,0) 100%); background: radial-gradient(ellipse 70% 46% at 50% 46%, rgba(56, 189, 248, 0.22) 0%, rgba(99, 102, 241, 0.14) 48%, rgba(2, 6, 23, 0) 96%);"
-        class="block pointer-events-none select-none absolute -inset-x-6 sm:-inset-x-20 -top-10 sm:-top-14 -bottom-28 sm:-bottom-48 z-0 overflow-visible blur-[56px] sm:blur-[110px] saturate-[1.85]">
-        <canvas
-          #glowCanvasA
-          width="32"
-          height="18"
-          [class]="activeGlowBuffer() === 0 ? 'opacity-55' : 'opacity-0'"
-          class="absolute inset-0 w-full h-full rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
-        ></canvas>
-        <canvas
-          #glowCanvasB
-          width="32"
-          height="18"
-          [class]="activeGlowBuffer() === 1 ? 'opacity-55' : 'opacity-0'"
-          class="absolute inset-0 w-full h-full rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
-        ></canvas>
-      </div>
+      <div class="relative w-full">
+        <!-- Rectangular Ambient Backlight Glow Derived from Active Hero Artwork (LCP-Safe 32x18 Dual-Canvas Crossfade — All Viewports, Zero Extra Network Requests & Never Flagged as LCP) -->
+        <div
+          aria-hidden="true"
+          data-testid="hero-ambient-glow"
+          style="background: linear-gradient(135deg, rgba(56, 189, 248, 0.20) 0%, rgba(99, 102, 241, 0.14) 50%, rgba(14, 165, 233, 0.18) 100%);"
+          class="block pointer-events-none select-none absolute inset-0 sm:-inset-1.5 lg:-inset-3 z-0 rounded-2xl sm:rounded-3xl overflow-visible blur-[22px] sm:blur-[36px] lg:blur-[48px] xl:blur-[60px] saturate-[1.85]">
+          <canvas
+            #glowCanvasA
+            width="32"
+            height="18"
+            [class]="activeGlowBuffer() === 0 ? 'opacity-60' : 'opacity-0'"
+            class="absolute inset-0 w-full h-full rounded-2xl sm:rounded-3xl transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
+          ></canvas>
+          <canvas
+            #glowCanvasB
+            width="32"
+            height="18"
+            [class]="activeGlowBuffer() === 1 ? 'opacity-60' : 'opacity-0'"
+            class="absolute inset-0 w-full h-full rounded-2xl sm:rounded-3xl transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
+          ></canvas>
+        </div>
 
-      <div
-        (mouseenter)="onMouseEnter()"
+        <div
+          (mouseenter)="onMouseEnter()"
         (mouseleave)="onMouseLeave()"
         (touchstart)="onTouchStart($event)"
         (touchend)="onTouchEnd($event)"
@@ -357,6 +358,7 @@ import {
             </div>
           </div>
         }
+        </div>
       </div>
     </div>
   `
