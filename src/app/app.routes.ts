@@ -1,6 +1,8 @@
 import { Routes } from '@angular/router';
 import { CatalogComponent } from './features/catalog/catalog.component';
-import { AnalyticsPageComponent } from './features/analytics/analytics-page.component';
+
+const loadAnalyticsPage = () =>
+  import('./features/analytics/analytics-page.component').then(m => m.AnalyticsPageComponent);
 
 export const routes: Routes = [
   {
@@ -25,15 +27,15 @@ export const routes: Routes = [
   },
   {
     path: 'analytics',
-    component: AnalyticsPageComponent
+    loadComponent: loadAnalyticsPage
   },
   {
     path: 'analytics/:username',
-    component: AnalyticsPageComponent
+    loadComponent: loadAnalyticsPage
   },
   {
     path: 'analytics/:username/:packageName',
-    component: AnalyticsPageComponent
+    loadComponent: loadAnalyticsPage
   },
   {
     path: 'package/:author/:name',

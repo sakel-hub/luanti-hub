@@ -64,32 +64,44 @@
     (scrollToTop)="scrollToTopOfPage()">
   </app-back-to-top>
 
-  <!-- Modals & Drawers (With Unified Enter & Exit Motion) -->
-  @if (displayedPackage(); as pkg) {
-    <app-package-detail-modal
-      [package]="pkg"
-      [class.is-closing]="isClosingPackageModal()">
-    </app-package-detail-modal>
+  <!-- Modals & Drawers (With Unified Enter & Exit Motion + Code-Split Lazy Chunks via @defer) -->
+  @defer (when displayedPackage() !== null) {
+    @if (displayedPackage(); as pkg) {
+      <app-package-detail-modal
+        [package]="pkg"
+        [class.is-closing]="isClosingPackageModal()">
+      </app-package-detail-modal>
+    }
   }
 
-  @if (renderSubmitModal()) {
-    <app-submit-modal [class.is-closing]="isClosingSubmitModal()"></app-submit-modal>
+  @defer (when renderSubmitModal()) {
+    @if (renderSubmitModal()) {
+      <app-submit-modal [class.is-closing]="isClosingSubmitModal()"></app-submit-modal>
+    }
   }
 
-  @if (renderSetupModal()) {
-    <app-setup-guide-modal [class.is-closing]="isClosingSetupModal()"></app-setup-guide-modal>
+  @defer (when renderSetupModal()) {
+    @if (renderSetupModal()) {
+      <app-setup-guide-modal [class.is-closing]="isClosingSetupModal()"></app-setup-guide-modal>
+    }
   }
 
-  @if (renderAuthModal()) {
-    <app-auth-modal [class.is-closing]="isClosingAuthModal()"></app-auth-modal>
+  @defer (when renderAuthModal()) {
+    @if (renderAuthModal()) {
+      <app-auth-modal [class.is-closing]="isClosingAuthModal()"></app-auth-modal>
+    }
   }
 
-  @if (renderProfileDrawer()) {
-    <app-profile-drawer [class.is-closing]="isClosingProfileDrawer()"></app-profile-drawer>
+  @defer (when renderProfileDrawer()) {
+    @if (renderProfileDrawer()) {
+      <app-profile-drawer [class.is-closing]="isClosingProfileDrawer()"></app-profile-drawer>
+    }
   }
 
-  @if (renderAuthorDrawer()) {
-    <app-author-drawer [class.is-closing]="isClosingAuthorDrawer()"></app-author-drawer>
+  @defer (when renderAuthorDrawer()) {
+    @if (renderAuthorDrawer()) {
+      <app-author-drawer [class.is-closing]="isClosingAuthorDrawer()"></app-author-drawer>
+    }
   }
 
   <!-- Global Frosted Glass Overlay Preloader for OAuth Handshake & Profile Hydration -->
@@ -357,7 +369,7 @@
       <div class="flex flex-wrap items-center gap-2.5">
         <img src="logo.svg" alt="LuantiHub" width="24" height="24" class="w-6 h-6 rounded-lg flex-shrink-0" />
         <span class="font-bold text-white text-sm tracking-tight">Luanti<span class="text-sky-400">Hub</span></span>
-        <span class="text-slate-600">•</span>
+        <span class="text-slate-400">•</span>
         <span class="text-slate-400 text-xs">{{ 'footer.about' | translate }}</span>
       </div>
 
@@ -403,27 +415,27 @@
       </nav>
 
       <!-- Legal & Safe Harbor Columns -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-white/5 text-[11px] text-slate-500 leading-relaxed">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-white/5 text-[11px] text-slate-400 leading-relaxed">
         <div>
-          <strong class="text-slate-400 block mb-1">Official Trademark &amp; Licensing</strong>
+          <strong class="text-slate-300 block mb-1">Official Trademark &amp; Licensing</strong>
           <p>{{ 'footer.disclaimer' | translate }}</p>
         </div>
         <div>
-          <strong class="text-slate-400 block mb-1">DMCA § 512 &amp; EU DSA Safe Harbor</strong>
+          <strong class="text-slate-300 block mb-1">DMCA § 512 &amp; EU DSA Safe Harbor</strong>
           <p>{{ 'footer.legalSafeHarbor' | translate }}</p>
         </div>
         <div>
-          <strong class="text-slate-400 block mb-1">Zero-Tracking Privacy &amp; Edge Security</strong>
+          <strong class="text-slate-300 block mb-1">Zero-Tracking Privacy &amp; Edge Security</strong>
           <p>{{ 'footer.legalPrivacy' | translate }}</p>
         </div>
       </div>
 
       <!-- Row 4: Copyright, Open-Source License & Engine Trademark Attribution -->
-      <div class="pt-4 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-slate-500">
+      <div class="pt-4 border-t border-white/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-[11px] text-slate-400">
         <p>
-          &copy; {{ currentYear }} <a href="https://luantihub.org" class="text-slate-400 hover:text-sky-400 font-semibold transition">LuantiHub</a> &bull; {{ 'footer.copyright' | translate }}
+          &copy; {{ currentYear }} <a href="https://luantihub.org" class="text-slate-300 hover:text-sky-400 font-semibold transition">LuantiHub</a> &bull; {{ 'footer.copyright' | translate }}
         </p>
-        <p class="text-slate-500">
+        <p class="text-slate-400">
           {{ 'footer.trademarkNotice' | translate }}
         </p>
       </div>

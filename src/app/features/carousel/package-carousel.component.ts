@@ -63,7 +63,7 @@ import {
                 </span>
               }
               <span>{{ title }}</span>
-              <span class="text-xs font-medium text-slate-500">({{ packages.length }})</span>
+              <span class="text-xs font-medium text-slate-400">({{ packages.length }})</span>
               @if (infoTooltip) {
                 <button
                   type="button"
@@ -72,8 +72,8 @@ import {
                   [appTooltipMultiline]="true"
                   appTooltipPlacement="top"
                   [attr.aria-label]="'How ' + title + ' is built'"
-                  class="w-5 h-5 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-                  <svg lucideInfo class="w-3 h-3"></svg>
+                  class="w-6 h-6 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                  <svg lucideInfo class="w-3.5 h-3.5"></svg>
                 </button>
               }
             </h2>
@@ -139,13 +139,16 @@ import {
           <div
             #carouselTrack
             (scroll)="onTrackScroll()"
+            (mouseenter)="expandFullRow()"
+            (touchstart)="expandFullRow()"
+            (focusin)="expandFullRow()"
             tabindex="0"
             role="region"
             [attr.aria-label]="title + ' carousel'"
             class="flex items-stretch gap-4 sm:gap-5 overflow-x-auto px-6 sm:px-10 lg:px-14 py-8 -my-6 no-scrollbar scroll-smooth">
-            @for (pkg of packages; track pkg.id; let first = $first; let last = $last) {
+            @for (pkg of renderedPackages; track pkg.id; let first = $first; let last = $last) {
               <div class="flex-shrink-0 flex self-stretch">
-                <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last" class="flex-shrink-0 w-60 sm:w-68 block"></app-package-card>
+                <app-package-card [package]="pkg" [isFirst]="first" [isLast]="last && renderedPackages.length === packages.length" class="flex-shrink-0 w-60 sm:w-68 block"></app-package-card>
               </div>
             }
           </div>
@@ -208,6 +211,19 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   readonly isScrollable = signal<boolean>(false);
   readonly canScrollLeft = signal<boolean>(false);
   readonly canScrollRight = signal<boolean>(false);
+  readonly renderedLimit = signal<number>(7);
+
+  get renderedPackages(): LuantiPackage[] {
+    const limit = this.renderedLimit();
+    return this.packages.length > limit ? this.packages.slice(0, limit) : this.packages;
+  }
+
+  expandFullRow(): void {
+    if (this.renderedLimit() < this.packages.length) {
+      this.renderedLimit.set(Math.max(24, this.packages.length));
+      setTimeout(() => this.updateScrollState(), 50);
+    }
+  }
 
   private scrollRafId: number | null = null;
   private readonly resizeHandler = () => this.updateScrollState();
@@ -235,6 +251,7 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   }
 
   onTrackScroll(): void {
+    this.expandFullRow();
     if (typeof window !== 'undefined' && window.innerWidth < 640) return;
     if (this.scrollRafId !== null) return;
     this.scrollRafId = requestAnimationFrame(() => {
@@ -246,10 +263,11 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   private updateScrollState(): void {
     if (!this.trackRef?.nativeElement) return;
     const el = this.trackRef.nativeElement;
-    const scrollable = el.scrollWidth > el.clientWidth + 10;
+    const hasUnrendered = this.packages.length > this.renderedLimit();
+    const scrollable = hasUnrendered || el.scrollWidth > el.clientWidth + 10;
     this.isScrollable.set(scrollable);
     this.canScrollLeft.set(el.scrollLeft > 15);
-    this.canScrollRight.set(el.scrollLeft < (el.scrollWidth - el.clientWidth - 15));
+    this.canScrollRight.set(hasUnrendered || el.scrollLeft < (el.scrollWidth - el.clientWidth - 15));
   }
 
   scrollLeft(): void {
@@ -261,6 +279,7 @@ export class PackageCarouselComponent implements AfterViewInit, OnChanges, OnDes
   }
 
   scrollRight(): void {
+    this.expandFullRow();
     if (!this.trackRef?.nativeElement) return;
     const el = this.trackRef.nativeElement;
     const distance = Math.max(320, el.clientWidth * 0.7);

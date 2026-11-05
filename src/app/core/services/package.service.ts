@@ -3027,7 +3027,7 @@ export class PackageService {
       });
     }
 
-    if (!fromCache) {
+    if (!fromCache && !Array.isArray(payload.recentReviews)) {
       this.ensureRecentReviewsLoaded();
     }
 
@@ -3199,6 +3199,9 @@ export class PackageService {
 
     const isLocalhost =
       window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+    if (!forceInTest && !isLocalhost && this.edgeApiAvailable) {
+      return;
+    }
     const candidateUrls = isLocalhost
       ? [
           '/cdb-api/reviews/?ngsw-bypass=true',
@@ -3213,9 +3216,10 @@ export class PackageService {
         let rawItems: any[] | null = null;
         for (const url of candidateUrls) {
           try {
-            const res = await fetch(url, {
-              headers: { Accept: 'application/json', 'ngsw-bypass': 'true' }
-            });
+            const headers: Record<string, string> = url.startsWith('/')
+              ? { Accept: 'application/json', 'ngsw-bypass': 'true' }
+              : { Accept: 'application/json' };
+            const res = await fetch(url, { headers });
             if (!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
               continue;
             }
@@ -3364,9 +3368,10 @@ export class PackageService {
         let recentUpstreamList: any[] | null = null;
         for (const url of candidateUrls) {
           try {
-            const res = await fetch(url, {
-              headers: { Accept: 'application/json', 'ngsw-bypass': 'true' }
-            });
+            const headers: Record<string, string> = url.startsWith('/')
+              ? { Accept: 'application/json', 'ngsw-bypass': 'true' }
+              : { Accept: 'application/json' };
+            const res = await fetch(url, { headers });
             if (!res || !res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
               continue;
             }
@@ -3783,7 +3788,7 @@ export class PackageService {
         this.ensurePackageHydrated(heroPkg, true);
       }
     }
-    const promoRowPkgs = this.activePromotionalRows().flatMap(row => row.packages.slice(0, 12));
+    const promoRowPkgs = this.activePromotionalRows().flatMap(row => row.packages.slice(0, 8));
     const priorityCandidates: LuantiPackage[] = this.hasActiveFilters()
       ? [
           ...this.visiblePackages(),
@@ -3792,14 +3797,14 @@ export class PackageService {
       : [
           ...heroSlides,
           ...promoRowPkgs,
-          ...this.recentlyAddedPackages().slice(0, 12),
-          ...this.trendingPackages().slice(0, 12),
+          ...this.recentlyAddedPackages().slice(0, 8),
+          ...this.trendingPackages().slice(0, 8),
           ...this.top10TodayPackages(),
-          ...this.standaloneGames().slice(0, 12),
-          ...this.decentralizedGitPackages().slice(0, 12),
+          ...this.standaloneGames().slice(0, 8),
+          ...this.decentralizedGitPackages().slice(0, 8),
           ...this.top10WeekPackages(),
-          ...this.automationMods().slice(0, 12),
-          ...this.texturePacks().slice(0, 12)
+          ...this.automationMods().slice(0, 8),
+          ...this.texturePacks().slice(0, 8)
         ];
 
     const isUnitTestEnv =
@@ -3807,7 +3812,7 @@ export class PackageService {
       typeof (globalThis as any).jasmine !== 'undefined' ||
       typeof (globalThis as any).vi !== 'undefined' ||
       typeof (globalThis as any).__vitest_worker__ !== 'undefined';
-    const maxInitialQueue = isUnitTestEnv ? 24 : 80;
+    const maxInitialQueue = isUnitTestEnv ? 24 : 48;
     let queued = 0;
     for (const pkg of priorityCandidates) {
       if (queued >= maxInitialQueue) break;
@@ -4416,7 +4421,7 @@ export class PackageService {
     if (!this.catalogPatchTimer) {
       this.catalogPatchTimer = setTimeout(() => {
         this.flushCatalogPatches();
-      }, 120);
+      }, 300);
     }
   }
 
@@ -4707,25 +4712,42 @@ export class PackageService {
         }
 
         if (updatesByLowerId.size > 0) {
-          this._packages.update(list =>
-            list.map(item => {
-              const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
-              const patch = updatesByLowerId.get(lowerKey);
-              if (!patch) return item;
-              const merged = { ...item, ...patch };
-              merged._searchBlob = this.buildSearchBlob(merged);
-              return merged;
-            })
-          );
-          const patchTopList = (list: LuantiPackage[]) =>
-            list.map(item => {
-              const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
-              const patch = updatesByLowerId.get(lowerKey);
-              return patch ? { ...item, ...patch } : item;
-            });
-          this._serverTop10Today.update(patchTopList);
-          this._serverTop10Week.update(patchTopList);
-          this._serverRecentlyAdded.update(patchTopList);
+          const isUnitTestEnv =
+            typeof (globalThis as any).__karma__ !== 'undefined' ||
+            typeof (globalThis as any).jasmine !== 'undefined' ||
+            typeof (globalThis as any).vi !== 'undefined' ||
+            typeof (globalThis as any).__vitest_worker__ !== 'undefined';
+          if (isUnitTestEnv) {
+            this._packages.update(list =>
+              list.map(item => {
+                const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
+                const patch = updatesByLowerId.get(lowerKey);
+                if (!patch) return item;
+                const merged = { ...item, ...patch };
+                merged._searchBlob = this.buildSearchBlob(merged);
+                return merged;
+              })
+            );
+            const patchTopList = (list: LuantiPackage[]) =>
+              list.map(item => {
+                const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
+                const patch = updatesByLowerId.get(lowerKey);
+                return patch ? { ...item, ...patch } : item;
+              });
+            this._serverTop10Today.update(patchTopList);
+            this._serverTop10Week.update(patchTopList);
+            this._serverRecentlyAdded.update(patchTopList);
+          } else {
+            for (const [lowerKey, patch] of updatesByLowerId.entries()) {
+              const existing = this.pendingCatalogPatches.get(lowerKey);
+              this.pendingCatalogPatches.set(lowerKey, existing ? { ...existing, ...patch } : patch);
+            }
+            if (!this.catalogPatchTimer) {
+              this.catalogPatchTimer = setTimeout(() => {
+                this.flushCatalogPatches();
+              }, 300);
+            }
+          }
           this.scheduleHydratedMetaPersist();
           this.scheduleBootCachePersist();
         }

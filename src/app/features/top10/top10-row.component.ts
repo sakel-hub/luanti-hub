@@ -72,8 +72,8 @@ import {
                   [appTooltipMultiline]="true"
                   appTooltipPlacement="top"
                   aria-label="How this Top 10 ranking is built"
-                  class="w-5 h-5 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-                  <svg lucideInfo class="w-3 h-3"></svg>
+                  class="w-6 h-6 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                  <svg lucideInfo class="w-3.5 h-3.5"></svg>
                 </button>
               </h2>
             </div>
@@ -125,8 +125,8 @@ import {
               tabindex="0"
               (keydown.enter)="openDetails(pkg)"
               (keydown.space)="openDetails(pkg)"
-              [attr.aria-label]="'#' + (idx + 1) + ' ' + pkg.title"
               class="relative flex items-end flex-shrink-0 group cursor-pointer transition-transform duration-300 hover:-translate-y-2 focus:outline-none">
+              <span class="sr-only">#{{ idx + 1 }}</span>
 
               <!-- Precision Geometric Netflix Rank Numeral with Right-Side Fade-Out Behind Tile -->
               <svg

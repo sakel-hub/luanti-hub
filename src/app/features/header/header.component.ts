@@ -271,7 +271,7 @@ import {
               type="button"
               (click)="toggleLanguageMenu($event)"
               [appTooltip]="'header.languageTooltip' | translate"
-              aria-label="Change language"
+              [attr.aria-label]="('header.languageTooltip' | translate) + ' ' + currentLocaleMeta().id.toUpperCase()"
               [attr.aria-expanded]="isLanguageMenuOpen()"
               class="h-9 px-2.5 rounded-lg glass-btn text-slate-200 hover:text-white text-xs font-medium flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
               <svg lucideLanguages class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>

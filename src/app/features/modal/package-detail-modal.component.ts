@@ -459,7 +459,8 @@ import {
                         @for (slide of mediaSlides(); track slide.url; let idx = $index) {
                           <div
                             class="w-full h-full flex-shrink-0 relative overflow-hidden bg-slate-950"
-                            [attr.aria-hidden]="idx !== mediaCarouselIndex()">
+                            [attr.aria-hidden]="idx !== mediaCarouselIndex()"
+                            [attr.inert]="idx !== mediaCarouselIndex() ? '' : null">
                             @if (slide.type === 'video') {
                               @if (isVideoPlaying() && idx === mediaCarouselIndex()) {
                                 @if (isDirectVideoUrl(slide.url)) {
@@ -2087,10 +2088,12 @@ import {
               <!-- Author / Admin Package Download Analytics Tab -->
               @if (activeTab() === 'analytics' && (authService.canManagePackage(package) || authService.isAdmin())) {
                 <div class="pt-4 luanti-tab-enter">
-                  <app-download-analytics-chart
-                    [package]="package"
-                    [showExpandButton]="true">
-                  </app-download-analytics-chart>
+                  @defer (on immediate) {
+                    <app-download-analytics-chart
+                      [package]="package"
+                      [showExpandButton]="true">
+                    </app-download-analytics-chart>
+                  }
                 </div>
               }
             </div>

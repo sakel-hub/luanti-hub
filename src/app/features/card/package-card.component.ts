@@ -65,7 +65,6 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
       tabindex="0"
       (keydown.enter)="openDetails()"
       (keydown.space)="openDetails()"
-      [attr.aria-label]="package.title + ' ' + ('card.byAuthor' | translate) + ' ' + authorDisplayName"
       [class.origin-left]="isFirst"
       [class.origin-right]="isLast"
       [class.origin-center]="!isFirst && !isLast"
@@ -260,22 +259,22 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
         </div>
 
         <!-- Bottom Capped Single-Line Tags / Author Footer -->
-        <div class="mt-auto pt-2 pb-0.5 flex items-center justify-between gap-1.5 text-[10px] text-slate-400 whitespace-nowrap min-h-[28px]">
+        <div class="mt-auto pt-2 pb-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400 whitespace-nowrap min-h-[28px]">
           <div class="flex items-center gap-1.5 overflow-hidden min-w-0">
             @if (displayTags.length > 0) {
               @for (t of displayTags; track t; let last = $last) {
                 <button
                   type="button"
                   (click)="onTagClick($event, t)"
-                  class="hover:text-sky-300 transition truncate max-w-[78px] cursor-pointer">
+                  class="min-w-6 min-h-6 px-1 inline-flex items-center justify-center hover:text-sky-300 transition truncate max-w-[78px] cursor-pointer">
                   #{{ t }}
                 </button>
                 @if (!last) {
-                  <span class="text-slate-600 flex-shrink-0">•</span>
+                  <span class="text-slate-400 flex-shrink-0">•</span>
                 }
               }
             } @else {
-              <span class="text-slate-500 truncate">{{ 'card.byAuthor' | translate }} {{ authorDisplayName }}</span>
+              <span class="text-slate-400 truncate">{{ 'card.byAuthor' | translate }} {{ authorDisplayName }}</span>
             }
           </div>
 
@@ -284,7 +283,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             (click)="onAuthorClick($event)"
             [appTooltip]="('author.viewProfile' | translate) + ' (@' + authorDisplayName + ')'"
             [attr.aria-label]="('author.viewProfile' | translate) + ' ' + authorDisplayName"
-            class="px-1.5 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer">
+            class="min-w-6 min-h-6 px-2 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer">
             <svg lucideUser class="w-2.5 h-2.5 text-sky-400 flex-shrink-0"></svg>
             <span class="truncate font-medium">{{ authorDisplayName }}</span>
           </button>

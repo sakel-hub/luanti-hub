@@ -46,11 +46,13 @@ import {
     LucideInfo
   ],
   template: `
+    @if (!packageService.hasActiveFilters()) {
+      <app-hero-billboard></app-hero-billboard>
+    }
+
     @if (packageService.isLoading() && packageService.packages().length === 0) {
       <!-- Initial Page Load Skeleton Preloader (Hero + Tags + Swimlane Tiles) -->
       @if (!packageService.hasActiveFilters()) {
-        <app-hero-billboard></app-hero-billboard>
-
         <!-- Skeleton Tags Bar -->
         <div class="max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-5">
           <div class="flex items-center gap-2 flex-wrap py-1">
@@ -253,7 +255,7 @@ import {
               <svg lucideSearchX class="w-6 h-6"></svg>
             </div>
             <h3 class="text-sm font-semibold text-slate-300">{{ 'common.noResults' | translate }}</h3>
-            <p class="text-xs text-slate-500 max-w-sm mx-auto">
+            <p class="text-xs text-slate-400 max-w-sm mx-auto">
               {{ 'common.noResultsDesc' | translate }}
             </p>
             <div class="flex items-center justify-center gap-3 pt-2">
@@ -302,7 +304,6 @@ import {
 
     } @else {
       <!-- Netflix Home Experience (Billboard + ContentDB Tags Bar + Capped 24-Item Horizontal Swimlanes) -->
-      <app-hero-billboard></app-hero-billboard>
 
       <!-- ContentDB & Custom Git Tags Quick-Filter Bar + Expandable Drawer -->
       <div class="relative z-10 max-w-[1760px] mx-auto px-4 sm:px-8 lg:px-12 xl:px-14 mt-2.5 sm:mt-3 space-y-2">
@@ -317,8 +318,8 @@ import {
               [appTooltipMultiline]="true"
               appTooltipPlacement="top"
               aria-label="How tags are curated"
-              class="w-4 h-4 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-              <svg lucideInfo class="w-2.5 h-2.5"></svg>
+              class="w-6 h-6 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+              <svg lucideInfo class="w-3 h-3"></svg>
             </button>
           </div>
           @for (tag of primaryTags(); track tag.name) {
@@ -436,8 +437,8 @@ import {
                       [appTooltipMultiline]="true"
                       appTooltipPlacement="top"
                       aria-label="How Git Community Releases are built"
-                      class="w-5 h-5 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-                      <svg lucideInfo class="w-3 h-3"></svg>
+                      class="w-6 h-6 rounded-full glass-pill text-slate-400 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                      <svg lucideInfo class="w-3.5 h-3.5"></svg>
                     </button>
                   </h2>
                   <p class="text-xs text-slate-400">

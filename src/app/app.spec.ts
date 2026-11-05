@@ -6777,6 +6777,8 @@ supported_games = minetest_game, voxelibre
 
     legalDeleteBtn.click();
     appFixture.detectChanges();
+    await appFixture.whenStable();
+    appFixture.detectChanges();
     expect(pkgService.isLegalModalOpen()).toBe(false);
     expect(authService.isProfileDrawerOpen()).toBe(true);
 
@@ -6988,7 +6990,7 @@ supported_games = minetest_game, voxelibre
     }
   });
 
-  it('collapses Package Dependencies by default when total items > 20 and keeps it expanded when <= 20', () => {
+  it('collapses Package Dependencies by default when total items > 20 and keeps it expanded when <= 20', async () => {
     const pkgService = TestBed.inject(PackageService);
     const appFixture = TestBed.createComponent(App);
 
@@ -7015,6 +7017,8 @@ supported_games = minetest_game, voxelibre
     };
 
     (pkgService as any)._activePackage.set(smallDepsPkg);
+    appFixture.detectChanges();
+    await appFixture.whenStable();
     appFixture.detectChanges();
 
     const depsSectionSmall = appFixture.nativeElement.querySelector('[data-testid="package-dependencies-section"]') as HTMLElement;
@@ -7169,7 +7173,7 @@ supported_games = minetest_game, voxelibre
     expect(modalFixture.componentInstance.mediaSlides().map(s => s.url)).toEqual([cdbShot1, cdbShot2]);
   });
 
-  it('keeps Delete Profile & Stored Data collapsed in a neutral section by default in Profile Drawer until expanded', () => {
+  it('keeps Delete Profile & Stored Data collapsed in a neutral section by default in Profile Drawer until expanded', async () => {
     const authService = TestBed.inject(AuthService);
     const appFixture = TestBed.createComponent(App);
     (authService as any)._currentUser.set({
@@ -7182,6 +7186,8 @@ supported_games = minetest_game, voxelibre
       packages: []
     });
     authService.openProfileDrawer(false);
+    appFixture.detectChanges();
+    await appFixture.whenStable();
     appFixture.detectChanges();
 
     const accountTabBtn = Array.from(

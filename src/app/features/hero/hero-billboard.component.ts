@@ -49,47 +49,48 @@ import {
     LucideExternalLink
   ],
   template: `
-    @if (showcase().length > 0 && currentPkg(); as pkg) {
-      <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4">
-        <!-- Netflix-Style Natural Ambient Backlight Glow Derived from Active Hero Artwork (Per-Slide Opacity Crossfade to Prevent [src] Swap Flicker) -->
-        <div
+    <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4">
+      <!-- Netflix-Style Natural Ambient Backlight Glow (Pure GPU CSS Radial Aura — Zero Extra Image Downloads & Preserves Primary Hero LCP Element) -->
+      <div
+        aria-hidden="true"
+        style="background: radial-gradient(ellipse 68% 60% at 50% 50%, rgba(56, 189, 248, 0.22) 0%, rgba(99, 102, 241, 0.14) 48%, rgba(2, 6, 23, 0) 100%);"
+        class="hidden sm:block pointer-events-none select-none absolute inset-0 z-0 rounded-[3rem] blur-[64px] opacity-80">
+      </div>
+
+      <div
+        (mouseenter)="onMouseEnter()"
+        (mouseleave)="onMouseLeave()"
+        (touchstart)="onTouchStart($event)"
+        (touchend)="onTouchEnd($event)"
+        (keydown.arrowleft)="prev()"
+        (keydown.arrowright)="next()"
+        tabindex="0"
+        role="region"
+        aria-roledescription="carousel"
+        [attr.aria-label]="currentPkg()?.title || 'Featured showcase'"
+        class="relative z-10 w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-[0_28px_80px_-15px_rgba(0,0,0,0.85)] border border-white/15 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
+
+        <!-- Persistent High-Priority Hero Backdrop (Paints on FCP and Remains Mounted Across Catalog Load for Sub-Second LCP) -->
+        <img
+          src="/banners/luanti-5-18-0.png"
+          alt=""
           aria-hidden="true"
-          class="hidden sm:block pointer-events-none select-none absolute -inset-x-10 sm:-inset-x-20 -top-12 -bottom-20 z-0 overflow-visible blur-[80px] sm:blur-[110px] saturate-[1.85]">
-          @for (glowPkg of showcase(); track glowPkg.id; let idx = $index) {
-            <img
-              [src]="getSlideBanner(glowPkg)"
-              [fallbackThumbnail]="glowPkg.thumbnail"
-              appImgFallback
-              alt=""
-              decoding="async"
-              style="-webkit-mask-image: radial-gradient(ellipse 68% 64% at 50% 50%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.6) 65%, rgba(0,0,0,0) 100%); mask-image: radial-gradient(ellipse 68% 64% at 50% 50%, rgba(0,0,0,1) 25%, rgba(0,0,0,0.6) 65%, rgba(0,0,0,0) 100%);"
-              [class]="idx === currentIndex() ? 'opacity-55' : 'opacity-0'"
-              class="absolute inset-0 w-full h-full object-cover object-center rounded-[4rem] transform-gpu will-change-[opacity] transition-opacity duration-700 ease-out"
-            />
-          }
-        </div>
+          fetchpriority="high"
+          loading="eager"
+          decoding="sync"
+          class="absolute inset-0 w-full h-full object-cover object-center pointer-events-none select-none z-0"
+        />
 
-        <div
-          (mouseenter)="onMouseEnter()"
-          (mouseleave)="onMouseLeave()"
-          (touchstart)="onTouchStart($event)"
-          (touchend)="onTouchEnd($event)"
-          (keydown.arrowleft)="prev()"
-          (keydown.arrowright)="next()"
-          tabindex="0"
-          role="region"
-          aria-roledescription="carousel"
-          [attr.aria-label]="pkg.title"
-          class="relative z-10 w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-[0_28px_80px_-15px_rgba(0,0,0,0.85)] border border-white/15 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
-
+        @if (showcase().length > 0 && currentPkg(); as pkg) {
           <!-- Hardware-Accelerated Horizontal Slide Track (Smooth Slide-In/Out without Image Flash) -->
           <div
-            class="flex w-full h-full transition-transform duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform"
+            class="relative z-10 flex w-full h-full transition-transform duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform"
             [style.transform]="'translate3d(-' + (currentIndex() * 100) + '%, 0, 0)'">
             @for (slidePkg of showcase(); track slidePkg.id; let idx = $index) {
               <div
                 class="w-full h-full flex-shrink-0 relative overflow-hidden"
-                [attr.aria-hidden]="idx !== currentIndex()">
+                [attr.aria-hidden]="idx !== currentIndex()"
+                [attr.inert]="idx !== currentIndex() ? '' : null">
 
                 <!-- Slide Background Image with Subtle Ken-Burns Scale Transition -->
                 <div class="absolute inset-0">
@@ -98,8 +99,9 @@ import {
                     [fallbackThumbnail]="slidePkg.thumbnail"
                     appImgFallback
                     [alt]="slidePkg.title"
-                    [attr.fetchpriority]="idx === 0 ? 'high' : 'auto'"
-                    decoding="async"
+                    [attr.fetchpriority]="idx === 0 ? 'high' : 'low'"
+                    [attr.loading]="idx === 0 || idx === currentIndex() ? 'eager' : 'lazy'"
+                    [attr.decoding]="idx === 0 ? 'sync' : 'async'"
                     [class]="idx === currentIndex() ? 'w-full h-full object-cover object-center scale-100 transition-transform duration-1000 ease-out' : 'w-full h-full object-cover object-center scale-105 transition-transform duration-1000 ease-out'"
                   />
                   <div class="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/40 to-transparent w-full md:w-3/5"></div>
@@ -126,12 +128,13 @@ import {
                         <button
                           type="button"
                           (click)="$event.stopPropagation()"
+                          [attr.tabindex]="idx === currentIndex() ? null : -1"
                           [appTooltip]="'carousel.infoHero' | translate"
                           [appTooltipMultiline]="true"
                           appTooltipPlacement="right"
                           aria-label="How this showcase is curated"
-                          class="w-5 h-5 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
-                          <svg lucideInfo class="w-3 h-3"></svg>
+                          class="w-6 h-6 rounded-full glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/50 flex items-center justify-center transition cursor-help">
+                          <svg lucideInfo class="w-3.5 h-3.5"></svg>
                         </button>
                       </app-package-badges>
                     }
@@ -171,6 +174,7 @@ import {
                           <button
                             type="button"
                             (click)="onPromoCtaClick(promo.cta_url, $event)"
+                            [attr.tabindex]="idx === currentIndex() ? null : -1"
                             class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
                             <span>{{ promo.cta_label || ('hero.learnMore' | translate) }}</span>
                             <svg lucideChevronRight class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
@@ -180,6 +184,7 @@ import {
                             [href]="promo.cta_url"
                             target="_blank"
                             rel="noopener noreferrer"
+                            [attr.tabindex]="idx === currentIndex() ? null : -1"
                             class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
                             <span>{{ promo.cta_label || ('hero.learnMore' | translate) }}</span>
                             <svg lucideExternalLink class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
@@ -191,6 +196,7 @@ import {
                             <button
                               type="button"
                               (click)="onPromoCtaClick(promo.secondary_cta_url, $event)"
+                              [attr.tabindex]="idx === currentIndex() ? null : -1"
                               class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
                               <span>{{ promo.secondary_cta_label }}</span>
                             </button>
@@ -199,6 +205,7 @@ import {
                               [href]="promo.secondary_cta_url"
                               target="_blank"
                               rel="noopener noreferrer"
+                              [attr.tabindex]="idx === currentIndex() ? null : -1"
                               class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
                               <span>{{ promo.secondary_cta_label }}</span>
                               <svg lucideExternalLink class="w-4 h-4 text-sky-400 flex-shrink-0"></svg>
@@ -212,6 +219,7 @@ import {
                         <button
                           type="button"
                           (click)="onDownload(slidePkg)"
+                          [attr.tabindex]="idx === currentIndex() ? null : -1"
                           [appTooltip]="('card.quickInstall' | translate) + (slidePkg.file_size ? ' (' + slidePkg.file_size + ')' : '')"
                           class="h-11 px-6 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2.5 hover:scale-[1.03] transition-all whitespace-nowrap cursor-pointer">
                           <svg lucideDownload class="w-5 h-5 text-sky-300 flex-shrink-0"></svg>
@@ -225,6 +233,7 @@ import {
                         <button
                           type="button"
                           (click)="packageService.openPackageModal(slidePkg)"
+                          [attr.tabindex]="idx === currentIndex() ? null : -1"
                           [appTooltip]="'hero.viewDetails' | translate"
                           class="h-11 px-5 sm:px-6 rounded-xl glass-btn text-white font-bold text-xs sm:text-sm flex items-center gap-2.5 transition whitespace-nowrap cursor-pointer">
                           <svg lucideInfo class="w-5 h-5 text-sky-400 flex-shrink-0"></svg>
@@ -235,6 +244,7 @@ import {
                           [href]="getSlideGitUrl(slidePkg)"
                           target="_blank"
                           rel="noopener noreferrer"
+                          [attr.tabindex]="idx === currentIndex() ? null : -1"
                           [appTooltip]="'hero.viewGit' | translate"
                           class="h-11 w-11 rounded-xl glass-btn text-amber-300 hover:text-white flex items-center justify-center transition cursor-pointer"
                           [attr.aria-label]="'hero.viewGit' | translate">
@@ -271,59 +281,60 @@ import {
             </button>
           </div>
 
-          <!-- Slide Indicators / Frosted Pill Dock -->
-          <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full glass-pill">
+          <!-- Slide Indicators / Frosted Pill Dock (WCAG 2.2 AA 24x24px Hit Targets) -->
+          <div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden md:flex items-center gap-1 px-2.5 py-0.5 rounded-full glass-pill">
             @for (item of showcase(); track item.id; let idx = $index) {
               <button
                 type="button"
                 (click)="goTo(idx, $event)"
                 [appTooltip]="item.title"
                 [attr.aria-label]="'Go to slide ' + (idx + 1) + ': ' + item.title"
-                class="h-2 rounded-full transition-all duration-500 ease-out overflow-hidden cursor-pointer"
-                [class.w-8]="idx === currentIndex()"
-                [class.bg-sky-400]="idx === currentIndex()"
-                [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="idx === currentIndex()"
-                [class.w-2.5]="idx !== currentIndex()"
-                [class.bg-white/35]="idx !== currentIndex()"
-                [class.hover:bg-white/60]="idx !== currentIndex()">
+                class="min-w-6 min-h-6 flex items-center justify-center cursor-pointer group focus:outline-none">
+                <span
+                  class="h-2 rounded-full transition-all duration-500 ease-out overflow-hidden block"
+                  [class.w-8]="idx === currentIndex()"
+                  [class.bg-sky-400]="idx === currentIndex()"
+                  [class.shadow-\[0_0_8px_rgba\(56\,189\,248\,0\.6\)\]]="idx === currentIndex()"
+                  [class.w-2.5]="idx !== currentIndex()"
+                  [class.bg-white/35]="idx !== currentIndex()"
+                  [class.group-hover:bg-white/60]="idx !== currentIndex()">
+                </span>
               </button>
             }
           </div>
 
-        </div>
-      </div>
-    } @else {
-      <!-- Professional 16:9 Hero Billboard Skeleton Preloader -->
-      <div class="relative w-full max-w-[1760px] mx-auto px-2 sm:px-8 lg:px-12 xl:px-14 mt-2 sm:mt-4" aria-busy="true" aria-label="Loading featured showcase">
-        <div class="relative w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden glass-panel border border-white/10">
-          <div class="absolute inset-0 skeleton-shimmer opacity-40"></div>
-          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent"></div>
+        } @else {
+          <!-- Professional 16:9 Hero Billboard Skeleton Preloader Overlay -->
+          <div class="relative z-10 w-full h-full" aria-busy="true">
+            <div class="absolute inset-0 skeleton-shimmer opacity-30"></div>
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-transparent"></div>
 
-          <div class="relative w-full px-6 sm:px-10 lg:px-14 h-full flex flex-col justify-end pb-16 sm:pb-20 lg:pb-24 z-10">
-            <div class="max-w-2xl space-y-4">
-              <div class="flex items-center gap-2">
-                <div class="h-5 w-14 rounded-md skeleton-shimmer"></div>
-                <div class="h-5 w-24 rounded-md skeleton-shimmer"></div>
-              </div>
-              <div class="h-10 sm:h-14 w-3/4 sm:w-2/3 rounded-2xl skeleton-shimmer"></div>
-              <div class="space-y-2">
-                <div class="h-4 w-full rounded-lg skeleton-shimmer"></div>
-                <div class="h-4 w-5/6 rounded-lg skeleton-shimmer"></div>
-              </div>
-              <div class="flex items-center gap-3 pt-1">
-                <div class="h-4 w-16 rounded-md skeleton-shimmer"></div>
-                <div class="h-4 w-28 rounded-md skeleton-shimmer"></div>
-              </div>
-              <div class="flex items-center gap-3 pt-2">
-                <div class="h-11 w-44 rounded-xl skeleton-shimmer border border-white/15"></div>
-                <div class="h-11 w-36 rounded-xl skeleton-shimmer border border-white/10"></div>
-                <div class="h-11 w-11 rounded-xl skeleton-shimmer border border-white/10"></div>
+            <div class="relative w-full px-6 sm:px-10 lg:px-14 h-full flex flex-col justify-end pb-16 sm:pb-20 lg:pb-24 z-10">
+              <div class="max-w-2xl space-y-4">
+                <div class="flex items-center gap-2">
+                  <div class="h-5 w-14 rounded-md skeleton-shimmer"></div>
+                  <div class="h-5 w-24 rounded-md skeleton-shimmer"></div>
+                </div>
+                <div class="h-10 sm:h-14 w-3/4 sm:w-2/3 rounded-2xl skeleton-shimmer"></div>
+                <div class="space-y-2">
+                  <div class="h-4 w-full rounded-lg skeleton-shimmer"></div>
+                  <div class="h-4 w-5/6 rounded-lg skeleton-shimmer"></div>
+                </div>
+                <div class="flex items-center gap-3 pt-1">
+                  <div class="h-4 w-16 rounded-md skeleton-shimmer"></div>
+                  <div class="h-4 w-28 rounded-md skeleton-shimmer"></div>
+                </div>
+                <div class="flex items-center gap-3 pt-2">
+                  <div class="h-11 w-44 rounded-xl skeleton-shimmer border border-white/15"></div>
+                  <div class="h-11 w-36 rounded-xl skeleton-shimmer border border-white/10"></div>
+                  <div class="h-11 w-11 rounded-xl skeleton-shimmer border border-white/10"></div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        }
       </div>
-    }
+    </div>
   `
 })
 export class HeroBillboardComponent implements OnInit, OnDestroy {
@@ -469,7 +480,7 @@ export class HeroBillboardComponent implements OnInit, OnDestroy {
         if (!this.isPaused() && typeof document !== 'undefined' && document.visibilityState === 'visible') {
           this.ngZone.run(() => this.next());
         }
-      }, 6500);
+      }, 12000);
     });
   }
 

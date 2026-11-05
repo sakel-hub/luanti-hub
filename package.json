@@ -11,7 +11,8 @@
     "dev:cloudflare": "wrangler pages dev --proxy 4200 --remote",
     "deploy": "npm run build && wrangler pages deploy dist/luanti-hub/browser --project-name=luanti-hub",
     "db:schema:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/schema.sql",
-    "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql"
+    "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql",
+    "lighthouse:mcp": "node node_modules/lighthouse-mcp/build/index.js"
   },
   "private": true,
   "packageManager": "npm@11.13.0",
@@ -36,6 +37,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "autoprefixer": "^10.6.2",
     "jsdom": "^30.0.0",
+    "lighthouse-mcp": "^0.1.21",
     "postcss": "^8.5.32",
     "prettier": "^3.8.1",
     "tailwindcss": "^4.3.3",
