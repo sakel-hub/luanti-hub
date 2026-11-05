@@ -1076,9 +1076,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   // Cache `/packages/?fmt=vcs` for 30 minutes (1800s) and never block non-boot in-game client requests on `/scores/` network fetches
   // (ContentDB's `/api/scores/` runs 3,700+ N+1 SQL queries on cache miss and Luanti's `contentdb.lua` never reads `score` or `downloads`).
   const upstreamTtl = upstreamPath === '/packages/?fmt=vcs' ? 1800 : 300;
-  const upstreamPromise = fetchUpstreamJsonCached<any[]>(upstreamPath, upstreamTtl)
-    .then(list => Array.isArray(list) ? list : [])
-    .catch(() => []);
+  const upstreamPromise: Promise<any[]> = fetchUpstreamJsonCached<any[]>(upstreamPath, upstreamTtl)
+    .then((list): any[] => (Array.isArray(list) ? list : []))
+    .catch((): any[] => []);
 
   const scoresPromise = isBootBundle
     ? fetchUpstreamJsonCached<any[]>('/scores/', 900)
@@ -1411,6 +1411,26 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     recentReviewsPromise,
     authorDisplayMapPromise
   ]);
+
+  // Ensure any newly approved ContentDB packages from `recentUpstreamList` (15m cache) are immediately
+  // present in `upstreamList` even if the bulk `/packages/?fmt=vcs` snapshot (30m cache) has not expired yet.
+  if (Array.isArray(recentUpstreamList) && recentUpstreamList.length > 0 && recentUpstreamList.length <= 100) {
+    const existingUpstreamKeys = new Set<string>();
+    for (const item of upstreamList) {
+      if (item?.author && item?.name) {
+        existingUpstreamKeys.add(`${item.author}/${item.name}`.toLowerCase());
+      }
+    }
+    for (const recentItem of recentUpstreamList.slice(0, 24)) {
+      if (recentItem?.author && recentItem?.name) {
+        const key = `${recentItem.author}/${recentItem.name}`.toLowerCase();
+        if (!existingUpstreamKeys.has(key)) {
+          existingUpstreamKeys.add(key);
+          upstreamList.push({ ...recentItem });
+        }
+      }
+    }
+  }
 
   // Enrich upstreamList with bulk ContentDB /api/scores/ (exact downloads, score, and review counts for all 3,500+ packages in 1 call)
   if (Array.isArray(scoresList) && scoresList.length > 0) {
@@ -1981,7 +2001,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             pkg.dev_state = detail.dev_state;
           }
           if ((detail?.created_at || detail?.approved_at) && !pkg.created_at) {
-            pkg.created_at = detail.created_at || detail.approved_at;
+            const normCreated = detail?.created_at ? normalizeUtcIsoTimestamp(detail.created_at) : '';
+            const normApproved = detail?.approved_at ? normalizeUtcIsoTimestamp(detail.approved_at) : '';
+            const cMs = normCreated ? Date.parse(normCreated) : NaN;
+            const aMs = normApproved ? Date.parse(normApproved) : NaN;
+            if (Number.isFinite(cMs) && Number.isFinite(aMs)) {
+              pkg.created_at = aMs >= cMs ? normApproved : normCreated;
+            } else {
+              pkg.created_at = normApproved || normCreated;
+            }
           }
           if (detailTags.length > 0) {
             pkg.tags = Array.from(new Set([...(pkg.tags || []), ...detailTags])).filter(Boolean);
@@ -2231,13 +2259,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         maxRecentCdbMs = parsedMs;
       }
     }
-    let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : Date.now()) + 60_000;
+    const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
+    let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
     for (const pkg of recentUpstreamMerged) {
       const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-      if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs < anchorMs) {
-        anchorMs = parsedMs;
+      if (Number.isFinite(parsedMs) && parsedMs > 0) {
+        if (parsedMs < anchorMs) {
+          anchorMs = parsedMs;
+        } else {
+          anchorMs -= 1_000;
+          pkg.created_at = new Date(anchorMs).toISOString();
+        }
       } else {
-        anchorMs -= 60_000;
+        anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
         pkg.created_at = new Date(anchorMs).toISOString();
       }
     }

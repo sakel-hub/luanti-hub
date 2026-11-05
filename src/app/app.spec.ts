@@ -75,7 +75,14 @@ import {
 } from '../../functions/api/promotions/index';
 
 describe('App & Core Services', () => {
+  let defaultFetchRestore: typeof fetch | null = null;
+
   beforeEach(async () => {
+    defaultFetchRestore = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error('Network disabled in unit tests unless explicitly mocked');
+    }) as unknown as typeof fetch;
+
     await TestBed.configureTestingModule({
       imports: [App, Top10RowComponent],
       providers: [
@@ -83,6 +90,13 @@ describe('App & Core Services', () => {
         { provide: RouteReuseStrategy, useClass: CatalogRouteReuseStrategy }
       ]
     }).compileComponents();
+  });
+
+  afterEach(() => {
+    if (defaultFetchRestore) {
+      globalThis.fetch = defaultFetchRestore;
+      defaultFetchRestore = null;
+    }
   });
 
   it('should create the app', () => {
@@ -10191,6 +10205,216 @@ supported_games = minetest_game, voxelibre
     } finally {
       globalThis.fetch = origFetch;
       (globalThis as any).caches = origCaches;
+    }
+  });
+
+  it('should notify for brand-new ContentDB packages (via recentlyAdded created_at / approved_at) and Git packages across foreground PwaService and Service Worker evaluateCatalogNotificationsBatch without false positives on existing catalog', async () => {
+    const {
+      evaluateCatalogNotificationsBatch,
+      buildNewGitPackageNotificationSpec
+    } = await import('./core/utils/notification-engine');
+    const pkgService = TestBed.inject(PackageService);
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+
+    settingsService.notificationsEnabled.set(true);
+    settingsService.notifyNewGitPackages.set(true);
+    settingsService.notifyPackageUpdates.set(true);
+
+    const nowMs = Date.now();
+    const baselineSeededAt = nowMs - 2 * 3600 * 1000; // 2 hours ago
+    const recentApprovedIso = new Date(nowMs - 15 * 60 * 1000).toISOString(); // 15 minutes ago
+    const oldCreatedIso = new Date(nowMs - 4 * 24 * 3600 * 1000).toISOString(); // 4 days ago
+
+    // 1. Existing user migration safety:
+    // User previously only had Git packages in `lh_known_git_packages_v1`, while `lh_known_package_versions_v1`
+    // already tracked existing ContentDB packages (`tenplus1/farming`, `wuzzy/mineclone2`).
+    // A brand-new ContentDB package (`newauthor/crystal_realms`) arrives in `packages` (without `created_at` on the slim row)
+    // and in `recentlyAdded` (with `created_at: recentApprovedIso` resolved from ContentDB `approved_at`).
+    localStorage.setItem('lh_notif_baseline_seeded_at_v1', String(baselineSeededAt));
+    localStorage.setItem('lh_known_git_packages_v1', JSON.stringify(['sakel-hub/pixie']));
+    localStorage.setItem(
+      'lh_known_package_versions_v1',
+      JSON.stringify({
+        'tenplus1/farming': `28100|${oldCreatedIso}|`,
+        'wuzzy/mineclone2': `39534|${oldCreatedIso}|`,
+        'sakel-hub/pixie': `1|${oldCreatedIso}|1111111a`
+      })
+    );
+    localStorage.removeItem('lh_seen_notification_tags');
+
+    const sentForegroundNotifs: any[] = [];
+    const origSend = pwaService.sendNativeNotification.bind(pwaService);
+    pwaService.sendNativeNotification = async (payload: any) => {
+      sentForegroundNotifs.push(payload);
+      return true;
+    };
+
+    try {
+      const bootPayload = {
+        packages: [
+          {
+            id: 'TenPlus1/farming',
+            author: 'TenPlus1',
+            name: 'farming',
+            title: 'Farming Redo',
+            type: 'mod',
+            source: 'official',
+            sources: ['official'],
+            release_id: 28100,
+            updated_at: oldCreatedIso
+          },
+          {
+            id: 'Wuzzy/mineclone2',
+            author: 'Wuzzy',
+            name: 'mineclone2',
+            title: 'VoxeLibre',
+            type: 'game',
+            source: 'official',
+            sources: ['official'],
+            release_id: 39534,
+            updated_at: oldCreatedIso
+          },
+          {
+            id: 'NewAuthor/crystal_realms',
+            author: 'NewAuthor',
+            name: 'crystal_realms',
+            title: 'Crystal Realms',
+            type: 'mod',
+            short_desc: 'Adds glowing crystal caverns and dimension portals.',
+            source: 'official',
+            sources: ['official'],
+            thumbnail: 'https://cdn.content.luanti.org/uploads/crystal_realms.png',
+            release_id: 41200
+            // Note: slim /api/packages/ list row does NOT include created_at; it comes from recentlyAdded below!
+          }
+        ],
+        recentlyAdded: [
+          {
+            id: 'NewAuthor/crystal_realms',
+            author: 'NewAuthor',
+            name: 'crystal_realms',
+            title: 'Crystal Realms',
+            type: 'mod',
+            short_desc: 'Adds glowing crystal caverns and dimension portals.',
+            source: 'official',
+            sources: ['official'],
+            thumbnail: 'https://cdn.content.luanti.org/uploads/crystal_realms.png',
+            release_id: 41200,
+            created_at: recentApprovedIso
+          }
+        ]
+      };
+
+      // Foreground applyBootPayload must merge `recentlyAdded` created_at BEFORE running checkAndNotifyNewGitPackages
+      (pkgService as any).applyBootPayload(bootPayload);
+
+      // Verify Crystal Realms in catalog has its `created_at` stamped immediately
+      const catalogCrystal = pkgService.packages().find(p => p.id === 'NewAuthor/crystal_realms');
+      expect(catalogCrystal?.created_at).toBe(recentApprovedIso);
+
+      // Exactly 1 notification fired for the brand-new ContentDB package (and 0 false positives for Farming Redo or VoxeLibre)
+      expect(sentForegroundNotifs.length).toBe(1);
+      expect(sentForegroundNotifs[0].title).toBe('New Package · [MOD] Crystal Realms');
+      expect(sentForegroundNotifs[0].body).toContain('by NewAuthor');
+      expect(sentForegroundNotifs[0].body).toContain('Adds glowing crystal caverns and dimension portals.');
+      expect(sentForegroundNotifs[0].tag).toBe('lh-new-git-pkg-newauthor/crystal_realms');
+      expect(sentForegroundNotifs[0].category).toBe('new_git_package');
+      expect(sentForegroundNotifs[0].data?.packageId).toBe('NewAuthor/crystal_realms');
+
+      // 2. Verify Service Worker `evaluateCatalogNotificationsBatch` produces the exact same notification
+      //    when given `bootPayload.packages` + `bootPayload.recentlyAdded`
+      const swEval = evaluateCatalogNotificationsBatch(
+        bootPayload,
+        {
+          prefs: {
+            notificationsEnabled: true,
+            notifyNewGitPackages: true,
+            notifyPackageUpdates: true,
+            notifyNewReviews: true
+          },
+          baselineSeededAt,
+          knownGitPackages: ['sakel-hub/pixie'],
+          knownPackageVersions: {
+            'tenplus1/farming': `28100|${oldCreatedIso}|`,
+            'wuzzy/mineclone2': `39534|${oldCreatedIso}|`,
+            'sakel-hub/pixie': `1|${oldCreatedIso}|1111111a`
+          },
+          packageUpdateCooldowns: {}
+        },
+        nowMs
+      );
+
+      expect(swEval.notifications.length).toBe(1);
+      expect(swEval.notifications[0].title).toBe('New Package · [MOD] Crystal Realms');
+      expect(swEval.notifications[0].tag).toBe('lh-new-git-pkg-newauthor/crystal_realms');
+      expect(swEval.stateUpdates.knownGitPackages).toContain('newauthor/crystal_realms');
+
+      // 3. Verify pure Git packages still use 'New Git Package · [TYPE] Title'
+      const gitSpec = buildNewGitPackageNotificationSpec(
+        {
+          id: 'sakel-hub/new_git_mod',
+          author: 'sakel-hub',
+          name: 'new_git_mod',
+          title: 'New Git Mod',
+          type: 'mod',
+          source: 'git',
+          sources: ['git']
+        },
+        'sakel-hub/new_git_mod',
+        nowMs
+      );
+      expect(gitSpec.title).toBe('New Git Package · [MOD] New Git Mod');
+
+      // 4. Verify deferred `created_at` hydration: if a new ContentDB package first arrives in `packages`
+      //    WITHOUT `created_at` (e.g. before `ensureRecentlyAddedLoaded()` completes), it is NOT prematurely
+      //    marked as known, so when `created_at` arrives shortly after, the notification fires!
+      (pkgService as any).applyBootPayload({
+        packages: [
+          ...bootPayload.packages,
+          {
+            id: 'NewAuthor/deferred_cdb_mod',
+            author: 'NewAuthor',
+            name: 'deferred_cdb_mod',
+            title: 'Deferred ContentDB Mod',
+            type: 'mod',
+            short_desc: 'Hydrated asynchronously by recentlyAdded.',
+            source: 'official',
+            sources: ['official'],
+            release_id: 41205
+          }
+        ]
+      });
+      // Still 1 notification before `created_at` is hydrated
+      expect(sentForegroundNotifs.length).toBe(1);
+
+      // Now `recentlyAdded` hydration supplies `created_at`
+      const deferredCount = pwaService.checkAndNotifyNewGitPackages(
+        [
+          {
+            id: 'NewAuthor/deferred_cdb_mod',
+            author: 'NewAuthor',
+            name: 'deferred_cdb_mod',
+            title: 'Deferred ContentDB Mod',
+            type: 'mod',
+            short_desc: 'Hydrated asynchronously by recentlyAdded.',
+            source: 'official',
+            sources: ['official'],
+            created_at: recentApprovedIso
+          }
+        ],
+        { isBaselineSeedAllowed: false }
+      );
+      expect(deferredCount).toBe(1);
+      expect(sentForegroundNotifs.length).toBe(2);
+      expect(sentForegroundNotifs[1].title).toBe('New Package · [MOD] Deferred ContentDB Mod');
+      expect(sentForegroundNotifs[1].tag).toBe('lh-new-git-pkg-newauthor/deferred_cdb_mod');
+    } finally {
+      pwaService.sendNativeNotification = origSend;
+      localStorage.removeItem('lh_known_git_packages_v1');
+      localStorage.removeItem('lh_known_package_versions_v1');
+      localStorage.removeItem('lh_notif_baseline_seeded_at_v1');
+      localStorage.removeItem('lh_seen_notification_tags');
     }
   });
 });

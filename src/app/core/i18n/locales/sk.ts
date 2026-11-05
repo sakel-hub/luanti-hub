@@ -353,7 +353,7 @@ export const sk: TranslationDictionary = {
     notifyModerationLabel: 'Aktualizácie hlásení a balíčkov (Odpovede & Vyriešenia)',
     notifyAdminQueueLabel: 'Upozornenia frontu moderovania (Admin)',
     notifyAppUpdatesLabel: 'Aktualizácie aplikácie LuantiHub',
-    notifyNewGitPackagesLabel: 'Nové publikované komunitné Git balíčky',
+    notifyNewGitPackagesLabel: 'Nové publikované balíčky (ContentDB & Git)',
     notifyPackageUpdatesLabel: 'Nedávne aktualizácie a nové vydania balíčkov',
     notifyPromotionsLabel: 'Odporúčané udalosti, Game Jamy a komunitné akcie',
     notifyNewReviewsLabel: 'Nové komunitné recenzie a hodnotenia',

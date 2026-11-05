@@ -353,7 +353,7 @@ export const ru: TranslationDictionary = {
     notifyModerationLabel: 'Обновления по жалобам и пакетам (Ответы и решения)',
     notifyAdminQueueLabel: 'Уведомления очереди модерации (Админ)',
     notifyAppUpdatesLabel: 'Обновления приложения LuantiHub',
-    notifyNewGitPackagesLabel: 'Новые опубликованные Git-пакеты сообщества',
+    notifyNewGitPackagesLabel: 'Новые опубликованные пакеты (ContentDB и Git)',
     notifyPackageUpdatesLabel: 'Недавние обновления и новые релизы пакетов',
     notifyPromotionsLabel: 'События, Game Jams и промоакции сообщества',
     notifyNewReviewsLabel: 'Новые отзывы и оценки сообщества',

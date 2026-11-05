@@ -615,7 +615,7 @@ export class PwaService {
         try {
           localStorage.setItem(
             KNOWN_GIT_PACKAGES_KEY,
-            JSON.stringify(merged.knownGitPackages.slice(-2000))
+            JSON.stringify(merged.knownGitPackages.slice(-10000))
           );
         } catch {}
       }
@@ -1658,10 +1658,11 @@ export class PwaService {
   }
 
   /**
-   * Tracks known community Git package IDs in localStorage (`lh_known_git_packages_v1`).
+   * Tracks known package IDs in localStorage (`lh_known_git_packages_v1`).
    * On the very first catalog load, seeds the baseline set silently without spamming notifications.
    * On subsequent checks or when `forceNotifyIds` is provided, sends a native PWA notification
-   * formatted as `New Git Package · [MOD] Title` for genuinely new community Git packages (published <= 12h).
+   * formatted as `New Package · [MOD] Title` (for ContentDB) or `New Git Package · [MOD] Title` (for community Git)
+   * for genuinely new packages published within the last 12h.
    */
   checkAndNotifyNewGitPackages(
     candidates: Array<{
@@ -1695,19 +1696,14 @@ export class PwaService {
     const dedupedCandidates =
       forceSet.size === 0 ? deduplicateNotificationPackageCandidates(candidates) : candidates;
 
-    // 1. Identify all eligible Git packages (including dual-indexed ones) for baseline seeding
-    const allGitCandidates = dedupedCandidates.filter(pkg => {
+    // 1. Identify all eligible packages (both ContentDB and community Git packages) for baseline seeding & discovery
+    const allCandidates = dedupedCandidates.filter(pkg => {
       if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') return false;
       const idInfo = resolveCanonicalPackageIdentity(pkg);
-      if (!idInfo) return false;
-      return (
-        pkg.source === 'git' ||
-        (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
-        forceSet.has(idInfo.lowerId)
-      );
+      return Boolean(idInfo);
     });
 
-    if (allGitCandidates.length === 0) return 0;
+    if (allCandidates.length === 0) return 0;
 
     let rawKnown: string | null = null;
     try {
@@ -1716,19 +1712,20 @@ export class PwaService {
       return 0;
     }
 
-    // First-time baseline seed: record all existing Git packages silently without notification flood
+    // First-time baseline seed: record all existing packages silently without notification flood
     if (rawKnown === null && forceSet.size === 0) {
       if (options?.isBaselineSeedAllowed === false) {
         return 0;
       }
       try {
         const initialIds = Array.from(
-          new Set(
-            allGitCandidates
+          new Set([
+            ...allCandidates
               .map(pkg => resolveCanonicalPackageIdentity(pkg)?.lowerId || '')
-              .filter(Boolean)
-          )
-        ).slice(-2000);
+              .filter(Boolean),
+            '__cdb_seeded_v1__'
+          ])
+        ).slice(-10000);
         localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(initialIds));
         if (!localStorage.getItem(BASELINE_SEEDED_AT_KEY)) {
           localStorage.setItem(BASELINE_SEEDED_AT_KEY, String(nowMs));
@@ -1753,6 +1750,31 @@ export class PwaService {
     }
 
     const knownSet = new Set<string>(knownList.map(id => id.toLowerCase()));
+    let knownSetChanged = false;
+
+    // One-time migration: include any package IDs already tracked in KNOWN_PACKAGE_VERSIONS_KEY so existing users
+    // upgrading from the Git-only baseline never receive false-positive notifications for already-known ContentDB packages
+    if (!knownSet.has('__cdb_seeded_v1__')) {
+      try {
+        const rawVersions = localStorage.getItem(KNOWN_PACKAGE_VERSIONS_KEY);
+        if (rawVersions) {
+          const parsedVersions = JSON.parse(rawVersions);
+          if (parsedVersions && typeof parsedVersions === 'object' && !Array.isArray(parsedVersions)) {
+            const vKeys = Object.keys(parsedVersions).filter(Boolean);
+            if (vKeys.length > 0) {
+              for (const key of vKeys) {
+                knownSet.add(key.toLowerCase());
+              }
+              knownSet.add('__cdb_seeded_v1__');
+              knownSetChanged = true;
+            }
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
     let baselineSeededAt = 0;
     try {
       baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
@@ -1760,12 +1782,14 @@ export class PwaService {
       baselineSeededAt = 0;
     }
 
-    // 2. Strict Filter for Notifications: Only notify for genuine community Git packages
-    // Exclude established ContentDB packages that simply linked a Git repo (dual-indexed: sources.includes('official'))
-    // And exclude packages published more than 12 hours ago (NOTIFICATION_MAX_EVENT_AGE_MS) or before baselineSeededAt
-    const newlyDiscovered: Array<{ pkg: (typeof allGitCandidates)[number]; resolvedId: string; createdMs?: number }> = [];
+    // 2. Strict Filter for Notifications:
+    // - Exclude dual-indexed packages (sources.includes('official') && sources.includes('git')) unless forced,
+    //   so linking a Git repo to an established ContentDB package never fires a "New Package" alert.
+    // - For official ContentDB packages (isOfficial && !isGit), require a valid `created_at` timestamp within 12h.
+    // - For pure Git packages (!isOfficial), check `created_at || updated_at` within 12h (or allow minimal test mocks without timestamps).
+    const newlyDiscovered: Array<{ pkg: (typeof allCandidates)[number]; resolvedId: string; createdMs?: number }> = [];
 
-    for (const pkg of allGitCandidates) {
+    for (const pkg of allCandidates) {
       const idInfo = resolveCanonicalPackageIdentity(pkg);
       if (!idInfo) continue;
       const { resolvedId, lowerId } = idInfo;
@@ -1774,26 +1798,51 @@ export class PwaService {
       const isOfficial = Array.isArray(pkg.sources)
         ? pkg.sources.includes('official')
         : pkg.source === 'official';
-      const isPureGit = !isOfficial || isForced;
+      const isGit = Array.isArray(pkg.sources)
+        ? pkg.sources.includes('git')
+        : pkg.source === 'git';
+      const isDualSource = isOfficial && isGit;
 
-      let isRecent = true;
+      let isRecent = false;
       let createdMs: number | undefined;
-      if (!isForced && (pkg.created_at || pkg.updated_at)) {
-        const timeMs = parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
+      if (isForced) {
+        isRecent = true;
+      } else if (isOfficial && !isGit) {
+        // Official ContentDB package: require an explicit `created_at` within the 12h recency window
+        const timeMs = parseNotificationTimestampMs(pkg.created_at);
         if (timeMs !== null) {
           createdMs = timeMs;
           const withinMaxAge = nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS;
           const afterBaseline =
             baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS;
-          if (!withinMaxAge || !afterBaseline) {
-            isRecent = false;
+          isRecent = withinMaxAge && afterBaseline;
+        }
+      } else if (!isOfficial) {
+        // Pure Git package
+        if (pkg.created_at || pkg.updated_at) {
+          const timeMs = parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
+          if (timeMs !== null) {
+            createdMs = timeMs;
+            const withinMaxAge = nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS;
+            const afterBaseline =
+              baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS;
+            isRecent = withinMaxAge && afterBaseline;
+          } else {
+            isRecent = true;
           }
+        } else {
+          isRecent = true;
         }
       }
 
       if (!knownSet.has(lowerId)) {
+        if (isOfficial && !isGit && !pkg.created_at && !isForced) {
+          // Wait until `recentlyAdded` or detail hydration provides `created_at` before marking a new ContentDB package as known
+          continue;
+        }
         knownSet.add(lowerId);
-        if (isPureGit && isRecent) {
+        knownSetChanged = true;
+        if ((!isDualSource || isForced) && isRecent) {
           newlyDiscovered.push({ pkg, resolvedId, createdMs });
         }
       } else if (isForced) {
@@ -1801,15 +1850,21 @@ export class PwaService {
       }
     }
 
-    if (newlyDiscovered.length === 0) return 0;
-
-    try {
-      const updatedIds = Array.from(knownSet).slice(-2000);
-      localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(updatedIds));
-      this.syncNotificationStateToIndexedDb().catch(() => {});
-    } catch {
-      // ignore storage errors
+    if (knownSetChanged) {
+      try {
+        if (knownSet.has('__cdb_seeded_v1__')) {
+          knownSet.delete('__cdb_seeded_v1__');
+          knownSet.add('__cdb_seeded_v1__');
+        }
+        const updatedIds = Array.from(knownSet).slice(-10000);
+        localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(updatedIds));
+        this.syncNotificationStateToIndexedDb().catch(() => {});
+      } catch {
+        // ignore storage errors
+      }
     }
+
+    if (newlyDiscovered.length === 0) return 0;
 
     // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
     for (const item of newlyDiscovered.slice(0, 3)) {
@@ -2012,7 +2067,7 @@ export class PwaService {
     if (mapChanged) {
       try {
         const entries = Object.entries(knownMap);
-        const trimmed = entries.length > 4000 ? Object.fromEntries(entries.slice(-4000)) : knownMap;
+        const trimmed = entries.length > 10000 ? Object.fromEntries(entries.slice(-10000)) : knownMap;
         localStorage.setItem(KNOWN_PACKAGE_VERSIONS_KEY, JSON.stringify(trimmed));
         this.syncNotificationStateToIndexedDb().catch(() => {});
       } catch {

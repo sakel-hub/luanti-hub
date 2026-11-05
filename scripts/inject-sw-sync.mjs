@@ -24,18 +24,30 @@ function safeWriteFileSync(filePath, content) {
   } catch (err) {
     if (err && (err.code === 'EPERM' || err.code === 'EACCES')) {
       try {
-        const tmpOut = path.join('/tmp', path.basename(filePath));
-        fs.writeFileSync(tmpOut, content, 'utf8');
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+        fs.writeFileSync(filePath, content, 'utf8');
+        return true;
       } catch {
-        // ignore fallback write error
+        try {
+          const tmpOut = path.join('/tmp', path.basename(filePath));
+          fs.writeFileSync(tmpOut, content, 'utf8');
+        } catch {
+          // ignore fallback write error
+        }
+        return false;
       }
-      return false;
     }
     throw err;
   }
 }
 
-if (fs.existsSync(notifEnginePath) && fs.existsSync(customSwPath)) {
+let inMemoryCustomSwContent = fs.existsSync(customSwPath)
+  ? fs.readFileSync(customSwPath, 'utf8')
+  : '';
+
+if (fs.existsSync(notifEnginePath) && inMemoryCustomSwContent) {
   try {
     const engineTs = fs.readFileSync(notifEnginePath, 'utf8');
     const startIdx = engineTs.indexOf(BEGIN_MARKER);
@@ -57,7 +69,7 @@ if (fs.existsSync(notifEnginePath) && fs.existsSync(customSwPath)) {
         .map((line) => (line.trim() ? `  ${line}` : ''))
         .join('\n');
 
-      const currentCustomSw = fs.readFileSync(customSwPath, 'utf8');
+      const currentCustomSw = inMemoryCustomSwContent;
       const swStartIdx = currentCustomSw.indexOf(BEGIN_MARKER);
       const swEndIdx = currentCustomSw.indexOf(END_MARKER);
       if (swStartIdx !== -1 && swEndIdx !== -1 && swEndIdx > swStartIdx) {
@@ -67,9 +79,13 @@ if (fs.existsSync(notifEnginePath) && fs.existsSync(customSwPath)) {
           indentedJs +
           '\n  ' +
           currentCustomSw.slice(swEndIdx);
+        inMemoryCustomSwContent = updatedCustomSw;
         if (updatedCustomSw !== currentCustomSw) {
-          safeWriteFileSync(customSwPath, updatedCustomSw);
-          console.log('[inject-sw-sync] Injected shared notification-engine.ts into public/custom-sw.js');
+          if (safeWriteFileSync(customSwPath, updatedCustomSw)) {
+            console.log('[inject-sw-sync] Injected shared notification-engine.ts into public/custom-sw.js');
+          } else {
+            console.warn('[inject-sw-sync] Could not write public/custom-sw.js directly (wrote fallback to /tmp/custom-sw.js)');
+          }
         }
         if (fs.existsSync(distCustomSwPath)) {
           safeWriteFileSync(distCustomSwPath, updatedCustomSw);
@@ -119,9 +135,9 @@ if (fs.existsSync(ngswJsonPath) && fs.existsSync(indexHtmlPath)) {
   }
 }
 
-if (fs.existsSync(ngswPath) && fs.existsSync(customSwPath)) {
+if (fs.existsSync(ngswPath) && (inMemoryCustomSwContent || fs.existsSync(customSwPath))) {
   const ngswContent = fs.readFileSync(ngswPath, 'utf8');
-  const customSwContent = fs.readFileSync(customSwPath, 'utf8');
+  const customSwContent = inMemoryCustomSwContent || fs.readFileSync(customSwPath, 'utf8');
 
   if (!ngswContent.includes('__lhCustomSwSyncInstalled')) {
     try {

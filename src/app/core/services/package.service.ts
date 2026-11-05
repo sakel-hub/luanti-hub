@@ -3225,16 +3225,45 @@ export class PackageService {
         .map((item: any) => this.normalizePackage(item))
     );
     const reverseDepMap = buildReverseDependencyCountMap(deduplicated);
+    const normalizeTop10Entry = (item: any): LuantiPackage => {
+      const norm = this.normalizePackage(item);
+      const revDepCount = reverseDepMap.get(String(norm.name || '').toLowerCase()) || norm.reverse_dep_count || 0;
+      return revDepCount !== norm.reverse_dep_count ? { ...norm, reverse_dep_count: revDepCount } : norm;
+    };
+
+    let normalizedRecent: LuantiPackage[] = [];
+    const recentCreatedById = new Map<string, string>();
+    if (Array.isArray(payload.recentlyAdded) && payload.recentlyAdded.length > 0) {
+      normalizedRecent = payload.recentlyAdded.map((item: any) => {
+        const norm = normalizeTop10Entry(item);
+        return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
+      });
+      this._serverRecentlyAdded.set(normalizedRecent);
+      for (const r of normalizedRecent) {
+        if (r.id && r.created_at) {
+          recentCreatedById.set(r.id.toLowerCase(), r.created_at);
+        }
+      }
+    }
+
     const normalized = deduplicated.map(pkg => {
       const revDepCount = reverseDepMap.get(String(pkg.name || '').toLowerCase()) || pkg.reverse_dep_count || 0;
-      return revDepCount !== pkg.reverse_dep_count
-        ? { ...pkg, reverse_dep_count: revDepCount }
-        : pkg;
+      const stampedCreatedAt = pkg.created_at || recentCreatedById.get(pkg.id.toLowerCase());
+      if (revDepCount !== pkg.reverse_dep_count || (stampedCreatedAt && stampedCreatedAt !== pkg.created_at)) {
+        return {
+          ...pkg,
+          reverse_dep_count: revDepCount,
+          ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {})
+        };
+      }
+      return pkg;
     });
 
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
-    this.pwaService.checkAndNotifyNewGitPackages(normalized, { isBaselineSeedAllowed: true });
+    const notifCandidates =
+      normalizedRecent.length > 0 ? [...normalized, ...normalizedRecent] : normalized;
+    this.pwaService.checkAndNotifyNewGitPackages(notifCandidates, { isBaselineSeedAllowed: true });
     this.pwaService.checkAndNotifyUpdatedPackages(normalized, { isBaselineSeedAllowed: true });
 
     if (Array.isArray(payload.recentReviews) && payload.recentReviews.length > 0) {
@@ -3349,39 +3378,13 @@ export class PackageService {
     }
     this.syncClientPromotionRowTags(this.activePromotions());
 
-    const normalizeTop10Entry = (item: any): LuantiPackage => {
-      const norm = this.normalizePackage(item);
-      const revDepCount = reverseDepMap.get(String(norm.name || '').toLowerCase()) || norm.reverse_dep_count || 0;
-      return revDepCount !== norm.reverse_dep_count ? { ...norm, reverse_dep_count: revDepCount } : norm;
-    };
     if (Array.isArray(payload.top10Week) && payload.top10Week.length > 0) {
       this._serverTop10Week.set(payload.top10Week.map(normalizeTop10Entry));
     }
     if (Array.isArray(payload.top10Today) && payload.top10Today.length > 0) {
       this._serverTop10Today.set(payload.top10Today.map(normalizeTop10Entry));
     }
-    if (Array.isArray(payload.recentlyAdded) && payload.recentlyAdded.length > 0) {
-      const normalizedRecent = payload.recentlyAdded.map((item: any) => {
-        const norm = normalizeTop10Entry(item);
-        return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
-      });
-      this._serverRecentlyAdded.set(normalizedRecent);
-      const recentCreatedById = new Map<string, string>();
-      for (const r of normalizedRecent) {
-        if (r.id && r.created_at) {
-          recentCreatedById.set(r.id.toLowerCase(), r.created_at);
-        }
-      }
-      if (recentCreatedById.size > 0) {
-        this._packages.update(curr =>
-          curr.map(p => {
-            if (p.created_at) return p;
-            const c = recentCreatedById.get(p.id.toLowerCase());
-            return c ? { ...p, created_at: c } : p;
-          })
-        );
-      }
-    } else if (this._serverRecentlyAdded().length === 0) {
+    if (normalizedRecent.length === 0 && this._serverRecentlyAdded().length === 0) {
       this.ensureRecentlyAddedLoaded();
     }
 
@@ -3657,7 +3660,13 @@ export class PackageService {
                 const detail = await detailRes.json().catch(() => null);
                 if (!detail || typeof detail !== 'object') return;
                 if (detail.created_at || detail.approved_at) {
-                  pkg.created_at = detail.created_at || detail.approved_at;
+                  const createdMs = detail.created_at ? Date.parse(String(detail.created_at)) : NaN;
+                  const approvedMs = detail.approved_at ? Date.parse(String(detail.approved_at)) : NaN;
+                  if (Number.isFinite(approvedMs) && (!Number.isFinite(createdMs) || approvedMs >= createdMs)) {
+                    pkg.created_at = String(detail.approved_at);
+                  } else {
+                    pkg.created_at = String(detail.created_at || detail.approved_at);
+                  }
                 }
                 if (detail.license || detail.media_license) {
                   pkg.license = detail.license || detail.media_license || pkg.license;
@@ -3688,13 +3697,19 @@ export class PackageService {
             maxRecentCdbMs = parsedMs;
           }
         }
-        let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : Date.now()) + 60_000;
+        const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
+        let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
         for (const pkg of cdbRecentItems) {
           const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-          if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs < anchorMs) {
-            anchorMs = parsedMs;
+          if (Number.isFinite(parsedMs) && parsedMs > 0) {
+            if (parsedMs < anchorMs) {
+              anchorMs = parsedMs;
+            } else {
+              anchorMs -= 1_000;
+              pkg.created_at = new Date(anchorMs).toISOString();
+            }
           } else {
-            anchorMs -= 60_000;
+            anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
             pkg.created_at = new Date(anchorMs).toISOString();
           }
         }
@@ -3743,6 +3758,7 @@ export class PackageService {
               };
             })
           );
+          this.pwaService.checkAndNotifyNewGitPackages(sortedRecent, { isBaselineSeedAllowed: false });
           this.prioritizePackagesForHydration(sortedRecent.slice(0, 12));
           this.scheduleBootCachePersist();
         }

@@ -178,6 +178,13 @@ export function deduplicateNotificationPackageCandidates(candidates: any[]): any
         ? pkg.updated_at
         : existing.updated_at || pkg.updated_at;
 
+    const prevCreatedMs = parseNotificationTimestampMs(existing.created_at) || 0;
+    const nextCreatedMs = parseNotificationTimestampMs(pkg.created_at) || 0;
+    const chosenCreated =
+      nextCreatedMs > prevCreatedMs
+        ? pkg.created_at
+        : existing.created_at || pkg.created_at;
+
     const chosenSha =
       normalizeCommitShaPart(pkg.latest_commit_sha || pkg.commit_sha) ||
       normalizeCommitShaPart(existing.latest_commit_sha || existing.commit_sha);
@@ -202,6 +209,7 @@ export function deduplicateNotificationPackageCandidates(candidates: any[]): any
         name: existing.name || idInfo.name,
         release_id: chosenRel || existing.release_id || pkg.release_id,
         updated_at: chosenUpd,
+        created_at: chosenCreated,
         latest_commit_sha: chosenSha || undefined,
         banner: existing.banner || pkg.banner || existing.banner_url || pkg.banner_url,
         thumbnail: existing.thumbnail || pkg.thumbnail || existing.thumbnail_url || pkg.thumbnail_url,
@@ -469,10 +477,21 @@ export function buildNewGitPackageNotificationSpec(
   const displayTitle = pkg?.title || idInfo.name;
   const thumb =
     pkg?.banner || pkg?.banner_url || pkg?.thumbnail || pkg?.thumbnail_url || undefined;
+  const isOfficial = Array.isArray(pkg?.sources)
+    ? pkg.sources.includes('official')
+    : pkg?.source === 'official';
+  const isGit = Array.isArray(pkg?.sources)
+    ? pkg.sources.includes('git')
+    : pkg?.source === 'git';
+  const isContentDbOnly = isOfficial && !isGit;
+  const titlePrefix = isContentDbOnly ? 'New Package' : 'New Git Package';
+  const defaultDesc = isContentDbOnly
+    ? 'New package published on LuantiHub.'
+    : 'New community Git repository published on LuantiHub.';
 
   return {
-    title: `New Git Package · [${typeLabel}] ${displayTitle}`,
-    body: `by ${idInfo.author} — ${pkg?.short_desc || 'New community Git repository published on LuantiHub.'}`,
+    title: `${titlePrefix} · [${typeLabel}] ${displayTitle}`,
+    body: `by ${idInfo.author} — ${pkg?.short_desc || defaultDesc}`,
     icon: thumb,
     image: thumb,
     badge: '/icons/icon-72x72.png',
@@ -611,7 +630,7 @@ export function mergeNotificationPersistenceStates(
   const hasAnyGit =
     Array.isArray(localState.knownGitPackages) || Array.isArray(remoteState.knownGitPackages);
   const knownGitPackages = hasAnyGit
-    ? unionStrings(localState.knownGitPackages, remoteState.knownGitPackages, 2000, true)
+    ? unionStrings(localState.knownGitPackages, remoteState.knownGitPackages, 10000, true)
     : null;
 
   const localVersions =
@@ -648,7 +667,7 @@ export function mergeNotificationPersistenceStates(
     }
     const entries = Object.entries(mergedMap);
     knownPackageVersions =
-      entries.length > 4000 ? Object.fromEntries(entries.slice(-4000)) : mergedMap;
+      entries.length > 10000 ? Object.fromEntries(entries.slice(-10000)) : mergedMap;
   }
 
   const localCooldown =
@@ -714,35 +733,60 @@ export function evaluateCatalogNotificationsBatch(
   }
 
   const rawPackages = Array.isArray(bootPayload?.packages) ? bootPayload.packages : [];
-  const packages = deduplicateNotificationPackageCandidates(rawPackages);
+  const rawRecentlyAdded = Array.isArray(bootPayload?.recentlyAdded) ? bootPayload.recentlyAdded : [];
+  const packages = deduplicateNotificationPackageCandidates([...rawPackages, ...rawRecentlyAdded]);
   const baselineSeededAt = Number(state?.baselineSeededAt || 0);
 
-  // 1. Evaluate New Git Packages
+  // 1. Evaluate New Packages (both ContentDB and Community Git packages)
   if (prefs.notifyNewGitPackages && Array.isArray(state.knownGitPackages)) {
     const knownGitSet = new Set(state.knownGitPackages.map((id: any) => String(id).toLowerCase()));
     let gitChanged = false;
+    if (!knownGitSet.has('__cdb_seeded_v1__')) {
+      const existingVersionKeys =
+        state.knownPackageVersions &&
+        typeof state.knownPackageVersions === 'object' &&
+        !Array.isArray(state.knownPackageVersions)
+          ? Object.keys(state.knownPackageVersions)
+              .map(k => k.toLowerCase())
+              .filter(Boolean)
+          : [];
+      if (existingVersionKeys.length > 0) {
+        for (const k of existingVersionKeys) {
+          knownGitSet.add(k);
+        }
+        knownGitSet.add('__cdb_seeded_v1__');
+        gitChanged = true;
+      }
+    }
     const newlyDiscoveredGit: Array<{ pkg: any; resolvedId: string; eventTimestampMs: number }> = [];
 
     for (const pkg of packages) {
       const idInfo = resolveCanonicalPackageIdentity(pkg);
       if (!idInfo) continue;
-      const isGit =
-        pkg.source === 'git' || (Array.isArray(pkg.sources) && pkg.sources.includes('git'));
-      if (!isGit) continue;
 
       if (!knownGitSet.has(idInfo.lowerId)) {
-        knownGitSet.add(idInfo.lowerId);
-        gitChanged = true;
         const isOfficial = Array.isArray(pkg.sources)
           ? pkg.sources.includes('official')
           : pkg.source === 'official';
-        const timeMs = parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
+        const isGit = Array.isArray(pkg.sources)
+          ? pkg.sources.includes('git')
+          : pkg.source === 'git';
+        if (isOfficial && !isGit && !pkg.created_at) {
+          // Wait until `recentlyAdded` or detail hydration provides `created_at` before marking a new ContentDB package as known
+          continue;
+        }
+        knownGitSet.add(idInfo.lowerId);
+        gitChanged = true;
+        const isDualSource = isOfficial && isGit;
+        const timeMs = isOfficial
+          ? parseNotificationTimestampMs(pkg.created_at)
+          : parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
         const isRecent =
           timeMs !== null
             ? nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS &&
               (baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS)
             : false;
-        if (!isOfficial && isRecent) {
+        if (!isDualSource && isRecent) {
           newlyDiscoveredGit.push({
             pkg,
             resolvedId: idInfo.resolvedId,
@@ -753,7 +797,11 @@ export function evaluateCatalogNotificationsBatch(
     }
 
     if (gitChanged) {
-      stateUpdates.knownGitPackages = Array.from(knownGitSet).slice(-2000);
+      if (knownGitSet.has('__cdb_seeded_v1__')) {
+        knownGitSet.delete('__cdb_seeded_v1__');
+        knownGitSet.add('__cdb_seeded_v1__');
+      }
+      stateUpdates.knownGitPackages = Array.from(knownGitSet).slice(-10000);
     }
 
     for (const item of newlyDiscoveredGit.slice(0, 3)) {
@@ -829,7 +877,7 @@ export function evaluateCatalogNotificationsBatch(
     if (mapChanged) {
       const entries = Object.entries(knownMap);
       stateUpdates.knownPackageVersions =
-        entries.length > 4000 ? Object.fromEntries(entries.slice(-4000)) : knownMap;
+        entries.length > 10000 ? Object.fromEntries(entries.slice(-10000)) : knownMap;
     }
 
     const favSet = new Set(
