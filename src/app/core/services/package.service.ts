@@ -26,7 +26,7 @@ import {
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
-import { AuthService, sanitizeUserFacingError } from './auth.service';
+import { AuthService, ProfileDrawerTab, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 import { TranslationService } from '../i18n/translation.service';
 import {
@@ -1139,6 +1139,13 @@ export class PackageService {
       return;
     }
     this.pendingRouteBlogModal = false;
+    this.pendingRoutePackage = null;
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     const merged = this.mergeBlogPostPreservingImage(base, this._latestBlogPost(), slideBannerUrl);
     this._latestBlogPost.set(merged);
     this._activeBlogArticle.set(merged);
@@ -1164,7 +1171,7 @@ export class PackageService {
     this._activeBlogArticle.set(null);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
@@ -2611,6 +2618,26 @@ export class PackageService {
   }
 
   private initRouterSync(): void {
+    this.authService.registerProfileHistoryNavigator((action, tab) => {
+      if (action === 'close') {
+        this.dismissOverlayToCatalog();
+        return;
+      }
+      if (action === 'open') {
+        this.pendingRoutePackage = null;
+        this.pendingRouteBlogModal = false;
+        this._activePackage.set(null);
+        this._activeAuthorUsername.set(null);
+        this._activeBlogArticle.set(null);
+        this._isSubmitModalOpen.set(false);
+        this._isSetupModalOpen.set(false);
+        this._isLegalModalOpen.set(false);
+      }
+      this.navigatePreservingScroll(['/profile'], {
+        tab: tab && tab !== 'packages' ? tab : null
+      });
+    });
+
     if (typeof window !== 'undefined') {
       const initialUrl =
         this.router?.url && this.router.url !== '/'
@@ -2622,6 +2649,30 @@ export class PackageService {
 
       window.addEventListener('popstate', () => {
         const currentUrl = (window.location.pathname || '/') + (window.location.search || '');
+        const skippedOverlayUrl = this.dismissedOverlayUrl;
+        const skippedCatalogUrl = this.lastDismissedCatalogUrl;
+        this.dismissedOverlayUrl = null;
+        this.lastDismissedCatalogUrl = null;
+        this.returnToPackageAfterModal = null;
+        this.returnToPackageAfterAuthorDrawer = null;
+        this.returnToAuthorAfterPackageModal = null;
+        if (
+          skippedOverlayUrl &&
+          currentUrl === skippedOverlayUrl &&
+          this.pwaService.getNavHistoryCursor() > 0
+        ) {
+          this.lastDismissedCatalogUrl = skippedCatalogUrl;
+          this.pwaService.navigateBack();
+          return;
+        }
+        if (
+          skippedCatalogUrl &&
+          currentUrl === skippedCatalogUrl &&
+          this.pwaService.getNavHistoryCursor() > 0
+        ) {
+          this.pwaService.navigateBack();
+          return;
+        }
         this.syncStateFromUrl(currentUrl);
       });
     }
@@ -2776,48 +2827,46 @@ export class PackageService {
       this.edgeInitialPackageSeed = edgeSeed;
     }
 
-    // Apply filter query params on initial page load, when navigating to a catalog route ('/', '/games', '/mods', '/texture-packs', '/git'),
-    // or when a modal route explicitly carries catalog query params in its URL (e.g. /package/:author/:name?type=mod).
-    if (!this.initialUrlSynced || !isModalRoute || queryPart !== undefined) {
-      this.initialUrlSynced = true;
-      const defaultTypeForPath =
-        path === '/games'
-          ? 'game'
-          : path === '/mods'
-            ? 'mod'
-            : path === '/texture-packs'
-              ? 'txp'
-              : 'all';
-      const defaultSourceForPath = path === '/git' ? 'git' : 'all';
+    // Apply filter query params from the URL across both catalog routes ('/', '/games', '/mods', '/texture-packs', '/git')
+    // and modal/drawer routes (e.g. /package/:author/:name?type=game or /package/:author/:name opened from Home '/').
+    this.initialUrlSynced = true;
+    const defaultTypeForPath =
+      path === '/games'
+        ? 'game'
+        : path === '/mods'
+          ? 'mod'
+          : path === '/texture-packs'
+            ? 'txp'
+            : 'all';
+    const defaultSourceForPath = path === '/git' ? 'git' : 'all';
 
-      if (queryPart !== undefined) {
-        const params = new URLSearchParams(queryPart);
-        const q = params.get('q') || '';
-        const type = params.get('type') || defaultTypeForPath;
-        const source = params.get('source') || defaultSourceForPath;
-        const tag = params.get('tag') || 'all';
-        const game = params.get('game') || 'all';
-        const sort = (params.get('sort') as SortOption) || 'downloads';
-        const favs = params.get('favs') === '1';
+    if (queryPart !== undefined) {
+      const params = new URLSearchParams(queryPart);
+      const q = params.get('q') || '';
+      const type = params.get('type') || defaultTypeForPath;
+      const source = params.get('source') || defaultSourceForPath;
+      const tag = params.get('tag') || 'all';
+      const game = params.get('game') || 'all';
+      const sort = (params.get('sort') as SortOption) || 'downloads';
+      const favs = params.get('favs') === '1';
 
-        this._searchInput.set(q);
-        this._searchQuery.set(q);
-        this._selectedType.set(type);
-        this._selectedSource.set(source);
-        this._selectedTag.set(tag);
-        this._selectedGame.set(game);
-        this._sortBy.set(sort);
-        this._showFavoritesOnly.set(favs);
-      } else if (!isModalRoute) {
-        this._searchInput.set('');
-        this._searchQuery.set('');
-        this._selectedType.set(defaultTypeForPath);
-        this._selectedSource.set(defaultSourceForPath);
-        this._selectedTag.set('all');
-        this._selectedGame.set('all');
-        this._sortBy.set('downloads');
-        this._showFavoritesOnly.set(false);
-      }
+      this._searchInput.set(q);
+      this._searchQuery.set(q);
+      this._selectedType.set(type);
+      this._selectedSource.set(source);
+      this._selectedTag.set(tag);
+      this._selectedGame.set(game);
+      this._sortBy.set(sort);
+      this._showFavoritesOnly.set(favs);
+    } else {
+      this._searchInput.set('');
+      this._searchQuery.set('');
+      this._selectedType.set(defaultTypeForPath);
+      this._selectedSource.set(defaultSourceForPath);
+      this._selectedTag.set('all');
+      this._selectedGame.set('all');
+      this._sortBy.set('downloads');
+      this._showFavoritesOnly.set(false);
     }
 
     if (path.startsWith('/package/') || path.startsWith('/packages/')) {
@@ -2828,6 +2877,7 @@ export class PackageService {
         this._isSetupModalOpen.set(false);
         this._isLegalModalOpen.set(false);
         this._activeAuthorUsername.set(null);
+        this.authService.closeProfileDrawer(false);
         this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
         return;
       }
@@ -2838,6 +2888,7 @@ export class PackageService {
         this._isSubmitModalOpen.set(false);
         this._isSetupModalOpen.set(false);
         this._isLegalModalOpen.set(false);
+        this.authService.closeProfileDrawer(false);
         this.openAuthorDrawer(decodeURIComponent(authorPart), false);
         return;
       }
@@ -2846,6 +2897,7 @@ export class PackageService {
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
       this._activeAuthorUsername.set(null);
+      this.authService.closeProfileDrawer(false);
       this.openPackageModalById(String(edgeSeed.author), String(edgeSeed.name), true);
       return;
     } else {
@@ -2857,6 +2909,7 @@ export class PackageService {
       this._activeAuthorUsername.set(null);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
+      this.authService.closeProfileDrawer(false);
       this._isSubmitModalOpen.set(true);
       this.seoService?.updateStaticRoute('Submit Git Package', 'Register your decentralized Git repository with Luanti Hub.', '/submit');
       return;
@@ -2865,16 +2918,25 @@ export class PackageService {
       this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isLegalModalOpen.set(false);
+      this.authService.closeProfileDrawer(false);
       this._isSetupModalOpen.set(true);
       this.seoService?.updateStaticRoute('In-Game Repository Setup', 'Configure your Luanti client to browse and install packages directly in-game.', '/setup');
       return;
     } else if (path === '/profile') {
+      const rawTab = queryPart ? new URLSearchParams(queryPart).get('tab') : null;
+      const resolvedTab: ProfileDrawerTab =
+        rawTab === 'favorites' ||
+        rawTab === 'account' ||
+        rawTab === 'moderation' ||
+        rawTab === 'promotions'
+          ? rawTab
+          : 'packages';
       this._activePackage.set(null);
       this._activeAuthorUsername.set(null);
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
-      this.authService.openProfileDrawer(false);
+      this.authService.openProfileDrawer(false, resolvedTab);
       this.seoService?.updateStaticRoute('Creator Profile', 'Manage your Luanti Hub packages, favorites, and connected identities.', '/profile');
       return;
     } else if (isAnalyticsRoute) {
@@ -2908,6 +2970,7 @@ export class PackageService {
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
+      this.authService.closeProfileDrawer(false);
       this.openBlogArticleModal(undefined, undefined, false);
       return;
     }
@@ -2933,6 +2996,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
 
     if (isCategoryRoute) {
       if (path === '/games') {
@@ -3000,6 +3064,10 @@ export class PackageService {
       !this._activePackage() &&
       !this._activeAuthorUsername() &&
       !this._activeBlogArticle() &&
+      !this._isSubmitModalOpen() &&
+      !this._isSetupModalOpen() &&
+      !this._isLegalModalOpen() &&
+      !this.authService.isProfileDrawerOpen() &&
       !this.pendingRoutePackage &&
       !this.pendingRouteBlogModal
     ) {
@@ -3007,9 +3075,11 @@ export class PackageService {
       const queryParams = this.buildActiveQueryParams(targetPath);
       const nextUrl = this.buildCanonicalUrlString(targetPath, queryParams);
       const currentUrl = this.getCurrentBrowserUrl();
+      const shouldReplace = replaceUrl || nextUrl === currentUrl;
+      const sameAsDismissed = !shouldReplace ? this.restoreDismissedOverlayBeforePush(nextUrl) : false;
       this.router.navigate([targetPath], {
         queryParams,
-        replaceUrl: replaceUrl || nextUrl === currentUrl
+        replaceUrl: shouldReplace || sameAsDismissed
       });
       return;
     }
@@ -4933,7 +5003,7 @@ export class PackageService {
   }
 
   setSearchQuery(query: string): void {
-    const wasSearching = Boolean(this._searchQuery().trim());
+    const wasSearching = Boolean(this._searchQuery().trim()) && !this.dismissedOverlayUrl;
     this._searchInput.set(query);
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
@@ -4947,7 +5017,7 @@ export class PackageService {
     }
 
     this.searchDebounceTimer = setTimeout(() => {
-      const alreadySearching = Boolean(this._searchQuery().trim());
+      const alreadySearching = Boolean(this._searchQuery().trim()) && !this.dismissedOverlayUrl;
       this._searchQuery.set(query);
       this._visibleCount.set(PAGE_SIZE);
       this.syncQueryParamsToUrl(alreadySearching);
@@ -4960,6 +5030,7 @@ export class PackageService {
    * cleanly deselects the previous primary tab.
    */
   selectPrimaryNavTab(tab: 'all' | 'game' | 'mod' | 'txp' | 'git' | 'favorites'): void {
+    this.closeAllModals(false);
     if (tab === 'all') {
       this._selectedType.set('all');
       this._selectedSource.set('all');
@@ -5027,6 +5098,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._selectedType.set('all');
     this._selectedSource.set('all');
     this._selectedTag.set('all');
@@ -5036,11 +5108,7 @@ export class PackageService {
     this._searchQuery.set(clean);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    if (this.router) {
-      this.router.navigate(['/'], {
-        queryParams: this.buildActiveQueryParams()
-      });
-    }
+    this.navigatePreservingScroll(['/']);
   }
 
   /**
@@ -5064,6 +5132,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._searchInput.set('');
     this._searchQuery.set('');
     this._selectedType.set('all');
@@ -5073,11 +5142,7 @@ export class PackageService {
     this._selectedTag.set(tag);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    if (this.router) {
-      this.router.navigate(['/'], {
-        queryParams: this.buildActiveQueryParams()
-      });
-    }
+    this.navigatePreservingScroll(['/']);
   }
 
   setTagFilter(tag: string): void {
@@ -5117,6 +5182,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._searchInput.set('');
     this._searchQuery.set('');
     this._selectedType.set('all');
@@ -5126,11 +5192,7 @@ export class PackageService {
     this._showFavoritesOnly.set(false);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    if (this.router) {
-      this.router.navigate(['/'], {
-        queryParams: this.buildActiveQueryParams()
-      });
-    }
+    this.navigatePreservingScroll(['/']);
   }
 
   setSortBy(sort: SortOption, updateUrl = true): void {
@@ -5165,6 +5227,10 @@ export class PackageService {
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
+    if (replaceUrl) {
+      this.dismissedOverlayUrl = null;
+      this.lastDismissedCatalogUrl = null;
+    }
     this._searchInput.set('');
     this._searchQuery.set('');
     this._selectedType.set('all');
@@ -5190,9 +5256,12 @@ export class PackageService {
       this._isSubmitModalOpen.set(false);
       this._isSetupModalOpen.set(false);
       this._isLegalModalOpen.set(false);
+      this.authService.closeProfileDrawer(false);
       this.seoService?.resetToHome();
       if (this.router) {
         const currentUrl = this.getCurrentBrowserUrl();
+        const shouldReplace = replaceUrl || currentUrl === '/';
+        const sameAsDismissed = !shouldReplace ? this.restoreDismissedOverlayBeforePush('/') : false;
         this.router.navigate(['/'], {
           queryParams: {
             q: null,
@@ -5203,7 +5272,7 @@ export class PackageService {
             sort: null,
             favs: null
           },
-          replaceUrl: replaceUrl || currentUrl === '/'
+          replaceUrl: shouldReplace || sameAsDismissed
         });
       }
       return;
@@ -8395,7 +8464,51 @@ export class PackageService {
     return selected;
   }
 
-  private navigatePreservingScroll(commands: any[]): void {
+  private dismissedOverlayUrl: string | null = null;
+  private lastDismissedCatalogUrl: string | null = null;
+  private pendingDismissalReplace = false;
+
+  /**
+   * Restores a previously dismissed overlay URL onto the current history entry immediately before
+   * pushing a new forward history entry (`nextUrl`). This keeps the full chronological sequence
+   * of visited dialogs/drawers intact in `window.history` when navigating forward, while avoiding
+   * pushing a duplicate catalog entry on top of an overlay when `X` / Escape is pressed.
+   */
+  private restoreDismissedOverlayBeforePush(nextUrl: string): boolean {
+    const pendingOverlayUrl = this.dismissedOverlayUrl;
+    this.dismissedOverlayUrl = null;
+    this.lastDismissedCatalogUrl = null;
+    if (!pendingOverlayUrl) {
+      return false;
+    }
+    if (pendingOverlayUrl === nextUrl) {
+      return true;
+    }
+    if (typeof window !== 'undefined' && window.history && typeof window.history.replaceState === 'function') {
+      try {
+        window.history.replaceState(window.history.state, '', pendingOverlayUrl);
+      } catch {
+        // Ignore history state restoration errors
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Dismisses an open modal/drawer to the active catalog route in-place (`replaceUrl: true`)
+   * without pushing a forward catalog entry on top of the modal entry, preventing Back-button loops.
+   */
+  private dismissOverlayToCatalog(): void {
+    this.pendingDismissalReplace = true;
+    this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+  }
+
+  private navigatePreservingScroll(
+    commands: any[],
+    extraQueryParams?: Record<string, string | null>
+  ): void {
+    const isDismissal = this.pendingDismissalReplace;
+    this.pendingDismissalReplace = false;
     if (!this.router) return;
     const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
     const firstCmd = typeof commands?.[0] === 'string' ? commands[0] : '/';
@@ -8404,14 +8517,38 @@ export class PackageService {
         ? commands.map(seg => String(seg ?? '')).join('/').replace(/^\/+/, '/')
         : '/';
     const targetPath = rawTargetPath.startsWith('/') ? rawTargetPath : `/${rawTargetPath}`;
-    const queryParams = this.buildActiveQueryParams(firstCmd);
+    const queryParams: Record<string, string | null> = {
+      ...this.buildActiveQueryParams(firstCmd),
+      ...(extraQueryParams || {})
+    };
     const nextUrl = this.buildCanonicalUrlString(targetPath, queryParams);
     const currentUrl = this.getCurrentBrowserUrl();
+
+    if (isDismissal) {
+      if (this.isModalUrlPath(currentUrl)) {
+        this.dismissedOverlayUrl = currentUrl;
+        this.lastDismissedCatalogUrl = nextUrl;
+      }
+      this.router
+        .navigate(commands, {
+          queryParams,
+          replaceUrl: true
+        })
+        .then(() => {
+          if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+            window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+          }
+        });
+      return;
+    }
+
+    const isSameUrl = nextUrl === currentUrl;
+    const sameAsDismissed = !isSameUrl ? this.restoreDismissedOverlayBeforePush(nextUrl) : false;
 
     this.router
       .navigate(commands, {
         queryParams,
-        replaceUrl: nextUrl === currentUrl
+        replaceUrl: isSameUrl || sameAsDismissed
       })
       .then(() => {
         if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
@@ -8435,6 +8572,17 @@ export class PackageService {
     const hydratedPkg: LuantiPackage = catalogMatch
       ? this.mergeDualSourcePackage(catalogMatch, { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` })
       : { ...pkg, author: resolvedAuthor, id: pkg.id || `${resolvedAuthor}/${pkg.name}` };
+
+    if (updateUrl) {
+      this.returnToAuthorAfterPackageModal = null;
+    }
+    this.pendingRouteBlogModal = false;
+    this._activeBlogArticle.set(null);
+    this._activeAuthorUsername.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
 
     this.startInEditTagsMode.set(editTags);
     const isAlreadyDeepHydrated = this.deepHydratedIds.has(targetId);
@@ -8903,9 +9051,20 @@ export class PackageService {
       this.returnToPackageAfterAuthorDrawer = returnToPkg;
     } else if (this._activePackage()) {
       this.returnToPackageAfterAuthorDrawer = this._activePackage();
+    } else if (updateUrl) {
+      this.returnToPackageAfterAuthorDrawer = null;
     }
-
+    if (updateUrl) {
+      this.returnToAuthorAfterPackageModal = null;
+    }
+    this.pendingRoutePackage = null;
+    this.pendingRouteBlogModal = false;
     this._activePackage.set(null);
+    this._activeBlogArticle.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._activeAuthorUsername.set(clean);
 
     const lower = clean.toLowerCase();
@@ -9079,12 +9238,12 @@ export class PackageService {
 
   openPackageFromAuthorDrawer(pkg: LuantiPackage, updateUrl = true): void {
     const currentAuthor = this._activeAuthorUsername();
-    if (currentAuthor) {
-      this.returnToAuthorAfterPackageModal = currentAuthor;
-    }
     this.returnToPackageAfterAuthorDrawer = null;
     this._activeAuthorUsername.set(null);
     this.openPackageModal(pkg, updateUrl);
+    if (currentAuthor) {
+      this.returnToAuthorAfterPackageModal = currentAuthor;
+    }
   }
 
   closeAuthorDrawer(updateUrl = true, restorePrevious = true): void {
@@ -9093,12 +9252,15 @@ export class PackageService {
     const prevPkg = this.returnToPackageAfterAuthorDrawer;
     this.returnToPackageAfterAuthorDrawer = null;
     if (restorePrevious && prevPkg) {
+      if (updateUrl) {
+        this.pendingDismissalReplace = true;
+      }
       this.openPackageModal(prevPkg, updateUrl);
       return;
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
@@ -9113,16 +9275,30 @@ export class PackageService {
     const prevAuthor = this.returnToAuthorAfterPackageModal;
     this.returnToAuthorAfterPackageModal = null;
     if (restorePrevious && prevAuthor) {
+      if (updateUrl) {
+        this.pendingDismissalReplace = true;
+      }
       this.openAuthorDrawer(prevAuthor, updateUrl, null);
       return;
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
   openSubmitModal(updateUrl = true): void {
+    this.returnToPackageAfterModal = null;
+    this.returnToPackageAfterAuthorDrawer = null;
+    this.returnToAuthorAfterPackageModal = null;
+    this.pendingRoutePackage = null;
+    this.pendingRouteBlogModal = false;
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._activeBlogArticle.set(null);
+    this._isSetupModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._isSubmitModalOpen.set(true);
     if (updateUrl) {
       this.navigatePreservingScroll(['/submit']);
@@ -9133,7 +9309,7 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
@@ -9142,7 +9318,17 @@ export class PackageService {
       this.returnToPackageAfterModal = returnToPkg;
     } else if (this._activePackage()) {
       this.returnToPackageAfterModal = this._activePackage();
+    } else if (updateUrl) {
+      this.returnToPackageAfterModal = null;
     }
+    this.pendingRoutePackage = null;
+    this.pendingRouteBlogModal = false;
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._activeBlogArticle.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this._isSetupModalOpen.set(true);
     if (updateUrl) {
       this.navigatePreservingScroll(['/setup']);
@@ -9154,18 +9340,28 @@ export class PackageService {
     const prevPkg = this.returnToPackageAfterModal;
     this.returnToPackageAfterModal = null;
     if (prevPkg) {
+      if (updateUrl) {
+        this.pendingDismissalReplace = true;
+      }
       this.openPackageModal(prevPkg, updateUrl);
       return;
     }
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
   openLegalModal(updateUrl = true): void {
-    this._isLegalModalOpen.set(true);
+    this.pendingRoutePackage = null;
+    this.pendingRouteBlogModal = false;
+    this._activePackage.set(null);
+    this._activeAuthorUsername.set(null);
+    this._activeBlogArticle.set(null);
+    this._isSubmitModalOpen.set(false);
+    this._isSetupModalOpen.set(false);
     this.authService.closeProfileDrawer(false);
+    this._isLegalModalOpen.set(true);
     if (updateUrl) {
       this.navigatePreservingScroll(['/legal']);
     }
@@ -9175,7 +9371,7 @@ export class PackageService {
     this._isLegalModalOpen.set(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 
@@ -9254,9 +9450,10 @@ export class PackageService {
     this._isSubmitModalOpen.set(false);
     this._isSetupModalOpen.set(false);
     this._isLegalModalOpen.set(false);
+    this.authService.closeProfileDrawer(false);
     this.seoService?.resetToHome();
     if (updateUrl) {
-      this.navigatePreservingScroll([this.getPrimaryCategoryRoutePath()]);
+      this.dismissOverlayToCatalog();
     }
   }
 

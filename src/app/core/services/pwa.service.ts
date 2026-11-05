@@ -1213,10 +1213,14 @@ export class PwaService {
         if (typeof origReplaceState === 'function') {
           const self = this;
           const wrappedReplace = function (this: History, data: any, unused: string, url?: string | URL | null) {
+            const explicitIdx =
+              data && typeof data === 'object' && typeof data.__lhNavIdx === 'number'
+                ? data.__lhNavIdx
+                : self.navHistoryCursor;
             const nextData =
               data && typeof data === 'object'
-                ? { ...data, __lhNavIdx: self.navHistoryCursor }
-                : { __lhNavIdx: self.navHistoryCursor };
+                ? { ...data, __lhNavIdx: explicitIdx }
+                : { __lhNavIdx: explicitIdx };
             const res = origReplaceState.call(this, nextData, unused, url);
             self.updateNavigationHistoryState(false);
             return res;
@@ -1246,6 +1250,8 @@ export class PwaService {
           if (idx > this.navHistoryMaxCursor) {
             this.navHistoryMaxCursor = idx;
           }
+        } else if (!state || (typeof state.__lhNavIdx !== 'number' && typeof state.navigationId !== 'number')) {
+          this.navHistoryCursor = 0;
         }
       }
 
@@ -1259,6 +1265,10 @@ export class PwaService {
     } catch {
       // ignore
     }
+  }
+
+  getNavHistoryCursor(): number {
+    return this.navHistoryCursor;
   }
 
   navigateBack(): void {

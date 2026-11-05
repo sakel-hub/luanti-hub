@@ -162,7 +162,7 @@ import {
               type="button"
               role="tab"
               [attr.aria-selected]="activeTab() === 'packages'"
-              (click)="activeTab.set('packages')"
+              (click)="onSelectPackagesTab()"
               [class]="activeTab() === 'packages' ? 'bg-sky-500/30 border border-sky-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
               class="flex-1 min-w-[130px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
               <svg lucideLayers class="w-3.5 h-3.5 text-sky-400 flex-shrink-0"></svg>
@@ -176,7 +176,7 @@ import {
               type="button"
               role="tab"
               [attr.aria-selected]="activeTab() === 'favorites'"
-              (click)="activeTab.set('favorites')"
+              (click)="onSelectFavoritesTab()"
               [class]="activeTab() === 'favorites' ? 'bg-rose-500/25 border border-rose-400/50 text-white shadow-sm' : 'border border-transparent text-slate-400 hover:text-white hover:bg-white/5'"
               class="flex-1 min-w-[125px] py-2 px-3 rounded-xl transition-all duration-200 flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer">
               <svg lucideHeart class="w-3.5 h-3.5 text-rose-400 flex-shrink-0"></svg>
@@ -2228,21 +2228,23 @@ export class ProfileDrawerComponent implements OnInit {
         this.authService.consumeRequestedDrawerTab();
         if (requestedTab === 'moderation') {
           if (this.authService.isAdmin()) {
-            this.onSelectModerationTab();
+            this.onSelectModerationTab(false);
           }
         } else if (requestedTab === 'promotions') {
           if (this.authService.isAdmin()) {
-            this.onSelectPromotionsTab();
+            this.onSelectPromotionsTab(false);
           }
         } else if (requestedTab === 'account') {
-          this.onSelectAccountTab();
+          this.onSelectAccountTab(false);
+        } else if (requestedTab === 'favorites') {
+          this.onSelectFavoritesTab(false);
         } else {
-          this.activeTab.set(requestedTab);
+          this.onSelectPackagesTab(false);
         }
       }
       if (this.authService.requestAccountDeleteConfirm()) {
         this.authService.requestAccountDeleteConfirm.set(false);
-        this.onSelectAccountTab();
+        this.onSelectAccountTab(false);
         this.isDeleteSectionExpanded.set(true);
         this.isConfirmingAccountDelete.set(true);
         this.deleteAccountError.set(null);
@@ -2413,13 +2415,33 @@ export class ProfileDrawerComponent implements OnInit {
     return this.authService.linkedIdentities().some(id => id.provider === provider);
   }
 
-  onSelectAccountTab(): void {
+  onSelectPackagesTab(updateUrl = true): void {
+    const changed = this.activeTab() !== 'packages';
+    this.activeTab.set('packages');
+    if (updateUrl && changed) {
+      this.authService.selectProfileDrawerTab('packages', true);
+    }
+  }
+
+  onSelectFavoritesTab(updateUrl = true): void {
+    const changed = this.activeTab() !== 'favorites';
+    this.activeTab.set('favorites');
+    if (updateUrl && changed) {
+      this.authService.selectProfileDrawerTab('favorites', true);
+    }
+  }
+
+  onSelectAccountTab(updateUrl = true): void {
+    const changed = this.activeTab() !== 'account';
     this.activeTab.set('account');
     this.myReportsManualOpen.set(null);
     this.isDeleteSectionExpanded.set(false);
     this.isConfirmingAccountDelete.set(false);
     this.deleteAccountError.set(null);
     this.authService.fetchMyReports(false, 1);
+    if (updateUrl && changed) {
+      this.authService.selectProfileDrawerTab('account', true);
+    }
   }
 
   toggleDeleteSection(): void {
@@ -2482,20 +2504,28 @@ export class ProfileDrawerComponent implements OnInit {
     this.authService.fetchMyReports(true, nextPage);
   }
 
-  onSelectModerationTab(): void {
+  onSelectModerationTab(updateUrl = true): void {
     if (!this.authService.isAdmin()) return;
+    const changed = this.activeTab() !== 'moderation';
     this.activeTab.set('moderation');
     this.authService.fetchModerationQueue(true);
+    if (updateUrl && changed) {
+      this.authService.selectProfileDrawerTab('moderation', true);
+    }
   }
 
-  onSelectPromotionsTab(): void {
+  onSelectPromotionsTab(updateUrl = true): void {
     if (!this.authService.isAdmin()) return;
+    const changed = this.activeTab() !== 'promotions';
     this.activeTab.set('promotions');
     this.promoFeedback.set(null);
     if (!this.promoExpiresAtLocal) {
       this.resetPromotionForm();
     }
     this.packageService.fetchAdminPromotions();
+    if (updateUrl && changed) {
+      this.authService.selectProfileDrawerTab('promotions', true);
+    }
   }
 
   private toLocalDatetimeInput(date: Date): string {

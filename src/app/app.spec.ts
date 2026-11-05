@@ -8499,11 +8499,77 @@ supported_games = minetest_game, voxelibre
     pkgService.resetFilters(true);
   });
 
-  it('should push browser history entries when browsing categories and opening/closing package detail dialogs (Home -> Open Dialog -> Close Dialog -> Mods -> Textures), and seed Home (/) for direct deep links', () => {
+  it('should maintain deterministic chronological browser history across categories, multiple package detail dialogs, and sidebars/drawers without getting stuck opening/closing dialogs on Back', () => {
     const pkgService = TestBed.inject(PackageService);
+    const authService = TestBed.inject(AuthService);
+    const pwaService = TestBed.inject(PwaService);
     const router = (pkgService as any).router;
-    window.history.replaceState({ __lhNavIdx: 0 }, '', '/');
-    pkgService.resetFilters(true, true);
+
+    const pkg1: LuantiPackage = {
+      id: 'ElCeejo/draconis',
+      author: 'ElCeejo',
+      name: 'draconis',
+      title: 'Draconis',
+      type: 'mod',
+      short_desc: 'Dragons mod',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 48000,
+      license: 'MIT',
+      source: 'official',
+      tags: ['mobs']
+    };
+    const pkg2: LuantiPackage = {
+      id: 'Wuzzy/mineclone2',
+      author: 'Wuzzy',
+      name: 'mineclone2',
+      title: 'VoxeLibre',
+      type: 'game',
+      short_desc: 'Survival sandbox game',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 420000,
+      license: 'GPL-3.0-only',
+      source: 'official',
+      tags: ['survival']
+    };
+    (pkgService as any)._packages.set([pkg1, pkg2]);
+
+    // Track actual browser history stack entries as pushState / replaceState / back execute
+    const historyStack: string[] = ['/'];
+    let historyCursor = 0;
+
+    const origPushState = window.history.pushState.bind(window.history);
+    const origReplaceState = window.history.replaceState.bind(window.history);
+
+    const pushSpy = vi.spyOn(window.history, 'pushState').mockImplementation(((data: any, unused: string, url?: string | URL | null) => {
+      const nextUrl = url ? String(url) : window.location.pathname + window.location.search;
+      historyStack.splice(historyCursor + 1);
+      historyStack.push(nextUrl);
+      historyCursor = historyStack.length - 1;
+      (pwaService as any).navHistoryCursor = historyCursor;
+      return origReplaceState({ ...(data || {}), __lhNavIdx: historyCursor }, unused, nextUrl);
+    }) as any);
+
+    const replaceSpy = vi.spyOn(window.history, 'replaceState').mockImplementation(((data: any, unused: string, url?: string | URL | null) => {
+      const nextUrl = url ? String(url) : window.location.pathname + window.location.search;
+      historyStack[historyCursor] = nextUrl;
+      return origReplaceState({ ...(data || {}), __lhNavIdx: historyCursor }, unused, nextUrl);
+    }) as any);
+
+    const stepBack = () => {
+      if (historyCursor > 0) {
+        historyCursor -= 1;
+      }
+      (pwaService as any).navHistoryCursor = historyCursor;
+      const targetUrl = historyStack[historyCursor];
+      origReplaceState({ __lhNavIdx: historyCursor }, '', targetUrl);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    };
+
+    const backSpy = vi.spyOn(window.history, 'back').mockImplementation(() => {
+      stepBack();
+    });
 
     const navigateSpy = vi.spyOn(router, 'navigate').mockImplementation(((commands: any, extras?: any) => {
       const targetPath = Array.isArray(commands) && commands.length > 0 ? commands.join('/').replace(/^\/\//, '/') : '/';
@@ -8517,97 +8583,184 @@ supported_games = minetest_game, voxelibre
       return Promise.resolve(true);
     }) as any);
 
-    // 1. Step-by-step category navigation pushes real history entries (replaceUrl: false)
+    pkgService.resetFilters(true, true);
+    historyStack.length = 0;
+    historyStack.push('/');
+    historyCursor = 0;
+    (pwaService as any).navHistoryCursor = 0;
+
+    // 1. User's exact scenario (dismissing dialogs with X between steps):
+    // Home (/) -> Games (/games) -> Open Package Dialog 1 -> Close X -> Open Package Dialog 2 -> Close X -> Mods (/mods) -> Textures (/texture-packs)
     pkgService.selectPrimaryNavTab('game');
-    expect(navigateSpy).toHaveBeenLastCalledWith(['/games'], expect.objectContaining({ replaceUrl: false }));
     expect(window.location.pathname).toBe('/games');
 
     // Clicking the already-active tab replaces instead of pushing a duplicate entry
     pkgService.selectPrimaryNavTab('game');
     expect(navigateSpy).toHaveBeenLastCalledWith(['/games'], expect.objectContaining({ replaceUrl: true }));
 
-    pkgService.selectPrimaryNavTab('mod');
-    expect(navigateSpy).toHaveBeenLastCalledWith(['/mods'], expect.objectContaining({ replaceUrl: false }));
-    expect(window.location.pathname).toBe('/mods');
+    pkgService.openPackageModal(pkg1);
+    expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
+    expect(window.location.pathname).toBe('/package/ElCeejo/draconis');
 
+    // Dismissing Dialog 1 with X replaces URL in-place with /games (replaceUrl: true) and records dismissedOverlayUrl
+    pkgService.closePackageModal(true);
+    expect(navigateSpy).toHaveBeenLastCalledWith(['/games'], expect.objectContaining({ replaceUrl: true }));
+    expect(pkgService.activePackage()).toBeNull();
+    expect(window.location.pathname).toBe('/games');
+
+    // Opening Package Dialog 2 restores Package Dialog 1 in historyStack and pushes Package Dialog 2
+    pkgService.openPackageModal(pkg2);
+    expect(pkgService.activePackage()?.id).toBe('Wuzzy/mineclone2');
+    expect(window.location.pathname).toBe('/package/Wuzzy/mineclone2');
+
+    // Dismissing Dialog 2 with X replaces URL in-place with /games
+    pkgService.closePackageModal(true);
+    expect(pkgService.activePackage()).toBeNull();
+    expect(window.location.pathname).toBe('/games');
+
+    // Clicking Mods -> Textures restores Package Dialog 2 in historyStack and pushes /mods -> /texture-packs
+    pkgService.selectPrimaryNavTab('mod');
+    expect(window.location.pathname).toBe('/mods');
     pkgService.selectPrimaryNavTab('txp');
-    expect(navigateSpy).toHaveBeenLastCalledWith(['/texture-packs'], expect.objectContaining({ replaceUrl: false }));
     expect(window.location.pathname).toBe('/texture-packs');
 
-    // Simulating Browser Back step-by-step via popstate restores Mods -> Games -> Home
-    window.history.replaceState(window.history.state, '', '/mods');
-    window.dispatchEvent(new PopStateEvent('popstate'));
-    expect(pkgService.selectedType()).toBe('mod');
+    expect(historyStack).toEqual([
+      '/',
+      '/games',
+      '/package/ElCeejo/draconis?type=game',
+      '/package/Wuzzy/mineclone2?type=game',
+      '/mods',
+      '/texture-packs'
+    ]);
 
-    window.history.replaceState(window.history.state, '', '/games');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    // Going Back step-by-step: Textures -> Mods -> Package Dialog 2 -> Package Dialog 1 -> Games -> Home
+    stepBack();
+    expect(window.location.pathname).toBe('/mods');
+    expect(pkgService.selectedType()).toBe('mod');
+    expect(pkgService.activePackage()).toBeNull();
+
+    stepBack();
+    expect(window.location.pathname).toBe('/package/Wuzzy/mineclone2');
+    expect(pkgService.activePackage()?.id).toBe('Wuzzy/mineclone2');
     expect(pkgService.selectedType()).toBe('game');
 
-    window.history.replaceState(window.history.state, '', '/');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    stepBack();
+    expect(window.location.pathname).toBe('/package/ElCeejo/draconis');
+    expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
+    expect(pkgService.selectedType()).toBe('game');
+
+    stepBack();
+    expect(window.location.pathname).toBe('/games');
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.selectedType()).toBe('game');
+
+    stepBack();
+    expect(window.location.pathname).toBe('/');
+    expect(pkgService.activePackage()).toBeNull();
     expect(pkgService.selectedType()).toBe('all');
     expect(pkgService.hasActiveFilters()).toBe(false);
 
-    // 2. Full dialog + category history flow:
-    // Home (/) -> Open Package Details (/package/ElCeejo/draconis) -> Close Dialog (/) -> Mods (/mods) -> Textures (/texture-packs)
-    pkgService.openPackageModal({
-      id: 'ElCeejo/draconis',
-      author: 'ElCeejo',
-      name: 'draconis',
-      title: 'Draconis',
-      type: 'mod',
-      short_desc: 'Dragons mod',
-      thumbnail: 'logo.svg',
-      score: 4.9,
-      downloads: 48000,
-      license: 'MIT',
-      source: 'official',
-      tags: ['mobs']
-    });
-    expect(navigateSpy).toHaveBeenLastCalledWith(
-      ['/package', 'ElCeejo', 'draconis'],
-      expect.objectContaining({ replaceUrl: false })
-    );
-    expect(window.location.pathname).toBe('/package/ElCeejo/draconis');
+    // 2. Verify NO open/close loop when pressing X on a dialog after navigating Back, and then pressing Back again:
+    // Home (/) -> Games (/games) -> Open Package Dialog 1 -> Close X -> Press Back -> lands directly on Home (/) without reopening Dialog 1!
+    pkgService.selectPrimaryNavTab('game');
+    pkgService.openPackageModal(pkg1);
     expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
 
-    // Closing the dialog pushes the underlying catalog URL ('/') onto browser history (replaceUrl: false)
     pkgService.closePackageModal(true);
-    expect(navigateSpy).toHaveBeenLastCalledWith(
-      ['/'],
-      expect.objectContaining({ replaceUrl: false })
-    );
+    expect(pkgService.activePackage()).toBeNull();
+    expect(window.location.pathname).toBe('/games');
+
+    // Pressing Back after closing Dialog 1 with X skips the duplicate /games entry and lands directly on Home ('/')
+    stepBack();
     expect(pkgService.activePackage()).toBeNull();
     expect(window.location.pathname).toBe('/');
-
-    // Navigate to Mods (/mods) -> Textures (/texture-packs)
-    pkgService.selectPrimaryNavTab('mod');
-    expect(navigateSpy).toHaveBeenLastCalledWith(['/mods'], expect.objectContaining({ replaceUrl: false }));
-    pkgService.selectPrimaryNavTab('txp');
-    expect(navigateSpy).toHaveBeenLastCalledWith(['/texture-packs'], expect.objectContaining({ replaceUrl: false }));
-
-    // Step backward through history: Textures -> Mods -> Home (dialog closed) -> Package Details (dialog open) -> Home (dialog closed)
-    window.history.replaceState(window.history.state, '', '/mods');
-    window.dispatchEvent(new PopStateEvent('popstate'));
-    expect(pkgService.selectedType()).toBe('mod');
-    expect(pkgService.activePackage()).toBeNull();
-
-    window.history.replaceState(window.history.state, '', '/');
-    window.dispatchEvent(new PopStateEvent('popstate'));
     expect(pkgService.selectedType()).toBe('all');
-    expect(pkgService.activePackage()).toBeNull();
 
-    window.history.replaceState(window.history.state, '', '/package/ElCeejo/draconis');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    // 2b. Verify nested sub-overlay X dismissal (Games -> Package Dialog 1 -> Author Drawer -> Close Author X -> Close Package X -> Press Back)
+    //     lands directly on Home ('/') without reopening Package Dialog 1 or Author Drawer
+    pkgService.selectPrimaryNavTab('game');
+    pkgService.openPackageModal(pkg1);
+    pkgService.openAuthorDrawer('sakel-hub', true);
+    expect(pkgService.activeAuthorUsername()).toBe('sakel-hub');
+
+    pkgService.closeAuthorDrawer(true, true);
+    expect(pkgService.activeAuthorUsername()).toBeNull();
     expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
 
-    window.history.replaceState(window.history.state, '', '/');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    pkgService.closePackageModal(true);
     expect(pkgService.activePackage()).toBeNull();
+    expect(window.location.pathname).toBe('/games');
+
+    stepBack();
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(window.location.pathname).toBe('/');
     expect(pkgService.selectedType()).toBe('all');
 
-    // 3. Direct deep-link entry on /package/:author/:name seeds '/' (Home) in window.history first
-    const pwaService = TestBed.inject(PwaService);
+    // 3. Sidebar / Drawer history (Profile Drawer tabs + Author Drawer + Package Dialog):
+    (authService as any)._currentUser.set({
+      id: 'usr_sakel',
+      username: 'sakel-hub',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      bio: '',
+      role: 'admin',
+      is_admin: true,
+      identities: [{ provider: 'github', username: 'sakel-hub', verified: true }]
+    });
+
+    authService.openProfileDrawer(true);
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(authService.activeProfileTab()).toBe('packages');
+    expect(window.location.pathname + window.location.search).toBe('/profile');
+
+    authService.selectProfileDrawerTab('account', true);
+    expect(authService.activeProfileTab()).toBe('account');
+    expect(window.location.pathname + window.location.search).toBe('/profile?tab=account');
+
+    authService.selectProfileDrawerTab('favorites', true);
+    expect(authService.activeProfileTab()).toBe('favorites');
+    expect(window.location.pathname + window.location.search).toBe('/profile?tab=favorites');
+
+    pkgService.openAuthorDrawer('sakel-hub', true);
+    expect(authService.isProfileDrawerOpen()).toBe(false);
+    expect(pkgService.activeAuthorUsername()).toBe('sakel-hub');
+    expect(window.location.pathname).toBe('/author/sakel-hub');
+
+    pkgService.openPackageFromAuthorDrawer(pkg1, true);
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(pkgService.activePackage()?.id).toBe('ElCeejo/draconis');
+    expect(window.location.pathname).toBe('/package/ElCeejo/draconis');
+
+    // Step backward through drawers & profile tabs:
+    // Package Dialog -> Author Drawer -> Profile (favorites) -> Profile (account) -> Profile (packages) -> Home
+    stepBack();
+    expect(pkgService.activePackage()).toBeNull();
+    expect(pkgService.activeAuthorUsername()).toBe('sakel-hub');
+    expect(authService.isProfileDrawerOpen()).toBe(false);
+
+    stepBack();
+    expect(pkgService.activeAuthorUsername()).toBeNull();
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(authService.activeProfileTab()).toBe('favorites');
+
+    stepBack();
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(authService.activeProfileTab()).toBe('account');
+
+    stepBack();
+    expect(authService.isProfileDrawerOpen()).toBe(true);
+    expect(authService.activeProfileTab()).toBe('packages');
+
+    stepBack();
+    expect(authService.isProfileDrawerOpen()).toBe(false);
+    expect(window.location.pathname).toBe('/');
+
+    pushSpy.mockRestore();
+    replaceSpy.mockRestore();
+    backSpy.mockRestore();
+
+    // 4. Direct deep-link entry on /package/:author/:name seeds '/' (Home) in window.history first
     (pwaService as any).navHistoryCursor = 0;
     const replaceStateSpy = vi.spyOn(window.history, 'replaceState');
     const pushStateSpy = vi.spyOn(window.history, 'pushState');
@@ -8634,9 +8787,8 @@ supported_games = minetest_game, voxelibre
     window.history.replaceState({ __lhNavIdx: 0 }, '', '/');
     pkgService.resetFilters(true, true);
 
-    // 4. Clicking "+ Direct Author / Community Sign-In" in ProfileDrawerComponent while logged in
+    // 5. Clicking "+ Direct Author / Community Sign-In" in ProfileDrawerComponent while logged in
     //    must open AuthModalComponent with Direct Sign-In expanded (and pre-select unlinked provider)
-    const authService = TestBed.inject(AuthService);
     (authService as any)._currentUser.set({
       id: 'usr_sakel',
       username: 'sakel-hub',

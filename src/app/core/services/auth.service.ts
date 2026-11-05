@@ -104,6 +104,8 @@ export function formatFriendlyAuthError(
   );
 }
 
+export type ProfileDrawerTab = 'packages' | 'favorites' | 'account' | 'moderation' | 'promotions';
+
 @Injectable({
   providedIn: 'root'
 })
@@ -111,6 +113,13 @@ export class AuthService {
   private readonly settingsService = inject(SettingsService);
   private readonly pwaService = inject(PwaService);
   private readonly router = inject(Router, { optional: true });
+  private profileHistoryNavigator?: (action: 'open' | 'close' | 'tab', tab?: ProfileDrawerTab) => void;
+
+  registerProfileHistoryNavigator(
+    fn: (action: 'open' | 'close' | 'tab', tab?: ProfileDrawerTab) => void
+  ): void {
+    this.profileHistoryNavigator = fn;
+  }
 
   private readonly _currentUser = signal<AuthUser | null>(null);
   private readonly _isAuthModalOpen = signal<boolean>(false);
@@ -135,7 +144,8 @@ export class AuthService {
   private readonly _moderationStatusFilter = signal<'open' | 'closed' | 'delisted'>('open');
   private readonly _moderationReasonFilter = signal<string>('all');
   private readonly _closedReportsCount = signal<number>(0);
-  private readonly _requestedDrawerTab = signal<'packages' | 'favorites' | 'account' | 'moderation' | 'promotions' | null>(null);
+  private readonly _requestedDrawerTab = signal<ProfileDrawerTab | null>(null);
+  private readonly _activeProfileTab = signal<ProfileDrawerTab>('packages');
   private readonly _expandDirectSignInOnOpen = signal<boolean>(false);
   readonly requestAccountDeleteConfirm = signal<boolean>(false);
   readonly expandDirectSignInOnOpen = this._expandDirectSignInOnOpen.asReadonly();
@@ -173,6 +183,7 @@ export class AuthService {
   readonly moderationReasonFilter = this._moderationReasonFilter.asReadonly();
   readonly closedReportsCount = this._closedReportsCount.asReadonly();
   readonly requestedDrawerTab = this._requestedDrawerTab.asReadonly();
+  readonly activeProfileTab = this._activeProfileTab.asReadonly();
 
   readonly isLoggedIn = computed(() => this._currentUser() !== null);
   readonly isAdmin = computed(() => {
@@ -644,30 +655,75 @@ export class AuthService {
     }
   }
 
-  openProfileDrawer(updateUrl = true): void {
+  openProfileDrawer(updateUrl = true, tab?: ProfileDrawerTab): void {
+    const resolvedTab: ProfileDrawerTab = tab ?? this._requestedDrawerTab() ?? 'packages';
+    this._activeProfileTab.set(resolvedTab);
+    this._requestedDrawerTab.set(resolvedTab);
     this._isProfileDrawerOpen.set(true);
     if (this.isAdmin()) {
       this.fetchModerationQueue();
     }
-    if (updateUrl && this.router) {
-      const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
-      this.router.navigate(['/profile'], { queryParamsHandling: 'preserve' }).then(() => {
-        if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
-          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
-        }
-      });
+    if (updateUrl) {
+      if (this.profileHistoryNavigator) {
+        this.profileHistoryNavigator('open', resolvedTab);
+      } else if (this.router) {
+        const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
+        this.router
+          .navigate(['/profile'], {
+            queryParams: { tab: resolvedTab !== 'packages' ? resolvedTab : null },
+            queryParamsHandling: 'merge'
+          })
+          .then(() => {
+            if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+              window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+            }
+          });
+      }
+    }
+  }
+
+  selectProfileDrawerTab(tab: ProfileDrawerTab, updateUrl = true): void {
+    this._activeProfileTab.set(tab);
+    this._requestedDrawerTab.set(tab);
+    if (updateUrl && this._isProfileDrawerOpen()) {
+      if (this.profileHistoryNavigator) {
+        this.profileHistoryNavigator('tab', tab);
+      } else if (this.router) {
+        const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
+        this.router
+          .navigate(['/profile'], {
+            queryParams: { tab: tab !== 'packages' ? tab : null },
+            queryParamsHandling: 'merge'
+          })
+          .then(() => {
+            if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+              window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+            }
+          });
+      }
     }
   }
 
   closeProfileDrawer(updateUrl = true): void {
     this._isProfileDrawerOpen.set(false);
-    if (updateUrl && this.router && typeof window !== 'undefined' && window.location.pathname === '/profile') {
-      const savedY = window.scrollY;
-      this.router.navigate(['/'], { queryParamsHandling: 'preserve' }).then(() => {
-        if (savedY > 0 && window.scrollY !== savedY) {
-          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
-        }
-      });
+    this._requestedDrawerTab.set(null);
+    if (updateUrl) {
+      if (this.profileHistoryNavigator) {
+        this.profileHistoryNavigator('close');
+      } else if (this.router && typeof window !== 'undefined' && window.location.pathname === '/profile') {
+        const savedY = window.scrollY;
+        this.router
+          .navigate(['/'], {
+            queryParams: { tab: null },
+            queryParamsHandling: 'merge',
+            replaceUrl: true
+          })
+          .then(() => {
+            if (savedY > 0 && window.scrollY !== savedY) {
+              window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+            }
+          });
+      }
     }
   }
 
