@@ -150,6 +150,8 @@ export interface TranslationDictionary {
     installInGame: string;
     setupGuide: string;
     setupGuideTooltip: string;
+    tryInBrowserTooltip: string;
+    tryInBrowserNoSupportedGameTooltip: string;
     directZipDownload: string;
     downloadZip: string;
     viewGitRepo: string;

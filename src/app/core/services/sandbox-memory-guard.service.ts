@@ -175,18 +175,54 @@ export class SandboxMemoryGuardService {
   }
 
   /**
+   * Returns true if the package is a LuantiHub Verified Git package claimed by a verified OAuth author account in D1.
+   */
+  isVerifiedGitPackage(
+    pkg:
+      | {
+          author_id?: string | null;
+          source?: string;
+          sources?: string[];
+          provider?: string;
+        }
+      | null
+      | undefined
+  ): boolean {
+    if (!pkg) return false;
+    const rawAuthorId = typeof pkg.author_id === 'string' ? pkg.author_id.trim() : '';
+    const hasVerifiedAuthor = Boolean(rawAuthorId && !rawAuthorId.startsWith('ext_'));
+    const isGitPkg =
+      pkg.source === 'git' ||
+      (Array.isArray(pkg.sources) && pkg.sources.includes('git')) ||
+      Boolean(pkg.provider && pkg.provider !== 'contentdb');
+    return hasVerifiedAuthor && isGitPkg;
+  }
+
+  /**
    * Pre-Flight Eligibility Check: determines whether the "Try in Browser" button should be shown
-   * for a given package based on feature flag, moderation status, and monthly $5 quota circuit breaker.
+   * for a given package based on verified Git package ownership, moderation status, and monthly $5 quota circuit breaker.
    * Since packages are downloaded and unpacked inside the isolated Luanti container (4 GB disk),
    * large packages (e.g. 93 MB texture packs or games) are supported without browser RAM limits.
    */
   isPackageEligibleForSandbox(
-    pkg: { status?: string; download_size?: number; file_size?: string } | null | undefined,
+    pkg:
+      | {
+          status?: string;
+          download_size?: number;
+          file_size?: string;
+          author_id?: string | null;
+          source?: string;
+          sources?: string[];
+          provider?: string;
+        }
+      | null
+      | undefined,
     _releases?: Array<{ size?: number | string }> | null,
     nowMs = Date.now()
   ): boolean {
     if (!pkg) return false;
     if (pkg.status === 'delisted' || pkg.status === 'flagged') return false;
+    if (!this.isVerifiedGitPackage(pkg)) return false;
     if (this.isQuotaExhausted(nowMs)) return false;
 
     return true;

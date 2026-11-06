@@ -137,8 +137,8 @@ function writeCleanNoVncViewerHtml() {
   </style>
 </head>
 <body>
-  <div id="mode-banner" title="Click or press L to toggle between 3D Mouselook Lock and Cursor Mode">
-    🎯 Click Game Window or Press L to Lock Mouse (360° Look) • Press I for Inventory
+  <div id="mode-banner" title="Click game window to lock mouse, or press Esc / Shift+Esc to unlock">
+    🎯 Click Game Window to Lock Mouse (360° Look) • Press I for Inventory
   </div>
   <div id="screen"></div>
   <div id="status-pill">Connecting to Luanti Engine...</div>
@@ -151,19 +151,17 @@ function writeCleanNoVncViewerHtml() {
     const wsUrl = proto + '://' + window.location.host + '/websockify';
 
     const params = new URLSearchParams(window.location.search);
-    const isTouchMode =
+    let isTouchMode =
       params.get('touch') === '1' ||
       Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
 
     const CENTER_X = 640;
     const CENTER_Y = 360;
-    const LOOK_SENSITIVITY = 0.55;
 
     let rfb = null;
-    let userLocked = false; // Controlled ONLY by L key / Lock button / initial canvas click (NEVER unlocked by Esc)
-    let guiMode = false; // true when Inventory (I) or Pause Menu formspec cursor is visible
+    let userLocked = false;
+    let guiMode = false; // true when Inventory (I), Chat (T / /), Console (F10), or Pause Menu cursor is active
     let programmaticUnlock = false;
-    let lastEscapeKeyDownAt = 0;
     let lastClientX = null;
     let lastClientY = null;
     let lastDeltaX = 0;
@@ -190,13 +188,13 @@ function writeCleanNoVncViewerHtml() {
         return;
       }
       if (userLocked && !guiMode) {
-        bannerEl.textContent = '🔒 3D Mouse Locked • Move to Look • Press L to Unlock • Press I for Inventory';
+        bannerEl.textContent = '🔒 3D Mouse Locked • Move to Look • Press Esc or Shift+Esc to Unlock • Press I for Inventory';
         bannerEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
       } else if (guiMode) {
-        bannerEl.textContent = '🎒 Formspec Cursor Mode • Press Esc or I to Close Formspec • Press L to Unlock';
+        bannerEl.textContent = '🎒 Formspec / Chat Mode • Press Esc to Return to 3D Look • Press Shift+Esc to Unlock Mouse';
         bannerEl.style.borderColor = 'rgba(251, 191, 36, 0.55)';
       } else {
-        bannerEl.textContent = '🎯 Mouse Unlocked • Press L or Click Game Window to Lock Mouse (360° Look)';
+        bannerEl.textContent = '🎯 Mouse Unlocked • Click Game Window to Lock Mouse (360° Look) • Press I for Inventory';
         bannerEl.style.borderColor = 'rgba(56, 189, 248, 0.35)';
       }
     }
@@ -204,11 +202,6 @@ function writeCleanNoVncViewerHtml() {
     function tryAcquireHardwareLock() {
       if (isTouchMode || !userLocked || guiMode || !rfb || !rfb._canvas) return;
       if (document.pointerLockElement === rfb._canvas) return;
-      try {
-        if (navigator.keyboard && typeof navigator.keyboard.lock === 'function') {
-          navigator.keyboard.lock(['Escape']).catch(() => {});
-        }
-      } catch (_) {}
       try {
         if (rfb._canvas.requestPointerLock) {
           const lockPromise = rfb._canvas.requestPointerLock();
@@ -230,8 +223,8 @@ function writeCleanNoVncViewerHtml() {
 
     function enterGuiMode() {
       guiMode = true;
-      // Exit hardware pointer lock while the formspec is open so:
-      // 1) the user can move the cursor freely across inventory slots, and
+      // Exit hardware pointer lock while the formspec or chat input is open so:
+      // 1) the user can move the cursor freely across inventory slots or type any key in chat, and
       // 2) pressing Esc to close the formspec won't be intercepted by the browser as a pointer-lock exit
       if (document.pointerLockElement) {
         programmaticUnlock = true;
@@ -268,22 +261,32 @@ function writeCleanNoVncViewerHtml() {
       updateBanner();
     }
 
+    window.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch' && !isTouchMode) {
+        isTouchMode = true;
+        unlockPointerManual();
+        updateBanner();
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ source: 'luanti-sandbox-container', type: 'SANDBOX_INPUT_MODE', touchMode: true }, '*');
+        }
+      } else if (ev.pointerType === 'mouse' && isTouchMode && params.get('touch') !== '1') {
+        isTouchMode = false;
+        updateBanner();
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ source: 'luanti-sandbox-container', type: 'SANDBOX_INPUT_MODE', touchMode: false }, '*');
+        }
+      }
+    }, true);
+
     document.addEventListener('pointerlockchange', () => {
       const isNowLocked = Boolean(document.pointerLockElement);
       if (isNowLocked) {
         programmaticUnlock = false;
         userLocked = true;
       } else if (!programmaticUnlock && userLocked && !guiMode) {
-        // The browser exited hardware pointer lock because the user pressed physical Esc while locked.
-        // Keep userLocked = true (only L unlocks the mouse!) and forward Esc to Luanti if the browser swallowed it.
-        if (rfb && Date.now() - lastEscapeKeyDownAt > 180) {
-          try {
-            rfb.sendKey(0xff1b, 'Escape', true);
-            setTimeout(() => {
-              try { rfb.sendKey(0xff1b, 'Escape', false); } catch (_) {}
-            }, 35);
-          } catch (_) {}
-        }
+        // The browser exited hardware pointer lock (e.g. user pressed Esc while locked).
+        // Immediately unlock userLocked so the cursor is free to interact with HUD or page controls.
+        userLocked = false;
       } else {
         programmaticUnlock = false;
       }
@@ -303,8 +306,11 @@ function writeCleanNoVncViewerHtml() {
 
     window.addEventListener('keydown', (e) => {
       if (isTouchMode) return;
-      // L key (unbound in default Luanti) is the dedicated toggle for 3D Mouse Lock / Unlock
-      if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Non-printable modifier chord (Shift + Esc or Ctrl/Cmd + Shift + L) toggles 3D Mouse Lock / Unlock
+      // without ever interfering with typing letters (including 'L') in chat or inventory search.
+      const isShiftEsc = e.code === 'Escape' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey;
+      const isCtrlShiftL = e.code === 'KeyL' && e.shiftKey && (e.ctrlKey || e.metaKey) && !e.altKey;
+      if (isShiftEsc || isCtrlShiftL) {
         e.preventDefault();
         e.stopPropagation();
         if (userLocked) {
@@ -314,32 +320,20 @@ function writeCleanNoVncViewerHtml() {
         }
         return;
       }
-      if (e.code === 'KeyI') {
-        if (!guiMode) {
+      if (!guiMode && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.code === 'KeyI' || e.code === 'KeyT' || e.code === 'Slash' || e.code === 'F10') {
           enterGuiMode();
-        } else {
+          return;
+        }
+      }
+      if (guiMode) {
+        if (e.code === 'Escape' || e.code === 'Enter' || e.code === 'NumpadEnter') {
           setTimeout(() => exitGuiMode(), 60);
         }
         return;
       }
-      if (e.code === 'Escape') {
-        lastEscapeKeyDownAt = Date.now();
-        if (guiMode) {
-          // Closing a formspec with Esc returns immediately to 3D locked look without unlocking userLocked
-          setTimeout(() => exitGuiMode(), 60);
-        }
-        return;
-      }
-      // Any movement/action key (W, A, S, D, Space, etc.) while userLocked && !guiMode
-      // transparently re-acquires hardware pointer lock if Esc previously released it
+      // Any movement/action key while userLocked && !guiMode re-acquires hardware pointer lock if needed
       if (userLocked && !guiMode && !document.pointerLockElement) {
-        tryAcquireHardwareLock();
-      }
-    }, true);
-
-    window.addEventListener('keyup', (e) => {
-      if (isTouchMode) return;
-      if (e.code === 'Escape' && userLocked && !guiMode) {
         tryAcquireHardwareLock();
       }
     }, true);
@@ -383,7 +377,7 @@ function writeCleanNoVncViewerHtml() {
       }
       if (!isTouchMode) {
         if (hasVisiblePixels) {
-          // Luanti opened a formspec (Inventory I / Chest / Pause Menu) -> enable cursor interaction
+          // Luanti opened a formspec (Inventory I / Chat / Chest / Pause Menu) -> enable cursor interaction
           // while preserving userLocked so closing the formspec returns to 3D locked mode
           enterGuiMode();
         } else if (guiMode) {
@@ -409,7 +403,6 @@ function writeCleanNoVncViewerHtml() {
       const isPointerLocked = document.pointerLockElement === this._canvas;
 
       // 1. When in 3D Mouselook Mode (userLocked === true and no formspec open):
-      // Active both when hardware pointerLockElement is engaged AND immediately after Esc closes a formspec!
       if (userLocked && !guiMode) {
         ev.stopPropagation();
         ev.preventDefault();
@@ -446,8 +439,8 @@ function writeCleanNoVncViewerHtml() {
 
           if (rawDx === 0 && rawDy === 0) return;
 
-          let dx = Math.max(-90, Math.min(90, Math.round(rawDx * LOOK_SENSITIVITY)));
-          let dy = Math.max(-90, Math.min(90, Math.round(rawDy * LOOK_SENSITIVITY)));
+          let dx = Math.max(-180, Math.min(180, Math.round(rawDx)));
+          let dy = Math.max(-180, Math.min(180, Math.round(rawDy)));
           if (dx === 0 && rawDx !== 0) dx = rawDx > 0 ? 1 : -1;
           if (dy === 0 && rawDy !== 0) dy = rawDy > 0 ? 1 : -1;
 
@@ -465,14 +458,14 @@ function writeCleanNoVncViewerHtml() {
         return;
       }
 
-      // 2. When a Formspec (Inventory / Chest / Pause Menu) is open:
+      // 2. When a Formspec (Inventory / Chat / Chest / Pause Menu) is open:
       // Pass normal absolute mouse coordinates so user can click slots/buttons
       if (guiMode) {
         origProtoHandleMouse.call(this, ev);
         return;
       }
 
-      // 3. When Mouse is Unlocked (user pressed L or hasn't clicked the game window yet):
+      // 3. When Mouse is Unlocked:
       // Ignore mousemove so hovering never spins the camera, and lock on canvas click!
       ev.stopPropagation();
       ev.preventDefault();
@@ -869,7 +862,6 @@ async function bootLuantiSession(payload) {
     `default_privs = interact, shout, fly, fast, noclip, give, creative, bring, settime, teleport, server`,
     `screen_w = 1280`,
     `screen_h = 720`,
-    `mouse_sensitivity = 0.14`,
     `fps_max = 60`,
     `viewing_range = 85`,
     `enable_sound = false`,
@@ -880,7 +872,6 @@ async function bootLuantiSession(payload) {
     confLines.push(
       `enable_touch = true`,
       `touch_controls = true`,
-      `touchscreen_sensitivity = 0.2`,
       `fixed_virtual_joystick = true`
     );
   }

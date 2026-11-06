@@ -22,6 +22,7 @@ import {
   LucideX
 } from '@lucide/angular';
 import { LuantiPackage } from '../../core/models/package.model';
+import { mergeLuantiHubAndContentDbGameSupport } from '../../core/config/package-utils.config';
 import {
   SandboxMemoryGuardError,
   SandboxMemoryGuardService,
@@ -47,6 +48,8 @@ export interface SandboxManifest {
   title: string;
   type: 'mod' | 'game' | 'txp' | 'modpack';
   baseEnvironment: 'devtest' | 'minetest_game_lite' | 'native_game' | 'texture_showcase';
+  targetGame?: { id: string; author: string; name: string; title: string } | null;
+  incompatibleReason?: string;
   estimatedTotalBytes: number;
   compatible?: boolean;
   quotaExhausted?: boolean;
@@ -274,14 +277,17 @@ export interface SandboxFaultState {
         >
           <div class="flex flex-wrap items-center gap-1.5">
             <span class="text-slate-400 font-semibold mr-1">Luanti Controls:</span>
-            <button
-              type="button"
-              (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_MOUSE_LOCK')"
-              class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 font-semibold transition-colors"
-              title="Toggle 3D Mouse Lock / Unlock (Shortcut: L)"
-            >
-              🔒 Lock / Unlock Mouse (L)
-            </button>
+            @if (!isTouchDevice()) {
+              <button
+                type="button"
+                data-testid="sandbox-mouse-lock-btn"
+                (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_MOUSE_LOCK')"
+                class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 font-semibold transition-colors"
+                title="Toggle 3D Mouse Lock / Unlock (Shortcut: Shift+Esc)"
+              >
+                🔒 Lock / Unlock Mouse (Shift+Esc)
+              </button>
+            }
 
             <button
               type="button"
@@ -363,6 +369,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   private readonly memoryGuard = inject(SandboxMemoryGuardService);
 
   readonly isMaximized = signal(false);
+  readonly isTouchDevice = signal<boolean>(this.detectTouchDevice());
   readonly memoryProfile = signal<SandboxMemoryProfile>(this.memoryGuard.detectMemoryProfile());
   readonly status = signal<'loading' | 'running' | 'fault'>('loading');
   readonly iframeVisible = signal(true);
@@ -394,15 +401,26 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   private abortController: AbortController | null = null;
 
   private readonly boundMessageListener = (event: MessageEvent) => {
-    if (event.data?.source === 'luanti-sandbox-container' && event.data?.type === 'SANDBOX_STREAM_CONNECTED') {
-      this.status.set('running');
-      this.loadingProgress.set(100);
+    if (event.data?.source === 'luanti-sandbox-container') {
+      if (event.data?.type === 'SANDBOX_STREAM_CONNECTED') {
+        this.status.set('running');
+        this.loadingProgress.set(100);
+      } else if (event.data?.type === 'SANDBOX_INPUT_MODE') {
+        this.isTouchDevice.set(Boolean(event.data.touchMode));
+      }
     }
   };
 
   private readonly boundKeyDownListener = (event: KeyboardEvent) => {
     if (this.status() !== 'running') return;
-    if (event.code === 'KeyL' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const isShiftEsc =
+      event.code === 'Escape' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
+    const isCtrlShiftL =
+      event.code === 'KeyL' &&
+      event.shiftKey &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey;
+    if (isShiftEsc || isCtrlShiftL) {
       event.preventDefault();
       event.stopPropagation();
       this.sendKeyCommand('TOGGLE_MOUSE_LOCK');
@@ -468,11 +486,13 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
 
       this.loadingProgress.set(55);
       this.loadingStepLabel.set('Booting Official Luanti Container...');
+      const gameLabel = manifest.targetGame?.title || '/worlds/sandbox/worldmods';
       this.loadingSubLabel.set(
-        `Mounting ${manifest.bundles.length} package bundle(s) into /worlds/sandbox/worldmods...`
+        `Mounting ${manifest.bundles.length} package bundle(s) into ${gameLabel}...`
       );
 
       const isTouchDevice = this.detectTouchDevice();
+      this.isTouchDevice.set(isTouchDevice);
 
       const bootRes = await fetch('/api/sandbox/session', {
         method: 'POST',
@@ -577,27 +597,77 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
 
     const pkgType = p.type === 'game' ? 'game' : p.type === 'txp' ? 'txp' : 'mod';
     const mountPath = pkgType === 'game' ? `/games/${safeDir}` : pkgType === 'txp' ? `/textures/${safeDir}` : `/mods/${safeDir}`;
+    const fallbackBundles: SandboxBundleDescriptor[] = [
+      {
+        id: `${p.author}/${p.name}`,
+        author: p.author,
+        name: p.name,
+        title: p.title || p.name,
+        type: pkgType,
+        isPrimary: true,
+        downloadUrl: `/api/packages/${encodeURIComponent(p.author)}/${encodeURIComponent(p.name)}/download?sandbox=1`,
+        mountPath,
+        estimatedBytes: Number(p.download_size || 0)
+      }
+    ];
+
+    let targetGame: SandboxManifest['targetGame'] = null;
+    if (pkgType === 'mod') {
+      const compatibleGames = mergeLuantiHubAndContentDbGameSupport(
+        p.game_support,
+        undefined,
+        p.dependencies,
+        p.optional_dependencies
+      ).filter(gs => gs.supports !== false);
+      const supportsMtg =
+        Boolean(p.supports_all_games) ||
+        compatibleGames.some(gs => gs.game.name.toLowerCase() === 'minetest_game');
+      if (supportsMtg) {
+        targetGame = {
+          id: 'Luanti/minetest_game',
+          author: 'Luanti',
+          name: 'minetest_game',
+          title: 'Minetest Game'
+        };
+      } else if (compatibleGames.length > 0) {
+        const picked = compatibleGames[0].game;
+        targetGame = {
+          id: picked.id,
+          author: picked.author,
+          name: picked.name,
+          title: picked.title
+        };
+        const safeGameDir =
+          picked.name.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'game';
+        fallbackBundles.unshift({
+          id: `${picked.author}/${picked.name}`,
+          author: picked.author,
+          name: picked.name,
+          title: picked.title,
+          type: 'game',
+          isPrimary: false,
+          downloadUrl: `/api/packages/${encodeURIComponent(picked.author)}/${encodeURIComponent(picked.name)}/download?sandbox=1`,
+          mountPath: `/games/${safeGameDir}`,
+          estimatedBytes: 0
+        });
+      }
+    }
+
     return {
       packageId: `${p.author}/${p.name}`,
       author: p.author,
       name: p.name,
       title: p.title || p.name,
       type: pkgType,
-      baseEnvironment: pkgType === 'game' ? 'native_game' : pkgType === 'txp' ? 'texture_showcase' : 'devtest',
+      baseEnvironment:
+        pkgType === 'game' || (targetGame && targetGame.name.toLowerCase() !== 'minetest_game')
+          ? 'native_game'
+          : pkgType === 'txp'
+            ? 'texture_showcase'
+            : 'devtest',
+      targetGame,
       estimatedTotalBytes: Number(p.download_size || 0),
-      bundles: [
-        {
-          id: `${p.author}/${p.name}`,
-          author: p.author,
-          name: p.name,
-          title: p.title || p.name,
-          type: pkgType,
-          isPrimary: true,
-          downloadUrl: `/api/packages/${encodeURIComponent(p.author)}/${encodeURIComponent(p.name)}/download?sandbox=1`,
-          mountPath,
-          estimatedBytes: Number(p.download_size || 0)
-        }
-      ]
+      bundles: fallbackBundles
     };
   }
 

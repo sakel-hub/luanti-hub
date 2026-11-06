@@ -24,6 +24,7 @@ import {
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl
 } from '../../core/config/git-providers.config';
+import { inferGameSupportFromDependencies } from '../../core/config/package-utils.config';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -229,8 +230,16 @@ import {
                     type="button"
                     (click)="openSandboxModal()"
                     data-testid="try-in-browser-btn"
-                    class="h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 hover:text-white font-bold text-xs sm:text-sm flex items-center gap-2 transition hover:scale-[1.03] whitespace-nowrap cursor-pointer">
-                    <svg lucidePlay class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
+                    [attr.aria-disabled]="isSandboxButtonDisabled() ? 'true' : null"
+                    [appTooltip]="isSandboxButtonDisabled() ? ('modal.tryInBrowserNoSupportedGameTooltip' | translate) : ('modal.tryInBrowserTooltip' | translate)"
+                    [appTooltipTap]="isSandboxButtonDisabled()"
+                    [class]="isSandboxButtonDisabled()
+                      ? 'h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-slate-800/60 border border-slate-600/40 text-slate-400 font-bold text-xs sm:text-sm flex items-center gap-2 transition whitespace-nowrap opacity-50 cursor-not-allowed'
+                      : 'h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 hover:text-white font-bold text-xs sm:text-sm flex items-center gap-2 transition hover:scale-[1.03] whitespace-nowrap cursor-pointer'">
+                    <svg
+                      lucidePlay
+                      [class]="isSandboxButtonDisabled() ? 'w-4 h-4 text-slate-400 flex-shrink-0' : 'w-4 h-4 text-emerald-400 flex-shrink-0'">
+                    </svg>
                     <span>Try in Browser</span>
                   </button>
                 }
@@ -2528,6 +2537,23 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   readonly isSandboxOpen = signal<boolean>(false);
   readonly sandboxManifestCompatible = signal<boolean>(true);
+  readonly sandboxManifestNoSupportedGame = signal<boolean>(false);
+
+  readonly hasSupportedGameForSandbox = computed<boolean>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return false;
+    if (pkg.type === 'game' || pkg.type === 'txp') return true;
+    if (this.sandboxManifestNoSupportedGame()) return false;
+    if (pkg.supports_all_games || this.compatibleGames().length > 0) return true;
+    if (inferGameSupportFromDependencies(pkg.dependencies, pkg.optional_dependencies).length > 0) {
+      return true;
+    }
+    if (this.isHydratingDetails()) return true;
+    return false;
+  });
+
+  readonly isSandboxButtonDisabled = computed<boolean>(() => !this.hasSupportedGameForSandbox());
+
   readonly isSandboxEnabled = computed<boolean>(() => {
     if (!this.sandboxGuard.isSandboxFeatureEnabled() || this.isPackageDelisted()) {
       return false;
@@ -3554,6 +3580,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.dependenciesManualOverride.set(null);
     this.reverseDepsManualOverride.set(null);
     this.sandboxManifestCompatible.set(true);
+    this.sandboxManifestNoSupportedGame.set(false);
     this.verifySandboxEligibilityInBackground(resolvedAuthor, this.package.name, key);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
@@ -4202,7 +4229,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   openSandboxModal(): void {
-    if (!this.isSandboxEnabled()) return;
+    if (!this.isSandboxEnabled() || this.isSandboxButtonDisabled()) return;
     this.isSandboxOpen.set(true);
   }
 
@@ -4213,6 +4240,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private verifySandboxEligibilityInBackground(author: string, name: string, expectedKey: string): void {
     if (typeof fetch === 'undefined' || !this.sandboxGuard.isSandboxFeatureEnabled()) return;
     if (!author || !name) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!this.sandboxGuard.isVerifiedGitPackage(pkg)) return;
     const url = `/api/sandbox/manifest?author=${encodeURIComponent(author)}&name=${encodeURIComponent(name)}`;
     fetch(url, { headers: { Accept: 'application/json', 'X-Purpose': 'preview' } })
       .then(res => (res.ok ? res.json() : null))
@@ -4223,6 +4252,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         }
         if (data.quotaExhausted === true) {
           this.sandboxManifestCompatible.set(false);
+        }
+        if (data.incompatibleReason === 'NO_SUPPORTED_GAME') {
+          this.sandboxManifestNoSupportedGame.set(true);
         }
       })
       .catch(() => {});

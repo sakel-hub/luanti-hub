@@ -23,11 +23,13 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
     });
   });
 
-  describe('Pre-Flight Package Eligibility (Status & Quota Gate)', () => {
-    it('allows active packages including large texture packs and games (e.g. Realism 512 at 93.1 MB) in the container sandbox', () => {
+  describe('Pre-Flight Package Eligibility (Verified Git, Status & Quota Gate)', () => {
+    it('allows active LuantiHub verified Git packages including large texture packs and games', () => {
       expect(
         service.isPackageEligibleForSandbox({
           status: 'active',
+          author_id: 'usr_verified_1',
+          source: 'git',
           download_size: 4 * 1024 * 1024 // 4 MB
         })
       ).toBe(true);
@@ -35,6 +37,8 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
       expect(
         service.isPackageEligibleForSandbox({
           status: 'active',
+          author_id: 'usr_verified_1',
+          sources: ['official', 'git'],
           download_size: 93.1 * 1024 * 1024
         })
       ).toBe(true);
@@ -42,14 +46,61 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
       expect(
         service.isPackageEligibleForSandbox({
           status: 'active',
+          author_id: 'usr_verified_1',
+          provider: 'github',
           file_size: '93.1 MB'
         })
       ).toBe(true);
     });
 
+    it('hides Try in Browser for unverified or ContentDB-only packages', () => {
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'active',
+          source: 'official',
+          sources: ['official'],
+          download_size: 1024 * 1024
+        })
+      ).toBe(false);
+
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'active',
+          author_id: 'ext_12345',
+          source: 'git',
+          download_size: 1024 * 1024
+        })
+      ).toBe(false);
+
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'active',
+          author_id: 'usr_verified_1',
+          source: 'official',
+          sources: ['official'],
+          provider: 'contentdb',
+          download_size: 1024 * 1024
+        })
+      ).toBe(false);
+    });
+
     it('hides Try in Browser for delisted or flagged packages', () => {
-      expect(service.isPackageEligibleForSandbox({ status: 'delisted', download_size: 1024 })).toBe(false);
-      expect(service.isPackageEligibleForSandbox({ status: 'flagged', download_size: 1024 })).toBe(false);
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'delisted',
+          author_id: 'usr_verified_1',
+          source: 'git',
+          download_size: 1024
+        })
+      ).toBe(false);
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'flagged',
+          author_id: 'usr_verified_1',
+          source: 'git',
+          download_size: 1024
+        })
+      ).toBe(false);
     });
   });
 
@@ -67,7 +118,7 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
       expect(service.isQuotaExhausted(beforeReset)).toBe(true);
       expect(
         service.isPackageEligibleForSandbox(
-          { status: 'active', download_size: 1024 * 1024 },
+          { status: 'active', author_id: 'usr_verified_1', source: 'git', download_size: 1024 * 1024 },
           null,
           beforeReset
         )
@@ -78,7 +129,7 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
       expect(service.isQuotaExhausted(afterReset)).toBe(false);
       expect(
         service.isPackageEligibleForSandbox(
-          { status: 'active', download_size: 1024 * 1024 },
+          { status: 'active', author_id: 'usr_verified_1', source: 'git', download_size: 1024 * 1024 },
           null,
           afterReset
         )
