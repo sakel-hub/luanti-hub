@@ -106,6 +106,11 @@ export function formatFriendlyAuthError(
 
 export type ProfileDrawerTab = 'packages' | 'favorites' | 'account' | 'moderation' | 'promotions';
 
+export interface PackageGitSyncStatus {
+  state: 'syncing' | 'synced' | 'failed' | 'conflict';
+  message?: string;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -149,6 +154,9 @@ export class AuthService {
   private readonly _expandDirectSignInOnOpen = signal<boolean>(false);
   readonly requestAccountDeleteConfirm = signal<boolean>(false);
   readonly expandDirectSignInOnOpen = this._expandDirectSignInOnOpen.asReadonly();
+  readonly isSyncingAuthorGit = signal<boolean>(false);
+  readonly syncAuthorGitProgress = signal<{ processed: number; total: number } | null>(null);
+  readonly packageSyncStatuses = signal<Record<string, PackageGitSyncStatus>>({});
   private lastModerationFetchAt = 0;
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
@@ -1236,6 +1244,232 @@ export class AuthService {
     const tab = this._requestedDrawerTab();
     this._requestedDrawerTab.set(null);
     return tab;
+  }
+
+  clearPackageSyncStatuses(): void {
+    this.packageSyncStatuses.set({});
+    this.syncAuthorGitProgress.set(null);
+  }
+
+  async syncAuthorGitPackages(
+    username?: string,
+    candidatePackageIds?: string[],
+    force = false
+  ): Promise<{
+    success: boolean;
+    syncedCount: number;
+    alreadySyncedCount: number;
+    skippedCount: number;
+    failedCount: number;
+    conflictCount: number;
+  }> {
+    const currentUser = this._currentUser();
+    const targetUsername = (username || currentUser?.username || '').trim();
+    if (!targetUsername || this.isSyncingAuthorGit()) {
+      return {
+        success: false,
+        syncedCount: 0,
+        alreadySyncedCount: 0,
+        skippedCount: 0,
+        failedCount: 0,
+        conflictCount: 0
+      };
+    }
+
+    const normalizedCandidates = Array.from(
+      new Set((candidatePackageIds || []).map(id => String(id || '').trim().toLowerCase()).filter(Boolean))
+    );
+
+    this.isSyncingAuthorGit.set(true);
+    if (normalizedCandidates.length > 0) {
+      this.syncAuthorGitProgress.set({ processed: 0, total: normalizedCandidates.length });
+      this.packageSyncStatuses.update(curr => {
+        const next = { ...curr };
+        for (const pkgId of normalizedCandidates) {
+          next[pkgId] = { state: 'syncing' };
+        }
+        return next;
+      });
+    } else {
+      this.syncAuthorGitProgress.set({ processed: 0, total: 1 });
+    }
+
+    let totalSynced = 0;
+    let totalAlreadySynced = 0;
+    let totalSkipped = 0;
+    let totalFailed = 0;
+    let totalConflict = 0;
+    const syncedIds = new Set<string>();
+
+    try {
+      const maxBatches = 6;
+      for (let batch = 0; batch < maxBatches; batch++) {
+        const res = await fetch(`/api/users/${encodeURIComponent(targetUsername)}/sync-contentdb`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            force: batch === 0 ? force : true,
+            maxNewImports: 8
+          })
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (!res.ok || !contentType.includes('application/json')) {
+          break;
+        }
+
+        const data = await res.json().catch(() => null);
+        if (!data || !data.success) {
+          break;
+        }
+
+        const batchItems: Array<{
+          packageId?: string;
+          id?: string;
+          status?: string;
+          message?: string;
+        }> = Array.isArray(data.packages) ? data.packages : [];
+
+        const batchSynced: string[] = Array.isArray(data.syncedPackages)
+          ? [...data.syncedPackages]
+          : [];
+        const batchFailed: Array<{ id: string; reason: string }> = Array.isArray(data.failedPackages)
+          ? [...data.failedPackages]
+          : [];
+        const batchConflicts: Array<{ id: string; reason: string }> = Array.isArray(data.conflictPackages)
+          ? [...data.conflictPackages]
+          : [];
+
+        for (const item of batchItems) {
+          const pkgId = String(item?.packageId || item?.id || '').trim();
+          if (!pkgId) continue;
+          if (item.status === 'imported') {
+            batchSynced.push(pkgId);
+          } else if (item.status === 'failed_broken' || item.status === 'held_moderation') {
+            batchFailed.push({ id: pkgId, reason: item.message || 'Git repository unreachable or requires review.' });
+          } else if (item.status === 'conflict') {
+            batchConflicts.push({ id: pkgId, reason: item.message || 'Ownership conflict requires review.' });
+          }
+        }
+
+        totalSynced += Number(data.newlyImportedCount ?? data.syncedCount ?? batchSynced.length ?? 0);
+        totalAlreadySynced = Math.max(totalAlreadySynced, Number(data.alreadySyncedCount || 0));
+        totalSkipped = Math.max(totalSkipped, Number(data.skippedNoRepoCount ?? data.skippedNoGitCount ?? 0));
+        totalFailed += Number(data.failedBrokenCount ?? batchFailed.length ?? 0);
+        totalConflict += Number(data.conflictCount ?? batchConflicts.length ?? 0);
+
+        if (batchSynced.length > 0 || batchFailed.length > 0 || batchConflicts.length > 0) {
+          this.packageSyncStatuses.update(curr => {
+            const next = { ...curr };
+            for (const pkgId of batchSynced) {
+              const lower = String(pkgId || '').trim().toLowerCase();
+              if (lower) {
+                syncedIds.add(lower);
+                next[lower] = { state: 'synced' };
+              }
+            }
+            for (const item of batchFailed) {
+              const lower = String(item?.id || '').trim().toLowerCase();
+              if (lower) {
+                next[lower] = { state: 'failed', message: item?.reason };
+              }
+            }
+            for (const item of batchConflicts) {
+              const lower = String(item?.id || '').trim().toLowerCase();
+              if (lower) {
+                next[lower] = { state: 'conflict', message: item?.reason };
+              }
+            }
+            return next;
+          });
+        }
+
+        const remaining = Number(data.remainingQueuedCount || 0);
+        const processedSoFar = totalSynced + totalFailed + totalConflict;
+        const estimatedTotal = Math.max(
+          normalizedCandidates.length,
+          processedSoFar + remaining,
+          1
+        );
+        this.syncAuthorGitProgress.set({
+          processed: Math.min(processedSoFar, estimatedTotal),
+          total: estimatedTotal
+        });
+
+        if (remaining <= 0) {
+          break;
+        }
+      }
+
+      // Clear any leftover 'syncing' entries that were skipped or already synced
+      this.packageSyncStatuses.update(curr => {
+        const next: Record<string, PackageGitSyncStatus> = {};
+        for (const [k, v] of Object.entries(curr)) {
+          if (v.state !== 'syncing') {
+            next[k] = v;
+          }
+        }
+        return next;
+      });
+
+      // Automatically fade out temporary 'synced' badges after 8 seconds
+      if (syncedIds.size > 0) {
+        setTimeout(() => {
+          this.packageSyncStatuses.update(curr => {
+            const next = { ...curr };
+            for (const id of syncedIds) {
+              if (next[id]?.state === 'synced') {
+                delete next[id];
+              }
+            }
+            return next;
+          });
+        }, 8000);
+      }
+
+      if (totalSynced > 0 || totalFailed > 0 || totalConflict > 0) {
+        this.clearAuthCache();
+        await this.initAuth(true);
+        await this.fetchMyReports(true);
+        if (this.isAdmin()) {
+          await this.fetchModerationQueue(true);
+        }
+        if (totalSynced > 0) {
+          this.pwaService.showToast('profile.syncGitSuccessToast');
+        }
+      }
+
+      return {
+        success: true,
+        syncedCount: totalSynced,
+        alreadySyncedCount: totalAlreadySynced,
+        skippedCount: totalSkipped,
+        failedCount: totalFailed,
+        conflictCount: totalConflict
+      };
+    } catch {
+      this.packageSyncStatuses.update(curr => {
+        const next: Record<string, PackageGitSyncStatus> = {};
+        for (const [k, v] of Object.entries(curr)) {
+          if (v.state !== 'syncing') {
+            next[k] = v;
+          }
+        }
+        return next;
+      });
+      return {
+        success: false,
+        syncedCount: totalSynced,
+        alreadySyncedCount: totalAlreadySynced,
+        skippedCount: totalSkipped,
+        failedCount: totalFailed,
+        conflictCount: totalConflict
+      };
+    } finally {
+      this.isSyncingAuthorGit.set(false);
+      this.syncAuthorGitProgress.set(null);
+    }
   }
 
   private processNotificationDigest(user: AuthUser): void {

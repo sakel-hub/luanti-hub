@@ -1265,10 +1265,10 @@ export function parseGitRepoTarget(
       if (host.includes('notabug.org')) {
         host = 'codeberg.org';
       }
-      // Strip deep web UI suffixes (`/-/tree/...`, `/tree/...`, `/src/branch/...`, `/releases`, `/commits`, `/downloads`)
+      // Strip deep web UI suffixes (`/-/tree/...`, `/tree/...`, `/src/branch/...`, `/plain/...`, `/log/...`, `/releases`, `/commits`, `/downloads`)
       const cleanedPath = u.pathname
         .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
-        .replace(/\/(?:tree|blob|src|commits|releases|tags|archive|downloads)(?:\/.*)?$/i, '')
+        .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive|downloads)(?:\/.*)?$/i, '')
         .replace(/^\/+|\/+$/g, '');
       const parts = cleanedPath.split('/').filter(Boolean);
       if (parts.length >= 2) {
@@ -1276,8 +1276,18 @@ export function parseGitRepoTarget(
           host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
         const isBitbucketHost =
           host === 'bitbucket.org' || host.endsWith('.bitbucket.org');
-        const owner = isGitlabHost && parts.length > 2 ? parts.slice(0, -1).join('/') : parts[0];
-        const repo = (isGitlabHost && parts.length > 2 ? parts[parts.length - 1] : parts[1]).replace(/\.git$/i, '');
+        const isSubpathCustomGit =
+          !isGitlabHost && !isBitbucketHost && parts.length > 2 && parts[0].toLowerCase() === 'git';
+        const owner = isGitlabHost && parts.length > 2
+          ? parts.slice(0, -1).join('/')
+          : isSubpathCustomGit
+            ? parts.slice(0, -1).join('/')
+            : parts[0];
+        const repo = (
+          (isGitlabHost || isSubpathCustomGit) && parts.length > 2
+            ? parts[parts.length - 1]
+            : parts[1]
+        ).replace(/\.git$/i, '');
         if (owner && repo) {
           let provider: 'github' | 'codeberg' | 'gitlab' | 'bitbucket' = 'codeberg';
           if (host === 'github.com' || host.endsWith('.github.com')) {
@@ -2097,25 +2107,31 @@ export async function fetchGitSmartHttpRefs(
     }
   }
 
-  const smartUrl = `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`;
+  const smartUrls = [
+    `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`,
+    `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/info/refs?service=git-upload-pack`
+  ];
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 3200);
   try {
-    const res = await fetchWithAnubisSupport(smartUrl, {
-      headers: {
-        'User-Agent': 'git/2.43.0 LuantiHub/1.0 (+https://luantihub.org)',
-        'Accept': 'application/x-git-upload-pack-advertisement, */*'
-      },
-      signal: ctrl.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const text = await res.text();
-    const parsed = parseGitSmartHttpRefs(text);
-    if (parsed.headSha || parsed.tags.length > 0) {
-      await writeEdgeCacheJson(cacheKey, parsed, 120);
-      return parsed;
+    for (const smartUrl of smartUrls) {
+      const res = await fetchWithAnubisSupport(smartUrl, {
+        headers: {
+          'User-Agent': 'git/2.43.0 LuantiHub/1.0 (+https://luantihub.org)',
+          'Accept': 'application/x-git-upload-pack-advertisement, */*'
+        },
+        signal: ctrl.signal
+      });
+      if (!res.ok) continue;
+      const text = await res.text();
+      const parsed = parseGitSmartHttpRefs(text);
+      if (parsed.headSha || parsed.tags.length > 0) {
+        clearTimeout(timer);
+        await writeEdgeCacheJson(cacheKey, parsed, 120);
+        return parsed;
+      }
     }
+    clearTimeout(timer);
   } catch {
     clearTimeout(timer);
   }
@@ -3268,15 +3284,25 @@ export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
     const host = u.hostname.toLowerCase();
     const cleanedPath = u.pathname
       .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
-      .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive)(?:\/.*)?$/i, '')
       .replace(/^\/+|\/+$/g, '');
     const parts = cleanedPath.split('/').filter(Boolean);
+    if (parts.length === 1) {
+      return `${u.origin}/${parts[0].replace(/\.git$/i, '')}`;
+    }
     if (parts.length >= 2) {
       if (host.includes('notabug.org')) {
         return `https://codeberg.org/${parts[0].toLowerCase()}/${parts[1].replace(/\.git$/i, '')}`;
       }
-      const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
-      const repoPath = isGitlabHost
+      const isStandardTwoSegmentForge =
+        host === 'github.com' ||
+        host.endsWith('.github.com') ||
+        host === 'codeberg.org' ||
+        host.endsWith('.codeberg.org') ||
+        host === 'bitbucket.org' ||
+        host.endsWith('.bitbucket.org') ||
+        host === 'git.minetest.land';
+      const repoPath = !isStandardTwoSegmentForge
         ? parts.map((p, idx) => (idx === parts.length - 1 ? p.replace(/\.git$/i, '') : p)).join('/')
         : `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
       return `${u.origin}/${repoPath}`;
@@ -3376,7 +3402,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v10/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v11/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3712,7 +3738,37 @@ export async function scanGitRepoMetadataCached(
   }
 
   if (!resolvedRepoUrl && sawExplicit404 && normalizedInputUrl) {
-    gitRepoStatus = 'broken_404';
+    // Never flag a repository as broken_404 solely because a guessed raw file endpoint returned 404.
+    // Probe the repository root URL itself before declaring broken_404.
+    let rootIsOnline = false;
+    const rootCtrl = new AbortController();
+    const rootTimer = setTimeout(() => rootCtrl.abort(), 1600);
+    try {
+      let rootRes = await fetchWithAnubisSupport(normalizedInputUrl, {
+        method: 'HEAD',
+        signal: rootCtrl.signal
+      }).catch(() => null);
+      if (!rootRes || rootRes.status === 405 || rootRes.status === 403 || rootRes.status === 501) {
+        rootRes = await fetchWithAnubisSupport(normalizedInputUrl, {
+          method: 'GET',
+          signal: rootCtrl.signal
+        }).catch(() => null);
+      }
+      if (rootRes && rootRes.ok) {
+        rootIsOnline = true;
+      }
+    } catch {
+      // Ignore probe error
+    } finally {
+      clearTimeout(rootTimer);
+    }
+
+    if (rootIsOnline) {
+      resolvedRepoUrl = normalizedInputUrl;
+      gitRepoStatus = 'verified';
+    } else {
+      gitRepoStatus = 'broken_404';
+    }
   }
 
   const cdbScreenshotsRaw = (cdbMeta as CdbJsonMetadata | null)?.screenshots;
@@ -4728,9 +4784,18 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
         }
       }
     } else {
-      const giteaBase = `${u.origin}/api/v1/repos/${owner}/${repo}/raw`;
-      for (const file of ['README.md', 'readme.md', 'README.txt', 'readme.txt']) {
-        pushCandidate(`${giteaBase}/${file}`, giteaBase);
+      const canonicalRepoBase = normalized.replace(/\/+$/, '');
+      const customRawBases = [
+        `${canonicalRepoBase}/plain`,
+        `${canonicalRepoBase}/raw/HEAD`,
+        `${canonicalRepoBase}/raw/branch/master`,
+        `${canonicalRepoBase}/raw/branch/main`,
+        `${u.origin}/api/v1/repos/${owner}/${repo}/raw`
+      ];
+      for (const rawBase of customRawBases) {
+        for (const file of ['README.md', 'readme.md', 'README.txt', 'readme.txt']) {
+          pushCandidate(`${rawBase}/${file}`, rawBase);
+        }
       }
     }
   } catch {

@@ -11064,4 +11064,327 @@ supported_games = minetest_game, voxelibre
       document.getElementById('pwa-sandbox-modal')?.remove();
     }
   });
+
+  it('should classify candidate ContentDB Git URLs and automatically verify/sync author Git packages with temporary per-package status pills', async () => {
+    const { classifyCandidateGitRepoUrl } = await import('../../functions/api/lib/author-git-sync');
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+
+    // 1. Verify classifyCandidateGitRepoUrl accurately distinguishes valid root Git repos from non-Git URLs
+    const validGithub = classifyCandidateGitRepoUrl('https://github.com/SaKeL/x_farming.git');
+    expect(validGithub).toEqual({
+      kind: 'git_candidate',
+      provider: 'github',
+      host: 'github.com',
+      owner: 'SaKeL',
+      repo: 'x_farming',
+      normalizedUrl: 'https://github.com/SaKeL/x_farming'
+    });
+
+    const validMeseHub = classifyCandidateGitRepoUrl('https://git.minetest.land/TenPlus1/farming');
+    expect(validMeseHub).toEqual({
+      kind: 'git_candidate',
+      provider: 'mesehub',
+      host: 'git.minetest.land',
+      owner: 'TenPlus1',
+      repo: 'farming',
+      normalizedUrl: 'https://git.minetest.land/TenPlus1/farming'
+    });
+
+    expect(classifyCandidateGitRepoUrl('')).toEqual({ kind: 'no_repo' });
+    expect(classifyCandidateGitRepoUrl('https://forum.luanti.org/viewtopic.php?t=123')).toEqual({
+      kind: 'non_git'
+    });
+    expect(classifyCandidateGitRepoUrl('https://example.com/downloads/mod.zip')).toEqual({
+      kind: 'non_git'
+    });
+    // Root branch link is valid git_candidate, whereas monorepo subdirectory link or /issues is non_git
+    expect(classifyCandidateGitRepoUrl('https://github.com/SaKeL/x_farming/tree/main')).toEqual({
+      kind: 'git_candidate',
+      provider: 'github',
+      host: 'github.com',
+      owner: 'SaKeL',
+      repo: 'x_farming',
+      normalizedUrl: 'https://github.com/SaKeL/x_farming'
+    });
+    expect(classifyCandidateGitRepoUrl('https://github.com/mt-mods/mesecons/tree/master/mesecons_torch')).toEqual({
+      kind: 'non_git'
+    });
+    expect(classifyCandidateGitRepoUrl('https://github.com/SaKeL/x_farming/issues')).toEqual({
+      kind: 'non_git'
+    });
+
+    // 2. Verify AuthService.syncAuthorGitPackages & ProfileDrawerComponent temporary per-package status indicators
+    (authService as any)._currentUser.set({
+      id: 'usr_sakel',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      bio: '',
+      role: 'user',
+      is_admin: false,
+      identities: [
+        {
+          provider: 'contentdb',
+          username: 'sakel',
+          profile_url: 'https://content.luanti.org/users/sakel/',
+          verified: true
+        }
+      ],
+      packages: []
+    });
+
+    const pkg1 = (pkgService as any).normalizePackage({
+      id: 'sakel/x_farming',
+      author: 'sakel',
+      name: 'x_farming',
+      title: 'X Farming',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      repo_url: 'https://bitbucket.org/minetest_gamers/x_farming'
+    });
+    const pkg2 = (pkgService as any).normalizePackage({
+      id: 'sakel/broken_mod',
+      author: 'sakel',
+      name: 'broken_mod',
+      title: 'Broken Mod',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      repo_url: 'https://github.com/sakel/deleted_repo_404'
+    });
+    const pkgZipOnly = (pkgService as any).normalizePackage({
+      id: 'sakel/zip_only_mod',
+      author: 'sakel',
+      name: 'zip_only_mod',
+      title: 'Zip Only Mod',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      repo_url: undefined
+    });
+    (pkgService as any)._packages.set([pkg1, pkg2, pkgZipOnly]);
+
+    const origFetch = globalThis.fetch;
+    const initAuthSpy = vi.spyOn(authService, 'initAuth').mockResolvedValue(undefined);
+    const fetchMyReportsSpy = vi.spyOn(authService, 'fetchMyReports').mockResolvedValue(undefined);
+    const refreshCatalogSpy = vi.spyOn(pkgService, 'initCatalog').mockResolvedValue(undefined);
+
+    let resolveSyncFetch: ((res: Response) => void) | null = null;
+    globalThis.fetch = vi.fn((input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/users/sakel/sync-contentdb')) {
+        return new Promise<Response>(resolve => {
+          resolveSyncFetch = resolve;
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+    }) as any;
+
+    try {
+      const drawerFixture = TestBed.createComponent(ProfileDrawerComponent);
+      const drawerComp = drawerFixture.componentInstance;
+      // Only pkg1 and pkg2 have eligible Git repo URLs; pkgZipOnly is excluded
+      expect(drawerComp.unsyncedEligibleGitPackages().map(p => p.id)).toEqual([
+        'sakel/x_farming',
+        'sakel/broken_mod'
+      ]);
+
+      (authService as any)._isProfileDrawerOpen.set(true);
+      drawerFixture.detectChanges();
+      await new Promise(resolve => setTimeout(resolve, 10));
+      drawerFixture.detectChanges();
+
+      // While sync is in-flight, temporary progress bar and per-package 'syncing' pills are rendered
+      expect(authService.isSyncingAuthorGit()).toBe(true);
+      const drawerEl = drawerFixture.nativeElement as HTMLElement;
+      expect(drawerEl.querySelector('[data-testid="author-git-sync-progress"]')).toBeTruthy();
+      expect(drawerEl.querySelectorAll('[data-testid="pkg-sync-status-syncing"]').length).toBe(2);
+
+      // Resolve the backend sync call with 1 synced package and 1 failed 404 package
+      expect(resolveSyncFetch).toBeTruthy();
+      resolveSyncFetch!(
+        new Response(
+          JSON.stringify({
+            success: true,
+            userId: 'usr_sakel',
+            authorHandles: ['sakel'],
+            totalContentDbPackages: 3,
+            alreadySyncedCount: 0,
+            newlyImportedCount: 1,
+            skippedNoRepoCount: 1,
+            flaggedForReviewCount: 1,
+            remainingQueuedCount: 0,
+            packages: [
+              {
+                packageId: 'sakel/x_farming',
+                author: 'sakel',
+                name: 'x_farming',
+                title: 'X Farming',
+                status: 'imported'
+              },
+              {
+                packageId: 'sakel/broken_mod',
+                author: 'sakel',
+                name: 'broken_mod',
+                title: 'Broken Mod',
+                status: 'failed_broken',
+                message: 'Repository returned HTTP 404'
+              }
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await new Promise(resolve => setTimeout(resolve, 25));
+      drawerFixture.detectChanges();
+
+      // Progress bar disappears once syncing finishes, while temporary 'synced' and 'failed' pills appear on the respective packages
+      expect(authService.isSyncingAuthorGit()).toBe(false);
+      expect(drawerEl.querySelector('[data-testid="author-git-sync-progress"]')).toBeNull();
+      expect(drawerEl.querySelectorAll('[data-testid="pkg-sync-status-synced"]').length).toBe(1);
+      const failedPill = drawerEl.querySelector('[data-testid="pkg-sync-status-failed"]') as HTMLElement;
+      expect(failedPill).toBeTruthy();
+      expect(refreshCatalogSpy).toHaveBeenCalledTimes(1);
+
+      // Clicking the failed sync pill navigates directly to Account -> My Reports
+      failedPill.click();
+      drawerFixture.detectChanges();
+      expect(drawerComp.activeTab()).toBe('account');
+      expect(drawerComp.isMyReportsOpen()).toBe(true);
+
+      drawerFixture.destroy();
+    } finally {
+      globalThis.fetch = origFetch;
+      initAuthSpy.mockRestore();
+      fetchMyReportsSpy.mockRestore();
+      refreshCatalogSpy.mockRestore();
+      authService.clearPackageSyncStatuses();
+    }
+  });
+
+  it('should support self-hosted cgit/subpath Git repositories (e.g. cheapiesystems.com/git/celevator), verify root URL before declaring broken_404, and auto-heal false-positive broken reports', async () => {
+    const {
+      normalizeGitRepoInputUrl,
+      buildProviderRawBaseCandidates,
+      detectGitProviderFromUrl,
+      scanGitRepoMetadataCached
+    } = await import('../../functions/api/lib/upstream');
+    const { autoHealOpenSystemBrokenReports } = await import('../../functions/api/admin/moderation');
+
+    // 1. Subpath URL normalization & cgit raw candidate generation
+    const celevatorUrl = 'https://cheapiesystems.com/git/celevator';
+    expect(normalizeGitRepoInputUrl(celevatorUrl)).toBe(celevatorUrl);
+    expect(normalizeGitRepoInputUrl('https://cheapiesystems.com/git/celevator/plain/mod.conf')).toBe(celevatorUrl);
+
+    const detected = detectGitProviderFromUrl(celevatorUrl);
+    expect(detected?.provider).toBe('custom');
+    expect(detected?.host).toBe('cheapiesystems.com');
+    expect(detected?.repo).toBe('celevator');
+
+    const cands = buildProviderRawBaseCandidates(celevatorUrl, 'cheapie', 'celevator');
+    expect(cands.length).toBeGreaterThan(0);
+    expect(cands[0]).toEqual({
+      base: 'https://cheapiesystems.com/git/celevator/plain',
+      repoUrl: 'https://cheapiesystems.com/git/celevator',
+      provider: 'custom'
+    });
+
+    const origFetch = globalThis.fetch;
+    try {
+      // 2. Case A: cgit /plain/mod.conf responds with 200 OK
+      globalThis.fetch = vi.fn(async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url === 'https://cheapiesystems.com/git/celevator/plain/mod.conf') {
+          return new Response(
+            'name = celevator\ntitle = C-Elevator\ndescription = Realistic elevators for Luanti\nlicense = Unlicense\n',
+            { status: 200, headers: { 'Content-Type': 'text/plain' } }
+          );
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as any;
+
+      const cgitScan = await scanGitRepoMetadataCached('cheapie', 'celevator', 'mod', celevatorUrl, 0);
+      expect(cgitScan.gitRepoStatus).toBe('verified');
+      expect(cgitScan.repoUrl).toBe(celevatorUrl);
+      expect(cgitScan.rawBaseUrl).toBe('https://cheapiesystems.com/git/celevator/plain');
+      expect(cgitScan.title).toBe('C-Elevator');
+      expect(cgitScan.license).toBe('Unlicense');
+
+      // 3. Case B: Custom Git host where all guessed raw file URLs return 404, but the repository root URL returns 200 OK -> never flagged as broken_404
+      globalThis.fetch = vi.fn(async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url === celevatorUrl) {
+          return new Response('<html><title>celevator - cgit</title></html>', {
+            status: 200,
+            headers: { 'Content-Type': 'text/html' }
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as any;
+
+      const rootVerifiedScan = await scanGitRepoMetadataCached('cheapie', 'celevator', 'mod', celevatorUrl, 0);
+      expect(rootVerifiedScan.gitRepoStatus).toBe('verified');
+      expect(rootVerifiedScan.repoUrl).toBe(celevatorUrl);
+
+      // 4. Case C: Truly deleted repository where both raw endpoints and root URL return 404 -> flagged as broken_404
+      globalThis.fetch = vi.fn(async () => new Response('Not Found', { status: 404 })) as any;
+      const deadScan = await scanGitRepoMetadataCached(
+        'cheapie',
+        'deleted_mod',
+        'mod',
+        'https://github.com/cheapie/deleted_mod',
+        0
+      );
+      expect(deadScan.gitRepoStatus).toBe('broken_404');
+
+      // 5. Auto-healing open system-git-monitor broken reports when repository URL returns 200 OK
+      let resolvedPkgId = '';
+      let resolvedNote = '';
+      const mockDb = {
+        prepare: (sql: string) => ({
+          all: async () => {
+            if (sql.includes('FROM moderation_reports')) {
+              return { results: [{ package_id: 'cheapie/celevator' }] };
+            }
+            return { results: [] };
+          },
+          bind: (...args: any[]) => ({
+            first: async () => {
+              if (sql.includes('SELECT repo_url FROM packages')) {
+                return { repo_url: celevatorUrl };
+              }
+              return null;
+            },
+            run: async () => {
+              if (sql.includes('UPDATE moderation_reports')) {
+                resolvedNote = String(args[0] || '');
+                resolvedPkgId = String(args[1] || '');
+                return { meta: { changes: 1 } };
+              }
+              return { meta: { changes: 0 } };
+            }
+          }),
+          run: async () => ({ meta: { changes: 0 } })
+        })
+      };
+
+      globalThis.fetch = vi.fn(async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url === celevatorUrl) {
+          return new Response('', { status: 200 });
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as any;
+
+      const healedCount = await autoHealOpenSystemBrokenReports(mockDb);
+      expect(healedCount).toBe(1);
+      expect(resolvedPkgId).toBe('cheapie/celevator');
+      expect(resolvedNote).toContain(celevatorUrl);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

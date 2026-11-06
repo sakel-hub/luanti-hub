@@ -9,6 +9,8 @@ import {
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   fetchUpstreamJsonCached,
+  fetchWithAnubisSupport,
+  autoResolveBrokenRepoReport,
   invalidateEdgeCacheKeys,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
@@ -19,7 +21,7 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
-async function probePackageGitOnline(
+export async function probePackageGitOnline(
   db: any,
   packageId: string
 ): Promise<{ online: boolean; checkedUrl: string }> {
@@ -46,8 +48,9 @@ async function probePackageGitOnline(
       `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
       120
     );
-    if (upstream?.repo) {
-      repoUrl = String(upstream.repo).trim();
+    const upstreamRepo = upstream?.repo || upstream?.repo_url;
+    if (upstreamRepo) {
+      repoUrl = String(upstreamRepo).trim();
     }
   }
 
@@ -65,31 +68,39 @@ async function probePackageGitOnline(
 
   const uniqueUrls = Array.from(new Set(candidateUrls));
   for (const url of uniqueUrls) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
     try {
-      const res = await fetch(url, {
+      const res = await fetchWithAnubisSupport(url, {
         method: 'HEAD',
         redirect: 'follow',
+        signal: ctrl.signal,
         headers: {
           'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
         }
       });
       if (res.ok) {
+        clearTimeout(timer);
         return { online: true, checkedUrl: url };
       }
-      if (res.status === 405) {
-        const getRes = await fetch(url, {
+      if (res.status === 405 || res.status === 403 || res.status === 501) {
+        const getRes = await fetchWithAnubisSupport(url, {
           method: 'GET',
           redirect: 'follow',
+          signal: ctrl.signal,
           headers: {
             'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
           }
         });
         if (getRes.ok) {
+          clearTimeout(timer);
           return { online: true, checkedUrl: url };
         }
       }
     } catch {
       // Try next candidate
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -97,6 +108,41 @@ async function probePackageGitOnline(
     online: false,
     checkedUrl: uniqueUrls[0] || `https://github.com/${packageId}`
   };
+}
+
+export async function autoHealOpenSystemBrokenReports(db: any): Promise<number> {
+  if (!db) return 0;
+  let healedCount = 0;
+  try {
+    const openAutoBrokenRes = await db.prepare(`
+      SELECT DISTINCT package_id
+      FROM moderation_reports
+      WHERE status = 'open'
+        AND reason = 'broken'
+        AND reporter_user_id IN ('system-git-monitor', 'system-git-sync')
+      ORDER BY created_at DESC
+      LIMIT 5
+    `).all();
+    const rows = openAutoBrokenRes?.results || [];
+    for (const row of rows) {
+      const pkgId = String(row?.package_id || '').trim();
+      if (!pkgId) continue;
+      const probe = await probePackageGitOnline(db, pkgId);
+      if (probe.online) {
+        const resolved = await autoResolveBrokenRepoReport(
+          db,
+          pkgId,
+          `Automated live re-check confirmed repository (${probe.checkedUrl}) is online (HTTP 200 OK).`
+        );
+        if (resolved) {
+          healedCount++;
+        }
+      }
+    }
+  } catch {
+    // Non-fatal background auto-heal
+  }
+  return healedCount;
 }
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
@@ -128,6 +174,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   await ensureModerationColumns(env.DB);
+  await autoHealOpenSystemBrokenReports(env.DB);
 
   const currentUser = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(userId).first();
   const idRes = await env.DB.prepare(

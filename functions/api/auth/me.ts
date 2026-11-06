@@ -20,6 +20,10 @@ import {
   invalidateEdgeCacheKeys,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
+import {
+  syncVerifiedAuthorGitPackages,
+  runOneTimeExistingUsersGitBackfill
+} from '../lib/author-git-sync';
 
 interface Env {
   DB?: any;
@@ -105,7 +109,7 @@ function buildFallbackUserFromClaims(
 }
 
 // GET /api/auth/me: Fetch current authenticated user profile, linked identities, packages, favorites & admin status
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: { request: Request; env: Env; waitUntil?: (promise: Promise<any>) => void }) {
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
   const oauthProviders = getConfiguredOAuthProviders(context.env);
@@ -190,8 +194,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     // 4. Fetch User's Published / Claimed Packages (Only match author_id or exact VERIFIED identities)
-    const verifiedHandles = Array.from(
-      new Set(
+    const verifiedHandles: string[] = Array.from(
+      new Set<string>(
         identities
           .filter((i: any) => Boolean(i.verified))
           .map((i: any) => String(i.username || '').trim().toLowerCase())
@@ -371,6 +375,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       setCachedAuthMePayload(userId, userPayload, 120_000);
     }
 
+    if (verifiedHandles.length > 0) {
+      context.waitUntil?.(
+        Promise.all([
+          syncVerifiedAuthorGitPackages(context.env, {
+            userId: resolvedUserId,
+            authorHandles: verifiedHandles
+          }),
+          runOneTimeExistingUsersGitBackfill(context.env)
+        ])
+      );
+    } else {
+      context.waitUntil?.(runOneTimeExistingUsersGitBackfill(context.env));
+    }
+
     return Response.json({
       user: userPayload,
       oauthProviders
@@ -399,7 +417,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 }
 
 // POST /api/auth/me: Direct Handle Sign-In / PAT Verification
-export async function onRequestPost(context: { request: Request; env: Env }) {
+export async function onRequestPost(context: { request: Request; env: Env; waitUntil?: (promise: Promise<any>) => void }) {
   try {
     const body = await context.request.json() as {
       provider?: string;
@@ -557,6 +575,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     deletedUserIdsInIsolate.delete(userId);
     invalidateCachedAuthMePayload(userId);
+    if (isCryptographicallyVerified) {
+      context.waitUntil?.(
+        syncVerifiedAuthorGitPackages(context.env, {
+          userId,
+          triggerProvider: provider,
+          verifiedUsername
+        })
+      );
+    }
     const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET, {
       username: verifiedUsername,
       displayName,

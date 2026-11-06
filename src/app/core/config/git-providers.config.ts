@@ -142,12 +142,23 @@ export function detectGitProviderFromUrl(
     const host = u.hostname.toLowerCase();
     const cleanedPath = u.pathname
       .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
-      .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive)(?:\/.*)?$/i, '')
       .replace(/^\/+|\/+$/g, '');
     const parts = cleanedPath.split('/').filter(Boolean);
-    if (parts.length < 2) return null;
-    const owner = parts[0];
-    const repo = parts[1].replace(/\.git$/i, '');
+    if (parts.length < 1) return null;
+    if (parts.length === 1) {
+      // Single-segment self-hosted Git repo (e.g. `https://git.bananach.space/advtrains.git`)
+      const singleRepo = parts[0].replace(/\.git$/i, '');
+      return {
+        provider: 'custom',
+        config: GIT_PROVIDER_CONFIGS.custom,
+        host,
+        owner: singleRepo,
+        repo: singleRepo
+      };
+    }
+    const owner = parts.length > 2 && parts[0].toLowerCase() === 'git' ? parts[1] : parts[0];
+    const repo = (parts.length > 2 && parts[0].toLowerCase() === 'git' ? parts[2] : parts[1]).replace(/\.git$/i, '');
 
     for (const id of ALL_GIT_PROVIDER_IDS) {
       if (id === 'custom') continue;
@@ -238,8 +249,31 @@ export function buildProviderRawBaseCandidates(
     pushCandidate(`https://api.bitbucket.org/2.0/repositories/${lowerOwner}/${lowerRepo}/src/master`, canonicalRepoUrl, 'bitbucket');
     pushCandidate(`https://api.bitbucket.org/2.0/repositories/${lowerOwner}/${lowerRepo}/src/main`, canonicalRepoUrl, 'bitbucket');
   } else if (host) {
-    // Self-hosted Gitea / Forgejo instance
-    pushCandidate(`https://${host}/api/v1/repos/${owner}/${repo}/raw`, `https://${host}/${owner}/${repo}`, 'custom');
+    // Self-hosted Gitea / Forgejo, cgit (`/plain`), gitweb / web raw (`/raw/HEAD`), or subpath Git instance
+    const canonicalCustomUrl = (normalizedInputUrl || `https://${host}/${owner}/${repo}`).replace(/\/+$/, '');
+    pushCandidate(`${canonicalCustomUrl}/plain`, canonicalCustomUrl, 'custom');
+    if (branchHint) {
+      pushCandidate(`${canonicalCustomUrl}/raw/branch/${branchHint}`, canonicalCustomUrl, 'custom');
+      pushCandidate(`${canonicalCustomUrl}/raw/${branchHint}`, canonicalCustomUrl, 'custom');
+    }
+    pushCandidate(`https://${host}/api/v1/repos/${owner}/${repo}/raw`, canonicalCustomUrl, 'custom');
+    try {
+      const parsedCustom = new URL(canonicalCustomUrl);
+      const customParts = parsedCustom.pathname.split('/').filter(Boolean);
+      if (customParts.length >= 3 && customParts[0].toLowerCase() === 'git') {
+        pushCandidate(
+          `https://${host}/git/api/v1/repos/${customParts[1]}/${customParts[2]}/raw`,
+          canonicalCustomUrl,
+          'custom'
+        );
+      }
+    } catch {
+      // Ignore URL parse error
+    }
+    pushCandidate(`${canonicalCustomUrl}/raw/HEAD`, canonicalCustomUrl, 'custom');
+    pushCandidate(`${canonicalCustomUrl}/raw/master`, canonicalCustomUrl, 'custom');
+    pushCandidate(`${canonicalCustomUrl}/raw/main`, canonicalCustomUrl, 'custom');
+    pushCandidate(`${canonicalCustomUrl}/-/raw/HEAD`, canonicalCustomUrl, 'custom');
   }
 
   if (!normalizedInputUrl) {
@@ -1027,11 +1061,24 @@ export function normalizeRepoComparisonKey(urlStr?: string | null): string {
     const parsed = new URL(urlStr.trim());
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
     const cleanPath = parsed.pathname
+      .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive)(?:\/.*)?$/i, '')
       .replace(/^\/+|\/+$/g, '')
       .replace(/\.git$/i, '')
       .toLowerCase();
     const parts = cleanPath.split('/').filter(Boolean);
     if (parts.length >= 2) {
+      const isStandardTwoSegmentForge =
+        host === 'github.com' ||
+        host.endsWith('.github.com') ||
+        host === 'codeberg.org' ||
+        host.endsWith('.codeberg.org') ||
+        host === 'bitbucket.org' ||
+        host.endsWith('.bitbucket.org') ||
+        host === 'git.minetest.land';
+      if (!isStandardTwoSegmentForge && parts.length > 2) {
+        return `${host}/${parts.join('/')}`;
+      }
       return `${host}/${parts[0]}/${parts[1]}`;
     }
     return cleanPath ? `${host}/${cleanPath}` : '';

@@ -367,7 +367,12 @@ export const ru: TranslationDictionary = {
     deleteAccountIncludePackagesLabel: 'Также удалить отправленные мной Git-пакеты сообщества из LuantiHub (пакеты, синхронизированные из официального ContentDB, останутся в публичном зеркале, но будут отвязаны от вашего профиля)',
     deleteAccountConfirmBtn: 'Навсегда удалить мой аккаунт и данные',
     deletingAccountBtn: 'Удаление аккаунта и данных...',
-    accountDeletedToast: 'Ваш аккаунт LuantiHub и все сохранённые персональные данные были навсегда удалены.'
+    accountDeletedToast: 'Ваш аккаунт LuantiHub и все сохранённые персональные данные были навсегда удалены.',
+    verifyingGitReposProgress: 'Проверка и привязка Git-репозиториев ваших пакетов...',
+    pkgSyncingBadge: 'Проверка Git...',
+    pkgSyncedBadge: 'Git проверен и привязан',
+    pkgSyncFailedBadge: 'Git-репозиторий недоступен (404) — см. Мои жалобы',
+    syncGitSuccessToast: 'Ваши Git-репозитории проверены и привязаны!'
   },
   setup: {
     title: 'Использование LuantiHub в Игре',

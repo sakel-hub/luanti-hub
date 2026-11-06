@@ -383,6 +383,11 @@ export interface TranslationDictionary {
     deleteAccountConfirmBtn: string;
     deletingAccountBtn: string;
     accountDeletedToast: string;
+    verifyingGitReposProgress: string;
+    pkgSyncingBadge: string;
+    pkgSyncedBadge: string;
+    pkgSyncFailedBadge: string;
+    syncGitSuccessToast: string;
   };
   setup: {
     title: string;

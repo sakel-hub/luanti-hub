@@ -6312,7 +6312,15 @@ export class PackageService {
           if (parts.length >= 2) {
             const host = u.hostname.toLowerCase();
             const isGitlabHost = host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
-            const fullName = isGitlabHost ? parts.join('/') : `${parts[0]}/${parts[1]}`;
+            const isStandardTwoSegmentForge =
+              host === 'github.com' ||
+              host.endsWith('.github.com') ||
+              host === 'codeberg.org' ||
+              host.endsWith('.codeberg.org') ||
+              host === 'bitbucket.org' ||
+              host.endsWith('.bitbucket.org') ||
+              host === 'git.minetest.land';
+            const fullName = !isStandardTwoSegmentForge ? parts.join('/') : `${parts[0]}/${parts[1]}`;
             if (host.includes('codeberg.org')) {
               pushUnique('codeberg', fullName, `https://codeberg.org/${fullName}`, `https://codeberg.org/api/v1/repos/${fullName}/raw`);
             } else if (host.includes('git.minetest.land')) {
@@ -6822,7 +6830,7 @@ export class PackageService {
     const trimmed = rawUrl
       .trim()
       .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
-      .replace(/\/(?:tree|blob|src|commits|releases|tags|archive)(?:\/.*)?$/i, '')
+      .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive)(?:\/.*)?$/i, '')
       .replace(/\/+$/, '')
       .replace(/\.git$/i, '')
       .replace(/\/+$/, '');

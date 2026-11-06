@@ -12,6 +12,7 @@ import {
   invalidateCachedAuthMePayload
 } from '../lib/session';
 import { fetchWithAnubisSupport } from '../../lib/upstream';
+import { syncVerifiedAuthorGitPackages } from '../../lib/author-git-sync';
 
 interface Env {
   DB?: any;
@@ -780,6 +781,12 @@ export async function onRequestGet(context: {
   try {
     const resolvedUserId = await inFlightPromise;
     await writeCompletedOAuthCodeToEdgeCache(provider, code, resolvedUserId);
+    context.waitUntil?.(
+      syncVerifiedAuthorGitPackages(context.env, {
+        userId: resolvedUserId,
+        triggerProvider: provider
+      })
+    );
     return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
   } catch (err: any) {
     // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache

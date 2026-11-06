@@ -11,7 +11,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { AuthService } from '../../core/services/auth.service';
+import { AuthService, PackageGitSyncStatus } from '../../core/services/auth.service';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -261,6 +261,22 @@ import {
                   </div>
                 </div>
 
+                @if (authService.isSyncingAuthorGit()) {
+                  <div
+                    data-testid="author-git-sync-progress"
+                    class="p-2.5 rounded-xl bg-sky-500/10 border border-sky-400/30 flex items-center justify-between gap-2 text-xs text-sky-200 animate-pulse">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <svg lucideRefreshCw class="w-3.5 h-3.5 text-sky-400 animate-spin flex-shrink-0"></svg>
+                      <span class="font-semibold truncate">{{ 'profile.verifyingGitReposProgress' | translate }}</span>
+                    </div>
+                    @if (authService.syncAuthorGitProgress(); as prog) {
+                      <span class="font-mono font-bold text-[11px] text-sky-300 flex-shrink-0">
+                        {{ prog.processed }} / {{ prog.total }}
+                      </span>
+                    }
+                  </div>
+                }
+
                 @if (userPackages().length === 0) {
                   <div class="p-6 rounded-2xl glass-panel text-center space-y-3">
                     <p class="text-xs text-slate-400">{{ 'profile.noPackages' | translate }}</p>
@@ -388,6 +404,35 @@ import {
                                     <span class="glass-badge glass-badge-amber font-black uppercase tracking-wider text-[9px] px-1.5 py-0">
                                       {{ pkg.status }}
                                     </span>
+                                  }
+                                  @if (getPackageSyncStatus(pkg.id); as syncStatus) {
+                                    @if (syncStatus.state === 'syncing') {
+                                      <span
+                                        data-testid="pkg-sync-status-syncing"
+                                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sky-300 font-bold text-[9px] animate-pulse">
+                                        <svg lucideRefreshCw class="w-2.5 h-2.5 animate-spin"></svg>
+                                        <span>{{ 'profile.pkgSyncingBadge' | translate }}</span>
+                                      </span>
+                                    } @else if (syncStatus.state === 'synced') {
+                                      <span
+                                        data-testid="pkg-sync-status-synced"
+                                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold text-[9px]">
+                                        <svg lucideCheck class="w-2.5 h-2.5"></svg>
+                                        <span>{{ 'profile.pkgSyncedBadge' | translate }}</span>
+                                      </span>
+                                    } @else if (syncStatus.state === 'failed' || syncStatus.state === 'conflict') {
+                                      <span
+                                        role="button"
+                                        tabindex="0"
+                                        data-testid="pkg-sync-status-failed"
+                                        (click)="$event.stopPropagation(); openMyReportsFromFailedSync()"
+                                        (keydown.enter)="$event.stopPropagation(); openMyReportsFromFailedSync()"
+                                        [attr.title]="syncStatus.message || ('profile.pkgSyncFailedBadge' | translate)"
+                                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-amber-300 hover:bg-amber-500/30 hover:text-white font-bold text-[9px] transition cursor-pointer">
+                                        <svg lucideShieldAlert class="w-2.5 h-2.5 text-amber-400 flex-shrink-0"></svg>
+                                        <span>{{ 'profile.pkgSyncFailedBadge' | translate }}</span>
+                                      </span>
+                                    }
                                   }
                                 </div>
                               </div>
@@ -2188,6 +2233,7 @@ export class ProfileDrawerComponent implements OnInit {
   readonly myReportsManualOpen = signal<boolean | null>(null);
   readonly confirmingPackageId = signal<string | null>(null);
   readonly managingPackageId = signal<string | null>(null);
+  private readonly autoSyncedUserKeysInSession = new Set<string>();
 
   readonly myReportsCount = computed<number>(() => {
     return Math.max(this.authService.myReportsTotal(), this.authService.myReports().length);
@@ -2248,6 +2294,25 @@ export class ProfileDrawerComponent implements OnInit {
         this.isDeleteSectionExpanded.set(true);
         this.isConfirmingAccountDelete.set(true);
         this.deleteAccountError.set(null);
+      }
+      if (this.authService.isProfileDrawerOpen()) {
+        const user = this.authService.currentUser();
+        const unsynced = this.unsyncedEligibleGitPackages();
+        const hasVerifiedIdentity = Boolean(
+          user && (user.identities || []).some(i => Boolean(i.verified))
+        );
+        if (user && hasVerifiedIdentity && unsynced.length > 0 && !this.authService.isSyncingAuthorGit()) {
+          const sessionKey = `${user.id}:${(user.identities || []).map(i => `${i.provider}:${i.username}`).join(',')}`;
+          if (!this.autoSyncedUserKeysInSession.has(sessionKey)) {
+            this.autoSyncedUserKeysInSession.add(sessionKey);
+            queueMicrotask(() => {
+              this.triggerAutomaticAuthorGitSync(
+                user.username,
+                unsynced.map(p => p.id)
+              );
+            });
+          }
+        }
       }
     });
   }
@@ -2348,6 +2413,92 @@ export class ProfileDrawerComponent implements OnInit {
   readonly userGitCount = computed(() =>
     this.userPackages().filter(p => p.sources?.includes('git') || p.source === 'git').length
   );
+
+  readonly unsyncedEligibleGitPackages = computed<LuantiPackage[]>(() => {
+    const statuses = this.authService.packageSyncStatuses();
+    return this.userPackages().filter(pkg => {
+      if (pkg.sources?.includes('git') || pkg.source === 'git') return false;
+      const lowerId = pkg.id.toLowerCase();
+      if (statuses[lowerId]?.state === 'failed' || statuses[lowerId]?.state === 'conflict') {
+        return false;
+      }
+      return this.isEligibleGitRepoUrl(pkg.repo_url);
+    });
+  });
+
+  isEligibleGitRepoUrl(rawUrl?: string): boolean {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed || !/^https?:\/\//i.test(trimmed)) return false;
+    try {
+      const parsed = new URL(trimmed);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      const supportedHosts = [
+        'github.com',
+        'codeberg.org',
+        'gitlab.com',
+        'git.minetest.land',
+        'mese.hub',
+        'bitbucket.org',
+        'notabug.org',
+        'framagit.org',
+        'salsa.debian.org'
+      ];
+      const isSupportedForge =
+        supportedHosts.includes(host) ||
+        host.includes('gitlab') ||
+        host.includes('codeberg') ||
+        host.includes('gitea') ||
+        host.includes('forgejo');
+      if (!isSupportedForge) return false;
+      const cleanPath = parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
+      const segments = cleanPath.split('/').filter(Boolean);
+      if (segments.length < 2) return false;
+      if (segments.length >= 3) {
+        const seg2 = (segments[2] || '').toLowerCase();
+        const seg3 = (segments[3] || '').toLowerCase();
+        if (
+          ['wiki', 'wikis', 'issues', 'pulls', 'pull', 'merge_requests', 'discussions', 'blob', 'raw', 'releases', 'archive'].includes(seg2) ||
+          (seg2 === '-' && ['wikis', 'issues', 'merge_requests', 'blob', 'raw', 'releases', 'archive'].includes(seg3))
+        ) {
+          return false;
+        }
+        if (seg2 === 'tree' && segments.length > 4) {
+          return false;
+        }
+        if (seg2 === '-' && seg3 === 'tree' && segments.length > 5) {
+          return false;
+        }
+        if (seg2 === 'src') {
+          if ((seg3 === 'branch' || seg3 === 'commit' || seg3 === 'tag') && segments.length > 5) {
+            return false;
+          }
+          if (seg3 !== 'branch' && seg3 !== 'commit' && seg3 !== 'tag' && segments.length > 4) {
+            return false;
+          }
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getPackageSyncStatus(packageId: string): PackageGitSyncStatus | null {
+    if (!packageId) return null;
+    return this.authService.packageSyncStatuses()[packageId.toLowerCase()] || null;
+  }
+
+  openMyReportsFromFailedSync(): void {
+    this.onSelectAccountTab(true);
+    this.myReportsManualOpen.set(true);
+  }
+
+  async triggerAutomaticAuthorGitSync(username: string, candidateIds: string[]): Promise<void> {
+    const res = await this.authService.syncAuthorGitPackages(username, candidateIds, false);
+    if (res.syncedCount > 0) {
+      await this.packageService.initCatalog(true);
+    }
+  }
 
   readonly filteredUserPackages = computed<LuantiPackage[]>(() =>
     filterAndSortDrawerPackages(this.userPackages(), {

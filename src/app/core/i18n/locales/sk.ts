@@ -367,7 +367,12 @@ export const sk: TranslationDictionary = {
     deleteAccountIncludePackagesLabel: 'Vymazať z LuantiHub aj mnou odoslané komunitné Git balíčky (balíčky synchronizované z upstream ContentDB zostanú vo verejnom zrkadle bez prepojenia na váš profil)',
     deleteAccountConfirmBtn: 'Natrvalo vymazať môj účet a dáta',
     deletingAccountBtn: 'Mažem účet a dáta...',
-    accountDeletedToast: 'Váš účet LuantiHub a všetky uložené osobné údaje boli natrvalo vymazané.'
+    accountDeletedToast: 'Váš účet LuantiHub a všetky uložené osobné údaje boli natrvalo vymazané.',
+    verifyingGitReposProgress: 'Overujem a prepájam Git repozitáre vašich balíčkov...',
+    pkgSyncingBadge: 'Overujem Git...',
+    pkgSyncedBadge: 'Git overený a prepojený',
+    pkgSyncFailedBadge: 'Git repozitár nedostupný (404) — pozri Moje hlásenia',
+    syncGitSuccessToast: 'Vaše Git repozitáre boli overené a prepojené!'
   },
   setup: {
     title: 'Používajte LuantiHub Priamo v Hre',
