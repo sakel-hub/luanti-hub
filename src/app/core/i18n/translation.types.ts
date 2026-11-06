@@ -486,6 +486,8 @@ export interface TranslationDictionary {
     offlineMode: string;
     offlineModeToast: string;
     backOnline: string;
+    autoUpdatedSuccess: string;
+    autoUpdatedTitle: string;
   };
   common: {
     loading: string;

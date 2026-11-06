@@ -470,7 +470,9 @@ export const es: TranslationDictionary = {
     downloadingZipToast: 'Descargando {name}.zip — ¡extrae el archivo en tu carpeta Luanti mods/, games/ o textures/!',
     offlineMode: 'Modo sin conexión (en caché)',
     offlineModeToast: 'Conexión perdida. Estás navegando paquetes en caché.',
-    backOnline: 'De nuevo en línea. Sincronizando catálogo...'
+    backOnline: 'De nuevo en línea. Sincronizando catálogo...',
+    autoUpdatedSuccess: 'LuantiHub se ha actualizado automáticamente a la última versión.',
+    autoUpdatedTitle: 'Aplicación actualizada'
   },
   common: {
     loading: 'Cargando paquetes...',

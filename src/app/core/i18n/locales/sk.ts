@@ -470,7 +470,9 @@ export const sk: TranslationDictionary = {
     downloadingZipToast: 'Sťahujem {name}.zip — rozbaľte ho do priečinka Luanti mods/, games/ alebo textures/!',
     offlineMode: 'Offline režim (z vyrovnávacej pamäte)',
     offlineModeToast: 'Sieťové pripojenie bolo prerušené. Prehliadate balíčky z vyrovnávacej pamäte.',
-    backOnline: 'Opäť online. Synchronizujem katalóg...'
+    backOnline: 'Opäť online. Synchronizujem katalóg...',
+    autoUpdatedSuccess: 'LuantiHub bol automaticky aktualizovaný na najnovšiu verziu.',
+    autoUpdatedTitle: 'Aplikácia bola aktualizovaná'
   },
   common: {
     loading: 'Načítavam balíčky z registra...',

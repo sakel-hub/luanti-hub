@@ -1124,8 +1124,10 @@
    * and notified even while the PWA window is minimized, unfocused, or closed.
    */
   async function checkNgswAppUpdateInSw(state, prefs, fireSwNotif, stateUpdates) {
-    if (!prefs || prefs.notifyAppUpdates === false) return false;
     const baselineSig = typeof state.bootManifestSignature === 'string' ? state.bootManifestSignature : '';
+    const canFireOsNotif =
+      Boolean(prefs && prefs.notificationsEnabled !== false && prefs.notifyAppUpdates !== false) &&
+      typeof fireSwNotif === 'function';
 
     try {
       const res = await fetch(`/ngsw.json?ngsw-bypass=true&ngsw-cache-bust=${Date.now()}`, {
@@ -1154,13 +1156,26 @@
       }
 
       const updateTag = `lh-app-update-${remoteSig.slice(0, 48)}`;
-      const fired = await fireSwNotif('LuantiHub Update Available', {
-        body: 'A new version of LuantiHub is ready. Click to reload and update.',
-        icon: '/icons/notif-app-update.png',
-        badge: '/icons/icon-72x72.png',
-        tag: updateTag,
-        data: { action: 'reload_update', signature: remoteSig }
-      });
+      const fired = canFireOsNotif
+        ? await fireSwNotif('LuantiHub Updated', {
+            body: 'LuantiHub was updated automatically in the background to the latest version.',
+            icon: '/icons/notif-app-update.png',
+            badge: '/icons/icon-72x72.png',
+            tag: updateTag,
+            data: { signature: remoteSig }
+          })
+        : false;
+
+      try {
+        if (self.registration && typeof self.registration.update === 'function') {
+          await self.registration.update().catch(() => {});
+        }
+        if (typeof self.skipWaiting === 'function') {
+          await self.skipWaiting().catch(() => {});
+        }
+      } catch {
+        // Ignore SW activation errors
+      }
 
       await broadcastSyncMessage({
         type: 'LH_APP_UPDATE_DETECTED',
@@ -1174,6 +1189,7 @@
       return false;
     }
   }
+  const evaluateBackgroundManifestUpdateInSw = checkNgswAppUpdateInSw;
 
   /**
    * Evaluates and displays OS-level notifications directly from the Service Worker
@@ -1183,18 +1199,12 @@
   async function evaluateBackgroundNotificationsInSw(bootPayload) {
     const notifiedTags = [];
     try {
-      if (!self.registration || typeof self.registration.showNotification !== 'function') {
-        return notifiedTags;
-      }
-      if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
-        return notifiedTags;
-      }
-
       const state = await readAllNotifStateFromSw();
       const prefs = state.prefs && typeof state.prefs === 'object' ? state.prefs : null;
-      if (!prefs || !prefs.notificationsEnabled) {
-        return notifiedTags;
-      }
+      const canShowNotifications =
+        Boolean(self.registration && typeof self.registration.showNotification === 'function') &&
+        (typeof Notification === 'undefined' || Notification.permission === 'granted') &&
+        Boolean(prefs && prefs.notificationsEnabled);
 
       const seenTagsList = Array.isArray(state.seenTags) ? state.seenTags.slice() : [];
       const seenTagsSet = new Set(seenTagsList);
@@ -1202,6 +1212,7 @@
       const nowMs = Date.now();
 
       const fireSwNotif = async (title, options) => {
+        if (!canShowNotifications) return false;
         if (!options || !options.tag || seenTagsSet.has(options.tag)) return false;
         seenTagsSet.add(options.tag);
         seenTagsList.push(options.tag);
@@ -1214,8 +1225,15 @@
         }
       };
 
-      // 0. Evaluate App Update (`/ngsw.json`) in Service Worker
+      // 0. Evaluate App Update (`/ngsw.json`) in Service Worker (always checks & broadcasts LH_APP_UPDATE_DETECTED; OS notification gated by canShowNotifications)
       await checkNgswAppUpdateInSw(state, prefs, fireSwNotif, stateUpdates);
+
+      if (!canShowNotifications) {
+        if (Object.keys(stateUpdates).length > 0) {
+          await writeNotifStateFromSw(stateUpdates);
+        }
+        return notifiedTags;
+      }
 
       // 1-5. Evaluate Catalog Notifications via Shared DRY Notification Engine (`notification-engine.ts`)
       const batchResult = evaluateCatalogNotificationsBatch(bootPayload, state, nowMs);

@@ -470,7 +470,9 @@ export const ru: TranslationDictionary = {
     downloadingZipToast: 'Скачивание {name}.zip — распакуйте архив в папку Luanti mods/, games/ или textures/!',
     offlineMode: 'Автономный режим (из кэша)',
     offlineModeToast: 'Соединение с сетью потеряно. Вы просматриваете кэшированные пакеты.',
-    backOnline: 'Снова в сети. Синхронизация каталога...'
+    backOnline: 'Снова в сети. Синхронизация каталога...',
+    autoUpdatedSuccess: 'LuantiHub был автоматически обновлен до последней версии.',
+    autoUpdatedTitle: 'Приложение обновлено'
   },
   common: {
     loading: 'Загрузка пакетов из реестра...',

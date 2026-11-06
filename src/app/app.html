@@ -37,30 +37,11 @@
     </div>
   }
 
-  <!-- PWA Automatic Update Banner (with mobile gesture safe-area inset) -->
-  @if (pwaService.updateAvailable()) {
-    <div
-      role="alert"
-      class="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom,1.5rem))] right-4 sm:right-6 z-50 p-4 glass-btn-sky text-white rounded-2xl flex items-center gap-4 luanti-dialog-panel shadow-2xl max-w-[95vw]">
-      <div class="text-xs font-medium">
-        <p class="font-bold">{{ 'pwa.updateAvailable' | translate }}</p>
-        <p class="text-sky-100">{{ 'pwa.updateDesc' | translate }}</p>
-      </div>
-      <button
-        type="button"
-        (click)="pwaService.applyUpdate()"
-        class="px-3.5 py-1.5 bg-white text-sky-900 font-bold rounded-xl text-xs hover:bg-slate-100 transition shadow cursor-pointer whitespace-nowrap">
-        {{ 'pwa.reloadNow' | translate }}
-      </button>
-    </div>
-  }
-
   <!-- Global Unobtrusive Frosted-Glass Back-to-Top Button (Visible past 100vh on all pages) -->
   <app-back-to-top
     position="fixed"
     testId="page-back-to-top-btn"
     [visible]="showPageBackToTop()"
-    [offsetBottomClass]="pwaService.updateAvailable() ? 'bottom-24 sm:bottom-24' : ''"
     (scrollToTop)="scrollToTopOfPage()">
   </app-back-to-top>
 

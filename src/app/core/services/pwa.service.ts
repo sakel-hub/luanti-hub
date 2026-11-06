@@ -55,6 +55,7 @@ export interface NativeNotificationPayload {
     reportId?: string;
     ctaUrl?: string;
     action?: 'reload_update';
+    signature?: string;
   };
 }
 
@@ -71,6 +72,9 @@ const RECENT_DISCOVERIES_KEY = 'lh_recent_discoveries_v1';
 const BASELINE_SEEDED_AT_KEY = 'lh_notif_baseline_seeded_at_v1';
 const LAST_BOOT_FETCH_AT_KEY = 'lh_last_boot_fetch_at_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
+export const AUTO_UPDATED_VERSION_SESSION_KEY = 'lh_pwa_auto_updated_version';
+export const JUST_AUTO_UPDATED_STORAGE_KEY = 'lh_pwa_just_auto_updated';
+const AUTO_RELOAD_INACTIVITY_MS = 45 * 1000;
 const MAX_SEEN_TAGS = 100;
 
 export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
@@ -431,8 +435,12 @@ export class PwaService {
   private idbSyncInFlight: Promise<void> | null = null;
   private idbSyncPending = false;
   private idbSyncPendingPrefs: Record<string, any> | undefined = undefined;
+  private pendingAutoReload = false;
+  private autoReloadInactivityTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoReloadActivityListenersBound = false;
 
   constructor() {
+    this.checkAndShowPostUpdateToast();
     this.initSwUpdate();
     this.initInstallPrompt();
     this.initWindowControlsOverlay();
@@ -801,10 +809,7 @@ export class PwaService {
         }
         const sig = String(data.signature || 'ready').trim();
         this.latestDetectedUpdateVersion = sig;
-        this.updateAvailable.set(true);
-        if (!data.notified) {
-          this.notifyAppUpdateAvailable(sig);
-        }
+        this.notifyAppUpdateAvailable(sig, { skipNativeNotification: Boolean(data.notified) });
       } else if (data.type === 'LH_OUTBOX_SYNC_COMPLETED') {
         writeFallbackOutbox([]);
       } else if (data.type === 'LH_NOTIFICATION_CLICK' && data.data) {
@@ -1025,24 +1030,117 @@ export class PwaService {
     }
   }
 
-  private notifyAppUpdateAvailable(versionIdentifier?: string): void {
+  /**
+   * Checks on startup if the application just reloaded from an automatic background update
+   * (`lh_pwa_just_auto_updated`). If present and recent (< 60s), displays the transient
+   * in-app auto-update success toast (`pwa.autoUpdatedSuccess`) and clears the receipt flag.
+   */
+  checkAndShowPostUpdateToast(nowMs = Date.now()): boolean {
+    let rawReceipt: string | null = null;
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        rawReceipt = sessionStorage.getItem(JUST_AUTO_UPDATED_STORAGE_KEY);
+        sessionStorage.removeItem(JUST_AUTO_UPDATED_STORAGE_KEY);
+      }
+    } catch {
+      // ignore sessionStorage errors
+    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const localReceipt = localStorage.getItem(JUST_AUTO_UPDATED_STORAGE_KEY);
+        if (!rawReceipt && localReceipt) {
+          rawReceipt = localReceipt;
+        }
+        localStorage.removeItem(JUST_AUTO_UPDATED_STORAGE_KEY);
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+
+    if (!rawReceipt) return false;
+
+    let receiptTs = 0;
+    let version = '';
+    try {
+      const parsed = JSON.parse(rawReceipt);
+      if (parsed && typeof parsed === 'object') {
+        receiptTs = Number(parsed.ts || 0);
+        version = String(parsed.version || '').trim();
+      } else if (typeof parsed === 'number') {
+        receiptTs = parsed;
+      } else if (parsed === true) {
+        receiptTs = nowMs;
+      }
+    } catch {
+      const num = Number(rawReceipt);
+      if (Number.isFinite(num) && num > 0) {
+        receiptTs = num;
+      } else if (rawReceipt === '1' || rawReceipt === 'true') {
+        receiptTs = nowMs;
+      }
+    }
+
+    if (receiptTs > 0 && nowMs - receiptTs < 60_000) {
+      if (version && typeof sessionStorage !== 'undefined') {
+        try {
+          sessionStorage.setItem(AUTO_UPDATED_VERSION_SESSION_KEY, version);
+        } catch {
+          // ignore
+        }
+      }
+      this.showToast('pwa.autoUpdatedSuccess', 4500);
+      return true;
+    }
+    return false;
+  }
+
+  private recordAutoUpdateReceipt(versionKey: string): void {
+    const payload = JSON.stringify({
+      version: versionKey || 'ready',
+      ts: Date.now()
+    });
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem(JUST_AUTO_UPDATED_STORAGE_KEY, payload);
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(JUST_AUTO_UPDATED_STORAGE_KEY, payload);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private notifyAppUpdateAvailable(
+    versionIdentifier?: string,
+    options?: { skipNativeNotification?: boolean }
+  ): void {
     this.updateAvailable.set(true);
-    this.statusMessage.set(null);
     const versionKey = String(versionIdentifier || this.latestDetectedUpdateVersion || 'ready').trim();
     this.latestDetectedUpdateVersion = versionKey;
-    this.sendNativeNotification({
-      title: 'LuantiHub Update Available',
-      body: 'A new version of LuantiHub is ready. Click to reload with the latest features.',
-      tag: `lh-app-update-${versionKey}`,
-      category: 'app_update',
-      variant: 'app_update',
-      data: { action: 'reload_update' }
-    });
+
+    if (!options?.skipNativeNotification && this.settingsService.notifyAppUpdates()) {
+      const tag = versionKey ? `lh-app-update-${versionKey}` : 'lh-app-update-notif';
+      this.sendNativeNotification({
+        title: 'LuantiHub Updated',
+        body: 'LuantiHub was updated automatically in the background to the latest version.',
+        tag,
+        category: 'app_update',
+        variant: 'app_update',
+        data: { signature: versionKey }
+      });
+    }
+
+    this.activateUpdate(false, versionKey).catch(() => {});
   }
 
   private initSwUpdate(): void {
     if (this.swUpdate?.isEnabled) {
-      // 1. Listen for version ready
+      // 1. Listen for version ready and automatically activate in background
       this.swUpdate.versionUpdates
         .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
         .subscribe((evt) => {
@@ -1105,6 +1203,9 @@ export class PwaService {
 
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
+          if (this.pendingAutoReload) {
+            this.executeSafeReload();
+          }
           handoffToServiceWorker(true);
         } else if (document.visibilityState === 'visible' && this.isOnline()) {
           this.syncAppBadge(0).catch(() => {});
@@ -1249,6 +1350,9 @@ export class PwaService {
 
     window.addEventListener('popstate', () => {
       this.updateNavigationHistoryState();
+      if (this.pendingAutoReload && !this.isUserWorkflowActive()) {
+        this.executeSafeReload();
+      }
     });
 
     try {
@@ -1267,6 +1371,13 @@ export class PwaService {
                 : { __lhNavIdx: self.navHistoryCursor };
             const res = origPushState.call(this, nextData, unused, url);
             self.updateNavigationHistoryState(false);
+            if (self.pendingAutoReload && !self.isUserWorkflowActive()) {
+              setTimeout(() => {
+                if (self.pendingAutoReload && !self.isUserWorkflowActive()) {
+                  self.executeSafeReload();
+                }
+              }, 0);
+            }
             return res;
           };
           (wrappedPush as any).__lhOrigPushState = origPushState;
@@ -1442,13 +1553,16 @@ export class PwaService {
 
     if (typeof window !== 'undefined' && typeof window.focus === 'function') {
       try {
-        window.focus();
+        const isJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
+        if (!isJsdom || typeof (window.focus as any)?.mock === 'object') {
+          window.focus();
+        }
       } catch {
         // ignore
       }
     }
-    if (data?.action === 'reload_update') {
-      this.activateUpdate();
+    if (data?.action === 'reload_update' || (data?.signature && this.pendingAutoReload)) {
+      this.executeSafeReload();
       return;
     }
     if (this.notificationClickHandler && data) {
@@ -3147,22 +3261,163 @@ export class PwaService {
     }
   }
 
-  async activateUpdate(): Promise<void> {
-    if (
-      this.swUpdate?.isEnabled &&
-      typeof navigator !== 'undefined' &&
-      navigator.serviceWorker?.controller
-    ) {
+  /**
+   * Determines whether the user is currently engaged in an active modal, sandbox web game,
+   * video theater, or form input that should not be interrupted by an automatic reload.
+   */
+  isUserWorkflowActive(): boolean {
+    if (typeof document === 'undefined') return false;
+    try {
+      const blockingSelector = [
+        '#pwa-sandbox-modal',
+        'app-package-detail-modal',
+        'app-submit-modal',
+        'app-setup-guide-modal',
+        'app-auth-modal',
+        'app-profile-drawer',
+        'app-author-drawer',
+        '.luanti-modal-backdrop',
+        '[role="dialog"][aria-modal="true"]'
+      ].join(', ');
+      if (document.querySelector(blockingSelector)) {
+        return true;
+      }
+
+      const videos = Array.from(document.querySelectorAll('video'));
+      if (videos.some(v => !v.paused && !v.ended)) {
+        return true;
+      }
+
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl) {
+        const tag = activeEl.tagName;
+        if (tag === 'TEXTAREA' || tag === 'SELECT' || activeEl.isContentEditable) {
+          return true;
+        }
+        if (tag === 'INPUT') {
+          const inputEl = activeEl as HTMLInputElement;
+          if (inputEl.id !== 'main-search-input' || Boolean(inputEl.value?.trim())) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // ignore DOM inspection errors
+    }
+    return false;
+  }
+
+  private scheduleSafeAutoReload(): void {
+    this.pendingAutoReload = true;
+    this.bindAutoReloadActivityListeners();
+    this.resetAutoReloadInactivityTimer();
+  }
+
+  private bindAutoReloadActivityListeners(): void {
+    if (this.autoReloadActivityListenersBound || typeof window === 'undefined') return;
+    this.autoReloadActivityListenersBound = true;
+    const onUserActivity = () => {
+      if (this.pendingAutoReload) {
+        this.resetAutoReloadInactivityTimer();
+      }
+    };
+    try {
+      window.addEventListener('pointerdown', onUserActivity, { passive: true });
+      window.addEventListener('keydown', onUserActivity, { passive: true });
+      window.addEventListener('touchstart', onUserActivity, { passive: true });
+      window.addEventListener('wheel', onUserActivity, { passive: true });
+    } catch {
+      // ignore listener errors
+    }
+  }
+
+  private resetAutoReloadInactivityTimer(): void {
+    if (this.autoReloadInactivityTimer) {
+      clearTimeout(this.autoReloadInactivityTimer);
+      this.autoReloadInactivityTimer = null;
+    }
+    if (!this.pendingAutoReload || typeof window === 'undefined') return;
+
+    this.autoReloadInactivityTimer = setTimeout(() => {
+      this.autoReloadInactivityTimer = null;
+      if (!this.pendingAutoReload) return;
+      if (!this.isUserWorkflowActive()) {
+        this.executeSafeReload();
+      } else {
+        this.resetAutoReloadInactivityTimer();
+      }
+    }, AUTO_RELOAD_INACTIVITY_MS);
+  }
+
+  reloadWindow(): void {
+    if (typeof window === 'undefined' || !window.location) return;
+    try {
+      const isJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
+      if (isJsdom && typeof (window.location.reload as any)?.mock !== 'object') {
+        return;
+      }
+      window.location.reload();
+    } catch {
+      // ignore
+    }
+  }
+
+  executeSafeReload(): boolean {
+    if (this.autoReloadInactivityTimer) {
+      clearTimeout(this.autoReloadInactivityTimer);
+      this.autoReloadInactivityTimer = null;
+    }
+    this.pendingAutoReload = false;
+
+    const versionKey = String(this.latestDetectedUpdateVersion || 'ready').trim();
+    if (typeof sessionStorage !== 'undefined') {
+      try {
+        if (sessionStorage.getItem(AUTO_UPDATED_VERSION_SESSION_KEY) === versionKey) {
+          return false;
+        }
+        sessionStorage.setItem(AUTO_UPDATED_VERSION_SESSION_KEY, versionKey);
+      } catch {
+        // ignore sessionStorage errors
+      }
+    }
+
+    this.recordAutoUpdateReceipt(versionKey);
+    this.reloadWindow();
+    return true;
+  }
+
+  async activateUpdate(forceImmediateReload = false, versionIdentifier?: string): Promise<void> {
+    const versionKey = String(versionIdentifier || this.latestDetectedUpdateVersion || 'ready').trim();
+    this.latestDetectedUpdateVersion = versionKey;
+
+    if (this.swUpdate?.isEnabled && typeof this.swUpdate.activateUpdate === 'function') {
       try {
         await Promise.race([
           this.swUpdate.activateUpdate(),
-          new Promise<void>(resolve => setTimeout(() => resolve(), 1500))
+          new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1500))
         ]);
       } catch (err) {
-        console.warn('Could not activate update via SwUpdate, clearing cache and reloading:', err);
+        console.warn('Could not activate update via SwUpdate:', err);
       }
     }
-    await this.forceClearCacheAndReload();
+
+    if (!forceImmediateReload && typeof sessionStorage !== 'undefined') {
+      try {
+        if (sessionStorage.getItem(AUTO_UPDATED_VERSION_SESSION_KEY) === versionKey) {
+          return;
+        }
+      } catch {
+        // ignore sessionStorage errors
+      }
+    }
+
+    const isHidden =
+      typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    if (forceImmediateReload || isHidden) {
+      this.executeSafeReload();
+    } else {
+      this.scheduleSafeAutoReload();
+    }
   }
 
   async forceClearCacheAndReload(): Promise<void> {
@@ -3187,17 +3442,18 @@ export class PwaService {
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.clear();
       }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(JUST_AUTO_UPDATED_STORAGE_KEY);
+      }
     } catch (err) {
       console.warn('Error clearing caches/service workers:', err);
     } finally {
-      if (typeof window !== 'undefined') {
-        window.location.reload();
-      }
+      this.reloadWindow();
     }
   }
 
   applyUpdate(): void {
-    this.activateUpdate();
+    this.activateUpdate(true);
   }
 
   showToast(msg: string, durationMs = 4000): void {

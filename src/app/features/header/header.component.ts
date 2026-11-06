@@ -427,14 +427,6 @@ import {
                 @if (updateFeedback()) {
                   <div class="px-3 py-2 rounded-lg text-[11px] font-medium transition flex items-center gap-2 border bg-slate-950/80 border-white/10 text-slate-300">
                     <span class="flex-1">{{ updateFeedback() }}</span>
-                    @if (pwaService.updateAvailable()) {
-                      <button
-                        type="button"
-                        (click)="pwaService.activateUpdate()"
-                        class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] whitespace-nowrap cursor-pointer">
-                        {{ 'pwa.updateReload' | translate }}
-                      </button>
-                    }
                   </div>
                 }
 
@@ -865,7 +857,9 @@ export class HeaderComponent {
     this.isCheckingUpdates.set(false);
 
     if (hasUpdate) {
-      this.updateFeedback.set(this.translationService.translate('pwa.updateAvailable'));
+      this.updateFeedback.set(this.translationService.translate('pwa.autoUpdatedSuccess'));
+      this.pwaService.showToast('pwa.autoUpdatedSuccess', 4500);
+      await this.pwaService.activateUpdate(true);
     } else {
       this.updateFeedback.set(this.translationService.translate('pwa.upToDate'));
       setTimeout(() => {

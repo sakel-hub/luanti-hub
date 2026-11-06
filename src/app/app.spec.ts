@@ -3659,7 +3659,7 @@ supported_games = minetest_game, voxelibre
       expect(swCalls[0].options?.icon).toContain('/icons/notif-dismissed.png');
       expect(fallbackCalls.length).toBe(0);
 
-      // 3. Verify checkForUpdate(false) fires the native "LuantiHub Update Available" notification
+      // 3. Verify checkForUpdate(false) fires the native "LuantiHub Updated" notification
       // with /icons/notif-app-update.png when /ngsw.json has a newer main-*.js bundle
       const mockScript = document.createElement('script');
       mockScript.setAttribute('src', 'main-OLDHASH1.js');
@@ -3682,9 +3682,11 @@ supported_games = minetest_game, voxelibre
         pwaService.updateAvailable.set(false);
         // Simulate hung SwUpdate when navigator.serviceWorker.controller is null after domain migration
         const origSwUpdate = (pwaService as any).swUpdate;
+        const activateUpdateSpy = vi.fn().mockResolvedValue(true);
         (pwaService as any).swUpdate = {
           isEnabled: true,
-          checkForUpdate: () => new Promise<boolean>(() => {}) // never resolves
+          checkForUpdate: () => new Promise<boolean>(() => {}), // never resolves
+          activateUpdate: activateUpdateSpy
         };
 
         const hasUpdate = await pwaService.checkForUpdate(true);
@@ -3692,10 +3694,15 @@ supported_games = minetest_game, voxelibre
         expect(pwaService.checkingForUpdate()).toBe(false);
         expect(pwaService.updateAvailable()).toBe(true);
         await new Promise(resolve => setTimeout(resolve, 25));
+        expect(activateUpdateSpy).toHaveBeenCalled();
         expect(swCalls.length).toBe(2);
-        expect(swCalls[1].title).toBe('LuantiHub Update Available');
+        expect(swCalls[1].title).toBe('LuantiHub Updated');
+        expect(swCalls[1].options?.body).toBe(
+          'LuantiHub was updated automatically in the background to the latest version.'
+        );
         expect(swCalls[1].options?.tag).toBe('lh-app-update-main-NEWHASH2.js');
         expect(swCalls[1].options?.icon).toContain('/icons/notif-app-update.png');
+        expect(swCalls[1].options?.data?.action).toBeUndefined();
 
         (pwaService as any).swUpdate = origSwUpdate;
       } finally {
@@ -5977,6 +5984,7 @@ supported_games = minetest_game, voxelibre
       expect(triggerSpy).toHaveBeenCalled();
 
       // Simulate Service Worker broadcasting LH_APP_UPDATE_DETECTED while minimized
+      const reloadSpy = vi.spyOn(pwaService, 'reloadWindow').mockImplementation(() => {});
       (pwaService as any).syncBroadcastChannel?.onmessage?.({
         data: {
           type: 'LH_APP_UPDATE_DETECTED',
@@ -5986,9 +5994,30 @@ supported_games = minetest_game, voxelibre
           ts: Date.now()
         }
       } as MessageEvent);
+      await new Promise(resolve => setTimeout(resolve, 15));
 
       expect(pwaService.updateAvailable()).toBe(true);
       expect(pwaService.hasSeenNotificationTag('lh-app-update-main-NEW123.js|styles-NEW456.css|hash789')).toBe(true);
+      expect(reloadSpy).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.getItem('lh_pwa_auto_updated_version')).toBe(
+        'main-NEW123.js|styles-NEW456.css|hash789'
+      );
+
+      // Verify post-reload boot toast ("lh_pwa_just_auto_updated") fires pwa.autoUpdatedSuccess and clears receipt
+      const toastShown = pwaService.checkAndShowPostUpdateToast();
+      expect(toastShown).toBe(true);
+      expect(pwaService.statusMessage()).toBe('pwa.autoUpdatedSuccess');
+      expect(localStorage.getItem('lh_pwa_just_auto_updated')).toBeNull();
+      expect(sessionStorage.getItem('lh_pwa_just_auto_updated')).toBeNull();
+
+      // Verify no manual "Reload Now" CTA banner is rendered in the DOM
+      const fixture = TestBed.createComponent(App);
+      fixture.detectChanges();
+      const rootEl = fixture.nativeElement as HTMLElement;
+      expect(rootEl.textContent).toContain('LuantiHub has been updated to the latest version.');
+      expect(rootEl.textContent).not.toContain('Reload Now');
+
+      reloadSpy.mockRestore();
     } finally {
       triggerSpy.mockRestore();
       syncIdbSpy.mockRestore();
@@ -10946,5 +10975,93 @@ supported_games = minetest_game, voxelibre
     expect(modalComp.isReleaseNotesExpanded(modalComp.getReleaseNotesKey(modalComp.releases()[0], 0))).toBe(false);
     fetchNotesSpy.mockRestore();
     modalFixture.destroy();
+  });
+
+  it('should automatically activate VERSION_READY updates, defer reload while active modals/sandbox are open, reload on route change or tab hide, and guard against reload loops', async () => {
+    const { Subject } = await import('rxjs');
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    const versionUpdates$ = new Subject<any>();
+    const activateUpdateSpy = vi.fn().mockResolvedValue(true);
+    const reloadSpy = vi.spyOn(pwaService, 'reloadWindow').mockImplementation(() => {});
+    const sendNotifSpy = vi.spyOn(pwaService, 'sendNativeNotification').mockResolvedValue(true);
+    const origSwUpdate = (pwaService as any).swUpdate;
+    const origVisDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+
+    try {
+      sessionStorage.removeItem('lh_pwa_auto_updated_version');
+      sessionStorage.removeItem('lh_pwa_just_auto_updated');
+      localStorage.removeItem('lh_pwa_just_auto_updated');
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyAppUpdates.set(true);
+
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => 'visible'
+      });
+
+      (pwaService as any).swUpdate = {
+        isEnabled: true,
+        versionUpdates: versionUpdates$.asObservable(),
+        activateUpdate: activateUpdateSpy,
+        checkForUpdate: vi.fn().mockResolvedValue(false)
+      };
+      (pwaService as any).initSwUpdate();
+
+      // 1. Emit VERSION_READY while page is visible -> activates SW in background & queues safe reload without immediate reload
+      versionUpdates$.next({
+        type: 'VERSION_READY',
+        currentVersion: { hash: 'v1-old' },
+        latestVersion: { hash: 'v2-new-auto' }
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      expect(activateUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendNotifSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'LuantiHub Updated',
+          body: 'LuantiHub was updated automatically in the background to the latest version.',
+          tag: 'lh-app-update-v2-new-auto',
+          category: 'app_update',
+          variant: 'app_update'
+        })
+      );
+      expect(reloadSpy).not.toHaveBeenCalled();
+      expect((pwaService as any).pendingAutoReload).toBe(true);
+
+      // 2. While #pwa-sandbox-modal is open, route navigation does NOT interrupt the user with a reload
+      const sandboxModal = document.createElement('div');
+      sandboxModal.id = 'pwa-sandbox-modal';
+      document.body.appendChild(sandboxModal);
+      expect(pwaService.isUserWorkflowActive()).toBe(true);
+
+      window.history.pushState({}, '', '/games');
+      await new Promise(resolve => setTimeout(resolve, 15));
+      expect(reloadSpy).not.toHaveBeenCalled();
+      expect((pwaService as any).pendingAutoReload).toBe(true);
+
+      // 3. Once sandbox modal is closed, the next route navigation executes the queued safe reload
+      sandboxModal.remove();
+      expect(pwaService.isUserWorkflowActive()).toBe(false);
+
+      window.history.pushState({}, '', '/mods');
+      await new Promise(resolve => setTimeout(resolve, 15));
+      expect(reloadSpy).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.getItem('lh_pwa_auto_updated_version')).toBe('v2-new-auto');
+
+      // 4. Loop guard: attempting to execute reload again for the same version in the same session is a no-op
+      expect(pwaService.executeSafeReload()).toBe(false);
+      expect(reloadSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      (pwaService as any).swUpdate = origSwUpdate;
+      reloadSpy.mockRestore();
+      sendNotifSpy.mockRestore();
+      if (origVisDescriptor) {
+        Object.defineProperty(document, 'visibilityState', origVisDescriptor);
+      } else {
+        delete (document as any).visibilityState;
+      }
+      document.getElementById('pwa-sandbox-modal')?.remove();
+    }
   });
 });

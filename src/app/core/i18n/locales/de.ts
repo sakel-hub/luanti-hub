@@ -470,7 +470,9 @@ export const de: TranslationDictionary = {
     downloadingZipToast: 'Lade {name}.zip herunter — entpacken Sie das Archiv in Ihren Luanti mods/, games/ oder textures/ Ordner!',
     offlineMode: 'Offline-Modus (Zwischengespeichert)',
     offlineModeToast: 'Netzwerkverbindung verloren. Sie durchsuchen zwischengespeicherte Pakete.',
-    backOnline: 'Wieder online. Katalog wird synchronisiert...'
+    backOnline: 'Wieder online. Katalog wird synchronisiert...',
+    autoUpdatedSuccess: 'LuantiHub wurde automatisch auf die neueste Version aktualisiert.',
+    autoUpdatedTitle: 'App automatisch aktualisiert'
   },
   common: {
     loading: 'Pakete werden aus der Registry geladen...',
