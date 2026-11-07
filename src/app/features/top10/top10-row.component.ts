@@ -14,6 +14,7 @@ import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { LuantiPackage } from '../../core/models/package.model';
+import { hasOrganicCodeTag } from '../../core/config/package-utils.config';
 import { formatContentDbCdnUrl, selectSharpPackageBanner } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
@@ -25,7 +26,8 @@ import {
   LucideHeart,
   LucideTrophy,
   LucideDownload,
-  LucideInfo
+  LucideInfo,
+  LucideSprout
 } from '@lucide/angular';
 
 @Component({
@@ -43,7 +45,8 @@ import {
     LucideHeart,
     LucideTrophy,
     LucideDownload,
-    LucideInfo
+    LucideInfo,
+    LucideSprout
   ],
   template: `
     @if (rowPackages().length > 0) {
@@ -173,11 +176,22 @@ import {
                   class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
 
-                <!-- Top Rose Frosted Glass Badge -->
-                <div class="absolute top-2 left-2 z-20">
+                <!-- Top Rose Frosted Glass Badge + Organic Code Badge -->
+                <div class="absolute top-2 left-2 z-20 flex items-center gap-1">
                   <span class="glass-badge glass-badge-rose font-black uppercase tracking-wider text-[9px] px-1.5 py-0.5">
                     {{ 'carousel.top10Badge' | translate }}
                   </span>
+                  @if (isOrganicCode(pkg)) {
+                    <span
+                      data-testid="organic-code-badge"
+                      (click)="$event.stopPropagation()"
+                      [appTooltip]="'card.organicCodeTooltip' | translate"
+                      [appTooltipTap]="true"
+                      [attr.aria-label]="'card.organicCodeLabel' | translate"
+                      class="glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0.5 cursor-help">
+                      <svg lucideSprout class="w-2.5 h-2.5 text-emerald-400 flex-shrink-0"></svg>
+                    </span>
+                  }
                 </div>
 
                 <!-- Quick Action Buttons (Download .zip + Favorite) -->
@@ -239,6 +253,10 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
 
   readonly packageService = inject(PackageService);
   readonly settingsService = inject(SettingsService);
+
+  isOrganicCode(pkg: LuantiPackage): boolean {
+    return hasOrganicCodeTag(pkg);
+  }
 
   readonly rowPackages = computed<LuantiPackage[]>(() => {
     return this.timeframe === 'today'

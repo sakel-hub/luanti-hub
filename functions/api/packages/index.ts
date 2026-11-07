@@ -46,6 +46,8 @@ import {
   computeLuantiHubFrecencyMetrics,
   mergeLuantiHubAndContentDbGameSupport,
   parsePackageTranslations,
+  parseBadgeTagsArray,
+  ORGANIC_CODE_TAG,
   BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
@@ -1474,7 +1476,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         if (done) return;
         await writeEdgeCacheJson(cleanupKey, true, 86400 * 30);
         await env.DB.prepare(
-          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND status = 'active'`
+          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND (badge_tags IS NULL OR badge_tags = '' OR badge_tags = '[]') AND (dev_state IS NULL OR dev_state = '') AND (translations IS NULL OR translations = '' OR translations = '{}') AND status = 'active'`
         ).run().catch(() => {});
         await env.DB.prepare(
           `DELETE FROM releases WHERE package_id NOT IN (SELECT id FROM packages)`
@@ -1509,8 +1511,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const selectCols = isBootBundle
       ? '*'
-      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha';
-    let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
+      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, badge_tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, translations, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha';
+    let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0 OR (badge_tags IS NOT NULL AND badge_tags != '' AND badge_tags != '[]') OR (dev_state IS NOT NULL AND dev_state != '') OR (translations IS NOT NULL AND translations != '' AND translations != '{}'))`;
     const params: any[] = [];
 
     const d1Types =
@@ -1944,6 +1946,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     const parsedTags = parseJsonArray(p.tags);
+    const parsedBadgeTags = parseBadgeTagsArray(p.badge_tags);
+    if (parsedTags.includes(ORGANIC_CODE_TAG) && !parsedBadgeTags.includes(ORGANIC_CODE_TAG)) {
+      parsedBadgeTags.push(ORGANIC_CODE_TAG);
+    }
     const rawProvider = String(p.provider || '').toLowerCase();
     const detectedRepoProvider =
       rawProvider !== 'contentdb' && p.repo_url
@@ -2123,6 +2129,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       min_minetest_version: p.min_minetest_version || matchedUpstream?.min_minetest_version || '5.0.0',
       ...(p.max_minetest_version || matchedUpstream?.max_minetest_version ? { max_minetest_version: p.max_minetest_version || matchedUpstream?.max_minetest_version } : {}),
       tags: combinedTags.length > 0 ? combinedTags : [p.type || 'mod'],
+      ...(parsedBadgeTags.length > 0 ? { badge_tags: parsedBadgeTags } : {}),
       dependencies: parsedDeps.length > 0 ? parsedDeps : matchedUpstream?.dependencies,
       optional_dependencies: parsedOptDeps.length > 0 ? parsedOptDeps : matchedUpstream?.optional_dependencies,
       daily_downloads: itemDailyDl,

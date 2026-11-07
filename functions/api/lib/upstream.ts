@@ -652,6 +652,12 @@ import {
   LUANTIHUB_ENGINE_VERSIONS,
   LUANTIHUB_DEV_STATES,
   LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_BADGE_TAGS,
+  ORGANIC_CODE_TAG,
+  ORGANIC_CODE_LABEL,
+  ORGANIC_CODE_TOOLTIP,
+  parseBadgeTagsArray,
+  hasOrganicCodeTag,
   LUANTIHUB_POPULAR_GAMES,
   parseGameSupportArray,
   inferGameSupportFromDependencies,
@@ -683,6 +689,12 @@ export {
   LUANTIHUB_ENGINE_VERSIONS,
   LUANTIHUB_DEV_STATES,
   LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_BADGE_TAGS,
+  ORGANIC_CODE_TAG,
+  ORGANIC_CODE_LABEL,
+  ORGANIC_CODE_TOOLTIP,
+  parseBadgeTagsArray,
+  hasOrganicCodeTag,
   LUANTIHUB_POPULAR_GAMES,
   parseGameSupportArray,
   inferGameSupportFromDependencies,
@@ -833,6 +845,7 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
   if (!db || !force || extendedColumnsEnsured) return;
   const requiredCols: Array<[string, string]> = [
     ['tags', 'TEXT'],
+    ['badge_tags', 'TEXT'],
     ['dependencies', 'TEXT'],
     ['optional_dependencies', 'TEXT'],
     ['min_minetest_version', "TEXT DEFAULT '5.0.0'"],
@@ -1046,9 +1059,166 @@ export async function ensurePromotionAndTagTables(db: any, force = false): Promi
 
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name))`).run().catch(() => {});
 
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS package_metadata_options (
+        category TEXT NOT NULL,
+        name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        icon TEXT,
+        extra_json TEXT,
+        source TEXT DEFAULT 'luantihub',
+        sort_order INTEGER DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (category, name)
+      )
+    `).run().catch(() => {});
+
+    await seedDefaultMetadataOptionsInD1(db).catch(() => {});
+
     promotionAndTagTablesEnsured = true;
   } catch {
     // Non-fatal schema initialization
+  }
+}
+
+/**
+ * Seeds canonical LuantiHub metadata options (`badge_tags`, `dev_states`, `content_warnings`,
+ * `engine_versions`, `popular_games`) into D1 `package_metadata_options` so all metadata choices
+ * are tracked in D1 without depending on 3rd-party APIs.
+ */
+export async function seedDefaultMetadataOptionsInD1(db: any): Promise<void> {
+  if (!db) return;
+  const stmts: any[] = [];
+  const pushOption = (
+    category: string,
+    name: string,
+    title: string,
+    description: string | null,
+    icon: string | null,
+    extraJson: string | null,
+    sortOrder: number
+  ) => {
+    stmts.push(
+      db.prepare(`
+        INSERT INTO package_metadata_options (category, name, title, description, icon, extra_json, source, sort_order, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'luantihub', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(category, name) DO UPDATE SET
+          title = excluded.title,
+          description = COALESCE(excluded.description, package_metadata_options.description),
+          icon = COALESCE(excluded.icon, package_metadata_options.icon),
+          extra_json = COALESCE(excluded.extra_json, package_metadata_options.extra_json),
+          sort_order = excluded.sort_order,
+          updated_at = CURRENT_TIMESTAMP
+      `).bind(category, name, title, description, icon, extraJson, sortOrder)
+    );
+  };
+
+  LUANTIHUB_BADGE_TAGS.forEach((b, idx) => {
+    pushOption('badge_tags', b.name, b.title, b.tooltip, b.icon, null, idx);
+  });
+  LUANTIHUB_DEV_STATES.forEach((d, idx) => {
+    pushOption('dev_states', d.code, d.label, null, null, null, idx);
+  });
+  LUANTIHUB_CONTENT_WARNINGS.forEach((w, idx) => {
+    pushOption('content_warnings', w.name, w.title, w.description, null, null, idx);
+  });
+  LUANTIHUB_ENGINE_VERSIONS.forEach((v, idx) => {
+    pushOption(
+      'engine_versions',
+      v.name,
+      v.label,
+      null,
+      null,
+      JSON.stringify({ protocol_version: v.protocol_version, is_dev: Boolean(v.is_dev) }),
+      idx
+    );
+  });
+  LUANTIHUB_POPULAR_GAMES.forEach((g, idx) => {
+    pushOption(
+      'popular_games',
+      g.name,
+      g.title,
+      null,
+      null,
+      JSON.stringify({ id: g.id, author: g.author, aliases: g.aliases }),
+      idx
+    );
+  });
+
+  if (stmts.length === 0) return;
+  if (typeof db.batch === 'function') {
+    await db.batch(stmts).catch(() => {});
+  } else {
+    for (const s of stmts) {
+      await s.run().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Upserts metadata options into D1 `package_metadata_options` so any custom or newly discovered
+ * options (badge tags, content warnings, engine versions, etc.) are persisted in our own DB.
+ */
+export async function upsertMetadataOptions(
+  db: any,
+  category: 'badge_tags' | 'dev_states' | 'content_warnings' | 'engine_versions' | 'popular_games',
+  items: Array<{
+    name: string;
+    title: string;
+    description?: string;
+    icon?: string;
+    extra_json?: string;
+    sort_order?: number;
+  }>,
+  source: 'luantihub' | 'contentdb' | 'custom' = 'luantihub'
+): Promise<void> {
+  if (!db || !Array.isArray(items) || items.length === 0) return;
+  const runBatch = async () => {
+    const stmts = items
+      .filter((i) => i && String(i.name || '').trim())
+      .map((item, idx) =>
+        db.prepare(`
+          INSERT INTO package_metadata_options (category, name, title, description, icon, extra_json, source, sort_order, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(category, name) DO UPDATE SET
+            title = CASE WHEN package_metadata_options.source = 'luantihub' AND excluded.source = 'contentdb' THEN package_metadata_options.title ELSE excluded.title END,
+            description = COALESCE(excluded.description, package_metadata_options.description),
+            icon = COALESCE(excluded.icon, package_metadata_options.icon),
+            extra_json = COALESCE(excluded.extra_json, package_metadata_options.extra_json),
+            updated_at = CURRENT_TIMESTAMP
+        `).bind(
+          category,
+          String(item.name).trim(),
+          String(item.title || item.name).trim(),
+          item.description ?? null,
+          item.icon ?? null,
+          item.extra_json ?? null,
+          source,
+          item.sort_order ?? idx
+        )
+      );
+    if (stmts.length === 0) return;
+    if (typeof db.batch === 'function') {
+      await db.batch(stmts);
+    } else {
+      for (const s of stmts) {
+        await s.run();
+      }
+    }
+  };
+
+  try {
+    try {
+      await runBatch();
+    } catch (err: any) {
+      if (/no such table|no such column|has no column/i.test(String(err?.message || ''))) {
+        await ensurePromotionAndTagTables(db, true);
+        await runBatch();
+      }
+    }
+  } catch {
+    // Non-blocking option persistence
   }
 }
 

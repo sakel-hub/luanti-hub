@@ -37,6 +37,10 @@ import {
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags,
+  upsertMetadataOptions,
+  LUANTIHUB_BADGE_TAGS,
+  ORGANIC_CODE_TAG,
+  parseBadgeTagsArray,
   verifyGitOrgOrRepoMembership,
   buildPackageCacheInvalidationKeys
 } from '../lib/upstream';
@@ -476,10 +480,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       customConf?: string;
       customLua?: string;
       tags?: string[];
+      badge_tags?: string[];
       requestAdminClaim?: boolean;
     };
 
-    const { repoUrl, warrantiesAccepted, dryRun, auditToken, customConf, customLua, tags: userSubmittedTags, requestAdminClaim } = body;
+    const { repoUrl, warrantiesAccepted, dryRun, auditToken, customConf, customLua, tags: userSubmittedTags, badge_tags: userSubmittedBadgeTags, requestAdminClaim } = body;
 
     if (!repoUrl) {
       return Response.json({ error: 'Git repository HTTPS URL is required.' }, { status: 400 });
@@ -1398,6 +1403,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const preservedCreatedAt =
       existingD1Pkg?.created_at || matchedContentDbPkg?.created_at || null;
 
+    const resolvedBadgeTags = Array.isArray(userSubmittedBadgeTags)
+      ? parseBadgeTagsArray(userSubmittedBadgeTags)
+      : parseBadgeTagsArray(existingD1Pkg?.badge_tags);
+    if (mergedTags.includes(ORGANIC_CODE_TAG) && !resolvedBadgeTags.includes(ORGANIC_CODE_TAG)) {
+      resolvedBadgeTags.push(ORGANIC_CODE_TAG);
+    }
+
     const packagePayload = {
       id: packageId,
       author: canonicalAuthor,
@@ -1438,6 +1450,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       source: 'git' as const,
       sources,
       tags: mergedTags,
+      ...(resolvedBadgeTags.length > 0 ? { badge_tags: resolvedBadgeTags } : {}),
       releases_list: discoveredReleases.length > 0 ? discoveredReleases : [
         {
           id: 1,
@@ -1696,11 +1709,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, default_branch, latest_commit_sha, thumbnail_url, banner_url, screenshots,
-          downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
+          downloads_count, contentdb_downloads, score, license, media_license, tags, badge_tags, dependencies, optional_dependencies,
           min_minetest_version, max_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
           video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END, COALESCE(?, CURRENT_TIMESTAMP))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END, COALESCE(?, CURRENT_TIMESTAMP))
         ON CONFLICT(id) DO UPDATE SET
           author_id = CASE
             WHEN packages.author_id IS NULL OR packages.author_id LIKE 'ext_%' THEN excluded.author_id
@@ -1722,6 +1735,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           license = excluded.license,
           media_license = excluded.media_license,
           tags = excluded.tags,
+          badge_tags = excluded.badge_tags,
           dependencies = excluded.dependencies,
           optional_dependencies = excluded.optional_dependencies,
           min_minetest_version = excluded.min_minetest_version,
@@ -1775,6 +1789,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         effectiveLicense,
         effectiveMediaLicense,
         JSON.stringify(mergedTags),
+        JSON.stringify(resolvedBadgeTags),
         JSON.stringify(dependencies),
         JSON.stringify(optionalDependencies),
         rawMinVersion,

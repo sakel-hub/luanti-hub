@@ -536,6 +536,65 @@ export const LUANTIHUB_CONTENT_WARNINGS: Array<{ name: string; title: string; de
 ];
 
 /**
+ * Canonical LuantiHub Special Badge Tags (rendered on package tiles & headers with rich tooltips).
+ */
+export const ORGANIC_CODE_TAG = 'organic_code';
+export const ORGANIC_CODE_LABEL = '100% Organic Code';
+export const ORGANIC_CODE_TOOLTIP = 'Zero artificial additives. Grown with sunlight, coffee, and patience.';
+
+export const LUANTIHUB_BADGE_TAGS: Array<{
+  name: string;
+  title: string;
+  tooltip: string;
+  icon: 'sprout';
+}> = [
+  {
+    name: ORGANIC_CODE_TAG,
+    title: ORGANIC_CODE_LABEL,
+    tooltip: ORGANIC_CODE_TOOLTIP,
+    icon: 'sprout'
+  }
+];
+
+/**
+ * Normalizes a `badge_tags` column/array into canonical lowercase badge tag IDs.
+ */
+export function parseBadgeTagsArray(val: unknown): string[] {
+  const raw = parseJsonArray(val);
+  const validSet = new Set(LUANTIHUB_BADGE_TAGS.map(b => b.name.toLowerCase()));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const clean = String(item || '').trim().toLowerCase();
+    if (!clean) continue;
+    const normalized =
+      clean === '100% organic code' || clean === '100_organic_code' || clean === 'organic-code'
+        ? ORGANIC_CODE_TAG
+        : clean;
+    if (validSet.has(normalized) && !seen.has(normalized)) {
+      seen.add(normalized);
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+/**
+ * Returns true if the package has the "100% Organic Code" badge tag enabled (either in `badge_tags` or `tags`).
+ */
+export function hasOrganicCodeTag(pkg?: { badge_tags?: unknown; tags?: unknown } | null): boolean {
+  if (!pkg) return false;
+  const badgeTags = parseBadgeTagsArray(pkg.badge_tags);
+  if (badgeTags.includes(ORGANIC_CODE_TAG)) return true;
+  const regularTags = parseJsonArray(pkg.tags).map(t => String(t || '').trim().toLowerCase());
+  return (
+    regularTags.includes(ORGANIC_CODE_TAG) ||
+    regularTags.includes('100% organic code') ||
+    regularTags.includes('organic-code')
+  );
+}
+
+/**
  * Canonical LuantiHub Game Ecosystems used for author Game Support selection,
  * catalog filtering, and Preferred Game personalization.
  */

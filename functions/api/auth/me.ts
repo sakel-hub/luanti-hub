@@ -18,7 +18,8 @@ import {
   ensureModerationColumns,
   ensureExtendedPackageColumns,
   invalidateEdgeCacheKeys,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  parseBadgeTagsArray
 } from '../lib/upstream';
 import {
   syncVerifiedAuthorGitPackages,
@@ -218,12 +219,16 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
     const packagesRes = await context.env.DB.prepare(pkgQuery)
       .bind(resolvedUserId, ...verifiedHandles)
       .all();
-    const userPackages = (packagesRes.results || []).map((p: any) => ({
-      ...p,
-      author: p.author || p.author_name || user.username,
-      author_display_name: user.display_name || user.username,
-      score: Number(p.review_score) || 0
-    }));
+    const userPackages = (packagesRes.results || []).map((p: any) => {
+      const parsedBadgeTags = parseBadgeTagsArray(p.badge_tags);
+      return {
+        ...p,
+        author: p.author || p.author_name || user.username,
+        author_display_name: user.display_name || user.username,
+        score: Number(p.review_score) || 0,
+        ...(parsedBadgeTags.length > 0 ? { badge_tags: parsedBadgeTags } : {})
+      };
+    });
 
     // 5. Fetch User's Synced Favorites & Per-Package Download Counts
     const favoritesRes = await context.env.DB.prepare(

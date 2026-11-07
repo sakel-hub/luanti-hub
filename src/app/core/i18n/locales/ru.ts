@@ -128,7 +128,9 @@ export const ru: TranslationDictionary = {
     muteVideo: 'Выключить звук',
     unmuteVideo: 'Включить звук',
     enlargeVideo: 'Увеличить видео',
-    viewPackageDetails: 'Подробнее о пакете'
+    viewPackageDetails: 'Подробнее о пакете',
+    organicCodeLabel: '100% Organic Code',
+    organicCodeTooltip: 'Zero artificial additives. Grown with sunlight, coffee, and patience.'
   },
   modal: {
     close: 'Закрыть (Esc)',
@@ -152,6 +154,7 @@ export const ru: TranslationDictionary = {
     technicalId: 'Технический ID',
     genresTags: 'Жанры и Теги',
     tags: 'Теги и Жанры',
+    badgeTagsLabel: 'Tags',
     category: 'Категория',
     source: 'Источник',
     license: 'Лицензия',

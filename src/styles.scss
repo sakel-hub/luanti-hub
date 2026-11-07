@@ -860,8 +860,8 @@ select:disabled {
     top: 0;
     user-select: none;
     -webkit-user-select: none;
-    app-region: drag;
-    -webkit-app-region: drag;
+    app-region: no-drag;
+    -webkit-app-region: no-drag;
 
     .luanti-app-header-inner {
       box-sizing: border-box;
@@ -878,17 +878,29 @@ select:disabled {
       padding-bottom: 0.375rem;
       padding-left: 0.625rem !important;
       padding-right: 0.625rem !important;
+      app-region: drag;
+      -webkit-app-region: drag;
+    }
+
+    &.luanti-wco-menu-open .luanti-app-header-inner {
+      app-region: no-drag;
+      -webkit-app-region: no-drag;
     }
 
     button,
+    button *,
     a,
+    a *,
     input,
     select,
     textarea,
     label,
     [role="button"],
+    [role="button"] *,
     .glass-dropdown,
-    .luanti-wco-no-drag {
+    .glass-dropdown *,
+    .luanti-wco-no-drag,
+    .luanti-wco-no-drag * {
       app-region: no-drag;
       -webkit-app-region: no-drag;
     }

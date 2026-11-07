@@ -46,8 +46,12 @@ import {
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags,
+  upsertMetadataOptions,
   LUANTIHUB_DEV_STATES,
   LUANTIHUB_CONTENT_WARNINGS,
+  LUANTIHUB_BADGE_TAGS,
+  ORGANIC_CODE_TAG,
+  parseBadgeTagsArray,
   parseGameSupportArray,
   mergeLuantiHubAndContentDbGameSupport,
   computeLuantiHubFrecencyMetrics,
@@ -649,6 +653,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         video_url: liteVideo.video_url || undefined,
         video_thumbnail_url: liteVideo.video_thumbnail_url || undefined,
         tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
+        badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
         source: isGitFast ? 'git' : 'official',
         sources: fastSources,
         git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified'
@@ -1051,6 +1056,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
             tags: fastCombinedTags.length > 0 ? fastCombinedTags : [d1Pkg.type || 'mod'],
+            badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
@@ -1465,6 +1471,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) ? [resolvedType, 'git'] : [])
         ])
       ).filter(Boolean);
+      const pureGitBadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
+      if (mergedTags.includes(ORGANIC_CODE_TAG) && !pureGitBadgeTags.includes(ORGANIC_CODE_TAG)) {
+        pureGitBadgeTags.push(ORGANIC_CODE_TAG);
+      }
       const mergedHardDeps = d1HardDeps.length > 0 ? d1HardDeps : (gitScan?.hardDeps || []);
       const mergedSoftDeps = d1SoftDeps.length > 0 ? d1SoftDeps : (gitScan?.softDeps || []);
       const mergedLicense = d1Pkg?.license || gitScan?.license || gitScan?.mediaLicense || '';
@@ -1624,6 +1634,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
         max_minetest_version: d1Pkg?.max_minetest_version || gitScan?.maxVersion || undefined,
         tags: mergedTags,
+        ...(pureGitBadgeTags.length > 0 ? { badge_tags: pureGitBadgeTags } : {}),
         dependencies: mergedHardDeps,
         optional_dependencies: mergedSoftDeps,
         download_size: firstRelSize > 0 ? firstRelSize : undefined,
@@ -1651,8 +1662,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   let finalHardDeps = hardDeps;
   let finalSoftDeps = softDeps;
-  let resolvedLicense = upstreamData.license || upstreamData.media_license || d1Pkg?.license || '';
-  let resolvedMediaLicense = upstreamData.media_license || upstreamData.license || d1Pkg?.media_license || '';
+  let resolvedLicense = d1Pkg?.license || upstreamData.license || upstreamData.media_license || '';
+  let resolvedMediaLicense = d1Pkg?.media_license || upstreamData.media_license || upstreamData.license || d1Pkg?.license || '';
   let repoUrl = normalizeDefunctGitHost(upstreamData.repo || upstreamData.repo_url || d1Pkg?.repo_url || undefined);
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = repoUrl ? 'verified' : 'unverified';
   let minVersion =
@@ -2012,7 +2023,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     normalizedLang
   );
 
-  const mergedTags = Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
+  const mergedTags = d1Tags.length > 0
+    ? Array.from(new Set([...d1Tags]))
+    : Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
+  const d1BadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
+  if (mergedTags.includes(ORGANIC_CODE_TAG) && !d1BadgeTags.includes(ORGANIC_CODE_TAG)) {
+    d1BadgeTags.push(ORGANIC_CODE_TAG);
+  }
   const resolvedScore = computeStarRating(
     { ...upstreamData, review_thread_counts: reviewThreadCounts, reviews_list: bundledReviews },
     d1Pkg?.score,
@@ -2030,7 +2047,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         : !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
           ? resolvedScore
           : null;
-    const newTagsJson = mergedTags.length > d1Tags.length ? JSON.stringify(mergedTags) : null;
+    const newTagsJson = d1Tags.length === 0 && mergedTags.length > 0 ? JSON.stringify(mergedTags) : null;
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
@@ -2178,6 +2195,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     screenshots,
     ...(screenshotMeta.length > 0 ? { screenshot_meta: screenshotMeta } : {}),
     tags: mergedTags,
+    ...(d1BadgeTags.length > 0 ? { badge_tags: d1BadgeTags } : {}),
     contentdb_downloads: contentdbDownloads,
     luantihub_downloads: luantihubDownloads,
     downloads: totalDownloads,
@@ -2259,23 +2277,52 @@ export async function onRequestPatch(context: { request: Request; params: { auth
 
     const isAdmin = checkIsAdmin(user, identities, context.env.ADMIN_USERS);
 
+    const body = await context.request.json().catch(() => ({})) as {
+      tags?: string[];
+      badge_tags?: string[];
+      dev_state?: string;
+      content_warnings?: string[];
+      min_minetest_version?: string | null;
+      max_minetest_version?: string | null;
+      supports_all_games?: boolean;
+      game_support?: any[];
+      translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+      title?: string;
+      short_desc?: string;
+      type?: string;
+      repo_url?: string;
+      license?: string;
+      media_license?: string;
+      thumbnail?: string;
+    };
+
     // If package is not yet in D1 (e.g., ContentDB-sourced package being customized on LuantiHub),
-    // verify ownership against upstream metadata or verified identity and seed a D1 row.
+    // verify ownership against upstream metadata or verified identity and seed a D1 row (with offline fallback).
     if (!pkgRow) {
       const encodedAuthor = encodeURIComponent(author);
       const encodedName = encodeURIComponent(name);
       const upstreamPkg = await fetchUpstreamJsonCached(`/api/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
-      if (!upstreamPkg) {
-        return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
-      }
+      const seedPkg: any = upstreamPkg || {
+        author,
+        name,
+        title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : name,
+        type: typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : 'mod',
+        short_description: typeof body.short_desc === 'string' ? body.short_desc.trim() : '',
+        long_description: '',
+        repo: typeof body.repo_url === 'string' ? body.repo_url.trim() : '',
+        license: typeof body.license === 'string' && body.license.trim() ? body.license.trim() : 'MIT',
+        media_license: typeof body.media_license === 'string' && body.media_license.trim() ? body.media_license.trim() : 'CC-BY-SA-4.0',
+        thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? body.thumbnail.trim() : null,
+        tags: Array.isArray(body.tags) ? body.tags : []
+      };
       const virtualPkgRow = {
-        id: `${upstreamPkg.author || author}/${upstreamPkg.name || name}`,
-        author_name: upstreamPkg.author || author,
-        name: upstreamPkg.name || name,
-        repo_url: upstreamPkg.repo || '',
+        id: `${seedPkg.author || author}/${seedPkg.name || name}`,
+        author_name: seedPkg.author || author,
+        name: seedPkg.name || name,
+        repo_url: seedPkg.repo || '',
         provider: 'contentdb',
-        type: upstreamPkg.type || 'mod',
-        tags: JSON.stringify(Array.isArray(upstreamPkg.tags) ? upstreamPkg.tags : [])
+        type: seedPkg.type || 'mod',
+        tags: JSON.stringify(Array.isArray(seedPkg.tags) ? seedPkg.tags : [])
       };
       const canSeed = isAdmin || verifyStrictPackageAuthorOwnership(user, identities, virtualPkgRow, author);
       if (!canSeed) {
@@ -2286,31 +2333,32 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       await context.env.DB.prepare(
         `INSERT OR IGNORE INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
-          repo_url, provider, license, media_license, thumbnail_url, tags,
+          repo_url, provider, license, media_license, thumbnail_url, tags, badge_tags,
           dev_state, content_warnings, min_minetest_version, max_minetest_version,
           supports_all_games, game_support, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
       ).bind(
         virtualPkgRow.id,
         resolvedUserId,
         virtualPkgRow.author_name,
         virtualPkgRow.name,
-        upstreamPkg.title || virtualPkgRow.name,
+        seedPkg.title || virtualPkgRow.name,
         virtualPkgRow.type,
-        upstreamPkg.short_description || '',
-        upstreamPkg.long_description || '',
+        seedPkg.short_description || '',
+        seedPkg.long_description || '',
         virtualPkgRow.repo_url || null,
         'contentdb',
-        upstreamPkg.license || 'MIT',
-        upstreamPkg.media_license || upstreamPkg.license || 'CC-BY-SA-4.0',
-        upstreamPkg.thumbnail || null,
+        seedPkg.license || 'MIT',
+        seedPkg.media_license || seedPkg.license || 'CC-BY-SA-4.0',
+        seedPkg.thumbnail || null,
         virtualPkgRow.tags,
-        upstreamPkg.dev_state || 'ACTIVELY_DEVELOPED',
-        JSON.stringify(Array.isArray(upstreamPkg.content_warnings) ? upstreamPkg.content_warnings : []),
-        upstreamPkg.min_minetest_version ? String(upstreamPkg.min_minetest_version) : null,
-        upstreamPkg.max_minetest_version ? String(upstreamPkg.max_minetest_version) : null,
-        upstreamPkg.supports_all_games ? 1 : 0,
-        JSON.stringify(parseGameSupportArray(upstreamPkg.game_support))
+        JSON.stringify(parseBadgeTagsArray(body.badge_tags)),
+        seedPkg.dev_state || 'ACTIVELY_DEVELOPED',
+        JSON.stringify(Array.isArray(seedPkg.content_warnings) ? seedPkg.content_warnings : []),
+        seedPkg.min_minetest_version ? String(seedPkg.min_minetest_version) : null,
+        seedPkg.max_minetest_version ? String(seedPkg.max_minetest_version) : null,
+        seedPkg.supports_all_games ? 1 : 0,
+        JSON.stringify(parseGameSupportArray(seedPkg.game_support))
       ).run();
       pkgRow = await context.env.DB.prepare(
         `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
@@ -2330,17 +2378,6 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         error: 'Forbidden: Only an administrator or the cryptographically verified package author on the hosting Git forge can edit this package.'
       }, { status: 403 });
     }
-
-    const body = await context.request.json().catch(() => ({})) as {
-      tags?: string[];
-      dev_state?: string;
-      content_warnings?: string[];
-      min_minetest_version?: string | null;
-      max_minetest_version?: string | null;
-      supports_all_games?: boolean;
-      game_support?: any[];
-      translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
-    };
 
     const existingTags = parseJsonArray(pkgRow.tags);
     let finalTags = existingTags;
@@ -2365,6 +2402,18 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       }
 
       finalTags = Array.from(new Set([...cleanedCustomTags, ...preservedSystemTags]));
+    }
+
+    // Validate badge_tags (e.g. 'organic_code' -> "100% Organic Code")
+    let finalBadgeTags = parseBadgeTagsArray(pkgRow.badge_tags);
+    if (Array.isArray(body.badge_tags)) {
+      finalBadgeTags = parseBadgeTagsArray(body.badge_tags);
+    } else if (Array.isArray(body.tags)) {
+      if (body.tags.some(t => String(t).trim().toLowerCase() === ORGANIC_CODE_TAG)) {
+        if (!finalBadgeTags.includes(ORGANIC_CODE_TAG)) {
+          finalBadgeTags.push(ORGANIC_CODE_TAG);
+        }
+      }
     }
 
     // Validate dev_state (LuantiHub-first taxonomy)
@@ -2444,32 +2493,62 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       finalTranslations = mergedTranslations;
     }
 
-    await context.env.DB.prepare(
-      `UPDATE packages SET
-        tags = ?,
-        dev_state = ?,
-        content_warnings = ?,
-        min_minetest_version = ?,
-        max_minetest_version = ?,
-        supports_all_games = ?,
-        game_support = ?,
-        translations = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`
-    ).bind(
-      JSON.stringify(finalTags),
-      finalDevState,
-      JSON.stringify(finalContentWarnings),
-      finalMinEngine,
-      finalMaxEngine,
-      finalSupportsAllGames ? 1 : 0,
-      JSON.stringify(finalGameSupport),
-      Object.keys(finalTranslations).length > 0 ? JSON.stringify(finalTranslations) : null,
-      pkgRow.id
-    ).run();
+    const runUpdatePkg = async () => {
+      await context.env.DB.prepare(
+        `UPDATE packages SET
+          tags = ?,
+          badge_tags = ?,
+          dev_state = ?,
+          content_warnings = ?,
+          min_minetest_version = ?,
+          max_minetest_version = ?,
+          supports_all_games = ?,
+          game_support = ?,
+          translations = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`
+      ).bind(
+        JSON.stringify(finalTags),
+        JSON.stringify(finalBadgeTags),
+        finalDevState,
+        JSON.stringify(finalContentWarnings),
+        finalMinEngine,
+        finalMaxEngine,
+        finalSupportsAllGames ? 1 : 0,
+        JSON.stringify(finalGameSupport),
+        Object.keys(finalTranslations).length > 0 ? JSON.stringify(finalTranslations) : null,
+        pkgRow.id
+      ).run();
+    };
+
+    try {
+      await runUpdatePkg();
+    } catch (updateErr: any) {
+      if (/no such column|has no column/i.test(String(updateErr?.message || ''))) {
+        await ensureExtendedPackageColumns(context.env.DB, true);
+        await runUpdatePkg();
+      } else {
+        throw updateErr;
+      }
+    }
 
     if (cleanedCustomTags.length > 0) {
       await upsertCustomAppTags(context.env.DB, cleanedCustomTags, 'custom');
+    }
+
+    if (finalBadgeTags.length > 0) {
+      await upsertMetadataOptions(
+        context.env.DB,
+        'badge_tags',
+        LUANTIHUB_BADGE_TAGS.filter(b => finalBadgeTags.includes(b.name)).map((b, idx) => ({
+          name: b.name,
+          title: b.title,
+          description: b.tooltip,
+          icon: b.icon,
+          sort_order: idx
+        })),
+        'luantihub'
+      );
     }
 
     await invalidateEdgeCacheKeys(
@@ -2483,6 +2562,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       success: true,
       ok: true,
       tags: finalTags,
+      badge_tags: finalBadgeTags,
       dev_state: finalDevState,
       content_warnings: finalContentWarnings,
       min_minetest_version: finalMinEngine,

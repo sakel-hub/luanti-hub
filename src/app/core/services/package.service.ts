@@ -10,6 +10,7 @@ import {
   SortOption,
   GitAuditReport,
   ContentDbTag,
+  LuantiHubBadgeTagOption,
   PublicAuthorProfile,
   UserIdentity,
   DownloadAnalyticsData,
@@ -63,6 +64,11 @@ import {
   LUANTIHUB_DEV_STATES,
   LUANTIHUB_CONTENT_WARNINGS,
   LUANTIHUB_ENGINE_VERSIONS,
+  LUANTIHUB_BADGE_TAGS,
+  ORGANIC_CODE_TAG,
+  ORGANIC_CODE_LABEL,
+  parseBadgeTagsArray,
+  hasOrganicCodeTag,
   parseGameSupportArray,
   inferGameSupportFromDependencies,
   mergeLuantiHubAndContentDbGameSupport,
@@ -227,6 +233,7 @@ export class PackageService {
   readonly selectedTag = this._selectedTag.asReadonly();
   readonly selectedGame = this._selectedGame.asReadonly();
   readonly availableTags = this._availableTags.asReadonly();
+  readonly availableBadgeTags = signal<LuantiHubBadgeTagOption[]>([...LUANTIHUB_BADGE_TAGS]).asReadonly();
   readonly availableGames = signal(LUANTIHUB_POPULAR_GAMES).asReadonly();
   readonly availableDevStates = signal(LUANTIHUB_DEV_STATES).asReadonly();
   readonly availableContentWarnings = signal(LUANTIHUB_CONTENT_WARNINGS).asReadonly();
@@ -860,6 +867,7 @@ export class PackageService {
   getTagDisplayTitle(tagName: string): string {
     const clean = String(tagName || '').trim();
     if (!clean) return '';
+    if (clean.toLowerCase() === ORGANIC_CODE_TAG) return ORGANIC_CODE_LABEL;
     const match = this._availableTags().find(t => t.name.toLowerCase() === clean.toLowerCase());
     return match ? match.title : formatTagDisplayTitle(clean);
   }
@@ -1331,13 +1339,17 @@ export class PackageService {
       }
 
       if (tag !== 'all') {
-        const hasExactTag = pkg.tags?.some(
-          t => t.toLowerCase() === tag || t.toLowerCase() === tagKeyword
-        );
-        const matchesSearchBlob = Boolean(
-          pkg._searchBlob && (pkg._searchBlob.includes(tag) || pkg._searchBlob.includes(tagKeyword))
-        );
-        if (!hasExactTag && !matchesSearchBlob) return false;
+        if (tag === ORGANIC_CODE_TAG) {
+          if (!hasOrganicCodeTag(pkg)) return false;
+        } else {
+          const hasExactTag =
+            pkg.tags?.some(t => t.toLowerCase() === tag || t.toLowerCase() === tagKeyword) ||
+            pkg.badge_tags?.some(bt => bt.toLowerCase() === tag);
+          const matchesSearchBlob = Boolean(
+            pkg._searchBlob && (pkg._searchBlob.includes(tag) || pkg._searchBlob.includes(tagKeyword))
+          );
+          if (!hasExactTag && !matchesSearchBlob) return false;
+        }
       }
 
       if (terms.length > 0) {
@@ -2140,7 +2152,9 @@ export class PackageService {
       pkg.author_display_name || '',
       pkg.short_desc || '',
       pkg.license || '',
-      ...(pkg.tags || [])
+      ...(pkg.tags || []),
+      ...(pkg.badge_tags || []),
+      ...(hasOrganicCodeTag(pkg) ? ['100% organic code', 'organic'] : [])
     ]
       .join(' ')
       .toLowerCase();
@@ -2403,6 +2417,10 @@ export class PackageService {
       [...deps, ...optDeps]
     );
     const parsedScreenshotMeta = parseScreenshotMetaArray(item.screenshot_meta ?? cachedMeta?.screenshot_meta);
+    const parsedBadgeTags = parseBadgeTagsArray(item.badge_tags ?? cachedMeta?.badge_tags);
+    if (lowerTags.includes(ORGANIC_CODE_TAG) && !parsedBadgeTags.includes(ORGANIC_CODE_TAG)) {
+      parsedBadgeTags.push(ORGANIC_CODE_TAG);
+    }
 
     const pkg: LuantiPackage = {
       id: pkgId,
@@ -2480,6 +2498,7 @@ export class PackageService {
       source,
       sources,
       tags: rawTags.length > 0 ? rawTags : [item.type || 'mod'],
+      ...(parsedBadgeTags.length > 0 ? { badge_tags: parsedBadgeTags } : {}),
       min_minetest_version: item.min_minetest_version || cachedMeta?.min_minetest_version || '5.0.0',
       max_minetest_version: item.max_minetest_version,
       featured: Boolean(item.featured),
@@ -2567,6 +2586,13 @@ export class PackageService {
     const secondary = primary === existing ? incoming : existing;
 
     const mergedTags = Array.from(new Set([...(primary.tags || []), ...(secondary.tags || [])]));
+    const mergedBadgeTags = Array.from(
+      new Set([
+        ...parseBadgeTagsArray(primary.badge_tags),
+        ...parseBadgeTagsArray(secondary.badge_tags),
+        ...(mergedTags.some(t => t.toLowerCase() === ORGANIC_CODE_TAG) ? [ORGANIC_CODE_TAG] : [])
+      ])
+    );
     const mergedDeps = Array.from(new Set([...(primary.dependencies || []), ...(secondary.dependencies || [])]));
     const mergedOptDeps = Array.from(new Set([...(primary.optional_dependencies || []), ...(secondary.optional_dependencies || [])]));
 
@@ -2704,6 +2730,7 @@ export class PackageService {
       dependencies: mergedDeps,
       optional_dependencies: mergedOptDeps,
       tags: mergedTags,
+      ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {}),
       source: mergedSources.includes('git') ? 'git' : primary.source,
       sources: mergedSources
     };
@@ -8006,6 +8033,10 @@ export class PackageService {
         );
         const screenshotMeta = parseScreenshotMetaArray(data.screenshot_meta ?? pkg.screenshot_meta);
         const translations = parsePackageTranslations(data.translations ?? pkg.translations);
+        const badgeTags =
+          data.badge_tags !== undefined
+            ? parseBadgeTagsArray(data.badge_tags)
+            : parseBadgeTagsArray(pkg.badge_tags);
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -8040,6 +8071,7 @@ export class PackageService {
           score_reviews: data.score_reviews !== undefined ? Number(data.score_reviews) || 0 : pkg.score_reviews,
           score: resolvedScore,
           tags: rawTags.length > 0 ? rawTags : pkg.tags,
+          ...(badgeTags.length > 0 || data.badge_tags !== undefined ? { badge_tags: badgeTags } : {}),
           screenshots,
           ...(screenshotMeta ? { screenshot_meta: screenshotMeta } : {}),
           ...(translations ? { translations } : {}),
@@ -8081,7 +8113,7 @@ export class PackageService {
         const targetNameLower = (pkg.name || '').toLowerCase();
 
         // Persist compact hydrated tile metadata locally
-        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || preferredGitShot || resolvedAuthorId || reviewThreadCounts || resolvedScore > 0) {
+        if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || badgeTags.length > 0 || preferredGitShot || resolvedAuthorId || reviewThreadCounts || resolvedScore > 0) {
           const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
           this.hydratedMetaCache.set(targetIdLower, {
             ...prevMeta,
@@ -8098,6 +8130,7 @@ export class PackageService {
             rating_checked: true,
             dev_state: data.dev_state ?? prevMeta.dev_state,
             tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
+            ...(badgeTags.length > 0 ? { badge_tags: badgeTags } : prevMeta.badge_tags ? { badge_tags: prevMeta.badge_tags } : {}),
             download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
             file_size: sizeFormatted || prevMeta.file_size,
             video_url: resolvedVideo.video_url || prevMeta.video_url,
@@ -9245,6 +9278,7 @@ export class PackageService {
     pkg: LuantiPackage,
     payload: {
       tags?: string[];
+      badge_tags?: string[];
       dev_state?: string;
       content_warnings?: string[];
       min_minetest_version?: string | null;
@@ -9256,6 +9290,7 @@ export class PackageService {
   ): Promise<{
     success: boolean;
     tags?: string[];
+    badge_tags?: string[];
     dev_state?: string;
     content_warnings?: string[];
     min_minetest_version?: string | null;
@@ -9279,10 +9314,20 @@ export class PackageService {
     const cacheKey = (pkg.id || `${resolvedAuthor}/${pkg.name}`).toLowerCase();
 
     try {
+      const requestBody = {
+        ...payload,
+        title: pkg.title,
+        short_desc: pkg.short_desc,
+        type: pkg.type,
+        repo_url: pkg.repo_url,
+        license: pkg.license,
+        media_license: pkg.media_license,
+        thumbnail: pkg.thumbnail
+      };
       const res = await fetch(`/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(requestBody)
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -9290,6 +9335,9 @@ export class PackageService {
       }
 
       const updatedTags: string[] = Array.isArray(data.tags) ? data.tags : (payload.tags ?? pkg.tags ?? []);
+      const updatedBadgeTags: string[] = Array.isArray(data.badge_tags)
+        ? parseBadgeTagsArray(data.badge_tags)
+        : parseBadgeTagsArray(payload.badge_tags ?? pkg.badge_tags ?? []);
       const updatedDevState: string | undefined = typeof data.dev_state === 'string' ? data.dev_state : (payload.dev_state ?? pkg.dev_state);
       const updatedContentWarnings: string[] = Array.isArray(data.content_warnings)
         ? data.content_warnings
@@ -9315,6 +9363,20 @@ export class PackageService {
           : (payload.translations ?? pkg.translations);
 
       this.deepHydratedIds.delete(cacheKey);
+      const prevHydrated = this.hydratedMetaCache.get(cacheKey) || {};
+      this.hydratedMetaCache.set(cacheKey, {
+        ...prevHydrated,
+        tags: updatedTags,
+        badge_tags: updatedBadgeTags,
+        dev_state: updatedDevState,
+        content_warnings: updatedContentWarnings,
+        min_minetest_version: updatedMinVersion,
+        max_minetest_version: updatedMaxVersion,
+        supports_all_games: updatedSupportsAllGames,
+        game_support: updatedGameSupport,
+        translations: updatedTranslations
+      });
+      this.scheduleHydratedMetaPersist();
       this.clearBootCache();
 
       this._activePackage.update(current => {
@@ -9322,6 +9384,7 @@ export class PackageService {
           return {
             ...current,
             tags: updatedTags,
+            badge_tags: updatedBadgeTags,
             dev_state: updatedDevState,
             content_warnings: updatedContentWarnings,
             min_minetest_version: updatedMinVersion,
@@ -9334,11 +9397,12 @@ export class PackageService {
         return current;
       });
 
-      this._packages.update(list => list.map(item => {
+      const applyItemUpdate = (item: LuantiPackage): LuantiPackage => {
         if (item.id.toLowerCase() === cacheKey) {
           const merged: LuantiPackage = {
             ...item,
             tags: updatedTags,
+            badge_tags: updatedBadgeTags,
             dev_state: updatedDevState,
             content_warnings: updatedContentWarnings,
             min_minetest_version: updatedMinVersion,
@@ -9351,7 +9415,11 @@ export class PackageService {
           return merged;
         }
         return item;
-      }));
+      };
+
+      this._packages.update(list => list.map(applyItemUpdate));
+      this._serverTop10Today.update(list => list.map(applyItemUpdate));
+      this._serverTop10Week.update(list => list.map(applyItemUpdate));
 
       this.authService.clearAuthCache();
       this.authService.initAuth(true);
@@ -9359,6 +9427,7 @@ export class PackageService {
       return {
         success: true,
         tags: updatedTags,
+        badge_tags: updatedBadgeTags,
         dev_state: updatedDevState,
         content_warnings: updatedContentWarnings,
         min_minetest_version: updatedMinVersion ?? null,
@@ -10662,6 +10731,7 @@ export class PackageService {
     warrantiesAccepted: boolean;
     dryRun: boolean;
     tags?: string[];
+    badge_tags?: string[];
     auditToken?: string;
   }): Promise<{
     success: boolean;

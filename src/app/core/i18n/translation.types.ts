@@ -144,6 +144,8 @@ export interface TranslationDictionary {
     unmuteVideo: string;
     enlargeVideo: string;
     viewPackageDetails: string;
+    organicCodeLabel?: string;
+    organicCodeTooltip?: string;
   };
   modal: {
     close: string;
@@ -167,6 +169,7 @@ export interface TranslationDictionary {
     technicalId: string;
     genresTags: string;
     tags: string;
+    badgeTagsLabel?: string;
     category: string;
     source: string;
     license: string;

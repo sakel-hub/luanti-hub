@@ -94,8 +94,10 @@ import {
       </div>
     }
 
-    <header class="sticky top-0 z-40 w-full max-w-[100vw] glass-header luanti-wco-header transition-colors duration-200">
-      <div class="luanti-app-header-inner w-full min-w-0 px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-1.5 sm:gap-2 lg:gap-3">
+    <header
+      [class.luanti-wco-menu-open]="isLanguageMenuOpen() || isKofiMenuOpen() || isSettingsMenuOpen() || isMobileMenuOpen()"
+      class="sticky top-0 z-40 w-full max-w-[100vw] glass-header luanti-wco-header transition-colors duration-200">
+      <div class="luanti-app-header-inner relative z-30 w-full min-w-0 px-3 sm:px-6 lg:px-8 h-13 sm:h-15 flex items-center justify-between gap-1.5 sm:gap-2 lg:gap-3">
 
         <!-- Left: WCO/Standalone History Nav, Logo & Category Tabs -->
         <div class="flex items-center gap-1.5 sm:gap-2 2xl:gap-3.5 flex-shrink-0 justify-start">
@@ -266,11 +268,14 @@ import {
           }
 
           <!-- Language Selector Dropdown (lg+) -->
-          <div #langMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
+          <div
+            #langMenuContainer
+            [class.z-50]="isLanguageMenuOpen()"
+            [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleLanguageMenu($event)"
-              [appTooltip]="'header.languageTooltip' | translate"
+              [appTooltip]="isLanguageMenuOpen() ? '' : ('header.languageTooltip' | translate)"
               [attr.aria-label]="('header.languageTooltip' | translate) + ' ' + currentLocaleMeta().id.toUpperCase()"
               [attr.aria-expanded]="isLanguageMenuOpen()"
               class="h-9 px-2.5 rounded-lg glass-btn text-slate-200 hover:text-white text-xs font-medium flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
@@ -282,7 +287,7 @@ import {
             @if (isLanguageMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-44 rounded-xl glass-dropdown py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
+                class="absolute right-0 mt-2 w-44 rounded-xl glass-dropdown luanti-wco-no-drag py-1.5 z-50 animate-in fade-in zoom-in-95 duration-150">
                 @for (loc of supportedLocales; track loc.id) {
                   <button
                     type="button"
@@ -303,11 +308,14 @@ import {
           </div>
 
           <!-- Ko-fi Support Menu Toggle (lg+) -->
-          <div #kofiMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
+          <div
+            #kofiMenuContainer
+            [class.z-50]="isKofiMenuOpen()"
+            [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleKofiMenu($event)"
-              [appTooltip]="'header.supportKofiTooltip' | translate"
+              [appTooltip]="isKofiMenuOpen() ? '' : ('header.supportKofiTooltip' | translate)"
               [attr.aria-label]="'header.supportKofi' | translate"
               [attr.aria-expanded]="isKofiMenuOpen()"
               [class.border-rose-500/40]="isKofiMenuOpen()"
@@ -323,8 +331,8 @@ import {
             @if (isKofiMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-[340px] sm:w-[360px] rounded-2xl glass-dropdown p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
-                <div class="flex items-center justify-between px-1.5 py-0.5">
+                class="absolute right-0 mt-2 w-[340px] sm:w-[360px] rounded-2xl glass-dropdown luanti-wco-no-drag p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+                <div class="relative z-10 flex items-center justify-between px-1.5 py-0.5">
                   <div class="flex items-center gap-2 text-xs font-bold text-white">
                     <svg class="w-4 h-4 flex-shrink-0" viewBox="15 18 292 222" fill="none" aria-hidden="true">
                       <path fill="#202020" d="M66 25 H242 C278 25 301 51 301 89 C301 127 278 153 242 153 H238 C227 202 187 234 134 234 C72 234 21 190 21 118 V70 C21 41 38 25 66 25 Z"/>
@@ -339,16 +347,17 @@ import {
                       href="https://ko-fi.com/sakel"
                       target="_blank"
                       rel="noopener noreferrer"
+                      (click)="openKofiExternal($event)"
                       aria-label="Open Ko-fi in new tab"
                       class="p-1.5 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer">
-                      <svg lucideExternalLink class="w-3.5 h-3.5"></svg>
+                      <svg lucideExternalLink class="w-3.5 h-3.5 pointer-events-none"></svg>
                     </a>
                     <button
                       type="button"
-                      (click)="isKofiMenuOpen.set(false)"
+                      (click)="closeKofiMenu($event)"
                       aria-label="Close Ko-fi panel"
                       class="p-1.5 rounded-xl glass-btn text-slate-200 hover:text-white flex items-center justify-center transition hover:scale-105 active:scale-95 cursor-pointer">
-                      <svg lucideX class="w-3.5 h-3.5"></svg>
+                      <svg lucideX class="w-3.5 h-3.5 pointer-events-none"></svg>
                     </button>
                   </div>
                 </div>
@@ -368,11 +377,14 @@ import {
           </div>
 
           <!-- PWA & Cache Settings Menu Toggle (lg+) -->
-          <div #settingsMenuContainer [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
+          <div
+            #settingsMenuContainer
+            [class.z-50]="isSettingsMenuOpen()"
+            [class]="pwaService.isWcoCompact() ? 'hidden' : 'hidden lg:block relative flex-shrink-0'">
             <button
               type="button"
               (click)="toggleSettingsMenu($event)"
-              [appTooltip]="'pwa.clearCacheTitle' | translate"
+              [appTooltip]="isSettingsMenuOpen() ? '' : ('pwa.clearCacheTitle' | translate)"
               aria-label="PWA and Cache Settings"
               [attr.aria-expanded]="isSettingsMenuOpen()"
               class="h-9 w-9 flex items-center justify-center rounded-lg glass-btn text-slate-300 hover:text-white transition flex-shrink-0 cursor-pointer">
@@ -382,7 +394,7 @@ import {
             @if (isSettingsMenuOpen()) {
               <div
                 (click)="$event.stopPropagation()"
-                class="absolute right-0 mt-2 w-72 rounded-xl glass-dropdown p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+                class="absolute right-0 mt-2 w-72 rounded-xl glass-dropdown luanti-wco-no-drag p-2.5 z-50 space-y-2 animate-in fade-in zoom-in-95 duration-150">
                 <button
                   type="button"
                   (click)="packageService.openSetupModal(); isSettingsMenuOpen.set(false)"
@@ -516,7 +528,7 @@ import {
 
       <!-- Translucent Frosted-Glass Category Navigation Strip (< 2xl or whenever WCO titlebar overlay is active) -->
       <div
-        [class]="pwaService.isWcoActive() ? 'border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full' : '2xl:hidden border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full'">
+        [class]="pwaService.isWcoActive() ? 'relative z-10 luanti-wco-no-drag border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full' : 'relative z-10 luanti-wco-no-drag 2xl:hidden border-t border-white/10 bg-white/[0.02] px-3 sm:px-6 lg:px-8 py-1.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full'">
         <a
           href="/"
           (click)="selectNavTab('all', $event)"
@@ -581,7 +593,7 @@ import {
       @if (isMobileMenuOpen()) {
         <div
           (click)="$event.stopPropagation()"
-          [class]="pwaService.isWcoCompact() ? 'border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto' : 'lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto'">
+          [class]="pwaService.isWcoCompact() ? 'relative z-30 luanti-wco-no-drag border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto' : 'relative z-30 luanti-wco-no-drag lg:hidden border-t border-white/10 glass-dropdown px-4 py-4 space-y-4 animate-in fade-in duration-150 max-h-[80vh] overflow-y-auto'">
 
           <!-- Quick Actions Grid -->
           <div [class]="pwaService.isInstalled() ? 'grid grid-cols-1 sm:grid-cols-2 gap-2' : 'grid grid-cols-1 sm:grid-cols-3 gap-2'">
@@ -825,6 +837,16 @@ export class HeaderComponent {
     this.isLanguageMenuOpen.set(false);
     this.isSettingsMenuOpen.set(false);
     this.isMobileMenuOpen.set(false);
+  }
+
+  closeKofiMenu(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isKofiMenuOpen.set(false);
+  }
+
+  openKofiExternal(event?: MouseEvent): void {
+    if (event) event.stopPropagation();
+    this.isKofiMenuOpen.set(false);
   }
 
   toggleMobileKofi(): void {

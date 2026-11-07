@@ -128,7 +128,9 @@ export const de: TranslationDictionary = {
     muteVideo: 'Video stummschalten',
     unmuteVideo: 'Ton einschalten',
     enlargeVideo: 'Video vergrößern',
-    viewPackageDetails: 'Paketdetails anzeigen'
+    viewPackageDetails: 'Paketdetails anzeigen',
+    organicCodeLabel: '100% Organic Code',
+    organicCodeTooltip: 'Zero artificial additives. Grown with sunlight, coffee, and patience.'
   },
   modal: {
     close: 'Schließen (Esc)',
@@ -152,6 +154,7 @@ export const de: TranslationDictionary = {
     technicalId: 'Technischer Bezeichner',
     genresTags: 'Genres & Tags',
     tags: 'Tags & Genres',
+    badgeTagsLabel: 'Tags',
     category: 'Kategorie',
     source: 'Paketquelle',
     license: 'Lizenz',

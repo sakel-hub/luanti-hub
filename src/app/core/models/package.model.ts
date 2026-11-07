@@ -8,6 +8,13 @@ export interface ContentDbTag {
   title: string;
 }
 
+export interface LuantiHubBadgeTagOption {
+  name: string;
+  title: string;
+  tooltip: string;
+  icon: 'sprout';
+}
+
 export type PromoRowIcon = 'trophy' | 'sparkles' | 'flame' | 'gamepad' | 'star' | 'rocket';
 export type PromoRowSortOption = 'newest' | 'downloads' | 'rating' | 'trending';
 
@@ -133,6 +140,7 @@ export interface LuantiPackage {
   source: PackageSource;
   sources?: PackageSource[];
   tags: string[];
+  badge_tags?: string[];
   maintainers?: string[];
   provides?: string[];
   dev_state?: string;
@@ -349,6 +357,7 @@ export interface GitAuditReport {
     supported_games?: string[];
     unsupported_games?: string[];
     tags?: string[];
+    badge_tags?: string[];
     dependencies: string[];
     optional_dependencies: string[];
     provider: GitProvider;

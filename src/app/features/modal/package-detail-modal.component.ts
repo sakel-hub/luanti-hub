@@ -31,6 +31,11 @@ import {
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl
 } from '../../core/config/git-providers.config';
+import {
+  hasOrganicCodeTag,
+  ORGANIC_CODE_TAG,
+  parseBadgeTagsArray
+} from '../../core/config/package-utils.config';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
@@ -74,7 +79,8 @@ import {
   LucidePlay,
   LucideMaximize2,
   LucideZoomIn,
-  LucideZoomOut
+  LucideZoomOut,
+  LucideSprout
 } from '@lucide/angular';
 
 @Component({
@@ -122,7 +128,8 @@ import {
     LucidePlay,
     LucideMaximize2,
     LucideZoomIn,
-    LucideZoomOut
+    LucideZoomOut,
+    LucideSprout
   ],
   template: `
     @if (package) {
@@ -464,8 +471,32 @@ import {
                           </button>
                         </div>
 
-                        <!-- 1. Tags (up to 5) -->
+                        <!-- 1. Tags (Badge Tags: 100% Organic Code) -->
                         <div class="space-y-1.5">
+                          <span class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            {{ 'modal.badgeTagsLabel' | translate }}
+                          </span>
+                          <div class="flex flex-wrap gap-1.5">
+                            @for (bt of packageService.availableBadgeTags(); track bt.name) {
+                              <button
+                                type="button"
+                                data-testid="edit-badge-tag-organic"
+                                (click)="toggleEditableBadgeTag(bt.name)"
+                                [appTooltip]="'card.organicCodeTooltip' | translate"
+                                [appTooltipTap]="true"
+                                [class]="isEditableBadgeTagSelected(bt.name)
+                                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60 shadow-sm'
+                                  : 'glass-pill text-slate-300 hover:text-white'"
+                                class="px-3 py-1 rounded-full border text-[11px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer">
+                                <svg lucideSprout class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                                <span>{{ 'card.organicCodeLabel' | translate }}</span>
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        <!-- 1b. Category & Genre Tags (up to 5) -->
+                        <div class="pt-3 border-t border-white/10 space-y-1.5">
                           <div class="flex items-center justify-between">
                             <span class="text-[11px] font-semibold text-sky-300">
                               Select Tags ({{ editableTags().length }}/5)
@@ -1575,7 +1606,7 @@ import {
                 }
 
                 <!-- Tags -->
-                @if ((package.tags && package.tags.length > 0) || isHydratingDetails()) {
+                @if ((package.tags && package.tags.length > 0) || hasOrganicCode(package) || isHydratingDetails()) {
                   <div class="space-y-2">
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-slate-500 font-semibold uppercase tracking-wider block text-[10px]">
@@ -1583,14 +1614,26 @@ import {
                       </span>
                     </div>
 
-                    @if (isHydratingDetails() && (!package.tags || package.tags.length <= 1)) {
+                    @if (isHydratingDetails() && (!package.tags || package.tags.length <= 1) && !hasOrganicCode(package)) {
                       <div class="flex flex-wrap gap-1.5" aria-busy="true">
                         <div class="w-14 h-5 rounded-full skeleton-shimmer"></div>
                         <div class="w-20 h-5 rounded-full skeleton-shimmer"></div>
                         <div class="w-16 h-5 rounded-full skeleton-shimmer"></div>
                       </div>
-                    } @else if (package.tags && package.tags.length > 0) {
+                    } @else if ((package.tags && package.tags.length > 0) || hasOrganicCode(package)) {
                       <div class="flex flex-wrap gap-1.5">
+                        @if (hasOrganicCode(package)) {
+                          <button
+                            type="button"
+                            data-testid="sidebar-organic-code-tag"
+                            (click)="filterByTag('organic_code')"
+                            [appTooltip]="'card.organicCodeTooltip' | translate"
+                            [appTooltipTap]="true"
+                            class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 hover:border-emerald-400 text-emerald-300 hover:text-white text-[10px] font-semibold inline-flex items-center gap-1 transition cursor-pointer">
+                            <svg lucideSprout class="w-3 h-3 text-emerald-400 flex-shrink-0"></svg>
+                            <span>{{ 'card.organicCodeLabel' | translate }}</span>
+                          </button>
+                        }
                         @for (tag of package.tags; track tag) {
                           <button
                             type="button"
@@ -2862,6 +2905,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   // Author Metadata & Tag Editing state (LuantiHub-First)
   readonly isEditingTags = signal(false);
   readonly editableTags = signal<string[]>([]);
+  readonly editableBadgeTags = signal<string[]>([]);
   readonly editableDevState = signal<string>('');
   readonly editableMinEngineVersion = signal<string>('');
   readonly editableMaxEngineVersion = signal<string>('');
@@ -4018,6 +4062,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     setTimeout(() => this.copiedTechId.set(false), 2000);
   }
 
+  hasOrganicCode(pkg?: LuantiPackage | null): boolean {
+    return hasOrganicCodeTag(pkg ?? this.packageService.activePackage() ?? this.package);
+  }
+
   openEditTags(): void {
     if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
@@ -4026,6 +4074,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       .map(t => String(t).toLowerCase())
       .filter(t => Boolean(t) && !systemTagSet.has(t));
     this.editableTags.set(currentCustom.slice(0, 5));
+    const currentBadgeTags = parseBadgeTagsArray(pkg?.badge_tags);
+    if (hasOrganicCodeTag(pkg) && !currentBadgeTags.includes(ORGANIC_CODE_TAG)) {
+      currentBadgeTags.push(ORGANIC_CODE_TAG);
+    }
+    this.editableBadgeTags.set(currentBadgeTags);
     this.editableDevState.set((pkg?.dev_state || '').trim().toUpperCase());
     this.editableMinEngineVersion.set((pkg?.min_minetest_version || '').trim());
     this.editableMaxEngineVersion.set((pkg?.max_minetest_version || '').trim());
@@ -4064,6 +4117,20 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   isEditableTagSelected(tagName: string): boolean {
     return this.editableTags().includes(tagName.toLowerCase());
+  }
+
+  isEditableBadgeTagSelected(tagName: string): boolean {
+    return this.editableBadgeTags().includes(tagName.toLowerCase());
+  }
+
+  toggleEditableBadgeTag(tagName: string): void {
+    const normalized = tagName.toLowerCase();
+    const current = this.editableBadgeTags();
+    if (current.includes(normalized)) {
+      this.editableBadgeTags.set(current.filter(t => t !== normalized));
+    } else {
+      this.editableBadgeTags.set([...current, normalized]);
+    }
   }
 
   toggleEditableTag(tagName: string): void {
@@ -4179,6 +4246,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isSavingTags.set(true);
     const res = await this.packageService.updatePackageMetadata(pkg, {
       tags: this.editableTags(),
+      badge_tags: this.editableBadgeTags(),
       dev_state: this.editableDevState() || undefined,
       content_warnings: this.editableContentWarnings(),
       min_minetest_version: this.editableMinEngineVersion() || null,
@@ -4192,6 +4260,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.package = {
         ...this.package,
         tags: res.tags ?? this.package.tags,
+        badge_tags: res.badge_tags ?? this.editableBadgeTags(),
         dev_state: res.dev_state ?? this.package.dev_state,
         content_warnings: res.content_warnings ?? this.package.content_warnings,
         min_minetest_version: res.min_minetest_version ?? undefined,

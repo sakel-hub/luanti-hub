@@ -128,7 +128,9 @@ export const sk: TranslationDictionary = {
     muteVideo: 'Stlmiť zvuk videa',
     unmuteVideo: 'Zapnúť zvuk videa',
     enlargeVideo: 'Zväčšiť video',
-    viewPackageDetails: 'Zobraziť detaily balíčka'
+    viewPackageDetails: 'Zobraziť detaily balíčka',
+    organicCodeLabel: '100% Organic Code',
+    organicCodeTooltip: 'Zero artificial additives. Grown with sunlight, coffee, and patience.'
   },
   modal: {
     close: 'Zavrieť okno (Esc)',
@@ -152,6 +154,7 @@ export const sk: TranslationDictionary = {
     technicalId: 'Technický Identifikátor',
     genresTags: 'Žánre & Značky',
     tags: 'Značky & Žánre',
+    badgeTagsLabel: 'Tags',
     category: 'Kategória',
     source: 'Zdroj Balíčka',
     license: 'Licencia',

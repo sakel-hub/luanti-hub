@@ -1,9 +1,10 @@
 import { Component, ChangeDetectionStrategy, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LuantiPackage } from '../../core/models/package.model';
+import { hasOrganicCodeTag } from '../../core/config/package-utils.config';
 import { TooltipDirective } from '../directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
-import { LucideGitBranch, LucideGlobe } from '@lucide/angular';
+import { LucideGitBranch, LucideGlobe, LucideSprout } from '@lucide/angular';
 
 @Component({
   selector: 'app-package-badges',
@@ -15,7 +16,8 @@ import { LucideGitBranch, LucideGlobe } from '@lucide/angular';
     TooltipDirective,
     TranslatePipe,
     LucideGitBranch,
-    LucideGlobe
+    LucideGlobe,
+    LucideSprout
   ],
   template: `
     <div [class]="compact ? 'inline-flex items-center gap-1 flex-wrap' : 'flex items-center gap-1.5 flex-wrap'">
@@ -41,6 +43,19 @@ import { LucideGitBranch, LucideGlobe } from '@lucide/angular';
           [class]="compact ? 'glass-badge glass-badge-amber font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-amber font-bold'">
           <svg lucideGitBranch [class]="compact ? 'w-2.5 h-2.5 text-amber-300 flex-shrink-0' : 'w-3 h-3 text-amber-300 flex-shrink-0'"></svg>
           <span>Git</span>
+        </span>
+      }
+
+      <!-- 100% Organic Code Badge (LuantiHub Custom Badge Tag) -->
+      @if (isOrganicCode) {
+        <span
+          data-testid="organic-code-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="'card.organicCodeTooltip' | translate"
+          [appTooltipTap]="true"
+          [attr.aria-label]="'card.organicCodeLabel' | translate"
+          [class]="compact ? 'glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0.5 cursor-help' : 'glass-badge glass-badge-emerald font-bold px-1.5 py-0.5 cursor-help'">
+          <svg lucideSprout [class]="compact ? 'w-2.5 h-2.5 text-emerald-400 flex-shrink-0' : 'w-3 h-3 text-emerald-400 flex-shrink-0'"></svg>
         </span>
       }
 
@@ -85,5 +100,9 @@ export class PackageBadgesComponent {
       this.package?.sources?.includes('git') ||
       this.package?.source === 'git'
     );
+  }
+
+  get isOrganicCode(): boolean {
+    return hasOrganicCodeTag(this.package);
   }
 }
