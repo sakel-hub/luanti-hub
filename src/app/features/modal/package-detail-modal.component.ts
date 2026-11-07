@@ -509,7 +509,7 @@ import {
                             </button>
                           </div>
                           <div class="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1">
-                            @for (t of packageService.availableTags(); track t.name) {
+                            @for (t of packageService.selectableGenreTags(); track t.name) {
                               <button
                                 type="button"
                                 (click)="toggleEditableTag(t.name)"

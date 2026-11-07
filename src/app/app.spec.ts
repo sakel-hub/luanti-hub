@@ -20,6 +20,7 @@ import { AuthorDrawerComponent } from './features/author/author-drawer.component
 import { HeaderComponent } from './features/header/header.component';
 import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
 import { DownloadAnalyticsChartComponent } from './shared/components/download-analytics-chart.component';
+import { filterAndSortDrawerPackages } from './shared/components/drawer-pagination.component';
 import { PwaService, PERIODIC_SYNC_TAG, ONE_OFF_OUTBOX_SYNC_TAG, ONE_OFF_CATALOG_SYNC_TAG } from './core/services/pwa.service';
 import { CompactNumberPipe } from './shared/pipes/compact-number.pipe';
 import { TooltipDirective } from './shared/directives/tooltip.directive';
@@ -13041,6 +13042,26 @@ core.register_node(modname .. ":panel", {
       expect(modalFixture.componentInstance.package.badge_tags).toEqual(['organic_code']);
       expect(modalEl.querySelector('[data-testid="sidebar-organic-code-tag"] svg[lucideLeaf]')).toBeTruthy();
       expect(modalEl.querySelector('[data-testid="organic-code-badge"] svg[lucideLeaf]')).toBeTruthy();
+
+      // Verify "100% Organic Code" (organic_code) is present in availableTags() for the Catalog Tags filter bar,
+      // while selectableGenreTags() excludes badge tag IDs from the 5-genre-tag picker
+      expect(pkgService.availableTags().some(t => t.name === 'organic_code' && t.title === '100% Organic Code')).toBe(true);
+      expect(pkgService.selectableGenreTags().some(t => t.name === 'organic_code')).toBe(false);
+
+      // Verify any future custom metadata tag or badge_tag saved on a package is also added to availableTags() and filterable
+      pkgService.ensureTagsRegisteredInAvailableTags(['future_custom_tag', 'future_badge_tag']);
+      expect(pkgService.availableTags().some(t => t.name === 'future_custom_tag')).toBe(true);
+      expect(pkgService.availableTags().some(t => t.name === 'future_badge_tag')).toBe(true);
+
+      // Verify filtering the catalog by 'organic_code' matches the package
+      pkgService.setTagFilter('organic_code');
+      expect(pkgService.filteredPackages().map(p => p.id)).toEqual(['SaKeL/everness']);
+      pkgService.setTagFilter('all');
+
+      // Verify drawer filtering (Author / Profile Drawer) matches packages by badge_tags as well as tags
+      expect(filterAndSortDrawerPackages(pkgService.packages(), { tag: 'organic_code' }).map(p => p.id)).toEqual([
+        'SaKeL/everness'
+      ]);
 
       // Simulate reopening the modal and triggering loadPackageDetails while browser cache still has stale badge_tags: []
       (pkgService as any).edgeApiAvailable = true;

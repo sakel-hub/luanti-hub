@@ -398,7 +398,7 @@ import {
               Select up to 5 ContentDB-compatible tags to categorize your package in the catalog.
             </p>
             <div class="flex items-center gap-1.5 flex-wrap max-h-32 overflow-y-auto pr-1 pt-0.5">
-              @for (tag of packageService.availableTags(); track tag.name) {
+              @for (tag of packageService.selectableGenreTags(); track tag.name) {
                 <button
                   type="button"
                   (click)="toggleTag(tag.name)"

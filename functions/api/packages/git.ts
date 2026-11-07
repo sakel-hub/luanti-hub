@@ -38,6 +38,7 @@ import {
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags,
   upsertMetadataOptions,
+  resolveBadgeTagItemsForCatalog,
   LUANTIHUB_BADGE_TAGS,
   ORGANIC_CODE_TAG,
   parseBadgeTagsArray,
@@ -1824,6 +1825,31 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
       if (mergedTags.length > 0) {
         await upsertCustomAppTags(context.env.DB, mergedTags, 'custom');
+      }
+
+      if (resolvedBadgeTags.length > 0) {
+        const badgeCatalogTagItems = resolveBadgeTagItemsForCatalog(resolvedBadgeTags);
+        const knownBadgeByLower = new Map(
+          LUANTIHUB_BADGE_TAGS.map((b) => [b.name.toLowerCase(), b])
+        );
+        await Promise.all([
+          upsertMetadataOptions(
+            context.env.DB,
+            'badge_tags',
+            badgeCatalogTagItems.map((item, idx) => {
+              const known = knownBadgeByLower.get(item.name.toLowerCase());
+              return {
+                name: item.name,
+                title: known?.title || item.title,
+                description: known?.tooltip,
+                icon: known?.icon,
+                sort_order: idx
+              };
+            }),
+            'luantihub'
+          ),
+          upsertCustomAppTags(context.env.DB, badgeCatalogTagItems, 'luantihub')
+        ]);
       }
 
       const releaseBatchStmts: any[] = [

@@ -782,12 +782,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
   const lowerQ = q.toLowerCase();
   const lowerAuthor = author.toLowerCase();
+  const requestedTagFilters = url.searchParams
+    .getAll('tag')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
   const buildInGameClientCatalogResponse = (packagesList: any[]): any => {
     const filtered = (Array.isArray(packagesList) ? packagesList : []).filter((pkg: any) => {
       if (!pkg || !pkg.author || !pkg.name) return false;
       const pkgType = pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod');
       if (sortedUniqueTypes.length > 0 && !isAllStandardTypes && !sortedUniqueTypes.includes(pkgType)) {
         return false;
+      }
+      if (requestedTagFilters.length > 0) {
+        const pkgTagsLower = new Set<string>([
+          ...parseJsonArray(pkg.tags).map((t: string) => String(t).toLowerCase()),
+          ...parseBadgeTagsArray(pkg.badge_tags).map((t: string) => String(t).toLowerCase())
+        ]);
+        if (!requestedTagFilters.every(reqTag => pkgTagsLower.has(reqTag))) {
+          return false;
+        }
       }
       if (lowerAuthor) {
         const pkgAuthorLower = String(pkg.author || '').toLowerCase();
@@ -1476,7 +1489,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         if (done) return;
         await writeEdgeCacheJson(cleanupKey, true, 86400 * 30);
         await env.DB.prepare(
-          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND (badge_tags IS NULL OR badge_tags = '' OR badge_tags = '[]') AND (dev_state IS NULL OR dev_state = '') AND (translations IS NULL OR translations = '' OR translations = '{}') AND status = 'active'`
+          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND (tags IS NULL OR tags = '' OR tags = '[]') AND (badge_tags IS NULL OR badge_tags = '' OR badge_tags = '[]') AND (dev_state IS NULL OR dev_state = '') AND (translations IS NULL OR translations = '' OR translations = '{}') AND status = 'active'`
         ).run().catch(() => {});
         await env.DB.prepare(
           `DELETE FROM releases WHERE package_id NOT IN (SELECT id FROM packages)`
@@ -1512,7 +1525,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const selectCols = isBootBundle
       ? '*'
       : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, badge_tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, translations, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha';
-    let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0 OR (badge_tags IS NOT NULL AND badge_tags != '' AND badge_tags != '[]') OR (dev_state IS NOT NULL AND dev_state != '') OR (translations IS NOT NULL AND translations != '' AND translations != '{}'))`;
+    let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0 OR (tags IS NOT NULL AND tags != '' AND tags != '[]') OR (badge_tags IS NOT NULL AND badge_tags != '' AND badge_tags != '[]') OR (dev_state IS NOT NULL AND dev_state != '') OR (translations IS NOT NULL AND translations != '' AND translations != '{}'))`;
     const params: any[] = [];
 
     const d1Types =

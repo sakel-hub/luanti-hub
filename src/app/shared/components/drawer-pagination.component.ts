@@ -1,6 +1,7 @@
 import { Component, ChangeDetectionStrategy, EventEmitter, Input, Output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LuantiPackage, SortOption } from '../../core/models/package.model';
+import { ORGANIC_CODE_TAG, hasOrganicCodeTag } from '../../core/config/package-utils.config';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { LucideChevronLeft, LucideChevronRight } from '@lucide/angular';
 
@@ -32,12 +33,27 @@ export function filterAndSortDrawerPackages(
     }
 
     if (tag !== 'all') {
-      const hasTag = (pkg.tags || []).some(t => t.toLowerCase() === tag);
-      if (!hasTag) return false;
+      if (tag === ORGANIC_CODE_TAG) {
+        if (!hasOrganicCodeTag(pkg)) return false;
+      } else {
+        const hasTag =
+          (pkg.tags || []).some(t => t.toLowerCase() === tag) ||
+          (pkg.badge_tags || []).some(bt => bt.toLowerCase() === tag);
+        if (!hasTag) return false;
+      }
     }
 
     if (q) {
-      const hay = `${pkg.title} ${pkg.name} ${pkg.short_desc}`.toLowerCase();
+      const hay = [
+        pkg.title,
+        pkg.name,
+        pkg.short_desc,
+        ...(pkg.tags || []),
+        ...(pkg.badge_tags || []),
+        hasOrganicCodeTag(pkg) ? '100% organic code' : ''
+      ]
+        .join(' ')
+        .toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;

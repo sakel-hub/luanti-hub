@@ -11,6 +11,7 @@ import { SettingsService } from '../../core/services/settings.service';
 import { SortOption } from '../../core/models/package.model';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { ORGANIC_CODE_TAG } from '../../core/config/package-utils.config';
 import {
   LucideSearchX,
   LucideX,
@@ -20,7 +21,8 @@ import {
   LucideTag,
   LucideGitBranch,
   LucidePlus,
-  LucideInfo
+  LucideInfo,
+  LucideLeaf
 } from '@lucide/angular';
 
 @Component({
@@ -44,7 +46,8 @@ import {
     LucideTag,
     LucideGitBranch,
     LucidePlus,
-    LucideInfo
+    LucideInfo,
+    LucideLeaf
   ],
   template: `
     @if (!packageService.hasActiveFilters()) {
@@ -170,9 +173,15 @@ import {
               <button
                 type="button"
                 (click)="packageService.setTagFilter(tag.name)"
-                [class]="packageService.selectedTag().toLowerCase() === tag.name.toLowerCase() ? 'bg-sky-500/25 text-sky-300 border-sky-400/40 shadow-sm' : 'glass-pill text-slate-300 hover:text-white'"
-                class="px-3 py-1 rounded-full border text-xs font-medium transition whitespace-nowrap flex-shrink-0 cursor-pointer">
-                #{{ tag.title }}
+                [appTooltip]="isOrganicCodeTag(tag.name) ? ('card.organicCodeTooltip' | translate) : ('modal.filterByTagTooltip' | translate:{ tag: tag.title })"
+                [class]="packageService.selectedTag().toLowerCase() === tag.name.toLowerCase() ? (isOrganicCodeTag(tag.name) ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/50 shadow-sm' : 'bg-sky-500/25 text-sky-300 border-sky-400/40 shadow-sm') : 'glass-pill text-slate-300 hover:text-white'"
+                class="px-3 py-1 rounded-full border text-xs font-medium inline-flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
+                @if (isOrganicCodeTag(tag.name)) {
+                  <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                  <span>#{{ 'card.organicCodeLabel' | translate }}</span>
+                } @else {
+                  <span>#{{ tag.title }}</span>
+                }
               </button>
             }
             @if (extraTags().length > 0) {
@@ -198,9 +207,15 @@ import {
                 <button
                   type="button"
                   (click)="packageService.setTagFilter(tag.name)"
-                  [class]="packageService.selectedTag().toLowerCase() === tag.name.toLowerCase() ? 'bg-sky-500/25 text-sky-300 border-sky-400/40 shadow-sm' : 'glass-pill text-slate-300 hover:text-white'"
-                  class="px-2.5 py-1 rounded-full border text-xs font-medium transition whitespace-nowrap cursor-pointer">
-                  #{{ tag.title }}
+                  [appTooltip]="isOrganicCodeTag(tag.name) ? ('card.organicCodeTooltip' | translate) : ('modal.filterByTagTooltip' | translate:{ tag: tag.title })"
+                  [class]="packageService.selectedTag().toLowerCase() === tag.name.toLowerCase() ? (isOrganicCodeTag(tag.name) ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/50 shadow-sm' : 'bg-sky-500/25 text-sky-300 border-sky-400/40 shadow-sm') : 'glass-pill text-slate-300 hover:text-white'"
+                  class="px-2.5 py-1 rounded-full border text-xs font-medium inline-flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer">
+                  @if (isOrganicCodeTag(tag.name)) {
+                    <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                    <span>#{{ 'card.organicCodeLabel' | translate }}</span>
+                  } @else {
+                    <span>#{{ tag.title }}</span>
+                  }
                 </button>
               }
             </div>
@@ -357,8 +372,14 @@ import {
             <button
               type="button"
               (click)="packageService.setTagFilter(tag.name)"
-              class="px-3 py-1 rounded-full glass-pill hover:border-sky-400/40 text-slate-300 hover:text-white text-xs font-medium transition whitespace-nowrap flex-shrink-0 cursor-pointer">
-              #{{ tag.title }}
+              [appTooltip]="isOrganicCodeTag(tag.name) ? ('card.organicCodeTooltip' | translate) : ('modal.filterByTagTooltip' | translate:{ tag: tag.title })"
+              class="px-3 py-1 rounded-full glass-pill hover:border-sky-400/40 text-slate-300 hover:text-white text-xs font-medium inline-flex items-center gap-1.5 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
+              @if (isOrganicCodeTag(tag.name)) {
+                <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                <span>#{{ 'card.organicCodeLabel' | translate }}</span>
+              } @else {
+                <span>#{{ tag.title }}</span>
+              }
             </button>
           }
           @if (extraTags().length > 0) {
@@ -384,8 +405,14 @@ import {
               <button
                 type="button"
                 (click)="packageService.setTagFilter(tag.name)"
-                class="px-2.5 py-1 rounded-full glass-pill hover:border-sky-400/40 text-slate-300 hover:text-white text-xs font-medium transition whitespace-nowrap cursor-pointer">
-                #{{ tag.title }}
+                [appTooltip]="isOrganicCodeTag(tag.name) ? ('card.organicCodeTooltip' | translate) : ('modal.filterByTagTooltip' | translate:{ tag: tag.title })"
+                class="px-2.5 py-1 rounded-full glass-pill hover:border-sky-400/40 text-slate-300 hover:text-white text-xs font-medium inline-flex items-center gap-1.5 transition whitespace-nowrap cursor-pointer">
+                @if (isOrganicCodeTag(tag.name)) {
+                  <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                  <span>#{{ 'card.organicCodeLabel' | translate }}</span>
+                } @else {
+                  <span>#{{ tag.title }}</span>
+                }
               </button>
             }
           </div>
@@ -643,6 +670,10 @@ export class CatalogComponent {
 
   toggleTagsDrawer(): void {
     this.isTagsExpanded.update(v => !v);
+  }
+
+  isOrganicCodeTag(tagName: string): boolean {
+    return String(tagName || '').trim().toLowerCase() === ORGANIC_CODE_TAG;
   }
 
   onSortChange(sort: SortOption): void {

@@ -39,6 +39,7 @@ import {
   LucideSearch,
   LucideSlidersHorizontal,
   LucideTag,
+  LucideLeaf,
   LucideTrendingUp,
   LucideRefreshCw,
   LucideShieldAlert
@@ -70,6 +71,7 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
     LucideSearch,
     LucideSlidersHorizontal,
     LucideTag,
+    LucideLeaf,
     LucideTrendingUp,
     LucideRefreshCw,
     LucideShieldAlert
@@ -332,9 +334,16 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
                   <button
                     type="button"
                     (click)="selectTag(selectedTag() === tag.name ? 'all' : tag.name)"
+                    [appTooltip]="tag.name === 'organic_code' ? ('card.organicCodeTooltip' | translate) : ('modal.filterByTagTooltip' | translate:{ tag: packageService.getTagDisplayTitle(tag.name) })"
                     [class]="selectedTag() === tag.name ? 'bg-sky-500/25 text-sky-300 border-sky-400/50 shadow-sm' : 'glass-pill text-slate-300 hover:text-white'"
-                    class="px-2.5 py-0.5 rounded-full border text-[11px] font-medium transition cursor-pointer">
-                    #{{ tag.name }} <span class="text-slate-400 font-mono text-[10px]">({{ tag.count }})</span>
+                    class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[11px] font-medium transition cursor-pointer">
+                    @if (tag.name === 'organic_code') {
+                      <svg lucideLeaf class="w-3 h-3 text-emerald-400 flex-shrink-0"></svg>
+                      <span>#{{ 'card.organicCodeLabel' | translate }}</span>
+                    } @else {
+                      <span>#{{ packageService.getTagDisplayTitle(tag.name) }}</span>
+                    }
+                    <span class="text-slate-400 font-mono text-[10px]">({{ tag.count }})</span>
                   </button>
                 }
               </div>
@@ -773,11 +782,15 @@ export class AuthorDrawerComponent {
 
   readonly topAuthorTags = computed<Array<{ name: string; count: number }>>(() => {
     const counts = new Map<string, number>();
-    const ignored = new Set(['mod', 'game', 'txp', 'texture_pack', 'git', 'contentdb']);
+    const ignored = new Set(['mod', 'game', 'txp', 'modpack', 'texture_pack', 'git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb']);
     for (const pkg of this.authorPackages()) {
-      for (const rawTag of pkg.tags || []) {
+      const uniquePkgTags = new Set<string>();
+      for (const rawTag of [...(pkg.tags || []), ...(pkg.badge_tags || [])]) {
         const clean = String(rawTag || '').trim().toLowerCase();
         if (!clean || ignored.has(clean)) continue;
+        uniquePkgTags.add(clean);
+      }
+      for (const clean of uniquePkgTags) {
         counts.set(clean, (counts.get(clean) || 0) + 1);
       }
     }

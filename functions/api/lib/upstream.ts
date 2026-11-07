@@ -432,6 +432,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v21',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v22',
     'https://cache.luantihub.internal/__api_boot_recently_added_v1',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1'
@@ -517,7 +519,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
         k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
         k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v1_') ||
-        k.startsWith('https://cache.luantihub.internal/__unified_tags_v1')
+        k.startsWith('https://cache.luantihub.internal/__unified_tags_v')
       ) {
         isolateJsonCache.delete(k);
       }
@@ -579,6 +581,7 @@ export const deleteEdgeCacheKeys = invalidateEdgeCacheKeys;
   }
 
 export const DEFAULT_CONTENTDB_TAGS: Array<{ name: string; title: string }> = [
+  { name: 'organic_code', title: '100% Organic Code' },
   { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
   { name: 'building', title: 'Building' },
   { name: 'chat', title: 'Chat / Commands' },
@@ -1116,6 +1119,16 @@ export async function seedDefaultMetadataOptionsInD1(db: any): Promise<void> {
 
   LUANTIHUB_BADGE_TAGS.forEach((b, idx) => {
     pushOption('badge_tags', b.name, b.title, b.tooltip, b.icon, null, idx);
+    stmts.push(
+      db.prepare(`
+        INSERT INTO tags (name, title, source, updated_at)
+        VALUES (?, ?, 'luantihub', CURRENT_TIMESTAMP)
+        ON CONFLICT(name) DO UPDATE SET
+          title = excluded.title,
+          source = 'luantihub',
+          updated_at = CURRENT_TIMESTAMP
+      `).bind(b.name, b.title)
+    );
   });
   LUANTIHUB_DEV_STATES.forEach((d, idx) => {
     pushOption('dev_states', d.code, d.label, null, null, null, idx);
@@ -1217,9 +1230,27 @@ export async function upsertMetadataOptions(
         await runBatch();
       }
     }
+    if (category === 'badge_tags') {
+      await invalidateEdgeCacheKeys(['/__unified_tags_v1', '/__unified_tags_v2']);
+    }
   } catch {
     // Non-blocking option persistence
   }
+}
+
+export function resolveBadgeTagItemsForCatalog(
+  badgeTagNames: string[]
+): Array<{ name: string; title: string }> {
+  const knownByLower = new Map(
+    LUANTIHUB_BADGE_TAGS.map((b) => [b.name.toLowerCase(), b.title])
+  );
+  return (Array.isArray(badgeTagNames) ? badgeTagNames : [])
+    .map((raw) => String(raw || '').trim())
+    .filter(Boolean)
+    .map((name) => ({
+      name,
+      title: knownByLower.get(name.toLowerCase()) || formatTagTitle(name)
+    }));
 }
 
 /**
@@ -1231,7 +1262,10 @@ export async function upsertCustomAppTags(
   source: 'contentdb' | 'luantihub' | 'custom' = 'custom'
 ): Promise<void> {
   if (!db || !Array.isArray(tagItems) || tagItems.length === 0) return;
-  const systemTags = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+  const systemTags = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+  const knownBadgeTitles = new Map(
+    LUANTIHUB_BADGE_TAGS.map((b) => [b.name.toLowerCase(), b.title])
+  );
   const entries: Array<{ name: string; title: string }> = [];
   const seen = new Set<string>();
 
@@ -1242,7 +1276,10 @@ export async function upsertCustomAppTags(
     const lower = cleanName.toLowerCase();
     if (systemTags.has(lower) || seen.has(lower)) continue;
     seen.add(lower);
-    const title = (typeof item === 'object' && item?.title ? String(item.title).trim() : '') || formatTagTitle(cleanName);
+    const title =
+      (typeof item === 'object' && item?.title ? String(item.title).trim() : '') ||
+      knownBadgeTitles.get(lower) ||
+      formatTagTitle(cleanName);
     if (title) {
       entries.push({ name: cleanName, title });
     }
@@ -1256,7 +1293,7 @@ export async function upsertCustomAppTags(
         INSERT INTO tags (name, title, source, updated_at)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(name) DO UPDATE SET
-          title = CASE WHEN tags.source = 'custom' AND excluded.source = 'contentdb' THEN tags.title ELSE excluded.title END,
+          title = CASE WHEN tags.source IN ('custom', 'luantihub') AND excluded.source = 'contentdb' THEN tags.title ELSE excluded.title END,
           updated_at = CURRENT_TIMESTAMP
       `).bind(e.name, e.title, source)
     );
@@ -1280,42 +1317,49 @@ export async function upsertCustomAppTags(
         throw err;
       }
     }
-    await invalidateEdgeCacheKeys(['/__unified_tags_v1']);
+    await invalidateEdgeCacheKeys(['/__unified_tags_v1', '/__unified_tags_v2']);
   } catch {
     // Non-blocking tag persistence
   }
 }
 
 /**
- * Merges ContentDB `/api/tags/`, D1 `tags` mirror, and `DEFAULT_CONTENTDB_TAGS` into a single
- * ContentDB-agnostic tag list. Caches the unified tag list in Edge Cache (`/__unified_tags_v1`)
- * and mirrors newly discovered ContentDB tags into D1 at most once every 6 hours.
+ * Merges ContentDB `/api/tags/`, D1 `tags` mirror, `LUANTIHUB_BADGE_TAGS`, D1 `package_metadata_options`,
+ * active D1 `packages` metadata tags, and `DEFAULT_CONTENTDB_TAGS` into a single ContentDB-agnostic tag list.
+ * Caches the unified tag list in Edge Cache (`/__unified_tags_v2`) and mirrors newly discovered tags into D1.
  */
 export async function getUnifiedCatalogTags(
   db?: any,
   upstreamTagsInput?: any[] | null
 ): Promise<Array<{ name: string; title: string }>> {
-  const cacheKey = '/__unified_tags_v1';
+  const cacheKey = '/__unified_tags_v2';
   const cached = await readEdgeCacheJson<Array<{ name: string; title: string }>>(cacheKey);
   if (Array.isArray(cached) && cached.length > 0 && upstreamTagsInput === undefined) {
     return cached;
   }
 
   const tagMap = new Map<string, { name: string; title: string }>();
+  const knownBadgeTitles = new Map(
+    LUANTIHUB_BADGE_TAGS.map((b) => [b.name.toLowerCase(), b.title])
+  );
   const addTag = (nameRaw: string, titleRaw?: string) => {
     const name = String(nameRaw || '').trim();
     if (!name) return;
     const lower = name.toLowerCase();
-    if (['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack'].includes(lower)) {
+    if (['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack'].includes(lower)) {
       return;
     }
-    const title = String(titleRaw || '').trim() || formatTagTitle(name);
+    const title = String(titleRaw || '').trim() || knownBadgeTitles.get(lower) || formatTagTitle(name);
     if (!tagMap.has(lower)) {
       tagMap.set(lower, { name, title });
     } else if (titleRaw && String(titleRaw).trim()) {
       tagMap.set(lower, { name, title: String(titleRaw).trim() });
     }
   };
+
+  for (const badgeTag of LUANTIHUB_BADGE_TAGS) {
+    addTag(badgeTag.name, badgeTag.title);
+  }
 
   for (const defTag of DEFAULT_CONTENTDB_TAGS) {
     addTag(defTag.name, defTag.title);
@@ -1328,14 +1372,48 @@ export async function getUnifiedCatalogTags(
     }
   } else if (db) {
     try {
-      const d1Res = await db.prepare(`SELECT name, title FROM tags ORDER BY name ASC LIMIT 250`).all().catch(() => null);
-      if (Array.isArray(d1Res?.results)) {
-        for (const r of d1Res.results) {
+      const [d1TagsRes, d1BadgeOptsRes, d1PkgTagsRes] = await Promise.all([
+        db.prepare(`SELECT name, title FROM tags ORDER BY name ASC LIMIT 300`).all().catch(() => null),
+        db
+          .prepare(
+            `SELECT name, title FROM package_metadata_options WHERE category = 'badge_tags' ORDER BY sort_order ASC LIMIT 100`
+          )
+          .all()
+          .catch(() => null),
+        db
+          .prepare(
+            `SELECT tags, badge_tags FROM packages WHERE status = 'active' AND ((tags IS NOT NULL AND tags != '' AND tags != '[]') OR (badge_tags IS NOT NULL AND badge_tags != '' AND badge_tags != '[]')) LIMIT 500`
+          )
+          .all()
+          .catch(() => null)
+      ]);
+
+      if (Array.isArray(d1BadgeOptsRes?.results)) {
+        for (const r of d1BadgeOptsRes.results) {
+          if (r?.name) {
+            addTag(String(r.name), r.title ? String(r.title) : undefined);
+          }
+        }
+      }
+
+      if (Array.isArray(d1TagsRes?.results)) {
+        for (const r of d1TagsRes.results) {
           if (r?.name) {
             const nameStr = String(r.name);
             const titleStr = r.title ? String(r.title) : '';
             existingD1Tags.set(nameStr.toLowerCase(), titleStr);
             addTag(nameStr, titleStr || undefined);
+          }
+        }
+      }
+
+      if (Array.isArray(d1PkgTagsRes?.results)) {
+        for (const row of d1PkgTagsRes.results) {
+          for (const t of parseJsonArray(row?.tags)) {
+            addTag(t);
+          }
+          for (const bt of parseBadgeTagsArray(row?.badge_tags)) {
+            addTag(bt, knownBadgeTitles.get(bt.toLowerCase()));
           }
         }
       }
@@ -5242,7 +5320,7 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v21';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v22';
 export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v21';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';

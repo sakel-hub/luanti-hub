@@ -82,6 +82,7 @@ const PAGE_SIZE = 32;
 const CAROUSEL_CAP = 24;
 
 export const DEFAULT_CONTENTDB_TAGS: ContentDbTag[] = [
+  ...LUANTIHUB_BADGE_TAGS.map(b => ({ name: b.name, title: b.title })),
   { name: 'adventure_and_rpg', title: 'Adventure / RPG' },
   { name: 'building', title: 'Building' },
   { name: 'chat', title: 'Chat / Commands' },
@@ -129,6 +130,8 @@ export const DEFAULT_CONTENTDB_TAGS: ContentDbTag[] = [
 export function formatTagDisplayTitle(tagName: string): string {
   const clean = String(tagName || '').trim();
   if (!clean) return '';
+  const knownBadge = LUANTIHUB_BADGE_TAGS.find(b => b.name.toLowerCase() === clean.toLowerCase());
+  if (knownBadge) return knownBadge.title;
   const known = DEFAULT_CONTENTDB_TAGS.find(t => t.name.toLowerCase() === clean.toLowerCase());
   if (known) return known.title;
   const jamMatch = clean.match(/^jam_game_(\d{4})$/i);
@@ -236,6 +239,10 @@ export class PackageService {
   readonly selectedGame = this._selectedGame.asReadonly();
   readonly availableTags = this._availableTags.asReadonly();
   readonly availableBadgeTags = signal<LuantiHubBadgeTagOption[]>([...LUANTIHUB_BADGE_TAGS]).asReadonly();
+  readonly selectableGenreTags = computed<ContentDbTag[]>(() => {
+    const badgeSet = new Set(this.availableBadgeTags().map(b => b.name.toLowerCase()));
+    return this._availableTags().filter(t => !badgeSet.has(t.name.toLowerCase()));
+  });
   readonly availableGames = signal(LUANTIHUB_POPULAR_GAMES).asReadonly();
   readonly availableDevStates = signal(LUANTIHUB_DEV_STATES).asReadonly();
   readonly availableContentWarnings = signal(LUANTIHUB_CONTENT_WARNINGS).asReadonly();
@@ -440,7 +447,10 @@ export class PackageService {
           return false;
         }
         if (lowerFilterTags.length > 0) {
-          const pkgLowerTags = (pkg.tags || []).map(t => t.toLowerCase());
+          const pkgLowerTags = [
+            ...(pkg.tags || []),
+            ...(pkg.badge_tags || [])
+          ].map(t => t.toLowerCase());
           const matchesTag = lowerFilterTags.some(ft => {
             const kw = ft.replace(/_/g, ' ');
             return pkgLowerTags.includes(ft) || pkgLowerTags.includes(kw);
@@ -869,7 +879,11 @@ export class PackageService {
   getTagDisplayTitle(tagName: string): string {
     const clean = String(tagName || '').trim();
     if (!clean) return '';
-    if (clean.toLowerCase() === ORGANIC_CODE_TAG) return ORGANIC_CODE_LABEL;
+    if (clean.toLowerCase() === ORGANIC_CODE_TAG) {
+      return this.i18n.t('card.organicCodeLabel') || ORGANIC_CODE_LABEL;
+    }
+    const badgeMatch = this.availableBadgeTags().find(b => b.name.toLowerCase() === clean.toLowerCase());
+    if (badgeMatch) return badgeMatch.title;
     const match = this._availableTags().find(t => t.name.toLowerCase() === clean.toLowerCase());
     return match ? match.title : formatTagDisplayTitle(clean);
   }
@@ -891,7 +905,10 @@ export class PackageService {
     customTitles?: Record<string, string>
   ): void {
     if (!Array.isArray(tagNames) || tagNames.length === 0) return;
-    const systemSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const systemSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const badgeTitleByLower = new Map(
+      this.availableBadgeTags().map(b => [b.name.toLowerCase(), b.title])
+    );
     const current = this._availableTags();
     const existingLower = new Set(current.map(t => t.name.toLowerCase()));
     const additions: ContentDbTag[] = [];
@@ -904,7 +921,7 @@ export class PackageService {
       existingLower.add(lower);
       additions.push({
         name: clean,
-        title: customTitles?.[lower] || formatTagDisplayTitle(clean)
+        title: customTitles?.[lower] || badgeTitleByLower.get(lower) || formatTagDisplayTitle(clean)
       });
     }
 
@@ -915,6 +932,52 @@ export class PackageService {
         )
       );
     }
+  }
+
+  syncMetadataAndPackageTagsIntoAvailableTags(packagesList: LuantiPackage[] = this._packages()): void {
+    const customTitles: Record<string, string> = {};
+    const namesToRegister: string[] = [];
+
+    for (const badge of this.availableBadgeTags()) {
+      if (badge?.name) {
+        namesToRegister.push(badge.name);
+        if (badge.title) {
+          customTitles[badge.name.toLowerCase()] = badge.title;
+        }
+      }
+    }
+
+    for (const pkg of Array.isArray(packagesList) ? packagesList : []) {
+      if (!pkg || pkg.status === 'delisted' || pkg.status === 'flagged') continue;
+      for (const t of pkg.tags || []) {
+        if (t) namesToRegister.push(t);
+      }
+      for (const bt of pkg.badge_tags || []) {
+        if (bt) namesToRegister.push(bt);
+      }
+    }
+
+    const activePkg = this._activePackage();
+    if (activePkg) {
+      for (const t of activePkg.tags || []) {
+        if (t) namesToRegister.push(t);
+      }
+      for (const bt of activePkg.badge_tags || []) {
+        if (bt) namesToRegister.push(bt);
+      }
+    }
+
+    for (const meta of this.hydratedMetaCache.values()) {
+      if (!meta) continue;
+      for (const t of meta.tags || []) {
+        if (t) namesToRegister.push(t);
+      }
+      for (const bt of meta.badge_tags || []) {
+        if (bt) namesToRegister.push(bt);
+      }
+    }
+
+    this.ensureTagsRegisteredInAvailableTags(namesToRegister, customTitles);
   }
 
   explorePromotionalRow(row: PromotionalPackageRow): void {
@@ -1346,7 +1409,7 @@ export class PackageService {
         } else {
           const hasExactTag =
             pkg.tags?.some(t => t.toLowerCase() === tag || t.toLowerCase() === tagKeyword) ||
-            pkg.badge_tags?.some(bt => bt.toLowerCase() === tag);
+            pkg.badge_tags?.some(bt => bt.toLowerCase() === tag || bt.toLowerCase() === tagKeyword);
           const matchesSearchBlob = Boolean(
             pkg._searchBlob && (pkg._searchBlob.includes(tag) || pkg._searchBlob.includes(tagKeyword))
           );
@@ -2156,6 +2219,7 @@ export class PackageService {
       pkg.license || '',
       ...(pkg.tags || []),
       ...(pkg.badge_tags || []),
+      ...(pkg.badge_tags || []).map(bt => formatTagDisplayTitle(bt)),
       ...(hasOrganicCodeTag(pkg) ? ['100% organic code', 'organic'] : [])
     ]
       .join(' ')
@@ -3587,6 +3651,7 @@ export class PackageService {
             .filter(t => Boolean(t.name && t.title));
           if (parsed.length > 0) {
             this._availableTags.set(parsed);
+            this.syncMetadataAndPackageTagsIntoAvailableTags();
             for (const promo of this.activePromotions()) {
               if (Array.isArray(promo.row_filter_tags) && promo.row_filter_tags.length > 0) {
                 this.ensureTagsRegisteredInAvailableTags(promo.row_filter_tags);
@@ -3872,6 +3937,7 @@ export class PackageService {
         this._availableTags.set(parsedTags);
       }
     }
+    this.syncMetadataAndPackageTagsIntoAvailableTags();
     this.syncClientPromotionRowTags(this.activePromotions());
 
     if (Array.isArray(payload.top10Week) && payload.top10Week.length > 0) {
@@ -5518,6 +5584,19 @@ export class PackageService {
         }
 
         if (updatesByLowerId.size > 0) {
+          const hydratedTagNames: string[] = [];
+          for (const patch of updatesByLowerId.values()) {
+            for (const t of patch.tags || []) {
+              if (t) hydratedTagNames.push(t);
+            }
+            for (const bt of patch.badge_tags || []) {
+              if (bt) hydratedTagNames.push(bt);
+            }
+          }
+          if (hydratedTagNames.length > 0) {
+            this.ensureTagsRegisteredInAvailableTags(hydratedTagNames);
+          }
+
           const isUnitTestEnv =
             typeof (globalThis as any).__karma__ !== 'undefined' ||
             typeof (globalThis as any).jasmine !== 'undefined' ||
@@ -8081,6 +8160,10 @@ export class PackageService {
           this.setBoundedCache(this.readmeCache, cacheKey, readmeText, 40);
         }
 
+        if (rawTags.length > 0 || badgeTags.length > 0) {
+          this.ensureTagsRegisteredInAvailableTags([...rawTags, ...badgeTags]);
+        }
+
         const resolvedCreatedAt =
           [data.approved_at, data.created_at, pkg.created_at]
             .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
@@ -9462,6 +9545,8 @@ export class PackageService {
       this._packages.update(list => list.map(applyItemUpdate));
       this._serverTop10Today.update(list => list.map(applyItemUpdate));
       this._serverTop10Week.update(list => list.map(applyItemUpdate));
+      this.ensureTagsRegisteredInAvailableTags([...updatedTags, ...updatedBadgeTags]);
+      this.syncMetadataAndPackageTagsIntoAvailableTags();
 
       this.authService.clearAuthCache();
       this.authService.initAuth(true);
@@ -10819,6 +10904,13 @@ export class PackageService {
           if (!isPendingModeration) {
             const normalized = this.normalizePackage(result.package);
             this._packages.update(list => this.deduplicateCatalog([normalized, ...list]));
+            this.ensureTagsRegisteredInAvailableTags([
+              ...(normalized.tags || []),
+              ...(normalized.badge_tags || []),
+              ...(payload.tags || []),
+              ...(payload.badge_tags || [])
+            ]);
+            this.syncMetadataAndPackageTagsIntoAvailableTags();
             this.pwaService.checkAndNotifyNewGitPackages([normalized], {
               forceNotifyIds: [normalized.id],
               isBaselineSeedAllowed: false
