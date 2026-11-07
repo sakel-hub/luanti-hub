@@ -1620,7 +1620,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         updated_at: d1Pkg?.updated_at || undefined,
         latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
         provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('git.minetest.land') ? 'mesehub' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : resolvedRepo.includes('bitbucket.org') ? 'bitbucket' : 'github'),
-        default_branch: d1Pkg?.default_branch || 'main',
+        default_branch: d1Pkg?.default_branch || gitScan?.defaultBranch || 'main',
         min_minetest_version: d1Pkg?.min_minetest_version || gitScan?.minVersion || '5.0.0',
         max_minetest_version: d1Pkg?.max_minetest_version || gitScan?.maxVersion || undefined,
         tags: mergedTags,
@@ -2153,6 +2153,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     readme: readmeText || undefined,
     repo_url: repoUrl,
     git_repo_status: gitRepoStatus,
+    ...(gitProbeScan?.defaultBranch || d1Pkg?.default_branch || upstreamData.default_branch
+      ? { default_branch: gitProbeScan?.defaultBranch || d1Pkg?.default_branch || upstreamData.default_branch }
+      : {}),
     website: upstreamData.website || forClientData?.website || probedCdbMeta?.website || undefined,
     issue_tracker: issueTrackerUrl,
     forum_url: forumUrl,

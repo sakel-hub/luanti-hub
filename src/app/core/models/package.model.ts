@@ -212,8 +212,17 @@ export interface ReleaseNotesPayload {
   head_ref: string;
   base_ref?: string;
   compare_url?: string;
+  resolved_default_branch?: string;
   markdown_body?: string;
   commits: ReleaseCommitItem[];
+}
+
+export interface PackageModalFocusRequest {
+  packageId: string;
+  section: 'reviews' | 'releases';
+  reviewId?: string;
+  expandReleaseNotes?: boolean;
+  ts: number;
 }
 
 export interface CommunityReview {

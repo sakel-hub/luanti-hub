@@ -673,7 +673,9 @@
           timestamp: eventTimestampMs || parseNotificationTimestampMs(pkg?.updated_at) || Date.now(),
           renotify: false,
           data: {
-              packageId: idInfo.resolvedId
+              packageId: idInfo.resolvedId,
+              modalSection: 'releases',
+              expandReleaseNotes: true
           }
       };
   }
@@ -773,7 +775,9 @@
           timestamp: createdMs,
           renotify: false,
           data: {
-              packageId: pkgId
+              packageId: pkgId,
+              modalSection: 'reviews',
+              reviewId: cleanId
           }
       };
   }
@@ -1773,6 +1777,19 @@
       const parts = notifData.packageId.split('/');
       if (parts.length >= 2 && parts[0] && parts[1]) {
         targetPath = `/package/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+        const qsParams = [];
+        if (notifData.modalSection === 'reviews' || notifData.modalSection === 'releases') {
+          qsParams.push(`tab=${encodeURIComponent(notifData.modalSection)}`);
+        }
+        if (notifData.reviewId && typeof notifData.reviewId === 'string') {
+          qsParams.push(`reviewId=${encodeURIComponent(notifData.reviewId)}`);
+        }
+        if (notifData.expandReleaseNotes) {
+          qsParams.push('notes=1');
+        }
+        if (qsParams.length > 0) {
+          targetPath += `?${qsParams.join('&')}`;
+        }
       }
     } else if (notifData.ctaUrl && typeof notifData.ctaUrl === 'string') {
       targetPath = notifData.ctaUrl;

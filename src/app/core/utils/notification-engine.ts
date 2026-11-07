@@ -71,6 +71,9 @@ export interface EvaluatedNotificationSpec {
   data: {
     targetTab?: 'moderation' | 'account' | 'packages' | 'promotions';
     packageId?: string;
+    modalSection?: 'reviews' | 'releases';
+    reviewId?: string;
+    expandReleaseNotes?: boolean;
     reportId?: string;
     ctaUrl?: string;
     action?: 'reload_update';
@@ -580,7 +583,9 @@ export function buildPackageUpdateNotificationSpec(
     timestamp: eventTimestampMs || parseNotificationTimestampMs(pkg?.updated_at) || Date.now(),
     renotify: false,
     data: {
-      packageId: idInfo.resolvedId
+      packageId: idInfo.resolvedId,
+      modalSection: 'releases',
+      expandReleaseNotes: true
     }
   };
 }
@@ -705,7 +710,9 @@ export function buildReviewNotificationSpec(rev: any): EvaluatedNotificationSpec
     timestamp: createdMs,
     renotify: false,
     data: {
-      packageId: pkgId
+      packageId: pkgId,
+      modalSection: 'reviews',
+      reviewId: cleanId
     }
   };
 }

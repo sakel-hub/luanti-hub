@@ -55,6 +55,9 @@ export interface NativeNotificationPayload {
   data?: {
     targetTab?: 'moderation' | 'account' | 'packages' | 'promotions';
     packageId?: string;
+    modalSection?: 'reviews' | 'releases';
+    reviewId?: string;
+    expandReleaseNotes?: boolean;
     reportId?: string;
     ctaUrl?: string;
     action?: 'reload_update';

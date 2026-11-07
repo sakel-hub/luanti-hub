@@ -9036,7 +9036,11 @@ supported_games = minetest_game, voxelibre
         title: 'New Review · ★★★★★ Age of Mending',
         tag: 'lh-review-cdb_98765',
         category: 'new_review',
-        data: { packageId: 'Sumianvoice/age_of_mending' }
+        data: {
+          packageId: 'Sumianvoice/age_of_mending',
+          modalSection: 'reviews',
+          reviewId: 'cdb_98765'
+        }
       })
     );
 
@@ -9094,7 +9098,11 @@ supported_games = minetest_game, voxelibre
       expect.objectContaining({
         title: 'New Review · ★★★★★ Age of Mending',
         tag: 'lh-review-cdb_98766',
-        data: { packageId: 'Sumianvoice/age_of_mending' }
+        data: {
+          packageId: 'Sumianvoice/age_of_mending',
+          modalSection: 'reviews',
+          reviewId: 'cdb_98766'
+        }
       })
     );
 
@@ -12523,5 +12531,247 @@ core.register_node(modname .. ":panel", {
       params: { username: 'sakel' }
     });
     expect(unauthForceSyncRes.status).toBe(401);
+  });
+
+  it('should deep-link OS notifications to reviews/releases in PackageDetailModal and resolve verified Git branch/tag diff URLs', async () => {
+    const {
+      buildPackageUpdateNotificationSpec,
+      buildReviewNotificationSpec
+    } = await import('./core/utils/notification-engine');
+    const { fetchGitReleaseNotesBetweenRefs } = await import('../../functions/api/lib/upstream');
+
+    // 1. Verify notification specs include modalSection, reviewId, and expandReleaseNotes
+    const updateSpec = buildPackageUpdateNotificationSpec(
+      {
+        id: 'TenPlus1/mobs_animal',
+        author: 'TenPlus1',
+        name: 'mobs_animal',
+        title: 'Mobs Animal',
+        type: 'mod',
+        release_id: '55123'
+      },
+      'TenPlus1/mobs_animal',
+      '55123|2026-11-07T08:00:00Z|a1b2c3d'
+    );
+    expect(updateSpec.data.packageId).toBe('TenPlus1/mobs_animal');
+    expect(updateSpec.data.modalSection).toBe('releases');
+    expect(updateSpec.data.expandReleaseNotes).toBe(true);
+
+    const reviewSpec = buildReviewNotificationSpec({
+      id: 'lh_901',
+      package_id: 'TenPlus1/mobs_animal',
+      package_title: 'Mobs Animal',
+      rating: 5,
+      reviewer_username: 'miner42',
+      comment: 'Awesome animals mod!',
+      created_at: '2026-11-07T08:30:00Z'
+    });
+    expect(reviewSpec).not.toBeNull();
+    expect(reviewSpec!.data.packageId).toBe('TenPlus1/mobs_animal');
+    expect(reviewSpec!.data.modalSection).toBe('reviews');
+    expect(reviewSpec!.data.reviewId).toBe('901');
+
+    // 2. Verify Codeberg main -> master resolution in fetchGitReleaseNotesBetweenRefs
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        // Simulate Codeberg where 'main' does not exist (404) and 'master' is the real default branch
+        if (url.includes('info/refs?service=git-upload-pack')) {
+          const pkt = (str: string) => (str.length + 4).toString(16).padStart(4, '0') + str;
+          const body =
+            pkt('# service=git-upload-pack\n') +
+            '0000' +
+            pkt('a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 HEAD\0multi_ack symref=HEAD:refs/heads/master\n') +
+            pkt('a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 refs/heads/master\n') +
+            pkt('f0e1d2c3b4a5f0e1d2c3b4a5f0e1d2c3b4a5f0e1 refs/tags/2026-10-01\n') +
+            '0000';
+          return new Response(body, { status: 200 });
+        }
+        if (url.includes('codeberg.org/api/v1/repos/tenplus1/mobs_animal/commits')) {
+          if (url.includes('sha=main')) {
+            return new Response('Not Found', { status: 404 });
+          }
+          if (url.includes('sha=master') || url.includes('sha=2026-10-01') || !url.includes('sha=')) {
+            return new Response(
+              JSON.stringify([
+                {
+                  sha: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+                  commit: {
+                    message: 'Update sheep and cow textures',
+                    author: { name: 'TenPlus1', date: '2026-11-06T12:00:00Z' }
+                  },
+                  html_url: 'https://codeberg.org/tenplus1/mobs_animal/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
+                }
+              ]),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as typeof fetch;
+
+      const resolvedNotes = await fetchGitReleaseNotesBetweenRefs(
+        'https://codeberg.org/tenplus1/mobs_animal',
+        'tenplus1',
+        'mobs_animal',
+        { headRef: 'main', defaultBranch: 'main' }
+      );
+      expect(resolvedNotes.commits.length).toBe(1);
+      expect(resolvedNotes.head_ref).toBe('master');
+      expect(resolvedNotes.resolved_default_branch).toBe('master');
+      expect(resolvedNotes.compare_url).toBe('https://codeberg.org/tenplus1/mobs_animal/commits/branch/master');
+
+      // Also verify tag refs on Codeberg resolve to /commits/tag/<tag> instead of /commits/branch/<tag>
+      const resolvedTagNotes = await fetchGitReleaseNotesBetweenRefs(
+        'https://codeberg.org/tenplus1/mobs_animal',
+        'tenplus1',
+        'mobs_animal',
+        { headRef: '2026-10-01', defaultBranch: 'master' }
+      );
+      expect(resolvedTagNotes.commits.length).toBe(1);
+      expect(resolvedTagNotes.head_ref).toBe('2026-10-01');
+      expect(resolvedTagNotes.compare_url).toBe('https://codeberg.org/tenplus1/mobs_animal/commits/tag/2026-10-01');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 3. Verify clicking a review notification scrolls to & highlights the target review (even on page 2)
+    const pkgService = TestBed.inject(PackageService);
+    const mobsPkg = (pkgService as any).normalizePackage({
+      id: 'TenPlus1/mobs_animal',
+      author: 'TenPlus1',
+      name: 'mobs_animal',
+      title: 'Mobs Animal',
+      type: 'mod',
+      repo_url: 'https://codeberg.org/tenplus1/mobs_animal'
+    });
+    const sevenReviews = Array.from({ length: 7 }, (_, i) => ({
+      id: `lh_${900 + i}`,
+      package_id: 'TenPlus1/mobs_animal',
+      source: 'luantihub' as const,
+      rating: 5,
+      comment: `Review number ${i + 1}`,
+      created_at: '2026-11-07T08:00:00Z',
+      author: { username: `user_${i + 1}`, display_name: `User ${i + 1}`, avatar_url: 'logo.svg' }
+    }));
+    const sampleReleases = [
+      {
+        id: 55123,
+        version: '#55123',
+        tag_name: '2026-10-01',
+        commit_sha: 'a1b2c3d4e5f6',
+        download_url: '/api/packages/TenPlus1/mobs_animal/download?release=55123',
+        released_at: '2026-11-06T12:00:00Z'
+      }
+    ];
+    (pkgService as any).reviewsCache.set('tenplus1/mobs_animal', sevenReviews);
+    (pkgService as any).releasesCache.set('tenplus1/mobs_animal', sampleReleases);
+    vi.spyOn(pkgService, 'loadPackageDetails').mockResolvedValue(undefined);
+    vi.spyOn(pkgService, 'fetchReviews').mockResolvedValue(sevenReviews);
+    vi.spyOn(pkgService, 'fetchPackageReleases').mockResolvedValue(sampleReleases);
+    const notesSpy = vi.spyOn(pkgService, 'fetchReleaseNotesForRelease').mockResolvedValue({
+      source: 'commits',
+      head_ref: 'master',
+      compare_url: 'https://codeberg.org/tenplus1/mobs_animal/commits/branch/master',
+      resolved_default_branch: 'master',
+      commits: [
+        {
+          sha: 'a1b2c3d4e5f6',
+          short_sha: 'a1b2c3d',
+          title: 'Update sheep and cow textures',
+          author_name: 'TenPlus1',
+          committed_at: '2026-11-06T12:00:00Z',
+          url: 'https://codeberg.org/tenplus1/mobs_animal/commit/a1b2c3d4e5f6'
+        }
+      ]
+    });
+
+    // Request focus on the 6th review (`lh_905`, which is on page 2 since REVIEWS_PAGE_SIZE = 5)
+    pkgService.requestModalSectionFocus({
+      packageId: 'TenPlus1/mobs_animal',
+      section: 'reviews',
+      reviewId: '905'
+    });
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    modalFixture.componentInstance.package = mobsPkg;
+    modalFixture.detectChanges();
+    await modalFixture.whenStable();
+    modalFixture.detectChanges();
+
+    expect(modalFixture.componentInstance.activeTab()).toBe('reviews');
+    expect(modalFixture.componentInstance.reviewsPage()).toBe(2);
+    expect(modalFixture.componentInstance.highlightedReviewId()).toBe('lh_905');
+
+    // 4. Verify clicking a package_update notification switches to releases and auto-expands the latest release notes
+    pkgService.requestModalSectionFocus({
+      packageId: 'TenPlus1/mobs_animal',
+      section: 'releases',
+      expandReleaseNotes: true
+    });
+    modalFixture.detectChanges();
+    await modalFixture.whenStable();
+    modalFixture.detectChanges();
+
+    expect(modalFixture.componentInstance.activeTab()).toBe('releases');
+    expect(modalFixture.componentInstance.releasesPage()).toBe(1);
+    const latestRelKey = modalFixture.componentInstance.getReleaseNotesKey(sampleReleases[0], 0);
+    expect(modalFixture.componentInstance.isReleaseNotesExpanded(latestRelKey)).toBe(true);
+    expect(notesSpy).toHaveBeenCalled();
+
+    // 5. Verify clicking a new_review notification for a brand-new review (`lh_999`) not in reviewsCache invalidates the stale cache and fetches fresh reviews
+    const brandNewReview = {
+      id: 'lh_999',
+      package_id: 'TenPlus1/mobs_animal',
+      source: 'luantihub' as const,
+      rating: 5,
+      comment: 'Freshly submitted review!',
+      created_at: '2026-11-07T09:30:00Z',
+      author: { username: 'new_reviewer', display_name: 'New Reviewer', avatar_url: 'logo.svg' }
+    };
+    const fetchReviewsSpy = vi
+      .spyOn(pkgService, 'fetchReviews')
+      .mockResolvedValue([brandNewReview, ...sevenReviews]);
+
+    pkgService.requestModalSectionFocus({
+      packageId: 'TenPlus1/mobs_animal',
+      section: 'reviews',
+      reviewId: 'lh_999'
+    });
+    expect((pkgService as any).reviewsCache.has('tenplus1/mobs_animal')).toBe(false);
+
+    modalFixture.detectChanges();
+    await modalFixture.whenStable();
+    modalFixture.detectChanges();
+
+    expect(fetchReviewsSpy).toHaveBeenCalledWith(expect.anything(), true);
+    expect(modalFixture.componentInstance.activeTab()).toBe('reviews');
+    expect(modalFixture.componentInstance.reviewsPage()).toBe(1);
+    expect(modalFixture.componentInstance.highlightedReviewId()).toBe('lh_999');
+
+    // 6. Verify cold-start URL query-parameter deep linking (`?tab=releases&notes=1` and `?tab=reviews&reviewId=lh_905`)
+    (pkgService as any)._packages.set([mobsPkg]);
+    (pkgService as any).syncStateFromUrl('/package/TenPlus1/mobs_animal?tab=releases&notes=1');
+    const coldReleaseFocus = pkgService.consumeModalSectionFocus('TenPlus1/mobs_animal');
+    expect(coldReleaseFocus).toEqual(
+      expect.objectContaining({
+        packageId: 'TenPlus1/mobs_animal',
+        section: 'releases',
+        expandReleaseNotes: true
+      })
+    );
+
+    (pkgService as any).syncStateFromUrl('/package/TenPlus1/mobs_animal?tab=reviews&reviewId=lh_905');
+    const coldReviewFocus = pkgService.consumeModalSectionFocus('TenPlus1/mobs_animal');
+    expect(coldReviewFocus).toEqual(
+      expect.objectContaining({
+        packageId: 'TenPlus1/mobs_animal',
+        section: 'reviews',
+        reviewId: 'lh_905'
+      })
+    );
+
+    modalFixture.destroy();
   });
 });

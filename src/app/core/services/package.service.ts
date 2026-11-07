@@ -15,6 +15,7 @@ import {
   DownloadAnalyticsData,
   AuthorPackageBreakdownItem,
   ReleaseNotesPayload,
+  PackageModalFocusRequest,
   HeroPromotion,
   PromotionLocaleOverride,
   PromotionalPackageRow,
@@ -159,6 +160,7 @@ export class PackageService {
   private readonly _isLoading = signal<boolean>(true);
   private readonly _isLoadingDetails = signal<boolean>(false);
   private readonly _activePackage = signal<LuantiPackage | null>(null);
+  private readonly _pendingModalFocus = signal<PackageModalFocusRequest | null>(null);
   private readonly _isSubmitModalOpen = signal<boolean>(false);
   private readonly _isSetupModalOpen = signal<boolean>(false);
   private readonly _isLegalModalOpen = signal<boolean>(false);
@@ -236,6 +238,7 @@ export class PackageService {
   readonly isLoading = this._isLoading.asReadonly();
   readonly isLoadingDetails = this._isLoadingDetails.asReadonly();
   readonly activePackage = this._activePackage.asReadonly();
+  readonly pendingModalFocus = this._pendingModalFocus.asReadonly();
   readonly isSubmitModalOpen = this._isSubmitModalOpen.asReadonly();
   readonly isSetupModalOpen = this._isSetupModalOpen.asReadonly();
   readonly isLegalModalOpen = this._isLegalModalOpen.asReadonly();
@@ -2866,6 +2869,21 @@ export class PackageService {
       });
     });
 
+    this.authService.registerPackageNotificationNavigator(data => {
+      if (!data?.packageId || typeof data.packageId !== 'string') return;
+      const [author, name] = data.packageId.split('/');
+      if (!author || !name) return;
+      if (data.modalSection === 'reviews' || data.modalSection === 'releases') {
+        this.requestModalSectionFocus({
+          packageId: `${author}/${name}`,
+          section: data.modalSection,
+          reviewId: typeof data.reviewId === 'string' && data.reviewId.trim() ? data.reviewId.trim() : undefined,
+          expandReleaseNotes: Boolean(data.expandReleaseNotes)
+        });
+      }
+      this.openPackageModalById(author, name, false);
+    });
+
     if (typeof window !== 'undefined') {
       const initialUrl =
         this.router?.url && this.router.url !== '/'
@@ -3102,12 +3120,32 @@ export class PackageService {
       this.returnContextBeforeAnalytics = null;
       const parts = path.replace(/^\/packages?\//, '').split('/').filter(Boolean);
       if (parts[0] && parts[1]) {
+        const decodedAuthor = decodeURIComponent(parts[0]);
+        const decodedName = decodeURIComponent(parts[1]);
+        if (queryPart) {
+          const routeParams = new URLSearchParams(queryPart);
+          const tabParam = routeParams.get('tab');
+          if (tabParam === 'reviews' || tabParam === 'releases') {
+            const revIdParam = routeParams.get('reviewId')?.trim() || undefined;
+            const notesParam = routeParams.get('notes');
+            const expandNotes =
+              notesParam === '1' ||
+              notesParam === 'true' ||
+              (tabParam === 'releases' && notesParam === null);
+            this.requestModalSectionFocus({
+              packageId: `${decodedAuthor}/${decodedName}`,
+              section: tabParam,
+              reviewId: revIdParam,
+              expandReleaseNotes: expandNotes
+            });
+          }
+        }
         this._isSubmitModalOpen.set(false);
         this._isSetupModalOpen.set(false);
         this._isLegalModalOpen.set(false);
         this._activeAuthorUsername.set(null);
         this.authService.closeProfileDrawer(false);
-        this.openPackageModalById(decodeURIComponent(parts[0]), decodeURIComponent(parts[1]), false);
+        this.openPackageModalById(decodedAuthor, decodedName, false);
         return;
       }
     } else if (path.startsWith('/author/')) {
@@ -7987,6 +8025,7 @@ export class PackageService {
         const updatedFields: Partial<LuantiPackage> = {
           ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
           ...(data.title ? { title: String(data.title) } : {}),
+          ...(data.default_branch ? { default_branch: String(data.default_branch) } : {}),
           license: resolvedLicense,
           media_license: resolvedMediaLicense,
           desc: extractedLongDesc,
@@ -8786,6 +8825,27 @@ export class PackageService {
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
           const data = (await res.json()) as ReleaseNotesPayload;
           if (data && Array.isArray(data.commits)) {
+            if (
+              data.resolved_default_branch &&
+              typeof data.resolved_default_branch === 'string' &&
+              data.resolved_default_branch.trim() &&
+              data.resolved_default_branch.trim() !== pkg.default_branch
+            ) {
+              const verifiedBranch = data.resolved_default_branch.trim();
+              const targetKey = pkg.id.toLowerCase();
+              this._activePackage.update(curr =>
+                curr && curr.id.toLowerCase() === targetKey
+                  ? { ...curr, default_branch: verifiedBranch }
+                  : curr
+              );
+              this._packages.update(list =>
+                list.map(item =>
+                  item.id.toLowerCase() === targetKey
+                    ? { ...item, default_branch: verifiedBranch }
+                    : item
+                )
+              );
+            }
             const enriched: ReleaseNotesPayload = {
               ...data,
               head_ref: this.abbreviateGitRefLabel(data.head_ref) || displayHead,
@@ -9450,6 +9510,56 @@ export class PackageService {
     } catch {
       // Fallback handled when initCatalog() completes and checks pendingRoutePackage
     }
+  }
+
+  requestModalSectionFocus(req: Omit<PackageModalFocusRequest, 'ts'>): void {
+    if (!req?.packageId || (req.section !== 'reviews' && req.section !== 'releases')) return;
+    const cleanPkgId = req.packageId.trim();
+    const cacheKey = cleanPkgId.toLowerCase();
+    const cleanReviewId = req.reviewId ? req.reviewId.trim() : undefined;
+
+    if (req.section === 'reviews' && cleanReviewId) {
+      const rawTarget = cleanReviewId.toLowerCase();
+      const strippedTarget = rawTarget.replace(/^(lh_|cdb_)/i, '');
+      const hasMatchingReview = (list?: CommunityReview[]) =>
+        Array.isArray(list) &&
+        list.some(r => {
+          const rId = String(r?.id || '').trim().toLowerCase();
+          const rStripped = rId.replace(/^(lh_|cdb_)/i, '');
+          return rId === rawTarget || (strippedTarget.length > 0 && rStripped === strippedTarget);
+        });
+
+      const cachedReviews = this.reviewsCache.get(cacheKey);
+      if (!hasMatchingReview(cachedReviews)) {
+        this.reviewsCache.delete(cacheKey);
+        this.reviewsVerifiedEmptyKeys.delete(cacheKey);
+        this.deepHydratedIds.delete(cacheKey);
+      }
+    }
+
+    this._pendingModalFocus.set({
+      packageId: cleanPkgId,
+      section: req.section,
+      reviewId: cleanReviewId,
+      expandReleaseNotes: Boolean(req.expandReleaseNotes),
+      ts: Date.now()
+    });
+  }
+
+  consumeModalSectionFocus(packageId?: string): PackageModalFocusRequest | null {
+    const current = this._pendingModalFocus();
+    if (!current) return null;
+    if (packageId) {
+      const targetLower = packageId.trim().toLowerCase();
+      const currentLower = current.packageId.trim().toLowerCase();
+      const targetName = targetLower.split('/')[1] || targetLower;
+      const currentName = currentLower.split('/')[1] || currentLower;
+      if (currentLower !== targetLower && currentName !== targetName) {
+        return null;
+      }
+    }
+    this._pendingModalFocus.set(null);
+    return current;
   }
 
   private modalSubOverlayCloser: (() => boolean) | null = null;

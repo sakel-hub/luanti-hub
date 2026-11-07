@@ -8,6 +8,7 @@ import {
   inject,
   signal,
   computed,
+  effect,
   HostListener,
   OnInit,
   OnChanges,
@@ -18,7 +19,13 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
-import { LuantiPackage, CommunityReview, PackageRelease, ReleaseNotesPayload } from '../../core/models/package.model';
+import {
+  LuantiPackage,
+  CommunityReview,
+  PackageRelease,
+  ReleaseNotesPayload,
+  PackageModalFocusRequest
+} from '../../core/models/package.model';
 import {
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
@@ -1825,8 +1832,9 @@ import {
                     <div class="space-y-3">
                       @for (rev of paginatedReviews(); track rev.id) {
                         <div
-                          [class]="rev.source === 'contentdb' ? 'border-l-2 border-l-sky-400/60' : 'border-l-2 border-l-emerald-400/60'"
-                          class="p-3.5 rounded-2xl glass-panel space-y-2 text-xs">
+                          [attr.data-review-id]="rev.id"
+                          [class]="(rev.source === 'contentdb' ? 'border-l-2 border-l-sky-400/60' : 'border-l-2 border-l-emerald-400/60') + (highlightedReviewId() === rev.id ? ' ring-2 ring-sky-400/80 bg-sky-500/10' : '')"
+                          class="p-3.5 rounded-2xl glass-panel space-y-2 text-xs transition-all duration-300">
                           <div class="flex items-start justify-between gap-2">
                             <div class="flex items-center gap-2.5 min-w-0 flex-wrap">
                               <!-- Reviewer Avatar + Platform Corner Badge -->
@@ -2049,7 +2057,7 @@ import {
                       }
                     </div>
                   } @else if (cappedReleases().length === 0) {
-                    <div class="p-4 rounded-2xl glass-panel flex flex-col gap-2.5 text-xs">
+                    <div data-release-idx="branch-fallback" class="p-4 rounded-2xl glass-panel flex flex-col gap-2.5 text-xs">
                       <div class="flex items-center justify-between gap-3 flex-wrap">
                         <div>
                           <span class="font-bold text-white">Latest Archive ({{ package.default_branch || 'main' }})</span>
@@ -2149,7 +2157,7 @@ import {
                     </div>
                   } @else {
                     @for (rel of paginatedReleases(); track rel.id; let idx = $index) {
-                      <div class="p-3.5 rounded-2xl glass-panel flex flex-col gap-2 text-xs">
+                      <div [attr.data-release-idx]="idx" class="p-3.5 rounded-2xl glass-panel flex flex-col gap-2 text-xs">
                         <div class="flex items-center justify-between gap-3 flex-wrap">
                           <div class="space-y-0.5 min-w-0">
                             <div class="flex items-center gap-2 flex-wrap">
@@ -3158,6 +3166,199 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private scrollRafId: number | null = null;
   private cleanupScrollListener: (() => void) | null = null;
   readonly showModalBackToTop = signal<boolean>(false);
+  readonly highlightedReviewId = signal<string | null>(null);
+  private activeFocusRequest: PackageModalFocusRequest | null = null;
+  private highlightReviewTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    effect(() => {
+      const pending = this.packageService.pendingModalFocus();
+      if (pending && this.loadedPackageKey) {
+        this.consumeAndApplyPendingFocus();
+      }
+    });
+  }
+
+  private scrollElementIntoModalContainer(
+    targetOrSelector: HTMLElement | string | null | undefined,
+    block: ScrollLogicalPosition = 'start'
+  ): void {
+    const apply = () => {
+      const container = this.modalScrollContainerRef?.nativeElement;
+      const targetEl =
+        typeof targetOrSelector === 'string'
+          ? (container?.querySelector(targetOrSelector) as HTMLElement | null)
+          : (targetOrSelector ?? null);
+      if (!targetEl) return;
+      if (container) {
+        const cRect = container.getBoundingClientRect?.();
+        const tRect = targetEl.getBoundingClientRect?.();
+        if (cRect && tRect && (cRect.height > 0 || tRect.top !== 0 || targetEl.offsetTop > 0)) {
+          const relativeTop =
+            cRect.height > 0 && (tRect.top !== 0 || tRect.bottom !== 0)
+              ? container.scrollTop + (tRect.top - cRect.top) - 16
+              : Math.max(0, targetEl.offsetTop - 16);
+          const nextTop = Math.max(0, relativeTop);
+          this.lastKnownScrollTop = nextTop;
+          if (typeof container.scrollTo === 'function') {
+            container.scrollTo({ top: nextTop, behavior: 'smooth' });
+          } else {
+            container.scrollTop = nextTop;
+          }
+        }
+      }
+      if (typeof targetEl.scrollIntoView === 'function') {
+        try {
+          targetEl.scrollIntoView({ behavior: 'smooth', block });
+        } catch {
+          targetEl.scrollIntoView();
+        }
+      }
+    };
+    apply();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => apply());
+    }
+    setTimeout(() => apply(), 40);
+  }
+
+  private hasMatchingReviewInList(reviewId: string | undefined, list: CommunityReview[]): boolean {
+    if (!reviewId || !Array.isArray(list) || list.length === 0) return false;
+    const rawTarget = reviewId.trim().toLowerCase();
+    const cleanTarget = rawTarget.replace(/^(lh_|cdb_)/i, '');
+    return list.some(r => {
+      const rId = String(r?.id || '').trim().toLowerCase();
+      const rClean = rId.replace(/^(lh_|cdb_)/i, '');
+      return rId === rawTarget || (cleanTarget.length > 0 && rClean === cleanTarget);
+    });
+  }
+
+  private consumeAndApplyPendingFocus(): boolean {
+    if (!this.loadedPackageKey) return false;
+    const req = this.packageService.consumeModalSectionFocus(this.loadedPackageKey);
+    if (req) {
+      this.activeFocusRequest = req;
+      PackageDetailModalComponent.savedViewStateByPkg.delete(this.loadedPackageKey);
+      if (req.section === 'reviews') {
+        this.activeTab.set('reviews');
+        this.isReviewsNearViewport.set(true);
+        const needsFreshReviewFetch = Boolean(
+          req.reviewId && !this.hasMatchingReviewInList(req.reviewId, this.reviews())
+        );
+        if (needsFreshReviewFetch) {
+          this.isLoadingReviews.set(true);
+          this.reviewsFetchTriggeredForKey = '';
+          this.triggerReviewsLoad(true);
+        } else {
+          this.triggerReviewsLoad();
+        }
+      } else if (req.section === 'releases') {
+        this.activeTab.set('releases');
+        this.releasesPage.set(1);
+      }
+      this.scrollElementIntoModalContainer(this.reviewsSentinelRef?.nativeElement, 'start');
+    }
+    if (this.activeFocusRequest) {
+      this.fulfillActiveFocusRequest();
+      return true;
+    }
+    return false;
+  }
+
+  private fulfillActiveFocusRequest(): void {
+    const req = this.activeFocusRequest;
+    if (!req) return;
+
+    if (req.section === 'reviews') {
+      if (this.activeTab() !== 'reviews') {
+        this.activeTab.set('reviews');
+      }
+      const list = this.reviews();
+      if (list.length > 0) {
+        if (req.reviewId) {
+          const rawTarget = req.reviewId.trim().toLowerCase();
+          const cleanTarget = rawTarget.replace(/^(lh_|cdb_)/i, '');
+          const matchIdx = list.findIndex(r => {
+            const rId = String(r.id || '').trim().toLowerCase();
+            const rClean = rId.replace(/^(lh_|cdb_)/i, '');
+            return rId === rawTarget || (cleanTarget.length > 0 && rClean === cleanTarget);
+          });
+          if (matchIdx >= 0) {
+            const matched = list[matchIdx];
+            const targetPage = Math.floor(matchIdx / this.REVIEWS_PAGE_SIZE) + 1;
+            if (this.reviewsPage() !== targetPage) {
+              this.reviewsPage.set(targetPage);
+            }
+            this.highlightedReviewId.set(matched.id);
+            if (this.highlightReviewTimer) {
+              clearTimeout(this.highlightReviewTimer);
+            }
+            this.highlightReviewTimer = setTimeout(() => {
+              this.highlightedReviewId.set(null);
+            }, 4500);
+            this.activeFocusRequest = null;
+            const safeSelector = `[data-review-id="${String(matched.id).replace(/"/g, '\\"')}"]`;
+            this.scrollElementIntoModalContainer(safeSelector, 'center');
+            return;
+          }
+        }
+        if (!req.reviewId || !this.isLoadingReviews()) {
+          this.activeFocusRequest = null;
+          this.scrollElementIntoModalContainer(this.reviewsSentinelRef?.nativeElement, 'start');
+        }
+      } else if (!this.isLoadingReviews()) {
+        this.activeFocusRequest = null;
+        this.scrollElementIntoModalContainer(this.reviewsSentinelRef?.nativeElement, 'start');
+      }
+      return;
+    }
+
+    if (req.section === 'releases') {
+      if (this.activeTab() !== 'releases') {
+        this.activeTab.set('releases');
+      }
+      if (this.releasesPage() !== 1) {
+        this.releasesPage.set(1);
+      }
+      const pageRels = this.paginatedReleases();
+      if (pageRels.length > 0) {
+        const firstRel = pageRels[0];
+        if (req.expandReleaseNotes) {
+          const relKey = this.getReleaseNotesKey(firstRel, 0);
+          if (!this.isReleaseNotesExpanded(relKey)) {
+            void this.toggleReleaseNotes(firstRel, 0);
+          } else if (
+            this.hasValidGitRepo &&
+            !this.releaseNotesByKey().has(relKey) &&
+            this.loadingReleaseNotesKey() !== relKey
+          ) {
+            const nextExpanded = new Set(this.expandedReleaseKeys());
+            nextExpanded.delete(relKey);
+            this.expandedReleaseKeys.set(nextExpanded);
+            void this.toggleReleaseNotes(firstRel, 0);
+          }
+          if (this.hasValidGitRepo || !this.isHydratingDetails()) {
+            this.activeFocusRequest = null;
+          }
+        } else {
+          this.activeFocusRequest = null;
+        }
+        this.scrollElementIntoModalContainer('[data-release-idx="0"]', 'nearest');
+      } else if (!this.isLoadingReleases()) {
+        if (this.hasValidGitRepo || !this.isHydratingDetails()) {
+          this.activeFocusRequest = null;
+        }
+        if (req.expandReleaseNotes && this.cappedReleases().length === 0 && this.hasValidGitRepo) {
+          if (!this.isReleaseNotesExpanded('branch-fallback')) {
+            void this.toggleBranchFallbackNotes();
+          }
+          this.scrollElementIntoModalContainer('[data-release-idx="branch-fallback"]', 'nearest');
+        } else {
+          this.scrollElementIntoModalContainer(this.reviewsSentinelRef?.nativeElement, 'start');
+        }
+      }
+    }
+  }
 
   private computeModalScrollThreshold(container?: HTMLElement | null): number {
     if (container && container.clientHeight > 0) {
@@ -3249,9 +3450,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   ngAfterViewInit(): void {
-    const savedState = this.loadedPackageKey
-      ? PackageDetailModalComponent.savedViewStateByPkg.get(this.loadedPackageKey)
-      : undefined;
+    const hasFocusReq = this.consumeAndApplyPendingFocus();
+    const savedState =
+      !hasFocusReq && this.loadedPackageKey
+        ? PackageDetailModalComponent.savedViewStateByPkg.get(this.loadedPackageKey)
+        : undefined;
     if (savedState && savedState.scrollTop > 0) {
       this.restoreSavedScrollPosition(savedState.scrollTop);
     }
@@ -3261,6 +3464,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   ngOnDestroy(): void {
+    if (this.highlightReviewTimer) {
+      clearTimeout(this.highlightReviewTimer);
+      this.highlightReviewTimer = null;
+    }
     this.teardownPassiveScrollListener();
     this.persistCurrentViewState();
     this.disconnectSimilarObserver();
@@ -3436,7 +3643,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.reviewsObserver.observe(sentinel);
   }
 
-  triggerReviewsLoad(): void {
+  triggerReviewsLoad(forceRefresh = false): void {
     if (!this.isReviewsNearViewport()) {
       this.isReviewsNearViewport.set(true);
       this.persistCurrentViewState();
@@ -3444,32 +3651,40 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.disconnectReviewsObserver();
 
     const key = this.loadedPackageKey;
-    if (!key || this.reviewsFetchTriggeredForKey === key) return;
+    if (!key || (!forceRefresh && this.reviewsFetchTriggeredForKey === key)) return;
     this.reviewsFetchTriggeredForKey = key;
 
     const latestPkg = this.packageService.activePackage() || this.package;
     if (!latestPkg) return;
 
     const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
-    if (this.reviews().length === 0) {
+    if (this.reviews().length === 0 || forceRefresh) {
       this.isLoadingReviews.set(true);
     }
 
     this.packageService
-      .fetchReviews(latestPkg, false)
+      .fetchReviews(latestPkg, forceRefresh)
       .then(res => {
         if (this.loadedPackageKey !== key) return;
         if (res.length > 0 || this.reviews().length === 0) {
           this.reviews.set(res);
         }
         this.isLoadingReviews.set(false);
-        if (savedState && savedState.scrollTop > 0) {
-          this.restoreSavedScrollPosition(savedState.scrollTop);
+        if (this.activeFocusRequest) {
+          this.fulfillActiveFocusRequest();
+        } else {
+          const currentSaved = PackageDetailModalComponent.savedViewStateByPkg.get(key);
+          if (currentSaved && currentSaved.scrollTop > 0) {
+            this.restoreSavedScrollPosition(currentSaved.scrollTop);
+          }
         }
       })
       .catch(() => {
         if (this.loadedPackageKey === key) {
           this.isLoadingReviews.set(false);
+          if (this.activeFocusRequest) {
+            this.fulfillActiveFocusRequest();
+          }
         }
       });
   }
@@ -3537,14 +3752,16 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
     const savedState = PackageDetailModalComponent.savedViewStateByPkg.get(key);
     this.reviewsFetchTriggeredForKey = '';
-    if (savedState) {
+    this.highlightedReviewId.set(null);
+    const hasInitialFocusReq = this.consumeAndApplyPendingFocus();
+    if (!hasInitialFocusReq && savedState) {
       this.isSimilarNearViewport.set(savedState.isSimilarNearViewport);
       this.isReviewsNearViewport.set(savedState.isReviewsNearViewport);
       this.activeTab.set(savedState.activeTab);
       this.releasesPage.set(savedState.releasesPage);
       this.reviewsPage.set(savedState.reviewsPage || 1);
       this.restoreSavedScrollPosition(savedState.scrollTop);
-    } else if (isSwitchingPackage) {
+    } else if (!hasInitialFocusReq && isSwitchingPackage) {
       this.lastKnownScrollTop = 0;
       this.showModalBackToTop.set(false);
       this.isSimilarNearViewport.set(false);
@@ -3564,7 +3781,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         this.setupSimilarIntersectionObserver();
         this.setupReviewsIntersectionObserver();
       }, 0);
-    } else {
+    } else if (!hasInitialFocusReq) {
       this.reviewsPage.set(1);
     }
 
@@ -3585,6 +3802,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.isLoadingReleases.set(false);
     }
 
+    if (this.activeFocusRequest) {
+      this.fulfillActiveFocusRequest();
+    }
+
     if (this.isReviewsNearViewport() || !this.reviewsSentinelRef?.nativeElement) {
       this.triggerReviewsLoad();
     } else {
@@ -3599,13 +3820,21 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
           this.releases.set(res);
         }
         this.isLoadingReleases.set(false);
-        if (savedState && savedState.scrollTop > 0) {
-          this.restoreSavedScrollPosition(savedState.scrollTop);
+        if (this.activeFocusRequest) {
+          this.fulfillActiveFocusRequest();
+        } else {
+          const currentSaved = PackageDetailModalComponent.savedViewStateByPkg.get(key);
+          if (currentSaved && currentSaved.scrollTop > 0) {
+            this.restoreSavedScrollPosition(currentSaved.scrollTop);
+          }
         }
       })
       .catch(() => {
         if (this.loadedPackageKey === key) {
           this.isLoadingReleases.set(false);
+          if (this.activeFocusRequest) {
+            this.fulfillActiveFocusRequest();
+          }
         }
       });
   }

@@ -78,7 +78,12 @@ export async function onRequestGet(context: { request: Request; params: { author
   if (isNotesQuery && reqUrl) {
     const headRef = (reqUrl.searchParams.get('head') || '').trim();
     const baseRef = (reqUrl.searchParams.get('base') || '').trim();
-    const branchParam = (reqUrl.searchParams.get('branch') || d1Pkg?.default_branch || 'main').trim();
+    const rawBranchParam = (reqUrl.searchParams.get('branch') || '').trim();
+    let branchParam = (
+      d1Pkg?.default_branch ||
+      rawBranchParam ||
+      'main'
+    ).trim();
     const untilParam = (reqUrl.searchParams.get('until') || '').trim();
     const repoParam = (reqUrl.searchParams.get('repo') || '').trim();
     let repoUrl = d1Pkg?.repo_url || repoParam || '';
@@ -103,6 +108,9 @@ export async function onRequestGet(context: { request: Request; params: { author
         if (scanned?.repoUrl && scanned.gitRepoStatus === 'verified') {
           repoUrl = scanned.repoUrl;
         }
+        if (scanned?.defaultBranch && (!d1Pkg?.default_branch || d1Pkg.default_branch === 'main')) {
+          branchParam = scanned.defaultBranch;
+        }
       } catch {
         // Non-fatal fallback
       }
@@ -120,6 +128,18 @@ export async function onRequestGet(context: { request: Request; params: { author
         untilDate: untilParam || undefined
       }
     );
+
+    if (
+      context.env.DB &&
+      d1Pkg?.id &&
+      notesPayload.resolved_default_branch &&
+      notesPayload.resolved_default_branch !== d1Pkg.default_branch
+    ) {
+      context.env.DB.prepare(`UPDATE packages SET default_branch = ? WHERE id = ?`)
+        .bind(notesPayload.resolved_default_branch, d1Pkg.id)
+        .run()
+        .catch(() => {});
+    }
 
     return new Response(JSON.stringify(notesPayload), {
       headers: {

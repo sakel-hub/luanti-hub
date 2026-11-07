@@ -119,11 +119,28 @@ export class AuthService {
   private readonly pwaService = inject(PwaService);
   private readonly router = inject(Router, { optional: true });
   private profileHistoryNavigator?: (action: 'open' | 'close' | 'tab', tab?: ProfileDrawerTab) => void;
+  private packageNotificationNavigator?: (data: {
+    packageId: string;
+    modalSection?: 'reviews' | 'releases';
+    reviewId?: string;
+    expandReleaseNotes?: boolean;
+  }) => void;
 
   registerProfileHistoryNavigator(
     fn: (action: 'open' | 'close' | 'tab', tab?: ProfileDrawerTab) => void
   ): void {
     this.profileHistoryNavigator = fn;
+  }
+
+  registerPackageNotificationNavigator(
+    fn: (data: {
+      packageId: string;
+      modalSection?: 'reviews' | 'releases';
+      reviewId?: string;
+      expandReleaseNotes?: boolean;
+    }) => void
+  ): void {
+    this.packageNotificationNavigator = fn;
   }
 
   private readonly _currentUser = signal<AuthUser | null>(null);
@@ -221,10 +238,28 @@ export class AuthService {
         const [author, name] = data.packageId.split('/');
         if (author && name) {
           this.closeProfileDrawer(false);
+          if (this.packageNotificationNavigator) {
+            this.packageNotificationNavigator(data);
+          }
+          const queryParams: Record<string, string> = {};
+          if (data.modalSection === 'reviews' || data.modalSection === 'releases') {
+            queryParams['tab'] = data.modalSection;
+          }
+          if (data.reviewId && typeof data.reviewId === 'string') {
+            queryParams['reviewId'] = data.reviewId;
+          }
+          if (data.expandReleaseNotes) {
+            queryParams['notes'] = '1';
+          }
           if (this.router) {
-            this.router.navigate(['/package', author, name]);
-          } else if (typeof window !== 'undefined') {
-            window.location.href = `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+            if (Object.keys(queryParams).length > 0) {
+              this.router.navigate(['/package', author, name], { queryParams });
+            } else {
+              this.router.navigate(['/package', author, name]);
+            }
+          } else if (!this.packageNotificationNavigator && typeof window !== 'undefined') {
+            const qs = new URLSearchParams(queryParams).toString();
+            window.location.href = `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`;
           }
           return;
         }

@@ -3268,6 +3268,7 @@ export function parseCdbJsonMetadata(raw: any): CdbJsonMetadata | null {
 export interface GitRepoScanResult {
   repoUrl?: string;
   rawBaseUrl?: string;
+  defaultBranch?: string;
   gitRepoStatus: 'verified' | 'broken_404' | 'unverified';
   detectedType?: 'mod' | 'game' | 'txp' | 'modpack';
   title?: string;
@@ -3812,9 +3813,23 @@ export async function scanGitRepoMetadataCached(
     resolvedCdbScreenshots
   );
 
+  let detectedDefaultBranch = branchHint && branchHint.toUpperCase() !== 'HEAD' ? branchHint : undefined;
+  if (!detectedDefaultBranch && resolvedRawBaseUrl) {
+    const branchMatch =
+      resolvedRawBaseUrl.match(/\/raw\/branch\/([^/?#]+)/i) ||
+      resolvedRawBaseUrl.match(/\/-\/raw\/([^/?#]+)/i) ||
+      resolvedRawBaseUrl.match(/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/([^/?#]+)/i) ||
+      resolvedRawBaseUrl.match(/\/raw\/([^/?#]+)/i);
+    const branchCand = branchMatch?.[1] ? decodeURIComponent(branchMatch[1]).trim() : '';
+    if (branchCand && branchCand.toUpperCase() !== 'HEAD' && branchCand.toLowerCase() !== 'branch') {
+      detectedDefaultBranch = branchCand;
+    }
+  }
+
   const scanResult: GitRepoScanResult = {
     repoUrl: resolvedRepoUrl || normalizedInputUrl,
     rawBaseUrl: resolvedRawBaseUrl,
+    defaultBranch: detectedDefaultBranch,
     gitRepoStatus,
     detectedType,
     title,
@@ -4301,6 +4316,7 @@ export interface DiscoveredReleaseNotesPayload {
   head_ref: string;
   base_ref?: string;
   compare_url?: string;
+  resolved_default_branch?: string;
   markdown_body?: string;
   commits: DiscoveredReleaseCommitItem[];
 }
@@ -4410,11 +4426,72 @@ export async function fetchGitReleaseNotesBetweenRefs(
 
   const { provider, host, owner, repo } = target;
   const encOwnerPath = owner.split('/').map(encodeURIComponent).join('/');
-  const cacheKey = `/__release_notes_v2/${provider}/${encodeURIComponent(host)}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(headRef)}/${encodeURIComponent(baseRef || 'none')}/${encodeURIComponent(untilDate || 'none')}`;
+  const cacheKey = `/__release_notes_v3/${provider}/${encodeURIComponent(host)}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(headRef)}/${encodeURIComponent(baseRef || 'none')}/${encodeURIComponent(untilDate || 'none')}`;
   const cached = await readEdgeCacheJson<DiscoveredReleaseNotesPayload>(cacheKey);
   if (cached && Array.isArray(cached.commits) && (cached.commits.length > 0 || cached.markdown_body)) {
     return cached;
   }
+
+  const smartRefs = await fetchGitSmartHttpRefs(effectiveRepoUrl, owner, repo).catch(() => null);
+  const hasSmartBranches = Boolean(smartRefs && Object.keys(smartRefs.branches || {}).length > 0);
+  const hasSmartTags = Boolean(smartRefs && Array.isArray(smartRefs.tags) && smartRefs.tags.length > 0);
+  const verifiedDefaultBranch =
+    smartRefs?.defaultBranch ||
+    (smartRefs?.branches?.['master']
+      ? 'master'
+      : smartRefs?.branches?.['main']
+        ? 'main'
+        : hasSmartBranches
+          ? Object.keys(smartRefs!.branches)[0]
+          : undefined);
+
+  const resolveRefInRepo = (
+    rawRef: string
+  ): { ref: string; kind: 'commit' | 'tag' | 'branch' | 'unknown'; verified: boolean } => {
+    const clean = (rawRef || '').trim();
+    if (!clean || clean.toUpperCase() === 'HEAD') {
+      const br =
+        verifiedDefaultBranch ||
+        (options.defaultBranch && options.defaultBranch.toUpperCase() !== 'HEAD' ? options.defaultBranch : '') ||
+        'main';
+      return { ref: br, kind: 'branch', verified: Boolean(verifiedDefaultBranch) };
+    }
+    if (/^[0-9a-f]{7,40}$/i.test(clean)) {
+      return { ref: clean, kind: 'commit', verified: true };
+    }
+    if (smartRefs && (hasSmartBranches || hasSmartTags)) {
+      const branchKeys = Object.keys(smartRefs.branches || {});
+      const exactBranch =
+        branchKeys.find(b => b === clean) ||
+        branchKeys.find(b => b.toLowerCase() === clean.toLowerCase());
+      if (exactBranch) {
+        return { ref: exactBranch, kind: 'branch', verified: true };
+      }
+      const cleanNoV = clean.replace(/^v/i, '');
+      const exactTag =
+        smartRefs.tags.find(t => t.tagName === clean) ||
+        smartRefs.tags.find(t => t.tagName.toLowerCase() === clean.toLowerCase()) ||
+        smartRefs.tags.find(t => t.tagName.replace(/^v/i, '').toLowerCase() === cleanNoV.toLowerCase());
+      if (exactTag) {
+        return { ref: exactTag.tagName, kind: 'tag', verified: true };
+      }
+      if (
+        verifiedDefaultBranch &&
+        (clean === 'main' || clean === 'master' || clean === options.defaultBranch)
+      ) {
+        return { ref: verifiedDefaultBranch, kind: 'branch', verified: true };
+      }
+      return { ref: clean, kind: 'unknown', verified: false };
+    }
+    const isLikelyBranch =
+      clean === 'main' || clean === 'master' || clean === options.defaultBranch;
+    return { ref: clean, kind: isLikelyBranch ? 'branch' : 'unknown', verified: false };
+  };
+
+  const resolvedHead = resolveRefInRepo(headRef);
+  const resolvedBase = baseRef ? resolveRefInRepo(baseRef) : null;
+  let effectiveResolvedRef = resolvedHead.ref;
+  let effectiveResolvedKind: 'commit' | 'tag' | 'branch' | 'unknown' = resolvedHead.kind;
 
   const headers: Record<string, string> = {
     'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)',
@@ -4439,75 +4516,104 @@ export async function fetchGitReleaseNotesBetweenRefs(
   let source: DiscoveredReleaseNotesPayload['source'] = 'commits';
   let compareUrl: string | undefined;
 
+  const canAttemptCompare =
+    Boolean(resolvedBase && resolvedBase.ref && resolvedHead.ref) &&
+    resolvedBase!.ref !== resolvedHead.ref &&
+    resolvedHead.ref.toUpperCase() !== 'HEAD' &&
+    (!(hasSmartBranches || hasSmartTags) || (resolvedBase!.verified && resolvedHead.verified));
+
   // Level 1: Compare between baseRef...headRef
-  if (baseRef && headRef && baseRef !== headRef && headRef.toUpperCase() !== 'HEAD') {
-    const encBase = encodeURIComponent(baseRef);
-    const encHead = encodeURIComponent(headRef);
+  if (canAttemptCompare && resolvedBase) {
+    const encBase = encodeURIComponent(resolvedBase.ref);
+    const encHead = encodeURIComponent(resolvedHead.ref);
     if (provider === 'github') {
-      compareUrl = `https://github.com/${owner}/${repo}/compare/${encBase}...${encHead}`;
+      const candidateCompareUrl = `https://github.com/${owner}/${repo}/compare/${encBase}...${encHead}`;
       const cmp = await fetchJsonQuick(
         `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encBase}...${encHead}`
       );
       if (Array.isArray(cmp?.commits) && cmp.commits.length > 0) {
         source = 'compare';
+        compareUrl = candidateCompareUrl;
         commits = [...cmp.commits]
           .reverse()
           .map(c => normalizeForgeCommitItem(c, provider, host, owner, repo))
           .filter((c): c is DiscoveredReleaseCommitItem => Boolean(c))
           .slice(0, 25);
+      } else if (resolvedBase.verified && resolvedHead.verified) {
+        compareUrl = candidateCompareUrl;
       }
     } else if (provider === 'codeberg') {
-      compareUrl = `https://${host}/${owner}/${repo}/compare/${encBase}...${encHead}`;
+      const candidateCompareUrl = `https://${host}/${owner}/${repo}/compare/${encBase}...${encHead}`;
       const cmp = await fetchJsonQuick(
         `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encBase}...${encHead}`
       );
       if (Array.isArray(cmp?.commits) && cmp.commits.length > 0) {
         source = 'compare';
+        compareUrl = candidateCompareUrl;
         commits = cmp.commits
           .map((c: any) => normalizeForgeCommitItem(c, provider, host, owner, repo))
           .filter((c: DiscoveredReleaseCommitItem | null): c is DiscoveredReleaseCommitItem => Boolean(c))
           .slice(0, 25);
+      } else if (resolvedBase.verified && resolvedHead.verified) {
+        compareUrl = candidateCompareUrl;
       }
     } else if (provider === 'gitlab') {
-      compareUrl = `https://${host}/${owner}/${repo}/-/compare/${encBase}...${encHead}`;
+      const candidateCompareUrl = `https://${host}/${owner}/${repo}/-/compare/${encBase}...${encHead}`;
       const projectPath = encodeURIComponent(`${owner}/${repo}`);
       const cmp = await fetchJsonQuick(
         `https://${host}/api/v4/projects/${projectPath}/repository/compare?from=${encBase}&to=${encHead}`
       );
       if (Array.isArray(cmp?.commits) && cmp.commits.length > 0) {
         source = 'compare';
+        compareUrl = candidateCompareUrl;
         commits = [...cmp.commits]
           .reverse()
           .map(c => normalizeForgeCommitItem(c, provider, host, owner, repo))
           .filter((c): c is DiscoveredReleaseCommitItem => Boolean(c))
           .slice(0, 25);
+      } else if (resolvedBase.verified && resolvedHead.verified) {
+        compareUrl = candidateCompareUrl;
       }
     } else if (provider === 'bitbucket') {
-      compareUrl = `https://bitbucket.org/${owner}/${repo}/branches/compare/${encHead}%0D${encBase}`;
+      const candidateCompareUrl = `https://bitbucket.org/${owner}/${repo}/branches/compare/${encHead}%0D${encBase}`;
       const cmp = await fetchJsonQuick(
         `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/commits/${encHead}?exclude=${encBase}&pagelen=25`
       );
       if (Array.isArray(cmp?.values) && cmp.values.length > 0) {
         source = 'compare';
+        compareUrl = candidateCompareUrl;
         commits = cmp.values
           .map((c: any) => normalizeForgeCommitItem(c, provider, host, owner, repo))
           .filter((c: DiscoveredReleaseCommitItem | null): c is DiscoveredReleaseCommitItem => Boolean(c))
           .slice(0, 25);
+      } else if (resolvedBase.verified && resolvedHead.verified) {
+        compareUrl = candidateCompareUrl;
       }
     }
   }
 
   // Level 2 & 3: Single-ref or Default-Branch commit history fallback
   if (commits.length === 0) {
-    const refCandidates = Array.from(
+    const rawRefCandidates = Array.from(
       new Set(
         [
-          headRef !== 'HEAD' ? headRef : '',
-          options.defaultBranch || '',
+          resolvedHead.ref !== 'HEAD' ? resolvedHead.ref : '',
+          verifiedDefaultBranch || '',
+          options.defaultBranch && options.defaultBranch !== 'HEAD' ? options.defaultBranch : '',
+          'main',
+          'master',
           ''
         ].filter(v => v !== undefined)
       )
     );
+    const refCandidates = rawRefCandidates.filter(cand => {
+      if (!cand) return true;
+      if (!hasSmartBranches && !hasSmartTags) return true;
+      const info = resolveRefInRepo(cand);
+      if (info.verified && info.ref === cand) return true;
+      if (cand === 'main' || cand === 'master' || cand === options.defaultBranch) return false;
+      return true;
+    });
     const untilQuery = untilDate ? `&until=${encodeURIComponent(untilDate)}` : '';
 
     for (const refCand of refCandidates) {
@@ -4535,6 +4641,22 @@ export async function fetchGitReleaseNotesBetweenRefs(
 
       if (Array.isArray(rawList) && rawList.length > 0) {
         source = 'commits';
+        if (refCand) {
+          effectiveResolvedRef = refCand;
+          const candInfo = resolveRefInRepo(refCand);
+          effectiveResolvedKind =
+            candInfo.kind !== 'unknown'
+              ? candInfo.kind
+              : refCand === 'main' ||
+                  refCand === 'master' ||
+                  refCand === options.defaultBranch ||
+                  refCand === verifiedDefaultBranch
+                ? 'branch'
+                : effectiveResolvedKind;
+        } else if (verifiedDefaultBranch) {
+          effectiveResolvedRef = verifiedDefaultBranch;
+          effectiveResolvedKind = 'branch';
+        }
         commits = rawList
           .map(c => normalizeForgeCommitItem(c, provider, host, owner, repo))
           .filter((c): c is DiscoveredReleaseCommitItem => Boolean(c))
@@ -4547,29 +4669,75 @@ export async function fetchGitReleaseNotesBetweenRefs(
   // Level 3b: Atom / RSS feed fallback across GitHub, Codeberg, Mesehub, Gitea/Forgejo, and GitLab
   // when REST API quotas are rate-limited on shared Worker egress IPs or disabled on custom instances
   if (commits.length === 0 && provider !== 'bitbucket') {
-    const feedRefs = Array.from(
-      new Set([headRef !== 'HEAD' ? headRef : '', options.defaultBranch || 'main', 'master'].filter(Boolean))
+    const rawFeedRefs = Array.from(
+      new Set(
+        [
+          resolvedHead.ref !== 'HEAD' ? resolvedHead.ref : '',
+          verifiedDefaultBranch || '',
+          options.defaultBranch || '',
+          'main',
+          'master'
+        ].filter(Boolean)
+      )
     );
-    const feedUrls: string[] = [];
+    const feedRefs = rawFeedRefs.filter(cand => {
+      if (!hasSmartBranches && !hasSmartTags) return true;
+      const info = resolveRefInRepo(cand);
+      if (info.verified && info.ref === cand) return true;
+      if (cand === 'main' || cand === 'master' || cand === options.defaultBranch) return false;
+      return true;
+    });
+    const feedCandidates: Array<{ url: string; ref: string; kind: 'branch' | 'tag' }> = [];
     for (const ref of feedRefs) {
       const encRef = encodeURIComponent(ref);
+      const refInfo = resolveRefInRepo(ref);
+      const isTagRef = refInfo.kind === 'tag';
       if (provider === 'github') {
-        feedUrls.push(`https://github.com/${encOwnerPath}/${encodeURIComponent(repo)}/commits/${encRef}.atom`);
+        feedCandidates.push({
+          url: `https://github.com/${encOwnerPath}/${encodeURIComponent(repo)}/commits/${encRef}.atom`,
+          ref,
+          kind: isTagRef ? 'tag' : 'branch'
+        });
       } else if (provider === 'gitlab') {
-        feedUrls.push(`https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/-/commits/${encRef}?format=atom`);
+        feedCandidates.push({
+          url: `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/-/commits/${encRef}?format=atom`,
+          ref,
+          kind: isTagRef ? 'tag' : 'branch'
+        });
+      } else if (isTagRef) {
+        feedCandidates.push(
+          {
+            url: `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/tag/${encRef}.rss`,
+            ref,
+            kind: 'tag'
+          },
+          {
+            url: `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/branch/${encRef}.rss`,
+            ref,
+            kind: 'branch'
+          }
+        );
       } else {
-        feedUrls.push(
-          `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/branch/${encRef}.rss`,
-          `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/tag/${encRef}.rss`
+        feedCandidates.push(
+          {
+            url: `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/branch/${encRef}.rss`,
+            ref,
+            kind: 'branch'
+          },
+          {
+            url: `https://${host}/${encOwnerPath}/${encodeURIComponent(repo)}/commits/tag/${encRef}.rss`,
+            ref,
+            kind: 'tag'
+          }
         );
       }
     }
 
-    for (const feedUrl of feedUrls) {
+    for (const feedCand of feedCandidates) {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 3200);
       try {
-        const feedRes = await fetchWithAnubisSupport(feedUrl, {
+        const feedRes = await fetchWithAnubisSupport(feedCand.url, {
           headers: { 'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)' },
           signal: ctrl.signal
         });
@@ -4621,6 +4789,8 @@ export async function fetchGitReleaseNotesBetweenRefs(
           if (parsedEntries.length > 0) {
             source = 'commits';
             commits = parsedEntries;
+            effectiveResolvedRef = feedCand.ref;
+            effectiveResolvedKind = feedCand.kind;
             break;
           }
         }
@@ -4640,23 +4810,45 @@ export async function fetchGitReleaseNotesBetweenRefs(
     }
   }
 
-  const effectiveRefForUrl = encodeURIComponent(
-    headRef === 'HEAD' ? (options.defaultBranch || 'main') : headRef
-  );
+  const finalHeadRef =
+    effectiveResolvedRef && effectiveResolvedRef !== 'HEAD'
+      ? effectiveResolvedRef
+      : verifiedDefaultBranch || options.defaultBranch || 'main';
+  const finalHeadKind: 'commit' | 'tag' | 'branch' | 'unknown' = /^[0-9a-f]{7,40}$/i.test(finalHeadRef)
+    ? 'commit'
+    : effectiveResolvedKind !== 'unknown'
+      ? effectiveResolvedKind
+      : smartRefs?.tags?.some(t => t.tagName.toLowerCase() === finalHeadRef.toLowerCase()) &&
+          !smartRefs?.branches?.[finalHeadRef]
+        ? 'tag'
+        : 'branch';
+  const finalDisplayHeadRef = abbreviateGitRefLabel(finalHeadRef) || finalHeadRef;
+  const finalDisplayBaseRef = resolvedBase?.ref
+    ? abbreviateGitRefLabel(resolvedBase.ref) || resolvedBase.ref
+    : displayBaseRef;
+  const effectiveRefForUrl = encodeURIComponent(finalHeadRef);
   const defaultHistoryUrl =
     provider === 'gitlab'
       ? `https://${host}/${owner}/${repo}/-/commits/${effectiveRefForUrl}`
       : provider === 'codeberg'
-        ? (/^[0-9a-f]{7,40}$/i.test(headRef)
-            ? `https://${host}/${owner}/${repo}/commit/${effectiveRefForUrl}`
-            : `https://${host}/${owner}/${repo}/commits/branch/${effectiveRefForUrl}`)
-        : `https://${host}/${owner}/${repo}/commits/${effectiveRefForUrl}`;
+        ? finalHeadKind === 'commit'
+          ? `https://${host}/${owner}/${repo}/commit/${effectiveRefForUrl}`
+          : finalHeadKind === 'tag'
+            ? `https://${host}/${owner}/${repo}/commits/tag/${effectiveRefForUrl}`
+            : `https://${host}/${owner}/${repo}/commits/branch/${effectiveRefForUrl}`
+        : finalHeadKind === 'commit'
+          ? `https://${host}/${owner}/${repo}/commit/${effectiveRefForUrl}`
+          : `https://${host}/${owner}/${repo}/commits/${effectiveRefForUrl}`;
+  const resolvedDefaultBranch =
+    verifiedDefaultBranch ||
+    (finalHeadKind === 'branch' && commits.length > 0 ? finalHeadRef : undefined);
 
   const payload: DiscoveredReleaseNotesPayload = {
     source: commits.length > 0 ? source : releaseBody ? 'release_notes' : 'metadata',
-    head_ref: displayHeadRef,
-    base_ref: displayBaseRef,
+    head_ref: finalDisplayHeadRef,
+    base_ref: finalDisplayBaseRef,
     compare_url: compareUrl || defaultHistoryUrl,
+    ...(resolvedDefaultBranch ? { resolved_default_branch: resolvedDefaultBranch } : {}),
     markdown_body: releaseBody || undefined,
     commits
   };
