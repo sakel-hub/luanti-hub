@@ -19,6 +19,13 @@ import {
   autoResolveBrokenRepoReport,
   parseCdbJsonMetadata,
   CdbJsonMetadata,
+  parseLuantiConf,
+  computeConfShortDescription,
+  normalizeGitRepoInputUrl,
+  extractGitBranchHint,
+  fetchGitSmartHttpRefs,
+  buildProviderRawBaseCandidates,
+  detectGitProviderFromUrl,
   ensureExtendedPackageColumns,
   extractEmbeddedVideo,
   ensureModerationColumns,
@@ -31,6 +38,7 @@ import {
   mergeScreenshotsPreferringGit,
   upsertCustomAppTags
 } from '../lib/upstream';
+import { GitProviderId } from '../../../src/app/core/config/git-providers.config';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
 interface Env {
@@ -46,7 +54,7 @@ interface RepoEntry {
 }
 
 async function fetchRepoRootEntries(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
+  provider: GitProviderId,
   host: string,
   owner: string,
   repo: string,
@@ -118,7 +126,7 @@ async function fetchRepoRootEntries(
 }
 
 async function fetchRepoSizeEstimate(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
+  provider: GitProviderId,
   host: string,
   owner: string,
   repo: string
@@ -175,7 +183,7 @@ async function fetchRepoSizeEstimate(
 }
 
 async function verifyOrgOrRepoMembership(
-  provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket',
+  provider: GitProviderId,
   host: string,
   owner: string,
   repo: string,
@@ -317,11 +325,93 @@ function detectSpdxFromLicenseText(raw: string): string | undefined {
 }
 
 /**
+ * Strips Lua single-line comments (`--...`), long comments (`--[=*[ ... ]=*]`),
+ * short string literals (`"..."`, `'...'`), and multiline long strings (`[=*[ ... ]=*]`)
+ * while preserving every newline character (`\n`) so line numbers remain 100% accurate.
+ */
+function stripLuaCommentsAndStringsPreservingLines(source: string): string {
+  const out: string[] = [];
+  const len = source.length;
+  let i = 0;
+
+  const blankSpanPreservingNewlines = (start: number, end: number): void => {
+    for (let k = start; k < end; k++) {
+      const ch = source[k];
+      out.push(ch === '\n' || ch === '\r' ? ch : ' ');
+    }
+  };
+
+  while (i < len) {
+    // 1. Check for comment (`--`)
+    if (source[i] === '-' && source[i + 1] === '-') {
+      const longCommentMatch = source.slice(i + 2).match(/^\[(=*)\[/);
+      if (longCommentMatch) {
+        const closing = `]${longCommentMatch[1]}]`;
+        const openEnd = i + 2 + longCommentMatch[0].length;
+        const closeIdx = source.indexOf(closing, openEnd);
+        const spanEnd = closeIdx !== -1 ? closeIdx + closing.length : len;
+        blankSpanPreservingNewlines(i, spanEnd);
+        i = spanEnd;
+        continue;
+      }
+      // Single-line comment until newline
+      while (i < len && source[i] !== '\n') {
+        out.push(source[i] === '\r' ? '\r' : ' ');
+        i++;
+      }
+      continue;
+    }
+
+    // 2. Check for Lua multiline long string (`[[ ... ]]` or `[=[ ... ]=]`)
+    if (source[i] === '[') {
+      const longStrMatch = source.slice(i).match(/^\[(=*)\[/);
+      if (longStrMatch) {
+        const closing = `]${longStrMatch[1]}]`;
+        const openEnd = i + longStrMatch[0].length;
+        const closeIdx = source.indexOf(closing, openEnd);
+        const spanEnd = closeIdx !== -1 ? closeIdx + closing.length : len;
+        out.push('""');
+        blankSpanPreservingNewlines(i + 2, spanEnd);
+        i = spanEnd;
+        continue;
+      }
+    }
+
+    // 3. Check for short quoted string (`"..."` or `'...'`)
+    if (source[i] === '"' || source[i] === "'") {
+      const quote = source[i];
+      out.push(quote);
+      i++;
+      while (i < len && source[i] !== quote && source[i] !== '\n') {
+        if (source[i] === '\\' && i + 1 < len) {
+          out.push('  ');
+          i += 2;
+        } else {
+          out.push(source[i] === '\r' ? '\r' : ' ');
+          i++;
+        }
+      }
+      if (i < len && source[i] === quote) {
+        out.push(quote);
+        i++;
+      }
+      continue;
+    }
+
+    out.push(source[i]);
+    i++;
+  }
+
+  return out.join('');
+}
+
+/**
  * Runs a Luacheck-style static analysis pass on Lua source code (`init.lua`)
  */
 export function runLuacheckStaticAudit(luaSource: string, modName: string): GitAuditDiagnostic[] {
   const diagnostics: GitAuditDiagnostic[] = [];
-  const lines = luaSource.split(/\r?\n/);
+  const cleanedLua = stripLuaCommentsAndStringsPreservingLines(luaSource);
+  const lines = cleanedLua.split(/\r?\n/);
 
   let openBlocks = 0;
   let lastOpenLine = 1;
@@ -333,44 +423,16 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
   const allowedGlobals = new Set([
     modName, 'minetest', 'core', 'vector', 'VoxelArea', 'VoxelManip',
     'PerlinNoise', 'PerlinNoiseMap', 'PseudoRandom', 'PcgRandom', 'SecureRandom',
-    'ItemStack', 'Settings', 'AreaStore', 'Raycast', ' pairs', 'ipairs',
+    'ItemStack', 'Settings', 'AreaStore', 'Raycast', 'pairs', 'ipairs',
     'next', 'tonumber', 'tostring', 'type', 'unpack', 'table', 'string',
-    'math', 'os', 'io', 'debug', 'bit', 'jit', 'coroutine', 'error', 'assert',
+    'math', 'os', 'io', 'debug', 'bit', 'bit32', 'utf8', 'jit', 'coroutine', 'error', 'assert',
     'pcall', 'xpcall', 'select', 'rawget', 'rawset', 'rawequal', 'setmetatable',
-    'getmetatable', 'dofile', 'loadfile', 'print', '_'
+    'getmetatable', 'dofile', 'loadfile', 'require', 'collectgarbage', 'print', '_'
   ]);
-
-  let inMultilineComment = false;
 
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
-    let line = lines[i];
-
-    // Handle multiline comments --[[ ... ]]
-    if (inMultilineComment) {
-      if (line.includes(']]')) {
-        inMultilineComment = false;
-        line = line.slice(line.indexOf(']]') + 2);
-      } else {
-        continue;
-      }
-    }
-    if (line.includes('--[[')) {
-      const startIdx = line.indexOf('--[[');
-      const endIdx = line.indexOf(']]', startIdx + 4);
-      if (endIdx !== -1) {
-        line = line.slice(0, startIdx) + line.slice(endIdx + 2);
-      } else {
-        inMultilineComment = true;
-        line = line.slice(0, startIdx);
-      }
-    }
-
-    // Strip single-line comment and string literals for token scanning
-    const codeOnly = line
-      .replace(/--.*$/, '')
-      .replace(/"(?:\\.|[^"\\])*"/g, '""')
-      .replace(/'(?:\\.|[^'\\])*'/g, "''");
+    const codeOnly = lines[i];
 
     if (!codeOnly.trim()) continue;
 
@@ -383,14 +445,14 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
       hasLuantiEngineApi = true;
     }
 
-    // 2. Count block openers vs `end` / `until`
-    const openers = codeOnly.match(/\b(function|if|do|repeat)\b/g);
+    // 2. Count block openers vs `end` / `until` (ignoring `.` or `:` field/method accesses like `pos.end`)
+    const openers = codeOnly.match(/(?<![.:])\b(function|if|do|repeat)\b/g);
     // Avoid double-counting `while ... do` or `for ... do` (where `do` is the opener)
     if (openers) {
       openBlocks += openers.length;
       lastOpenLine = lineNum;
     }
-    const closers = codeOnly.match(/\b(end|until)\b/g);
+    const closers = codeOnly.match(/(?<![.:])\b(end|until)\b/g);
     if (closers) {
       openBlocks -= closers.length;
     }
@@ -560,38 +622,42 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }, { status: 400 });
     }
 
-    const host = urlObj.hostname.toLowerCase();
-    const parts = urlObj.pathname.replace(/^\/|\/$/g, '').split('/');
-    if (parts.length < 2) {
+    const branchHint = extractGitBranchHint(repoUrl.trim());
+    const canonicalRepoUrl = normalizeGitRepoInputUrl(repoUrl.trim()) || repoUrl.trim();
+    const rawPathParts = urlObj.pathname.replace(/^\/|\/$/g, '').split('/').filter(Boolean);
+    const detected = detectGitProviderFromUrl(canonicalRepoUrl);
+    if (!detected || (rawPathParts.length < 2 && detected.provider !== 'custom')) {
       return Response.json({
         error: 'Repository URL must include both owner and repository name (e.g., https://github.com/owner/repo).'
       }, { status: 400 });
     }
 
-    const owner = parts[0];
-    const repo = parts[1].replace(/\.git$/i, '');
+    const host = detected.host;
+    const owner = detected.owner;
+    const repo = detected.repo;
 
     // 1. Detect Provider & Candidate Branches / Config Files
-    let provider: 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket' = 'github';
-    if (host.includes('git.minetest.land')) {
-      provider = 'mesehub';
-    } else if (host.includes('codeberg') || host.includes('gitea') || host.includes('forgejo')) {
+    let provider: GitProviderId = detected.provider;
+    if (provider === 'custom' && (host.includes('gitea') || host.includes('forgejo'))) {
       provider = 'codeberg';
-    } else if (host.includes('gitlab')) {
-      provider = 'gitlab';
-    } else if (host.includes('bitbucket.org')) {
-      provider = 'bitbucket';
     }
 
+    let resolvedCustomRawBase = '';
     const buildRawUrl = (branchName: string, filePath: string): string => {
-      if (provider === 'codeberg' || provider === 'mesehub') {
-        return `https://${host}/${owner}/${repo}/raw/branch/${branchName}/${filePath}`;
-      } else if (provider === 'gitlab') {
-        return `https://${host}/${owner}/${repo}/-/raw/${branchName}/${filePath}`;
-      } else if (provider === 'bitbucket') {
-        return `https://bitbucket.org/${owner}/${repo}/raw/${branchName}/${filePath}`;
+      const cleanPath = filePath.replace(/^\/+/, '');
+      if (resolvedCustomRawBase) {
+        return cleanPath ? `${resolvedCustomRawBase}/${cleanPath}` : resolvedCustomRawBase;
       }
-      return `https://raw.githubusercontent.com/${owner}/${repo}/${branchName}/${filePath}`;
+      if (provider === 'codeberg' || provider === 'mesehub') {
+        return `https://${host}/${owner}/${repo}/raw/branch/${branchName}/${cleanPath}`;
+      } else if (provider === 'gitlab') {
+        return `https://${host}/${owner}/${repo}/-/raw/${branchName}/${cleanPath}`;
+      } else if (provider === 'bitbucket') {
+        return `https://bitbucket.org/${owner}/${repo}/raw/${branchName}/${cleanPath}`;
+      } else if (provider === 'custom') {
+        return `${canonicalRepoUrl.replace(/\/+$/, '')}/plain/${cleanPath}`;
+      }
+      return `https://raw.githubusercontent.com/${owner}/${repo}/${branchName}/${cleanPath}`;
     };
 
     // Only allow customConf / customLua overrides during dryRun preview;
@@ -599,35 +665,76 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     let rawConfig = dryRun ? (customConf || '') : '';
     let confFileName = 'mod.conf';
     let packageType: 'mod' | 'game' | 'txp' | 'modpack' = 'mod';
-    let branch = 'main';
+    let branch = branchHint || 'main';
+    let smartHeadSha = '';
+
+    const smartRefs = await fetchGitSmartHttpRefs(canonicalRepoUrl, owner, repo).catch(() => null);
+    if (smartRefs?.headSha) {
+      smartHeadSha = smartRefs.headSha;
+    }
+    if (smartRefs?.defaultBranch && !branchHint) {
+      branch = smartRefs.defaultBranch;
+    }
 
     if (!rawConfig) {
-      const candidates: Array<{ branch: string; file: string; type: 'mod' | 'game' | 'txp' | 'modpack' }> = [
-        { branch: 'main', file: 'mod.conf', type: 'mod' },
-        { branch: 'master', file: 'mod.conf', type: 'mod' },
-        { branch: 'main', file: 'game.conf', type: 'game' },
-        { branch: 'master', file: 'game.conf', type: 'game' },
-        { branch: 'main', file: 'modpack.conf', type: 'modpack' },
-        { branch: 'master', file: 'modpack.conf', type: 'modpack' },
-        { branch: 'main', file: 'texture_pack.conf', type: 'txp' },
-        { branch: 'master', file: 'texture_pack.conf', type: 'txp' }
+      const confFiles: Array<{ file: string; type: 'mod' | 'game' | 'txp' | 'modpack' }> = [
+        { file: 'mod.conf', type: 'mod' },
+        { file: 'game.conf', type: 'game' },
+        { file: 'modpack.conf', type: 'modpack' },
+        { file: 'texture_pack.conf', type: 'txp' }
       ];
 
-      for (const c of candidates) {
-        try {
-          const r = await fetchWithAnubisSupport(buildRawUrl(c.branch, c.file));
-          if (r.ok) {
-            const text = await r.text();
-            if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE')) {
-              rawConfig = text;
-              confFileName = c.file;
-              packageType = c.type;
-              branch = c.branch;
-              break;
+      if (provider === 'custom') {
+        const rawBaseCandidates = buildProviderRawBaseCandidates(
+          canonicalRepoUrl,
+          owner,
+          repo,
+          branchHint || smartRefs?.defaultBranch
+        );
+        for (const baseCand of rawBaseCandidates) {
+          const cleanBase = baseCand.base.replace(/\/+$/, '');
+          for (const cf of confFiles) {
+            try {
+              const r = await fetchWithAnubisSupport(`${cleanBase}/${cf.file}`);
+              if (r.ok) {
+                const text = await r.text();
+                if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
+                  rawConfig = text;
+                  confFileName = cf.file;
+                  packageType = cf.type;
+                  resolvedCustomRawBase = cleanBase;
+                  break;
+                }
+              }
+            } catch {
+              // Try next candidate
             }
           }
-        } catch {
-          // Try next candidate
+          if (rawConfig) break;
+        }
+      } else {
+        const branchCandidates = Array.from(
+          new Set([branchHint, smartRefs?.defaultBranch, 'main', 'master'].filter((b): b is string => Boolean(b)))
+        );
+        for (const cf of confFiles) {
+          for (const candBranch of branchCandidates) {
+            try {
+              const r = await fetchWithAnubisSupport(buildRawUrl(candBranch, cf.file));
+              if (r.ok) {
+                const text = await r.text();
+                if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
+                  rawConfig = text;
+                  confFileName = cf.file;
+                  packageType = cf.type;
+                  branch = candBranch;
+                  break;
+                }
+              }
+            } catch {
+              // Try next candidate
+            }
+          }
+          if (rawConfig) break;
         }
       }
     }
@@ -642,7 +749,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         severity: 'error',
         file: 'mod.conf / game.conf',
         title: 'Missing Package Configuration File',
-        message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch 'main' or 'master' in ${owner}/${repo}.`,
+        message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch '${branch}' in ${owner}/${repo}.`,
         howToFix: `Create a 'mod.conf' (or 'game.conf') file in the root directory of your ${provider} repository with the following fields and push it to your default branch:`,
         snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0`
       });
@@ -667,24 +774,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }, { status: 422 });
     }
 
-    // 2. Parse Key-Value Metadata from *.conf
-    const getConfValue = (key: string): string => {
-      for (const rawLine of rawConfig.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith('#')) continue;
-        const eqIdx = line.indexOf('=');
-        if (eqIdx === -1) continue;
-        const k = line.slice(0, eqIdx).trim();
-        if (k.toLowerCase() === key.toLowerCase()) {
-          let val = line.slice(eqIdx + 1).trim();
-          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-            val = val.slice(1, -1).trim();
-          }
-          return val;
-        }
-      }
-      return '';
-    };
+    // 2. Parse Key-Value Metadata from *.conf (including multiline """...""" blocks)
+    const parsedConf = parseLuantiConf(rawConfig);
 
     const cleanDep = (s: string): string => {
       return s
@@ -695,15 +786,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         .trim();
     };
 
-    const rawName = getConfValue('name');
-    const rawTitle = getConfValue('title');
-    const rawDesc = getConfValue('description');
-    const rawLicense = getConfValue('license');
-    const rawMediaLicense = getConfValue('media_license');
-    const rawDepends = getConfValue('depends');
-    const rawOptDepends = getConfValue('optional_depends');
-    const rawConfTags = getConfValue('tags') || getConfValue('categories');
-    const rawMinVersion = getConfValue('min_minetest_version') || '5.0.0';
+    const rawName = parsedConf['name'] || '';
+    const rawTitle = parsedConf['title'] || '';
+    const rawFullDesc = parsedConf['description'] || '';
+    const rawDesc = computeConfShortDescription(rawFullDesc) || rawFullDesc;
+    const rawLicense = parsedConf['license'] || '';
+    const rawMediaLicense = parsedConf['media_license'] || '';
+    const rawDepends = parsedConf['depends'] || '';
+    const rawOptDepends = parsedConf['optional_depends'] || '';
+    const rawConfTags = parsedConf['tags'] || parsedConf['categories'] || '';
+    const rawMinVersion = parsedConf['min_minetest_version'] || '5.0.0';
+    const rawMaxVersion = parsedConf['max_minetest_version'] || undefined;
+    const supportedGames = parsedConf['supported_games']
+      ? parsedConf['supported_games'].split(',').map(cleanDep).filter(Boolean)
+      : [];
+    const unsupportedGames = parsedConf['unsupported_games']
+      ? parsedConf['unsupported_games'].split(',').map(cleanDep).filter(Boolean)
+      : [];
 
     // Optional: Probe `.cdb.json` (Luanti ContentDB repository metadata specification)
     let cdbMeta: CdbJsonMetadata | null = null;
@@ -977,7 +1076,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     } catch {
       // Keep shortDesc
     }
-    const longDesc = readmeMarkdown ? readmeMarkdown.slice(0, 12000) : (rawDesc || 'Decentralized Luanti community package.');
+    const longDesc = readmeMarkdown ? readmeMarkdown.slice(0, 12000) : (rawFullDesc || rawDesc || 'Decentralized Luanti community package.');
 
     let screenshotUrl = buildRawUrl(branch, 'screenshot.png');
     let hasScreenshot = false;
@@ -1057,6 +1156,24 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const warningsCount = diagnostics.filter(d => d.severity === 'warning').length;
     const canPublish = errorsCount === 0;
 
+    const dependencies = rawDepends
+      ? rawDepends.split(',').map(cleanDep).filter(Boolean)
+      : [];
+    const optionalDependencies = rawOptDepends
+      ? rawOptDepends.split(',').map(cleanDep).filter(Boolean)
+      : [];
+
+    const confTags = rawConfTags
+      ? rawConfTags.split(',').map(s => s.trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
+      : [];
+    const cdbTags = cdbMeta?.tags || [];
+    const customTags = Array.isArray(userSubmittedTags)
+      ? userSubmittedTags.map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
+      : [];
+
+    const title = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+    const shortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
+
     // Check 6: Verify Cryptographic Repository Ownership (prevents posting someone else's Git repository)
     let ownershipVerified = false;
     let isCallerAdmin = false;
@@ -1106,65 +1223,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
-    const pendingAdminClaim = !ownershipVerified && Boolean(resolvedUserId && (provider === 'bitbucket' || requestAdminClaim));
-
-    if (ownershipVerified) {
-      diagnostics.push({
-        code: 'REPO_OWNERSHIP_VERIFIED',
-        severity: 'pass',
-        file: `${provider}:${owner}/${repo}`,
-        title: `Repository Ownership Verified (${verifiedProviderUsername || owner})`,
-        message: `Verified that your ${provider} account owns or maintains ${owner}/${repo}.`
-      });
-    } else if (pendingAdminClaim) {
-      diagnostics.push({
-        code: 'REPO_OWNERSHIP_PENDING_ADMIN',
-        severity: 'warning',
-        file: `${provider}:${owner}/${repo}`,
-        title: `Ownership Claim Queued for Moderator Approval (${provider})`,
-        message: `Your ownership claim for '${owner}/${repo}' will be reviewed and approved by a moderator before author privileges are granted.`
-      });
-    } else if (!dryRun) {
-      diagnostics.push({
-        code: 'REPO_OWNERSHIP_REQUIRED',
-        severity: 'error',
-        file: `${provider}:${owner}/${repo}`,
-        title: `Repository Ownership Verification Required (${provider})`,
-        message: `To prevent unauthorized third-party submissions, only the verified owner or maintainer of '${owner}/${repo}' on ${provider} can publish this repository.`,
-        howToFix: `Verify your '${owner}' account on ${provider} below using 1-Click OAuth or a read-only Personal Access Token.`
-      });
-    } else {
-      diagnostics.push({
-        code: 'REPO_OWNERSHIP_REQUIRED',
-        severity: 'warning',
-        file: `${provider}:${owner}/${repo}`,
-        title: `Verify '${owner}' on ${provider} Before Publishing`,
-        message: `Pre-flight checks passed, but publishing requires verifying that you own or maintain '${owner}/${repo}' on ${provider}.`,
-        howToFix: `Use the inline ${provider} verification box below (OAuth or read-only Personal Access Token) to unlock publishing.`
-      });
-    }
-
-    const dependencies = rawDepends
-      ? rawDepends.split(',').map(cleanDep).filter(Boolean)
-      : [];
-    const optionalDependencies = rawOptDepends
-      ? rawOptDepends.split(',').map(cleanDep).filter(Boolean)
-      : [];
-
-    const confTags = rawConfTags
-      ? rawConfTags.split(',').map(s => s.trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
-      : [];
-    const cdbTags = cdbMeta?.tags || [];
-    const customTags = Array.isArray(userSubmittedTags)
-      ? userSubmittedTags.map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
-      : [];
-
-    const title = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
-    const shortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
-
     // Check if this package already exists on ContentDB or in Cloudflare D1 to prevent duplicates
     // and link both ContentDB + Git Community badges onto the single canonical package!
-    const submittedRepoKey = normalizeRepoKey(repoUrl);
+    const submittedRepoKey = normalizeRepoKey(canonicalRepoUrl);
     const callerHasVerifiedHandle = (targetHandle: string): boolean => {
       if (isCallerAdmin) return true;
       const clean = String(targetHandle || '').trim().toLowerCase();
@@ -1263,6 +1324,70 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       } catch {
         existingD1Pkg = null;
       }
+    }
+
+    // Fast-path: If the caller is the verified ContentDB author of a package whose ContentDB `repo` URL matches this repository
+    // (or already owns the D1 package), recognize ownership as verified even for custom/self-hosted or Bitbucket repos!
+    if (!ownershipVerified) {
+      const matchedCdbRepoKey = normalizeRepoKey(matchedContentDbPkg?.repo || matchedContentDbPkg?.repo_url);
+      const hasVerifiedCdbAuthorForRepo = Boolean(
+        matchedContentDbPkg?.author &&
+        submittedRepoKey &&
+        matchedCdbRepoKey === submittedRepoKey &&
+        callerIdentities.some(
+          id =>
+            id.verified &&
+            id.provider === 'contentdb' &&
+            id.username.trim().toLowerCase() === String(matchedContentDbPkg.author).trim().toLowerCase()
+        )
+      );
+      const ownsExistingD1Record = Boolean(
+        existingD1Pkg &&
+        reconciledUser &&
+        verifyStrictPackageAuthorOwnership(reconciledUser, callerIdentities, existingD1Pkg, existingD1Pkg.author_name)
+      );
+      if (hasVerifiedCdbAuthorForRepo || ownsExistingD1Record) {
+        ownershipVerified = true;
+        verifiedProviderUsername = matchedContentDbPkg?.author || existingD1Pkg?.author_name || reconciledUser?.username || owner;
+      }
+    }
+
+    const pendingAdminClaim = !ownershipVerified && Boolean(resolvedUserId && (provider === 'bitbucket' || provider === 'custom' || requestAdminClaim));
+
+    if (ownershipVerified) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_VERIFIED',
+        severity: 'pass',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Repository Ownership Verified (${verifiedProviderUsername || owner})`,
+        message: `Verified that your ${provider} account owns or maintains ${owner}/${repo}.`
+      });
+    } else if (pendingAdminClaim) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_PENDING_ADMIN',
+        severity: 'warning',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Ownership Claim Queued for Moderator Approval (${provider})`,
+        message: `Your ownership claim for '${owner}/${repo}' will be reviewed and approved by a moderator before author privileges are granted.`
+      });
+    } else if (!dryRun) {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_REQUIRED',
+        severity: 'error',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Repository Ownership Verification Required (${provider})`,
+        message: `To prevent unauthorized third-party submissions, only the verified owner or maintainer of '${owner}/${repo}' on ${provider} can publish this repository.`,
+        howToFix: `Verify your '${owner}' account on ${provider} below using 1-Click OAuth or a read-only Personal Access Token.`
+      });
+    } else {
+      diagnostics.push({
+        code: 'REPO_OWNERSHIP_REQUIRED',
+        severity: 'warning',
+        file: `${provider}:${owner}/${repo}`,
+        title: `Verify '${owner}' on ${provider} Before Publishing`,
+        message: `Pre-flight checks passed, but publishing requires verifying that you own or maintain '${owner}/${repo}' on ${provider}.`,
+        howToFix: `Use the inline ${provider} verification box below (OAuth or read-only Personal Access Token) to unlock publishing.`
+      });
     }
 
     const isAlsoOnContentDb = Boolean(
@@ -1391,6 +1516,16 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? cdbMeta.ai_disclosures
       : parseJsonArray(existingD1Pkg?.ai_disclosures);
 
+    const resolvedMaxVersion =
+      rawMaxVersion || matchedContentDbPkg?.max_minetest_version || existingD1Pkg?.max_minetest_version || undefined;
+    const latestCommitSha =
+      discoveredReleases[0]?.commit_sha ||
+      smartHeadSha ||
+      existingD1Pkg?.latest_commit_sha ||
+      null;
+    const preservedCreatedAt =
+      existingD1Pkg?.created_at || matchedContentDbPkg?.created_at || null;
+
     const packagePayload = {
       id: packageId,
       author: canonicalAuthor,
@@ -1410,7 +1545,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       downloads: resolvedDownloads,
       license: effectiveLicense,
       media_license: effectiveMediaLicense,
-      repo_url: repoUrl.trim(),
+      repo_url: canonicalRepoUrl,
       website: resolvedWebsite,
       issue_tracker: resolvedIssueTracker,
       forum_url: resolvedForumUrl,
@@ -1423,6 +1558,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       provider,
       default_branch: branch,
       min_minetest_version: rawMinVersion,
+      max_minetest_version: resolvedMaxVersion,
+      supported_games: supportedGames.length > 0 ? supportedGames : undefined,
+      unsupported_games: unsupportedGames.length > 0 ? unsupportedGames : undefined,
       dependencies,
       optional_dependencies: optionalDependencies,
       source: 'git' as const,
@@ -1434,7 +1572,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           version: branch,
           title: branch,
           tag_name: branch,
-          commit_sha: 'HEAD',
+          commit_sha: smartHeadSha || 'HEAD',
           url: branchArchiveUrl,
           download_url: branchArchiveUrl,
           min_minetest_version: rawMinVersion,
@@ -1685,12 +1823,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       const runPackageUpsert = () => context.env.DB.prepare(`
         INSERT INTO packages (
           id, author_id, author_name, name, title, type, short_desc, long_desc,
-          repo_url, provider, default_branch, thumbnail_url, banner_url, screenshots,
+          repo_url, provider, default_branch, latest_commit_sha, thumbnail_url, banner_url, screenshots,
           downloads_count, contentdb_downloads, score, license, media_license, tags, dependencies, optional_dependencies,
-          min_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
-          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at
+          min_minetest_version, max_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
+          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END, COALESCE(?, CURRENT_TIMESTAMP))
         ON CONFLICT(id) DO UPDATE SET
           author_id = CASE
             WHEN packages.author_id IS NULL OR packages.author_id LIKE 'ext_%' THEN excluded.author_id
@@ -1702,6 +1840,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           repo_url = excluded.repo_url,
           provider = excluded.provider,
           default_branch = excluded.default_branch,
+          latest_commit_sha = COALESCE(excluded.latest_commit_sha, packages.latest_commit_sha),
           thumbnail_url = excluded.thumbnail_url,
           banner_url = excluded.banner_url,
           screenshots = COALESCE(excluded.screenshots, packages.screenshots),
@@ -1714,6 +1853,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           dependencies = excluded.dependencies,
           optional_dependencies = excluded.optional_dependencies,
           min_minetest_version = excluded.min_minetest_version,
+          max_minetest_version = COALESCE(excluded.max_minetest_version, packages.max_minetest_version),
           donate_url = COALESCE(excluded.donate_url, packages.donate_url),
           translation_url = COALESCE(excluded.translation_url, packages.translation_url),
           forum_url = COALESCE(excluded.forum_url, packages.forum_url),
@@ -1750,9 +1890,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         packageType,
         shortDesc,
         resolvedLongDesc,
-        repoUrl.trim(),
+        canonicalRepoUrl,
         provider,
         branch,
+        latestCommitSha,
         resolvedThumbnail,
         resolvedBanner,
         mergedScreenshots.length > 0 ? JSON.stringify(mergedScreenshots) : null,
@@ -1765,6 +1906,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         JSON.stringify(dependencies),
         JSON.stringify(optionalDependencies),
         rawMinVersion,
+        resolvedMaxVersion || null,
         resolvedDonateUrl || null,
         resolvedTranslationUrl || null,
         resolvedForumUrl || null,
@@ -1778,7 +1920,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         estFileSize,
         initialStatus,
         initialStatusReason,
-        initialStatus
+        initialStatus,
+        preservedCreatedAt
       ).run();
 
       try {
@@ -1894,13 +2037,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       '/__api_packages_v2',
       '/__api_packages_v2?boot=1',
       '/__api_boot_catalog_bundle_v3',
+      'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
       `/__api_pkg_detail_v2/${lowerA}/${lowerN}`,
-      `https://cache.luantihub.internal/pkg-detail-v4/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/pkg-detail-v4/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `/__git_repo_scan_v11/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
       `https://cache.luantihub.internal/pkg-detail-v5/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
       `https://cache.luantihub.internal/pkg-detail-v5/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/__for_client_v2/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`,
-      `https://cache.luantihub.internal/__for_client_v3/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`
+      `https://cache.luantihub.internal/pkg-detail-v7/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/pkg-detail-v7/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
+      `https://cache.luantihub.internal/__for_client_v3/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`,
+      `https://cache.luantihub.internal/__for_client_v4/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`
     ]);
 
     if (safetyEval.holdForAdminReview) {

@@ -39,8 +39,11 @@ import {
   LucideSearch,
   LucideSlidersHorizontal,
   LucideTag,
-  LucideTrendingUp
+  LucideTrendingUp,
+  LucideRefreshCw,
+  LucideShieldAlert
 } from '@lucide/angular';
+import { PackageGitSyncStatus } from '../../core/services/auth.service';
 
 @Component({
   selector: 'app-author-drawer',
@@ -67,7 +70,9 @@ import {
     LucideSearch,
     LucideSlidersHorizontal,
     LucideTag,
-    LucideTrendingUp
+    LucideTrendingUp,
+    LucideRefreshCw,
+    LucideShieldAlert
   ],
   template: `
     @if (packageService.activeAuthorProfile(); as author) {
@@ -338,6 +343,53 @@ import {
 
           <!-- Author's Packages Section (Filterable, Sortable & Paginated 8/page) -->
           <div #packagesSectionTop class="space-y-3 flex-1 flex flex-col">
+            @if (authService.isSyncingAuthorGit()) {
+              <div
+                data-testid="author-drawer-git-sync-progress"
+                class="p-2.5 rounded-xl bg-sky-500/10 border border-sky-400/30 flex items-center justify-between gap-2 text-xs text-sky-200 animate-pulse">
+                <div class="flex items-center gap-2 min-w-0">
+                  <svg lucideRefreshCw class="w-3.5 h-3.5 text-sky-400 animate-spin flex-shrink-0"></svg>
+                  <span class="font-semibold truncate">{{ 'profile.verifyingGitReposProgress' | translate }}</span>
+                </div>
+                @if (authService.syncAuthorGitProgress(); as prog) {
+                  <span class="font-mono font-bold text-[11px] text-sky-300 flex-shrink-0">
+                    {{ prog.processed }} / {{ prog.total }}
+                  </span>
+                }
+              </div>
+            } @else if (author.is_registered && (authService.isAdmin() || isOwnProfile() || (author.git_sync?.pendingQueueCount ?? 0) > 0 || unsyncedEligibleGitPackages().length > 0)) {
+              <div
+                data-testid="author-drawer-git-sync-diagnostics"
+                class="px-3 py-2 rounded-xl glass-panel border border-white/10 flex items-center justify-between gap-2 flex-wrap text-[11px]">
+                <div class="flex items-center gap-2 flex-wrap text-slate-300">
+                  <span class="font-bold text-sky-300">Git Sync:</span>
+                  <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
+                    {{ author.git_sync?.alreadySyncedCount ?? gitCount() }} Synced
+                  </span>
+                  @if ((author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length) > 0) {
+                    <span class="glass-badge glass-badge-sky font-bold text-[10px]">
+                      {{ author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length }} Queued
+                    </span>
+                  }
+                  @if ((author.git_sync?.brokenReportCount ?? 0) > 0) {
+                    <span class="glass-badge glass-badge-amber font-bold text-[10px]">
+                      {{ author.git_sync?.brokenReportCount }} Broken/Review
+                    </span>
+                  }
+                </div>
+                @if (authService.isAdmin() || isOwnProfile() || (author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length) > 0) {
+                  <button
+                    type="button"
+                    data-testid="author-drawer-verify-git-btn"
+                    (click)="onManualSyncAuthorGit()"
+                    class="px-2.5 py-1 rounded-lg glass-btn-sky text-white text-[10px] font-bold inline-flex items-center gap-1 transition cursor-pointer">
+                    <svg lucideRefreshCw class="w-3 h-3"></svg>
+                    <span>{{ 'profile.verifySyncGitBtn' | translate }}</span>
+                  </button>
+                }
+              </div>
+            }
+
             <!-- Category Filter Pills + Sort Controls -->
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1 border-t border-white/10">
               <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
@@ -460,6 +512,31 @@ import {
                           </app-package-badges>
                           <span>•</span>
                           <span class="font-mono">{{ (pkg.downloads || 0) | compactNumber }} dl</span>
+                          @if (getPackageSyncStatus(pkg.id); as syncStatus) {
+                            @if (syncStatus.state === 'syncing') {
+                              <span
+                                data-testid="author-pkg-sync-status-syncing"
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/20 border border-sky-400/40 text-sky-300 font-bold text-[9px] animate-pulse">
+                                <svg lucideRefreshCw class="w-2.5 h-2.5 animate-spin"></svg>
+                                <span>{{ 'profile.pkgSyncingBadge' | translate }}</span>
+                              </span>
+                            } @else if (syncStatus.state === 'synced') {
+                              <span
+                                data-testid="author-pkg-sync-status-synced"
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold text-[9px]">
+                                <svg lucideCheck class="w-2.5 h-2.5"></svg>
+                                <span>{{ 'profile.pkgSyncedBadge' | translate }}</span>
+                              </span>
+                            } @else if (syncStatus.state === 'failed' || syncStatus.state === 'conflict') {
+                              <span
+                                data-testid="author-pkg-sync-status-failed"
+                                [attr.title]="syncStatus.message || ('profile.pkgSyncFailedBadge' | translate)"
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-400/40 text-amber-300 font-bold text-[9px]">
+                                <svg lucideShieldAlert class="w-2.5 h-2.5 text-amber-400 flex-shrink-0"></svg>
+                                <span>{{ 'profile.pkgSyncFailedBadge' | translate }}</span>
+                              </span>
+                            }
+                          }
                         </div>
                       </div>
                     </button>
@@ -521,6 +598,8 @@ export class AuthorDrawerComponent {
   readonly searchTerm = signal<string>('');
   readonly currentPage = signal<number>(1);
 
+  private readonly autoSyncedAuthorsInSession = new Set<string>();
+
   constructor() {
     effect(() => {
       const username = this.packageService.activeAuthorUsername();
@@ -531,6 +610,30 @@ export class AuthorDrawerComponent {
         this.sortBy.set('downloads');
         this.searchTerm.set('');
         this.currentPage.set(1);
+      }
+    });
+
+    effect(() => {
+      const author = this.packageService.activeAuthorProfile();
+      const unsynced = this.unsyncedEligibleGitPackages();
+      const pendingFromServer = Number(author?.git_sync?.pendingQueueCount || 0);
+      if (
+        author &&
+        author.is_registered &&
+        (unsynced.length > 0 || pendingFromServer > 0) &&
+        !this.authService.isSyncingAuthorGit()
+      ) {
+        const key = author.username.trim().toLowerCase();
+        if (key && !this.autoSyncedAuthorsInSession.has(key)) {
+          this.autoSyncedAuthorsInSession.add(key);
+          queueMicrotask(() => {
+            this.triggerAuthorGitSync(
+              author.username,
+              unsynced.map(p => p.id),
+              false
+            );
+          });
+        }
       }
     });
   }
@@ -561,6 +664,83 @@ export class AuthorDrawerComponent {
   readonly officialCount = computed(() =>
     this.authorPackages().filter(p => p.sources?.includes('official') || p.source === 'official').length
   );
+
+  readonly unsyncedEligibleGitPackages = computed<LuantiPackage[]>(() => {
+    const statuses = this.authService.packageSyncStatuses();
+    return this.authorPackages().filter(pkg => {
+      if (pkg.sources?.includes('git') || pkg.source === 'git') return false;
+      const lowerId = pkg.id.toLowerCase();
+      if (statuses[lowerId]?.state === 'failed' || statuses[lowerId]?.state === 'conflict') {
+        return false;
+      }
+      return this.isEligibleGitRepoUrl(pkg.repo_url);
+    });
+  });
+
+  isEligibleGitRepoUrl(rawUrl?: string): boolean {
+    const trimmed = String(rawUrl || '').trim();
+    if (!trimmed || !/^https?:\/\//i.test(trimmed)) return false;
+    try {
+      const parsed = new URL(trimmed);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      const supportedHosts = [
+        'github.com',
+        'codeberg.org',
+        'gitlab.com',
+        'git.minetest.land',
+        'mese.hub',
+        'bitbucket.org',
+        'notabug.org',
+        'framagit.org',
+        'salsa.debian.org'
+      ];
+      const isSupportedForge =
+        supportedHosts.includes(host) ||
+        host.includes('gitlab') ||
+        host.includes('codeberg') ||
+        host.includes('gitea') ||
+        host.includes('forgejo');
+      if (!isSupportedForge) return false;
+      const cleanPath = parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
+      const segments = cleanPath.split('/').filter(Boolean);
+      return segments.length >= 2;
+    } catch {
+      return false;
+    }
+  }
+
+  getPackageSyncStatus(packageId: string): PackageGitSyncStatus | null {
+    if (!packageId) return null;
+    return this.authService.packageSyncStatuses()[packageId.toLowerCase()] || null;
+  }
+
+  async onManualSyncAuthorGit(): Promise<void> {
+    const author = this.packageService.activeAuthorProfile();
+    if (!author) return;
+    await this.triggerAuthorGitSync(
+      author.username,
+      this.unsyncedEligibleGitPackages().map(p => p.id),
+      this.authService.isAdmin() || this.isOwnProfile()
+    );
+  }
+
+  async triggerAuthorGitSync(username: string, candidateIds: string[], force = false): Promise<void> {
+    const res = await this.authService.syncAuthorGitPackages(username, candidateIds, force);
+    if (res.syncedCount > 0) {
+      await this.packageService.initCatalog(true);
+    }
+    const diag = await this.authService.fetchAuthorGitSyncStatus(username);
+    if (diag) {
+      this.packageService.updateActiveAuthorGitSync({
+        totalContentDbPackages: diag.totalContentDbPackages,
+        alreadySyncedCount: diag.alreadySyncedCount,
+        pendingQueueCount: diag.pendingQueueCount,
+        skippedNoRepoCount: diag.skippedNoRepoCount,
+        brokenReportCount: diag.brokenReportCount,
+        conflictCount: diag.conflictCount
+      });
+    }
+  }
 
   readonly typeBreakdownSummary = computed(() => {
     const parts: string[] = [];

@@ -3,7 +3,10 @@ import {
   parseCookies,
   checkIsAdmin
 } from '../../auth/lib/session';
-import { syncVerifiedAuthorGitPackages } from '../../lib/author-git-sync';
+import {
+  syncVerifiedAuthorGitPackages,
+  inspectAuthorGitSyncStatus
+} from '../../lib/author-git-sync';
 import { sanitizePublicErrorMessage } from '../../lib/upstream';
 
 interface Env {
@@ -12,25 +15,69 @@ interface Env {
   ADMIN_USERS?: string;
 }
 
+export async function onRequestGet(context: {
+  request: Request;
+  env: Env;
+  params?: { username?: string };
+  waitUntil?: (promise: Promise<any>) => void;
+}) {
+  const rawParamUsername = String(context.params?.username || '').trim();
+  if (!rawParamUsername) {
+    return Response.json({ error: 'Username is required.' }, { status: 400 });
+  }
+  if (!context.env.DB) {
+    return Response.json({ error: 'Database unavailable.' }, { status: 503 });
+  }
+
+  try {
+    const status = await inspectAuthorGitSyncStatus(context.env, {
+      username: rawParamUsername,
+      authorHandles: [rawParamUsername]
+    });
+
+    const url = new URL(context.request.url);
+    const autoTrigger = url.searchParams.get('autotrig') === '1';
+    if (autoTrigger && status.isRegistered && status.userId && status.pendingQueueCount > 0) {
+      context.waitUntil?.(
+        syncVerifiedAuthorGitPackages(context.env, {
+          userId: status.userId,
+          authorHandles: status.authorHandles,
+          verifiedUsername: status.username || rawParamUsername,
+          maxNewImports: 8,
+          forceRescan: false,
+          rescanAlreadyTracked: false,
+          reportAmbiguousRepos: true
+        })
+      );
+    }
+
+    return Response.json(
+      {
+        success: true,
+        ...status
+      },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
+  } catch (err: any) {
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Failed to inspect author Git sync status.') },
+      { status: 500 }
+    );
+  }
+}
+
 export async function onRequestPost(context: {
   request: Request;
   env: Env;
   params?: { username?: string };
 }) {
-  const cookies = parseCookies(context.request);
-  const sessionToken = cookies['lh_session'];
-  if (!sessionToken) {
-    return Response.json({ error: 'Authentication required to verify and sync Git repositories.' }, { status: 401 });
-  }
-
-  const claims = await verifySessionTokenClaims(sessionToken, context.env.SESSION_SECRET);
-  const userId = claims?.userId || null;
-  if (!userId || !context.env.DB) {
-    return Response.json({ error: 'Invalid or expired session.' }, { status: 401 });
+  if (!context.env.DB) {
+    return Response.json({ error: 'Database unavailable.' }, { status: 503 });
   }
 
   const rawParamUsername = String(context.params?.username || '').trim();
   let forceRescan = false;
+  let rescanAlreadyTracked = false;
   let maxNewImports = 8;
 
   try {
@@ -38,9 +85,11 @@ export async function onRequestPost(context: {
     if (contentType.includes('application/json')) {
       const body = await context.request.json().catch(() => ({})) as {
         force?: boolean;
+        rescanAlreadyTracked?: boolean;
         maxNewImports?: number;
       };
       forceRescan = Boolean(body?.force);
+      rescanAlreadyTracked = Boolean(body?.rescanAlreadyTracked);
       if (typeof body?.maxNewImports === 'number' && Number.isFinite(body.maxNewImports)) {
         maxNewImports = Math.max(1, Math.min(8, Math.floor(body.maxNewImports)));
       }
@@ -49,67 +98,122 @@ export async function onRequestPost(context: {
     // Ignore empty or non-JSON request body
   }
 
+  const cookies = parseCookies(context.request);
+  const sessionToken = cookies['lh_session'];
+  const claims = sessionToken
+    ? await verifySessionTokenClaims(sessionToken, context.env.SESSION_SECRET)
+    : null;
+  const userId = claims?.userId || null;
+
   try {
-    const userRow = await context.env.DB.prepare(
-      `SELECT id, username, role FROM users WHERE id = ?`
-    ).bind(userId).first();
-    const idRows = await context.env.DB.prepare(
-      `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
-    ).bind(userId).all();
+    let userRow: any = null;
+    let identities: Array<{ provider: string; username: string; verified: boolean }> = [];
+    let isAdmin = false;
+    const verifiedHandles = new Set<string>();
 
-    const identities = (idRows?.results || []).map((r: any) => ({
-      provider: String(r?.provider || '').trim().toLowerCase(),
-      username: String(r?.username || '').trim(),
-      verified: Boolean(r?.verified)
-    }));
+    if (userId) {
+      userRow = await context.env.DB.prepare(
+        `SELECT id, username, role FROM users WHERE id = ?`
+      ).bind(userId).first();
+      const idRows = await context.env.DB.prepare(
+        `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
+      ).bind(userId).all();
 
-    const isAdmin = checkIsAdmin(
-      userRow || { username: claims?.username || '', role: claims?.role },
-      identities,
-      context.env.ADMIN_USERS
-    );
+      identities = (idRows?.results || []).map((r: any) => ({
+        provider: String(r?.provider || '').trim().toLowerCase(),
+        username: String(r?.username || '').trim(),
+        verified: Boolean(r?.verified)
+      }));
 
-    const verifiedHandles = new Set<string>(
-      identities
-        .filter((i: any) => i.verified && i.username)
-        .map((i: any) => i.username.toLowerCase())
-    );
-    if (userRow?.username && identities.some((i: any) => i.verified)) {
-      verifiedHandles.add(String(userRow.username).trim().toLowerCase());
-    }
-    if (claims?.verified && claims?.username) {
-      verifiedHandles.add(String(claims.username).trim().toLowerCase());
+      isAdmin = checkIsAdmin(
+        userRow || { username: claims?.username || '', role: claims?.role },
+        identities,
+        context.env.ADMIN_USERS
+      );
+
+      for (const i of identities) {
+        if (i.verified && i.username) {
+          verifiedHandles.add(i.username.toLowerCase());
+        }
+      }
+      if (userRow?.username && identities.some((i: any) => i.verified)) {
+        verifiedHandles.add(String(userRow.username).trim().toLowerCase());
+      }
+      if (claims?.verified && claims?.username) {
+        verifiedHandles.add(String(claims.username).trim().toLowerCase());
+      }
     }
 
     const requestedHandle = rawParamUsername.toLowerCase();
-    if (!isAdmin && requestedHandle && !verifiedHandles.has(requestedHandle)) {
-      return Response.json(
-        { error: 'Forbidden: You can only sync Git repositories for your own verified author account.' },
-        { status: 403 }
-      );
-    }
+    const isOwnHandle = Boolean(requestedHandle && verifiedHandles.has(requestedHandle));
 
-    let targetUserId = userId;
-    const authorHandles = Array.from(verifiedHandles);
-    if (requestedHandle && !authorHandles.includes(requestedHandle)) {
-      authorHandles.push(requestedHandle);
-    }
-
-    // If an admin triggers sync for a specific author username, resolve that author's userId if registered
-    if (isAdmin && requestedHandle && !verifiedHandles.has(requestedHandle)) {
+    // Resolve whether the requested handle belongs to a registered and verified author in D1
+    let registeredTargetUserId: string | null = null;
+    let registeredTargetHandles: string[] = [];
+    if (requestedHandle) {
       const targetIdentity = await context.env.DB.prepare(
         `SELECT user_id FROM user_identities WHERE LOWER(provider_username) = LOWER(?) AND verified = 1 LIMIT 1`
       ).bind(rawParamUsername).first();
       if (targetIdentity?.user_id) {
-        targetUserId = String(targetIdentity.user_id);
+        registeredTargetUserId = String(targetIdentity.user_id);
       } else {
         const targetUser = await context.env.DB.prepare(
           `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
         ).bind(rawParamUsername).first();
         if (targetUser?.id) {
-          targetUserId = String(targetUser.id);
+          const hasVerifiedId = await context.env.DB.prepare(
+            `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+          ).bind(String(targetUser.id)).first();
+          if (hasVerifiedId?.id || String(targetUser.id).startsWith('usr_')) {
+            registeredTargetUserId = String(targetUser.id);
+          }
         }
       }
+
+      if (registeredTargetUserId) {
+        const targetIdRows = await context.env.DB.prepare(
+          `SELECT provider_username FROM user_identities WHERE user_id = ? AND verified = 1`
+        ).bind(registeredTargetUserId).all();
+        const handleSet = new Set<string>([requestedHandle]);
+        for (const r of (targetIdRows?.results || [])) {
+          const h = String(r?.provider_username || '').trim().toLowerCase();
+          if (h) handleSet.add(h);
+        }
+        registeredTargetHandles = Array.from(handleSet);
+      }
+    }
+
+    // If not admin and not own handle:
+    // - If the target author is NOT a registered verified author in D1, require authentication (401) or return 403
+    // - If the target author IS a registered verified author in D1, allow advancing their pending unverified ContentDB Git queue
+    //   (without forceRescan or rescanAlreadyTracked, which remain restricted to the author or Admin)
+    if (!isAdmin && !isOwnHandle) {
+      if (!registeredTargetUserId) {
+        if (!userId) {
+          return Response.json({ error: 'Authentication required to verify and sync Git repositories.' }, { status: 401 });
+        }
+        return Response.json(
+          { error: 'Forbidden: You can only sync Git repositories for your own verified author account.' },
+          { status: 403 }
+        );
+      }
+      // Restrict forceRescan / rescanAlreadyTracked when triggered by a non-owner visitor
+      forceRescan = false;
+      rescanAlreadyTracked = false;
+    }
+
+    if (!userId && !registeredTargetUserId) {
+      return Response.json({ error: 'Authentication required to verify and sync Git repositories.' }, { status: 401 });
+    }
+
+    let targetUserId = userId || registeredTargetUserId!;
+    let authorHandles = Array.from(verifiedHandles);
+
+    if (!isOwnHandle && registeredTargetUserId) {
+      targetUserId = registeredTargetUserId;
+      authorHandles = registeredTargetHandles.length > 0 ? registeredTargetHandles : [requestedHandle];
+    } else if (requestedHandle && !authorHandles.includes(requestedHandle)) {
+      authorHandles.push(requestedHandle);
     }
 
     const syncResult = await syncVerifiedAuthorGitPackages(context.env, {
@@ -118,12 +222,13 @@ export async function onRequestPost(context: {
       verifiedUsername: rawParamUsername || userRow?.username || claims?.username,
       maxNewImports,
       forceRescan,
+      rescanAlreadyTracked,
       reportAmbiguousRepos: true
     });
 
     return Response.json({
-      success: true,
-      ...syncResult
+      ...syncResult,
+      success: syncResult.success !== false
     });
   } catch (err: any) {
     return Response.json(

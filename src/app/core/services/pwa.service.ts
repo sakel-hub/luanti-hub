@@ -4,16 +4,19 @@ import { filter } from 'rxjs/operators';
 import { SettingsService } from './settings.service';
 import { HeroPromotion, LuantiBlogPost } from '../models/package.model';
 import {
+  APP_UPDATE_NOTIFICATION_COOLDOWN_MS,
   NOTIFICATION_BASELINE_SKEW_GRACE_MS,
   NOTIFICATION_MAX_EVENT_AGE_MS,
   NOTIFICATION_PACKAGE_COOLDOWN_MS,
   NotificationPersistenceState,
+  buildAppUpdateRelatedTags,
   buildNewGitPackageNotificationSpec,
   buildPackageUpdateNotificationSpec,
   buildReviewNotificationSpec,
   computePackageVersionStamp,
   deduplicateNotificationPackageCandidates,
   evaluatePackageStampAdvancement,
+  extractNgswBundleSignature,
   mergeNotificationPersistenceStates,
   parseNotificationTimestampMs,
   resolveCanonicalPackageIdentity,
@@ -71,6 +74,7 @@ const PACKAGE_UPDATE_COOLDOWN_MS = NOTIFICATION_PACKAGE_COOLDOWN_MS;
 const RECENT_DISCOVERIES_KEY = 'lh_recent_discoveries_v1';
 const BASELINE_SEEDED_AT_KEY = 'lh_notif_baseline_seeded_at_v1';
 const LAST_BOOT_FETCH_AT_KEY = 'lh_last_boot_fetch_at_v1';
+const LAST_APP_UPDATE_NOTIFIED_AT_KEY = 'lh_last_app_update_notif_at_v1';
 const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 export const AUTO_UPDATED_VERSION_SESSION_KEY = 'lh_pwa_auto_updated_version';
 export const JUST_AUTO_UPDATED_STORAGE_KEY = 'lh_pwa_just_auto_updated';
@@ -426,6 +430,8 @@ export class PwaService {
   private syncBroadcastChannel: BroadcastChannel | null = null;
   private latestDetectedUpdateVersion: string | null = null;
   private bootManifestSignature: string | null = null;
+  private appUpdateNotifiedInSession = false;
+  private lastParsedManifestInfo: ReturnType<typeof extractNgswBundleSignature> = null;
   private lastNotificationClickSig = '';
   private lastNotificationClickAt = 0;
   private navHistoryCursor = 0;
@@ -547,6 +553,8 @@ export class PwaService {
     const recentDiscoveredPackages = this.readRecentDiscoveriesFromStorage();
     const baselineSeededAt = Number(localStorage.getItem(BASELINE_SEEDED_AT_KEY) || 0) || 0;
     const lastBootFetchAt = Number(localStorage.getItem(LAST_BOOT_FETCH_AT_KEY) || 0) || 0;
+    const lastAppUpdateNotifiedAt =
+      Number(localStorage.getItem(LAST_APP_UPDATE_NOTIFIED_AT_KEY) || 0) || 0;
     return {
       prefs,
       seenTags: parseJsonSafe(SEEN_NOTIFICATION_TAGS_KEY, []),
@@ -561,7 +569,8 @@ export class PwaService {
       recentDiscoveredPackages,
       ...(this.bootManifestSignature ? { bootManifestSignature: this.bootManifestSignature } : {}),
       ...(baselineSeededAt > 0 ? { baselineSeededAt } : {}),
-      ...(lastBootFetchAt > 0 ? { lastBootFetchAt } : {})
+      ...(lastBootFetchAt > 0 ? { lastBootFetchAt } : {}),
+      ...(lastAppUpdateNotifiedAt > 0 ? { lastAppUpdateNotifiedAt } : {})
     };
   }
 
@@ -612,6 +621,9 @@ export class PwaService {
           }
           if (merged.lastBootFetchAt && merged.lastBootFetchAt > 0) {
             entries['lastBootFetchAt'] = merged.lastBootFetchAt;
+          }
+          if (merged.lastAppUpdateNotifiedAt && merged.lastAppUpdateNotifiedAt > 0) {
+            entries['lastAppUpdateNotifiedAt'] = merged.lastAppUpdateNotifiedAt;
           }
           await writeNotifStateEntries(entries);
         } catch {
@@ -732,6 +744,19 @@ export class PwaService {
           localStorage.setItem(LAST_BOOT_FETCH_AT_KEY, String(merged.lastBootFetchAt));
         } catch {}
       }
+
+      if (merged.lastAppUpdateNotifiedAt && merged.lastAppUpdateNotifiedAt > 0) {
+        try {
+          localStorage.setItem(
+            LAST_APP_UPDATE_NOTIFIED_AT_KEY,
+            String(merged.lastAppUpdateNotifiedAt)
+          );
+        } catch {}
+      }
+
+      if (merged.bootManifestSignature) {
+        this.bootManifestSignature = merged.bootManifestSignature;
+      }
     } catch {
       // Ignore IndexedDB reconciliation errors
     }
@@ -804,10 +829,21 @@ export class PwaService {
           ts: Number(data.ts || Date.now())
         });
       } else if (data.type === 'LH_APP_UPDATE_DETECTED') {
-        if (typeof data.tag === 'string' && data.tag) {
-          this.markNotificationTagSeen(data.tag, false);
-        }
         const sig = String(data.signature || 'ready').trim();
+        if (sig && sig !== 'ready' && sig.includes('|')) {
+          this.bootManifestSignature = sig;
+        }
+        const relatedTags = buildAppUpdateRelatedTags(sig, this.lastParsedManifestInfo);
+        if (typeof data.tag === 'string' && data.tag) {
+          relatedTags.push(data.tag);
+        }
+        for (const t of relatedTags) {
+          this.markNotificationTagSeen(t, false);
+        }
+        if (data.notified) {
+          this.appUpdateNotifiedInSession = true;
+          this.recordAppUpdateNotifiedAt();
+        }
         this.latestDetectedUpdateVersion = sig;
         this.notifyAppUpdateAvailable(sig, { skipNativeNotification: Boolean(data.notified) });
       } else if (data.type === 'LH_OUTBOX_SYNC_COMPLETED') {
@@ -1115,16 +1151,69 @@ export class PwaService {
     }
   }
 
+  private recordAppUpdateNotifiedAt(nowMs = Date.now()): void {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(LAST_APP_UPDATE_NOTIFIED_AT_KEY, String(nowMs));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  private isWithinAppUpdateNotificationCooldown(nowMs = Date.now()): boolean {
+    if (this.appUpdateNotifiedInSession) return true;
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        const autoUpdatedVer = sessionStorage.getItem(AUTO_UPDATED_VERSION_SESSION_KEY);
+        if (autoUpdatedVer && autoUpdatedVer.trim()) {
+          return true;
+        }
+      }
+    } catch {
+      // ignore sessionStorage errors
+    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const lastTs = Number(localStorage.getItem(LAST_APP_UPDATE_NOTIFIED_AT_KEY) || 0);
+        if (
+          Number.isFinite(lastTs) &&
+          lastTs > 0 &&
+          nowMs - lastTs < APP_UPDATE_NOTIFICATION_COOLDOWN_MS
+        ) {
+          return true;
+        }
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+    return false;
+  }
+
   private notifyAppUpdateAvailable(
     versionIdentifier?: string,
     options?: { skipNativeNotification?: boolean }
   ): void {
+    const alreadyUpdateAvailable = this.updateAvailable();
     this.updateAvailable.set(true);
     const versionKey = String(versionIdentifier || this.latestDetectedUpdateVersion || 'ready').trim();
     this.latestDetectedUpdateVersion = versionKey;
 
-    if (!options?.skipNativeNotification && this.settingsService.notifyAppUpdates()) {
-      const tag = versionKey ? `lh-app-update-${versionKey}` : 'lh-app-update-notif';
+    const tag = versionKey ? `lh-app-update-${versionKey}` : 'lh-app-update-notif';
+    const relatedTags = buildAppUpdateRelatedTags(versionKey, this.lastParsedManifestInfo);
+    const alreadySeenAnyRelatedTag = relatedTags.some(t => this.hasSeenNotificationTag(t));
+    const withinCooldown = this.isWithinAppUpdateNotificationCooldown();
+
+    const shouldSkipNotification =
+      Boolean(options?.skipNativeNotification) ||
+      alreadyUpdateAvailable ||
+      this.appUpdateNotifiedInSession ||
+      alreadySeenAnyRelatedTag ||
+      withinCooldown;
+
+    if (!shouldSkipNotification && this.settingsService.notifyAppUpdates()) {
+      this.appUpdateNotifiedInSession = true;
+      this.recordAppUpdateNotifiedAt();
       this.sendNativeNotification({
         title: 'LuantiHub Updated',
         body: 'LuantiHub was updated automatically in the background to the latest version.',
@@ -1133,6 +1222,17 @@ export class PwaService {
         variant: 'app_update',
         data: { signature: versionKey }
       });
+      for (const t of relatedTags) {
+        if (t !== tag) {
+          this.markNotificationTagSeen(t, false);
+        }
+      }
+      this.syncNotificationStateToIndexedDb().catch(() => {});
+    } else {
+      for (const t of relatedTags) {
+        this.markNotificationTagSeen(t, false);
+      }
+      this.syncNotificationStateToIndexedDb().catch(() => {});
     }
 
     this.activateUpdate(false, versionKey).catch(() => {});
@@ -1144,8 +1244,21 @@ export class PwaService {
       this.swUpdate.versionUpdates
         .pipe(filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'))
         .subscribe((evt) => {
-          const hash = (evt as any).latestVersion?.hash || this.latestDetectedUpdateVersion || Date.now();
-          this.notifyAppUpdateAvailable(String(hash));
+          const alreadyDetected =
+            this.updateAvailable() ||
+            Boolean(this.latestDetectedUpdateVersion) ||
+            this.isWithinAppUpdateNotificationCooldown();
+          const appDataBuildTs = String(
+            (evt as any).latestVersion?.appData?.buildTimestamp || ''
+          ).trim();
+          const hash =
+            this.latestDetectedUpdateVersion ||
+            appDataBuildTs ||
+            (evt as any).latestVersion?.hash ||
+            Date.now();
+          this.notifyAppUpdateAvailable(String(hash), {
+            skipNativeNotification: alreadyDetected
+          });
         });
 
       if ((this.swUpdate as any).unrecoverable) {
@@ -3098,25 +3211,18 @@ export class PwaService {
       });
       if (!res || !res.ok) return false;
       const manifest = await res.json();
-      const appGroup = Array.isArray(manifest?.assetGroups)
-        ? manifest.assetGroups.find((g: any) => g.name === 'app')
-        : null;
-      const urls: string[] = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
-
-      // 1. Compare main-*.js bundle hash against DOM <script src>
-      const remoteMain = urls.find((u: string) => /\/main-[A-Za-z0-9]+\.js$/.test(u));
-      const remoteStyles = urls.find((u: string) => /\/styles-[A-Za-z0-9]+\.css$/.test(u));
-      const remoteBuildTs = String(
-        manifest?.appData?.buildTimestamp ?? manifest?.timestamp ?? ''
-      ).trim();
-      const indexHash = manifest?.hashTable?.['/index.html'] || '';
-      const customSwHash = manifest?.hashTable?.['/custom-sw.js'] || '';
-      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+      const parsed = extractNgswBundleSignature(manifest);
+      this.lastParsedManifestInfo = parsed;
+      const remoteMain = parsed?.remoteMain || '';
+      const remoteStyles = parsed?.remoteStyles || '';
+      const remoteBuildTs = parsed?.remoteBuildTs || '';
+      const indexHash = parsed?.indexHash || '';
+      const signature = parsed?.signature || '||||';
 
       if (remoteMain) {
         const scripts = Array.from(document.querySelectorAll('script[src]'))
           .map(s => s.getAttribute('src') || '');
-        const currentMain = scripts.find(src => /main-[A-Za-z0-9]+\.js/.test(src));
+        const currentMain = scripts.find(src => /main-[A-Za-z0-9_-]+\.js/.test(src));
         if (currentMain) {
           const remoteFilename = remoteMain.replace(/^\//, '');
           const currentFilename = currentMain.split('/').pop() || '';
@@ -3135,7 +3241,7 @@ export class PwaService {
       if (remoteStyles) {
         const links = Array.from(document.querySelectorAll('link[rel="stylesheet"][href]'))
           .map(l => l.getAttribute('href') || '');
-        const currentStyles = links.find(href => /styles-[A-Za-z0-9]+\.css/.test(href));
+        const currentStyles = links.find(href => /styles-[A-Za-z0-9_-]+\.css/.test(href));
         if (currentStyles) {
           const remoteStyleFile = remoteStyles.replace(/^\//, '');
           const currentStyleFile = currentStyles.split('/').pop()?.split('?')[0] || '';
@@ -3182,7 +3288,7 @@ export class PwaService {
           this.bootManifestSignature = signature;
           this.syncNotificationStateToIndexedDb().catch(() => {});
           this.latestDetectedUpdateVersion =
-            remoteBuildTs || indexHash || String(manifest?.timestamp || Date.now());
+            parsed?.versionKey || remoteBuildTs || indexHash || String(manifest?.timestamp || Date.now());
           return true;
         }
       }

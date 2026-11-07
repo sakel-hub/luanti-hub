@@ -3,9 +3,14 @@ import {
   safeDecodeParam,
   readEdgeCacheJson,
   writeEdgeCacheJson,
+  deleteEdgeCacheKeys,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
+import {
+  inspectAuthorGitSyncStatus,
+  syncVerifiedAuthorGitPackages
+} from '../lib/author-git-sync';
 
 interface Env {
   DB?: any;
@@ -18,6 +23,7 @@ export async function onRequestGet(context: {
   request: Request;
   env: Env;
   params: { username: string };
+  waitUntil?: (promise: Promise<any>) => void;
 }) {
   const rawUsername = safeDecodeParam(context.params?.username || '').trim();
   if (!rawUsername) {
@@ -42,18 +48,35 @@ export async function onRequestGet(context: {
     }
   }
 
-  if (!noCache) {
-    const cached = await readEdgeCacheJson<any>(cacheKey);
-    if (cached) {
-      return Response.json(cached, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=60, s-maxage=120, stale-while-revalidate=300',
-          'X-LuantiHub-Cache': 'HIT-EDGE'
+    if (!noCache) {
+      const cached = await readEdgeCacheJson<any>(cacheKey);
+      if (cached) {
+        const cachedPending = Number(cached?.author?.git_sync?.pendingQueueCount || 0);
+        if (cached?.author?.is_registered && cachedPending > 0 && context.env.DB && context.waitUntil) {
+          context.waitUntil(
+            syncVerifiedAuthorGitPackages(context.env, {
+              authorHandles: [lowerUsername],
+              verifiedUsername: String(cached.author.username || rawUsername),
+              maxNewImports: 6
+            })
+              .then(res => {
+                if (res && (res.newlyImportedCount > 0 || res.flaggedForReviewCount > 0)) {
+                  return deleteEdgeCacheKeys([cacheKey]);
+                }
+                return null;
+              })
+              .catch(() => null)
+          );
         }
-      });
+        return Response.json(cached, {
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=60, s-maxage=120, stale-while-revalidate=300',
+            'X-LuantiHub-Cache': 'HIT-EDGE'
+          }
+        });
+      }
     }
-  }
 
   // Query ContentDB User API (`GET /api/users/<username>/`) in parallel with D1 lookup
   const cdbUserPromise = fetchUpstreamJsonCached<any>(
@@ -221,6 +244,58 @@ export async function onRequestGet(context: {
       identities.find(i => i.avatar_url)?.avatar_url ||
       (githubIdentity ? `https://github.com/${githubIdentity.username}.png` : '');
 
+    let gitSyncSummary: {
+      totalContentDbPackages: number;
+      alreadySyncedCount: number;
+      pendingQueueCount: number;
+      skippedNoRepoCount: number;
+      brokenReportCount: number;
+      conflictCount: number;
+    } | undefined;
+
+    if (userRow?.id) {
+      try {
+        const verifiedAuthorHandles = Array.from(
+          new Set<string>([
+            String(userRow.username || rawUsername).trim().toLowerCase(),
+            ...identities.filter(i => i.verified && i.username).map(i => i.username.trim().toLowerCase())
+          ].filter(Boolean))
+        );
+        const gitStatus = await inspectAuthorGitSyncStatus(context.env, {
+          userId: String(userRow.id),
+          username: String(userRow.username || rawUsername),
+          authorHandles: verifiedAuthorHandles
+        });
+        gitSyncSummary = {
+          totalContentDbPackages: gitStatus.totalContentDbPackages,
+          alreadySyncedCount: gitStatus.alreadySyncedCount,
+          pendingQueueCount: gitStatus.pendingQueueCount,
+          skippedNoRepoCount: gitStatus.skippedNoRepoCount,
+          brokenReportCount: gitStatus.brokenReportCount,
+          conflictCount: gitStatus.conflictCount
+        };
+        if (gitStatus.pendingQueueCount > 0 && context.waitUntil) {
+          context.waitUntil(
+            syncVerifiedAuthorGitPackages(context.env, {
+              userId: String(userRow.id),
+              authorHandles: gitStatus.authorHandles,
+              verifiedUsername: String(userRow.username || rawUsername),
+              maxNewImports: 6
+            })
+              .then(res => {
+                if (res && (res.newlyImportedCount > 0 || res.flaggedForReviewCount > 0)) {
+                  return deleteEdgeCacheKeys([cacheKey]);
+                }
+                return null;
+              })
+              .catch(() => null)
+          );
+        }
+      } catch {
+        // Non-fatal if ContentDB or D1 status inspection fails
+      }
+    }
+
     const payload = {
       author: {
         username: userRow?.username || cdbUser?.username || rawUsername,
@@ -234,11 +309,14 @@ export async function onRequestGet(context: {
         contentdb_url: cdbUser?.links?.profile || (cdbUser?.username ? `https://content.luanti.org/users/${encodeURIComponent(cdbUser.username)}/` : undefined),
         created_at: userRow?.created_at || undefined,
         is_registered: Boolean(userRow?.id),
-        identities
+        identities,
+        ...(gitSyncSummary ? { git_sync: gitSyncSummary } : {})
       }
     };
 
-    await writeEdgeCacheJson(cacheKey, payload, 120);
+    // Use shorter TTL (30s) while background Git sync still has pending packages in the queue
+    const ttlSeconds = gitSyncSummary && gitSyncSummary.pendingQueueCount > 0 ? 30 : 120;
+    await writeEdgeCacheJson(cacheKey, payload, ttlSeconds);
 
     return Response.json(payload, {
       headers: {

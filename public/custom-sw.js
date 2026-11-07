@@ -258,6 +258,95 @@
   const NOTIFICATION_PACKAGE_COOLDOWN_MS = 12 * 3600 * 1000; // 12 hours per-package update cooldown
   const NOTIFICATION_BASELINE_SKEW_GRACE_MS = 15 * 60 * 1000; // 15 minutes grace for clock skew on newly seeded baselines
   const MIN_SW_BOOT_FETCH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes minimum interval between SW boot catalog fetches
+  const APP_UPDATE_NOTIFICATION_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes cooldown between app update OS notifications
+  /**
+   * Extracts a canonical bundle signature and version key from `/ngsw.json` so foreground (`PwaService`)
+   * and background (`custom-sw.js`) always compute identical signatures and deduplication tags.
+   */
+  function extractNgswBundleSignature(manifest) {
+      if (!manifest || typeof manifest !== 'object')
+          return null;
+      const hashTable = manifest.hashTable && typeof manifest.hashTable === 'object' ? manifest.hashTable : {};
+      const indexHash = String(hashTable['/index.html'] || hashTable['index.html'] || '').trim();
+      const customSwHash = String(hashTable['/custom-sw.js'] || hashTable['custom-sw.js'] || '').trim();
+      const remoteBuildTs = String(manifest?.appData?.buildTimestamp ??
+          (typeof manifest.timestamp === 'number' || typeof manifest.timestamp === 'string'
+              ? manifest.timestamp
+              : '')).trim();
+      let remoteMain = '';
+      let remoteStyles = '';
+      if (Array.isArray(manifest.assetGroups)) {
+          const appGroup = manifest.assetGroups.find((g) => g && g.name === 'app') || manifest.assetGroups[0];
+          const urls = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
+          remoteMain = urls.find((u) => /\/main-[A-Za-z0-9_-]+\.js$/.test(u)) || '';
+          remoteStyles = urls.find((u) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(u)) || '';
+      }
+      if (!remoteMain && !remoteStyles) {
+          const keys = Object.keys(hashTable).sort();
+          remoteMain = keys.find((k) => /\/main-[A-Za-z0-9_-]+\.js$/.test(k)) || '';
+          remoteStyles = keys.find((k) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(k)) || '';
+      }
+      if (!remoteMain && !remoteStyles && !indexHash && !remoteBuildTs) {
+          return null;
+      }
+      const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+      const cleanMain = remoteMain ? remoteMain.replace(/^\//, '') : '';
+      const cleanStyles = remoteStyles ? remoteStyles.replace(/^\//, '') : '';
+      const versionKey = cleanMain || remoteBuildTs || cleanStyles || indexHash || signature.slice(0, 48);
+      return {
+          signature,
+          versionKey,
+          remoteMain,
+          remoteStyles,
+          remoteBuildTs,
+          indexHash,
+          customSwHash
+      };
+  }
+  /**
+   * Builds all related `lh-app-update-*` deduplication tags for a detected build
+   * (main bundle filename, styles filename, build timestamp, and full/sliced manifest signature)
+   * so notifications fired by one detection path are recognized as already seen by all other paths.
+   */
+  function buildAppUpdateRelatedTags(versionOrSig, parsedManifest) {
+      const tags = new Set();
+      const trimmed = String(versionOrSig || '').trim();
+      if (trimmed) {
+          tags.add(`lh-app-update-${trimmed}`);
+          tags.add(`lh-app-update-${trimmed.slice(0, 48)}`);
+          if (trimmed.includes('|')) {
+              const parts = trimmed.split('|');
+              const mainPart = (parts[0] || '').replace(/^\//, '').trim();
+              const stylesPart = (parts[1] || '').replace(/^\//, '').trim();
+              const buildTsPart = (parts[4] || '').trim();
+              if (mainPart)
+                  tags.add(`lh-app-update-${mainPart}`);
+              if (stylesPart)
+                  tags.add(`lh-app-update-${stylesPart}`);
+              if (buildTsPart)
+                  tags.add(`lh-app-update-${buildTsPart}`);
+          }
+      }
+      if (parsedManifest) {
+          if (parsedManifest.versionKey) {
+              tags.add(`lh-app-update-${parsedManifest.versionKey}`);
+          }
+          if (parsedManifest.signature) {
+              tags.add(`lh-app-update-${parsedManifest.signature}`);
+              tags.add(`lh-app-update-${parsedManifest.signature.slice(0, 48)}`);
+          }
+          const cleanMain = (parsedManifest.remoteMain || '').replace(/^\//, '').trim();
+          if (cleanMain)
+              tags.add(`lh-app-update-${cleanMain}`);
+          const cleanStyles = (parsedManifest.remoteStyles || '').replace(/^\//, '').trim();
+          if (cleanStyles)
+              tags.add(`lh-app-update-${cleanStyles}`);
+          if (parsedManifest.remoteBuildTs) {
+              tags.add(`lh-app-update-${parsedManifest.remoteBuildTs}`);
+          }
+      }
+      return Array.from(tags);
+  }
   function normalizeReleaseStampPart(rawRel) {
       const trimmed = String(rawRel ?? '').trim();
       if (!trimmed || trimmed === '0')
@@ -790,6 +879,23 @@
       const rSeed = Number(remoteState.baselineSeededAt || 0);
       const baselineSeededAt = lSeed > 0 && rSeed > 0 ? Math.min(lSeed, rSeed) : Math.max(lSeed, rSeed, 0);
       const lastBootFetchAt = Math.max(Number(localState.lastBootFetchAt || 0), Number(remoteState.lastBootFetchAt || 0));
+      const lastAppUpdateNotifiedAt = Math.max(Number(localState.lastAppUpdateNotifiedAt || 0), Number(remoteState.lastAppUpdateNotifiedAt || 0));
+      const localSig = String(localState.bootManifestSignature || '').trim();
+      const remoteSig = String(remoteState.bootManifestSignature || '').trim();
+      let mergedBootSig = localSig || remoteSig || '';
+      if (localSig && remoteSig && localSig !== remoteSig) {
+          const localBuildTs = Number(localSig.split('|')[4] || 0);
+          const remoteBuildTs = Number(remoteSig.split('|')[4] || 0);
+          if (Number.isFinite(remoteBuildTs) && Number.isFinite(localBuildTs) && remoteBuildTs > localBuildTs) {
+              mergedBootSig = remoteSig;
+          }
+          else if (Number.isFinite(localBuildTs) && Number.isFinite(remoteBuildTs) && localBuildTs > remoteBuildTs) {
+              mergedBootSig = localSig;
+          }
+          else {
+              mergedBootSig = remoteSig;
+          }
+      }
       return {
           prefs: localState.prefs || remoteState.prefs || null,
           seenTags,
@@ -802,9 +908,10 @@
           packageUpdateCooldown: mergedCooldown,
           packageUpdateCooldowns: mergedCooldown,
           recentDiscoveredPackages: mergedRecentDiscovered,
-          bootManifestSignature: localState.bootManifestSignature || remoteState.bootManifestSignature || '',
+          bootManifestSignature: mergedBootSig,
           baselineSeededAt,
-          lastBootFetchAt
+          lastBootFetchAt,
+          ...(lastAppUpdateNotifiedAt > 0 ? { lastAppUpdateNotifiedAt } : {})
       };
   }
   /**
@@ -1090,33 +1197,8 @@
   // === END SHARED NOTIF ENGINE ===
 
   function extractNgswBundleSignatureInSw(manifest) {
-    if (!manifest || typeof manifest !== 'object') return null;
-    const hashTable = manifest.hashTable && typeof manifest.hashTable === 'object' ? manifest.hashTable : {};
-    const indexHash = hashTable['/index.html'] || hashTable['index.html'] || '';
-    const customSwHash = hashTable['/custom-sw.js'] || hashTable['custom-sw.js'] || '';
-    const remoteBuildTs = String(
-      (manifest.appData && manifest.appData.buildTimestamp) ||
-      (typeof manifest.timestamp === 'number' ? manifest.timestamp : '')
-    ).trim();
-
-    let remoteMain = '';
-    let remoteStyles = '';
-    if (Array.isArray(manifest.assetGroups)) {
-      const appGroup = manifest.assetGroups.find((g) => g && g.name === 'app') || manifest.assetGroups[0];
-      const urls = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
-      remoteMain = urls.find((u) => /\/main-[A-Za-z0-9_-]+\.js$/.test(u)) || '';
-      remoteStyles = urls.find((u) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(u)) || '';
-    }
-    if (!remoteMain && !remoteStyles) {
-      const keys = Object.keys(hashTable).sort();
-      remoteMain = keys.find((k) => /\/main-[A-Za-z0-9_-]+\.js$/.test(k)) || '';
-      remoteStyles = keys.find((k) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(k)) || '';
-    }
-
-    if (remoteMain || indexHash || remoteBuildTs) {
-      return `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
-    }
-    return null;
+    const parsed = extractNgswBundleSignature(manifest);
+    return parsed ? parsed.signature : null;
   }
 
   /**
@@ -1139,7 +1221,8 @@
       });
       if (!res || !res.ok) return false;
       const manifest = await res.json();
-      const remoteSig = extractNgswBundleSignatureInSw(manifest);
+      const parsed = extractNgswBundleSignature(manifest);
+      const remoteSig = parsed ? parsed.signature : null;
       if (!remoteSig) return false;
 
       if (!baselineSig) {
@@ -1155,16 +1238,33 @@
         stateUpdates.bootManifestSignature = remoteSig;
       }
 
-      const updateTag = `lh-app-update-${remoteSig.slice(0, 48)}`;
-      const fired = canFireOsNotif
-        ? await fireSwNotif('LuantiHub Updated', {
-            body: 'LuantiHub was updated automatically in the background to the latest version.',
-            icon: '/icons/notif-app-update.png',
-            badge: '/icons/icon-72x72.png',
-            tag: updateTag,
-            data: { signature: remoteSig }
-          })
-        : false;
+      const canonicalKey = (parsed && parsed.versionKey) || remoteSig.slice(0, 48);
+      const updateTag = `lh-app-update-${canonicalKey}`;
+      const relatedTags = buildAppUpdateRelatedTags(canonicalKey, parsed);
+      const seenList = Array.isArray(state.seenTags) ? state.seenTags : [];
+      const alreadySeenRelated = relatedTags.some((t) => seenList.includes(t));
+      const lastUpdateNotifAt = Number(state.lastAppUpdateNotifiedAt || 0);
+      const withinCooldown =
+        lastUpdateNotifAt > 0 && Date.now() - lastUpdateNotifAt < APP_UPDATE_NOTIFICATION_COOLDOWN_MS;
+
+      const fired =
+        canFireOsNotif && !alreadySeenRelated && !withinCooldown
+          ? await fireSwNotif('LuantiHub Updated', {
+              body: 'LuantiHub was updated automatically in the background to the latest version.',
+              icon: '/icons/notif-app-update.png',
+              badge: '/icons/icon-72x72.png',
+              tag: updateTag,
+              data: {
+                signature: remoteSig,
+                versionKey: canonicalKey,
+                relatedTags
+              }
+            })
+          : false;
+
+      if (fired && stateUpdates && typeof stateUpdates === 'object') {
+        stateUpdates.lastAppUpdateNotifiedAt = Date.now();
+      }
 
       try {
         if (self.registration && typeof self.registration.update === 'function') {
@@ -1180,6 +1280,7 @@
       await broadcastSyncMessage({
         type: 'LH_APP_UPDATE_DETECTED',
         signature: remoteSig,
+        versionKey: canonicalKey,
         tag: updateTag,
         notified: fired,
         ts: Date.now()
@@ -1216,6 +1317,14 @@
         if (!options || !options.tag || seenTagsSet.has(options.tag)) return false;
         seenTagsSet.add(options.tag);
         seenTagsList.push(options.tag);
+        if (options.data && Array.isArray(options.data.relatedTags)) {
+          for (const relTag of options.data.relatedTags) {
+            if (relTag && !seenTagsSet.has(relTag)) {
+              seenTagsSet.add(relTag);
+              seenTagsList.push(relTag);
+            }
+          }
+        }
         notifiedTags.push(options.tag);
         try {
           await self.registration.showNotification(title, options);

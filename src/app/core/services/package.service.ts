@@ -9448,10 +9448,9 @@ export class PackageService {
 
     if (isSelf && currentUser) {
       this.authorProfileCache.set(lower, initialProfile);
-      return;
+    } else {
+      this._isLoadingAuthorProfile.set(true);
     }
-
-    this._isLoadingAuthorProfile.set(true);
     try {
       const isLocalhost =
         typeof window !== 'undefined' &&
@@ -9536,20 +9535,21 @@ export class PackageService {
           (ghIdentity ? `https://github.com/${ghIdentity.username}.png` : '');
 
         const mergedProfile: PublicAuthorProfile = {
-          username: apiAuthor?.username || cdbUser?.username || clean,
-          display_name: cdbUser?.display_name || apiAuthor?.display_name || apiAuthor?.username || cdbUser?.username || clean,
-          avatar_url: resolvedAvatar,
-          bio: apiAuthor?.bio || '',
+          username: apiAuthor?.username || cdbUser?.username || initialProfile.username || clean,
+          display_name: cdbUser?.display_name || apiAuthor?.display_name || initialProfile.display_name || apiAuthor?.username || cdbUser?.username || clean,
+          avatar_url: resolvedAvatar || initialProfile.avatar_url,
+          bio: apiAuthor?.bio || initialProfile.bio || '',
           rank: cdbUser?.rank || apiAuthor?.rank || undefined,
           website_url: cdbUser?.website_url || apiAuthor?.website_url || undefined,
           forums_username: cdbUser?.connections?.forums || apiAuthor?.forums_username || undefined,
-          created_at: apiAuthor?.created_at,
-          is_registered: Boolean(apiAuthor?.is_registered),
-          identities: mergedIdentities,
+          created_at: apiAuthor?.created_at || initialProfile.created_at,
+          is_registered: Boolean(apiAuthor?.is_registered || initialProfile.is_registered),
+          identities: mergedIdentities.length > 0 ? mergedIdentities : initialProfile.identities,
           donate_url: latestDonate,
           contentdb_url: cdbUser?.links?.profile || ((latestOfficial || hasOfficial)
             ? `https://content.luanti.org/users/${encodeURIComponent(cdbUser?.username || canonicalCdbAuthor)}/`
-            : undefined)
+            : undefined),
+          ...(apiAuthor?.git_sync ? { git_sync: apiAuthor.git_sync } : {})
         };
         this.authorProfileCache.set(lower, mergedProfile);
         this._activeAuthorProfile.set(mergedProfile);
@@ -9565,6 +9565,21 @@ export class PackageService {
       if (this._activeAuthorUsername()?.toLowerCase() === lower) {
         this._isLoadingAuthorProfile.set(false);
       }
+    }
+  }
+
+  updateActiveAuthorGitSync(gitSync: PublicAuthorProfile['git_sync']): void {
+    if (!gitSync) return;
+    const curr = this._activeAuthorProfile();
+    if (!curr) return;
+    const updated: PublicAuthorProfile = {
+      ...curr,
+      git_sync: gitSync
+    };
+    this._activeAuthorProfile.set(updated);
+    const key = String(curr.username || '').trim().toLowerCase();
+    if (key) {
+      this.authorProfileCache.set(key, updated);
     }
   }
 

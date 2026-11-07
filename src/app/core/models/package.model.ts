@@ -245,6 +245,15 @@ export interface UserIdentity {
   verified?: boolean;
 }
 
+export interface AuthorGitSyncSummary {
+  totalContentDbPackages: number;
+  alreadySyncedCount: number;
+  pendingQueueCount: number;
+  skippedNoRepoCount: number;
+  brokenReportCount: number;
+  conflictCount?: number;
+}
+
 export interface PublicAuthorProfile {
   username: string;
   display_name: string;
@@ -258,6 +267,7 @@ export interface PublicAuthorProfile {
   identities: UserIdentity[];
   donate_url?: string;
   contentdb_url?: string;
+  git_sync?: AuthorGitSyncSummary;
 }
 
 export interface AuthUser {
@@ -326,6 +336,10 @@ export interface GitAuditReport {
     license: string;
     media_license: string;
     min_minetest_version: string;
+    max_minetest_version?: string;
+    supported_games?: string[];
+    unsupported_games?: string[];
+    tags?: string[];
     dependencies: string[];
     optional_dependencies: string[];
     provider: GitProvider;

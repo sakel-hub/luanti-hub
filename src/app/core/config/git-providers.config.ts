@@ -157,8 +157,22 @@ export function detectGitProviderFromUrl(
         repo: singleRepo
       };
     }
-    const owner = parts.length > 2 && parts[0].toLowerCase() === 'git' ? parts[1] : parts[0];
-    const repo = (parts.length > 2 && parts[0].toLowerCase() === 'git' ? parts[2] : parts[1]).replace(/\.git$/i, '');
+    const isGitlabHost =
+      host.includes('gitlab') || host === 'framagit.org' || host === 'salsa.debian.org';
+    const isSubpathCustomGit =
+      !isGitlabHost && parts.length > 2 && parts[0].toLowerCase() === 'git';
+    const owner = isGitlabHost && parts.length > 2
+      ? parts.slice(0, -1).join('/')
+      : isSubpathCustomGit
+        ? parts[1]
+        : parts[0];
+    const repo = (
+      isGitlabHost && parts.length > 2
+        ? parts[parts.length - 1]
+        : isSubpathCustomGit
+          ? parts[2]
+          : parts[1]
+    ).replace(/\.git$/i, '');
 
     for (const id of ALL_GIT_PROVIDER_IDS) {
       if (id === 'custom') continue;

@@ -1251,6 +1251,46 @@ export class AuthService {
     this.syncAuthorGitProgress.set(null);
   }
 
+  async fetchAuthorGitSyncStatus(
+    username: string
+  ): Promise<{
+    success: boolean;
+    isRegistered: boolean;
+    userId: string | null;
+    username: string;
+    authorHandles: string[];
+    totalContentDbPackages: number;
+    alreadySyncedCount: number;
+    pendingQueueCount: number;
+    skippedNoRepoCount: number;
+    brokenReportCount: number;
+    conflictCount: number;
+    packages?: Array<{
+      id: string;
+      title: string;
+      repoUrl: string;
+      state: 'synced' | 'pending_queue' | 'skipped_no_repo' | 'broken_report' | 'conflict';
+      reason?: string;
+      provider?: string;
+    }>;
+  } | null> {
+    const clean = (username || '').trim();
+    if (!clean) return null;
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(clean)}/sync-contentdb`, {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin'
+      });
+      if (!res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
+        return null;
+      }
+      const data = await res.json().catch(() => null);
+      return data && data.success ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
   async syncAuthorGitPackages(
     username?: string,
     candidatePackageIds?: string[],
@@ -1302,14 +1342,14 @@ export class AuthService {
     const syncedIds = new Set<string>();
 
     try {
-      const maxBatches = 6;
+      const maxBatches = 15;
       for (let batch = 0; batch < maxBatches; batch++) {
         const res = await fetch(`/api/users/${encodeURIComponent(targetUsername)}/sync-contentdb`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
           body: JSON.stringify({
-            force: batch === 0 ? force : true,
+            force: batch === 0 ? force : false,
             maxNewImports: 8
           })
         });
@@ -1429,11 +1469,13 @@ export class AuthService {
       }
 
       if (totalSynced > 0 || totalFailed > 0 || totalConflict > 0) {
-        this.clearAuthCache();
-        await this.initAuth(true);
-        await this.fetchMyReports(true);
-        if (this.isAdmin()) {
-          await this.fetchModerationQueue(true);
+        if (this._currentUser()) {
+          this.clearAuthCache();
+          await this.initAuth(true);
+          await this.fetchMyReports(true);
+          if (this.isAdmin()) {
+            await this.fetchModerationQueue(true);
+          }
         }
         if (totalSynced > 0) {
           this.pwaService.showToast('profile.syncGitSuccessToast');

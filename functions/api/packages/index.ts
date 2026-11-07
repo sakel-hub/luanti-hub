@@ -775,14 +775,40 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v10_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v11_${encodeURIComponent(normalizedCatalogKey)}`;
 
+  const lowerQ = q.toLowerCase();
+  const lowerAuthor = author.toLowerCase();
   const buildInGameClientCatalogResponse = (packagesList: any[]): any => {
     const filtered = (Array.isArray(packagesList) ? packagesList : []).filter((pkg: any) => {
       if (!pkg || !pkg.author || !pkg.name) return false;
       const pkgType = pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod');
       if (sortedUniqueTypes.length > 0 && !isAllStandardTypes && !sortedUniqueTypes.includes(pkgType)) {
         return false;
+      }
+      if (lowerAuthor) {
+        const pkgAuthorLower = String(pkg.author || '').toLowerCase();
+        const aliasAuthorMatch = Array.isArray(pkg.aliases)
+          ? pkg.aliases.some((al: string) => String(al || '').toLowerCase().startsWith(`${lowerAuthor}/`))
+          : false;
+        if (pkgAuthorLower !== lowerAuthor && !aliasAuthorMatch) {
+          return false;
+        }
+      }
+      if (lowerQ) {
+        const haystack = [
+          pkg.name,
+          pkg.title,
+          pkg.short_desc,
+          pkg.short_description,
+          pkg.author
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(lowerQ)) {
+          return false;
+        }
       }
       if (normalizedHideFlags.size > 0) {
         if (normalizedHideFlags.has('deprecated') && isPackageDeprecated(pkg)) {
@@ -962,6 +988,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   };
 
   if (catalogEdgeCacheKey && !noCache) {
+    // Share the already-warmed Web Boot Bundle (`bootEdgeCacheKey`) first for standard in-game Luanti C++ client requests
+    // (`GET /api/packages/?type=mod&type=game&type=txp...`) so in-game Content tab opens in < 5ms with zero D1 or upstream calls
+    // and immediately reflects any newly submitted or synced D1 Git packages whenever `bootEdgeCacheKey` is refreshed.
+    if (!isBootBundle && !q && !author && !hasCustomUpstreamFilters) {
+      const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
+      if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
+        const sharedClientPayload = buildInGameClientCatalogResponse(cachedBoot.packages);
+        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 1800);
+        return new Response(JSON.stringify(sharedClientPayload), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
+            'X-LuantiHub-Cache': 'HIT-BOOT-SHARED'
+          }
+        });
+      }
+    }
+
     const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
     if (
       cachedCatalog &&
@@ -1051,24 +1096,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
       });
-    }
-
-    // Share the already-warmed Web Boot Bundle (`bootEdgeCacheKey`) with in-game Luanti C++ client requests
-    // (`GET /api/packages/?type=mod&type=game&type=txp...`) so in-game Content tab opens in < 5ms with zero D1 or upstream calls.
-    if (!isBootBundle && !q && !author && !hasCustomUpstreamFilters) {
-      const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
-      if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
-        const sharedClientPayload = buildInGameClientCatalogResponse(cachedBoot.packages);
-        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 1800);
-        return new Response(JSON.stringify(sharedClientPayload), {
-          headers: {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
-            'X-LuantiHub-Cache': 'HIT-BOOT-SHARED'
-          }
-        });
-      }
     }
   }
 
@@ -1164,32 +1191,44 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const selectCols = isBootBundle
       ? '*'
-      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, release, updated_at, created_at, dev_state, tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts';
-    let query = `SELECT ${selectCols} FROM packages WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
+      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha';
+    let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0)`;
     const params: any[] = [];
 
-    if (types.length === 1) {
-      query += ` AND type = ?`;
-      params.push(types[0]);
-    } else if (types.length > 1) {
-      const placeholders = types.map(() => '?').join(', ');
-      query += ` AND type IN (${placeholders})`;
-      params.push(...types);
+    const d1Types =
+      types.includes('mod') && !types.includes('modpack') ? [...types, 'modpack'] : types;
+
+    if (d1Types.length === 1) {
+      whereClause += ` AND type = ?`;
+      params.push(d1Types[0]);
+    } else if (d1Types.length > 1) {
+      const placeholders = d1Types.map(() => '?').join(', ');
+      whereClause += ` AND type IN (${placeholders})`;
+      params.push(...d1Types);
     }
     if (q) {
-      query += ` AND (title LIKE ? OR name LIKE ? OR short_desc LIKE ? OR author_name LIKE ?)`;
+      whereClause += ` AND (title LIKE ? OR name LIKE ? OR short_desc LIKE ? OR author_name LIKE ?)`;
       params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     if (author) {
-      query += ` AND LOWER(author_name) = LOWER(?)`;
+      whereClause += ` AND LOWER(author_name) = LOWER(?)`;
       params.push(author);
     }
 
-    query += ` ORDER BY downloads_count DESC LIMIT 1000`;
+    const orderSuffix = ` ORDER BY downloads_count DESC LIMIT 1000`;
+    const query = `SELECT ${selectCols} FROM packages ${whereClause}${orderSuffix}`;
+    const fallbackStarQuery = `SELECT * FROM packages ${whereClause}${orderSuffix}`;
 
     d1Promise = env.DB.prepare(query).bind(...params).all()
       .then((res: any) => res.results || [])
-      .catch(() => []);
+      .catch(async () => {
+        try {
+          const fbRes = await env.DB.prepare(fallbackStarQuery).bind(...params).all();
+          return fbRes?.results || [];
+        } catch {
+          return [];
+        }
+      });
 
     // Instant Kill Switch: fetch any package IDs marked as 'flagged' or 'delisted'
     blockedPromise = env.DB.prepare(

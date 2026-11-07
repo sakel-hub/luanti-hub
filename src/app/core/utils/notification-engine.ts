@@ -37,6 +37,7 @@ export interface NotificationPersistenceState {
   bootManifestSignature?: string;
   baselineSeededAt?: number;
   lastBootFetchAt?: number;
+  lastAppUpdateNotifiedAt?: number;
   unreadBadgeCount?: number;
 }
 
@@ -83,6 +84,119 @@ export const NOTIFICATION_MAX_EVENT_AGE_MS = 12 * 3600 * 1000; // 12 hours max a
 export const NOTIFICATION_PACKAGE_COOLDOWN_MS = 12 * 3600 * 1000; // 12 hours per-package update cooldown
 export const NOTIFICATION_BASELINE_SKEW_GRACE_MS = 15 * 60 * 1000; // 15 minutes grace for clock skew on newly seeded baselines
 export const MIN_SW_BOOT_FETCH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes minimum interval between SW boot catalog fetches
+export const APP_UPDATE_NOTIFICATION_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes cooldown between app update OS notifications
+
+/**
+ * Extracts a canonical bundle signature and version key from `/ngsw.json` so foreground (`PwaService`)
+ * and background (`custom-sw.js`) always compute identical signatures and deduplication tags.
+ */
+export function extractNgswBundleSignature(manifest: any): {
+  signature: string;
+  versionKey: string;
+  remoteMain: string;
+  remoteStyles: string;
+  remoteBuildTs: string;
+  indexHash: string;
+  customSwHash: string;
+} | null {
+  if (!manifest || typeof manifest !== 'object') return null;
+  const hashTable =
+    manifest.hashTable && typeof manifest.hashTable === 'object' ? manifest.hashTable : {};
+  const indexHash = String(hashTable['/index.html'] || hashTable['index.html'] || '').trim();
+  const customSwHash = String(
+    hashTable['/custom-sw.js'] || hashTable['custom-sw.js'] || ''
+  ).trim();
+  const remoteBuildTs = String(
+    manifest?.appData?.buildTimestamp ??
+      (typeof manifest.timestamp === 'number' || typeof manifest.timestamp === 'string'
+        ? manifest.timestamp
+        : '')
+  ).trim();
+
+  let remoteMain = '';
+  let remoteStyles = '';
+  if (Array.isArray(manifest.assetGroups)) {
+    const appGroup =
+      manifest.assetGroups.find((g: any) => g && g.name === 'app') || manifest.assetGroups[0];
+    const urls: string[] = Array.isArray(appGroup?.urls) ? appGroup.urls : [];
+    remoteMain = urls.find((u: string) => /\/main-[A-Za-z0-9_-]+\.js$/.test(u)) || '';
+    remoteStyles = urls.find((u: string) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(u)) || '';
+  }
+  if (!remoteMain && !remoteStyles) {
+    const keys = Object.keys(hashTable).sort();
+    remoteMain = keys.find((k: string) => /\/main-[A-Za-z0-9_-]+\.js$/.test(k)) || '';
+    remoteStyles = keys.find((k: string) => /\/styles-[A-Za-z0-9_-]+\.css$/.test(k)) || '';
+  }
+
+  if (!remoteMain && !remoteStyles && !indexHash && !remoteBuildTs) {
+    return null;
+  }
+
+  const signature = `${remoteMain || ''}|${remoteStyles || ''}|${indexHash}|${customSwHash}|${remoteBuildTs}`;
+  const cleanMain = remoteMain ? remoteMain.replace(/^\//, '') : '';
+  const cleanStyles = remoteStyles ? remoteStyles.replace(/^\//, '') : '';
+  const versionKey =
+    cleanMain || remoteBuildTs || cleanStyles || indexHash || signature.slice(0, 48);
+
+  return {
+    signature,
+    versionKey,
+    remoteMain,
+    remoteStyles,
+    remoteBuildTs,
+    indexHash,
+    customSwHash
+  };
+}
+
+/**
+ * Builds all related `lh-app-update-*` deduplication tags for a detected build
+ * (main bundle filename, styles filename, build timestamp, and full/sliced manifest signature)
+ * so notifications fired by one detection path are recognized as already seen by all other paths.
+ */
+export function buildAppUpdateRelatedTags(
+  versionOrSig: string,
+  parsedManifest?: {
+    signature?: string;
+    versionKey?: string;
+    remoteMain?: string;
+    remoteStyles?: string;
+    remoteBuildTs?: string;
+  } | null
+): string[] {
+  const tags = new Set<string>();
+  const trimmed = String(versionOrSig || '').trim();
+  if (trimmed) {
+    tags.add(`lh-app-update-${trimmed}`);
+    tags.add(`lh-app-update-${trimmed.slice(0, 48)}`);
+    if (trimmed.includes('|')) {
+      const parts = trimmed.split('|');
+      const mainPart = (parts[0] || '').replace(/^\//, '').trim();
+      const stylesPart = (parts[1] || '').replace(/^\//, '').trim();
+      const buildTsPart = (parts[4] || '').trim();
+      if (mainPart) tags.add(`lh-app-update-${mainPart}`);
+      if (stylesPart) tags.add(`lh-app-update-${stylesPart}`);
+      if (buildTsPart) tags.add(`lh-app-update-${buildTsPart}`);
+    }
+  }
+  if (parsedManifest) {
+    if (parsedManifest.versionKey) {
+      tags.add(`lh-app-update-${parsedManifest.versionKey}`);
+    }
+    if (parsedManifest.signature) {
+      tags.add(`lh-app-update-${parsedManifest.signature}`);
+      tags.add(`lh-app-update-${parsedManifest.signature.slice(0, 48)}`);
+    }
+    const cleanMain = (parsedManifest.remoteMain || '').replace(/^\//, '').trim();
+    if (cleanMain) tags.add(`lh-app-update-${cleanMain}`);
+    const cleanStyles = (parsedManifest.remoteStyles || '').replace(/^\//, '').trim();
+    if (cleanStyles) tags.add(`lh-app-update-${cleanStyles}`);
+    if (parsedManifest.remoteBuildTs) {
+      tags.add(`lh-app-update-${parsedManifest.remoteBuildTs}`);
+    }
+  }
+  return Array.from(tags);
+}
 
 export function normalizeReleaseStampPart(rawRel: any): string {
   const trimmed = String(rawRel ?? '').trim();
@@ -726,6 +840,26 @@ export function mergeNotificationPersistenceStates(
     Number(remoteState.lastBootFetchAt || 0)
   );
 
+  const lastAppUpdateNotifiedAt = Math.max(
+    Number(localState.lastAppUpdateNotifiedAt || 0),
+    Number(remoteState.lastAppUpdateNotifiedAt || 0)
+  );
+
+  const localSig = String(localState.bootManifestSignature || '').trim();
+  const remoteSig = String(remoteState.bootManifestSignature || '').trim();
+  let mergedBootSig = localSig || remoteSig || '';
+  if (localSig && remoteSig && localSig !== remoteSig) {
+    const localBuildTs = Number(localSig.split('|')[4] || 0);
+    const remoteBuildTs = Number(remoteSig.split('|')[4] || 0);
+    if (Number.isFinite(remoteBuildTs) && Number.isFinite(localBuildTs) && remoteBuildTs > localBuildTs) {
+      mergedBootSig = remoteSig;
+    } else if (Number.isFinite(localBuildTs) && Number.isFinite(remoteBuildTs) && localBuildTs > remoteBuildTs) {
+      mergedBootSig = localSig;
+    } else {
+      mergedBootSig = remoteSig;
+    }
+  }
+
   return {
     prefs: localState.prefs || remoteState.prefs || null,
     seenTags,
@@ -738,10 +872,10 @@ export function mergeNotificationPersistenceStates(
     packageUpdateCooldown: mergedCooldown,
     packageUpdateCooldowns: mergedCooldown,
     recentDiscoveredPackages: mergedRecentDiscovered,
-    bootManifestSignature:
-      localState.bootManifestSignature || remoteState.bootManifestSignature || '',
+    bootManifestSignature: mergedBootSig,
     baselineSeededAt,
-    lastBootFetchAt
+    lastBootFetchAt,
+    ...(lastAppUpdateNotifiedAt > 0 ? { lastAppUpdateNotifiedAt } : {})
   };
 }
 

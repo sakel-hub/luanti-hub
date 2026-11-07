@@ -638,6 +638,18 @@ export class SubmitModalComponent {
     this.isAuditing.set(false);
     if (res.audit) {
       this.auditReport.set(res.audit);
+      if (this.selectedTags().length === 0 && Array.isArray(res.audit.metadata?.tags)) {
+        const catalogTagSet = new Set(
+          this.packageService.availableTags().map(t => t.name.toLowerCase())
+        );
+        const autoTags = res.audit.metadata.tags
+          .map(t => String(t || '').trim().toLowerCase())
+          .filter(t => catalogTagSet.has(t))
+          .slice(0, 5);
+        if (autoTags.length > 0) {
+          this.selectedTags.set(autoTags);
+        }
+      }
     }
     if (!res.success && !res.audit) {
       this.statusSuccess.set(false);

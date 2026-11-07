@@ -34,6 +34,7 @@ import { evaluateRepositoryContentSafety } from './content-safety';
 export type AuthorPackageSyncStatus =
   | 'imported'
   | 'already_synced'
+  | 'queued'
   | 'skipped_no_repo'
   | 'skipped_non_git'
   | 'failed_broken'
@@ -65,13 +66,28 @@ export interface AuthorGitSyncResult {
 }
 
 export interface AuthorGitSyncOptions {
-  userId: string;
+  userId?: string;
   authorHandles?: string[];
   triggerProvider?: string;
   verifiedUsername?: string;
   maxNewImports?: number;
   forceRescan?: boolean;
+  rescanAlreadyTracked?: boolean;
   reportAmbiguousRepos?: boolean;
+}
+
+export interface AuthorGitSyncDiagnosticStatus {
+  isRegistered: boolean;
+  userId: string;
+  username: string;
+  authorHandles: string[];
+  totalContentDbPackages: number;
+  alreadySyncedCount: number;
+  pendingQueueCount: number;
+  skippedNoRepoCount: number;
+  brokenReportCount: number;
+  conflictCount: number;
+  packages: AuthorPackageSyncItem[];
 }
 
 const NON_GIT_REPO_HOSTS = new Set([
@@ -336,16 +352,40 @@ export async function syncVerifiedAuthorGitPackages(
     packages: []
   };
 
-  if (!env?.DB || !options.userId) {
+  if (!env?.DB) {
     return emptyResult;
   }
 
   const maxNewImports = Math.max(1, Math.min(12, options.maxNewImports ?? 8));
   const forceRescan = Boolean(options.forceRescan);
+  const rescanAlreadyTracked = Boolean(options.rescanAlreadyTracked);
 
   try {
-    const reconciledUser = await reconcileAndMergeUserAccount(env.DB, options.userId);
-    const resolvedUserId = String(reconciledUser?.id || options.userId);
+    let targetUserId = String(options.userId || '').trim();
+    if (!targetUserId) {
+      const lookupUsername = String(options.verifiedUsername || options.authorHandles?.[0] || '').trim();
+      if (lookupUsername) {
+        const uRow = await env.DB.prepare(
+          `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+        ).bind(lookupUsername).first();
+        if (uRow?.id) {
+          targetUserId = String(uRow.id);
+        } else {
+          const idRow = await env.DB.prepare(
+            `SELECT u.id FROM user_identities ui JOIN users u ON u.id = ui.user_id WHERE LOWER(ui.provider_username) = LOWER(?) ORDER BY ui.verified DESC, u.created_at ASC LIMIT 1`
+          ).bind(lookupUsername).first();
+          if (idRow?.id) {
+            targetUserId = String(idRow.id);
+          }
+        }
+      }
+    }
+    if (!targetUserId) {
+      return emptyResult;
+    }
+
+    const reconciledUser = await reconcileAndMergeUserAccount(env.DB, targetUserId);
+    const resolvedUserId = String(reconciledUser?.id || targetUserId);
 
     // Check fast Edge Cache stamp when triggered passively in the background
     const userSyncCacheKey = buildUserGitSyncCacheKey(resolvedUserId);
@@ -380,7 +420,12 @@ export async function syncVerifiedAuthorGitPackages(
       }
     }
 
-    if (verifiedIdentities.length === 0 && !isCallerAdmin) {
+    const reconciledUsernameLower = String(reconciledUser?.username || '').trim().toLowerCase();
+    const isRegisteredNonExtUser = Boolean(
+      reconciledUsernameLower && !String(resolvedUserId).toLowerCase().startsWith('ext_')
+    );
+
+    if (verifiedIdentities.length === 0 && !isCallerAdmin && !isRegisteredNonExtUser) {
       return { ...emptyResult, userId: resolvedUserId };
     }
 
@@ -389,6 +434,9 @@ export async function syncVerifiedAuthorGitPackages(
         .filter((i: any) => i.provider === 'contentdb')
         .map((i: any) => i.username.toLowerCase())
     );
+    if (isRegisteredNonExtUser && (verifiedIdentities.length === 0 || verifiedCdbHandles.size === 0)) {
+      verifiedCdbHandles.add(reconciledUsernameLower);
+    }
     const verifiedGitByProvider = new Map<string, Set<string>>();
     for (const id of verifiedIdentities) {
       if (id.provider !== 'contentdb') {
@@ -398,11 +446,17 @@ export async function syncVerifiedAuthorGitPackages(
       }
     }
 
-    // If an admin explicitly requested syncing a specific username handle, include it in verifiedCdbHandles
-    if (isCallerAdmin && Array.isArray(options.authorHandles)) {
+    // Include explicitly requested authorHandles when caller is admin or when the handle belongs to the user's verified identities
+    if (Array.isArray(options.authorHandles)) {
+      const ownedHandles = new Set<string>([
+        ...(reconciledUsernameLower ? [reconciledUsernameLower] : []),
+        ...verifiedIdentities.map((i: any) => i.username.toLowerCase())
+      ]);
       for (const h of options.authorHandles) {
         const clean = String(h || '').trim().toLowerCase();
-        if (clean) verifiedCdbHandles.add(clean);
+        if (clean && (isCallerAdmin || ownedHandles.has(clean))) {
+          verifiedCdbHandles.add(clean);
+        }
       }
     }
 
@@ -590,7 +644,7 @@ export async function syncVerifiedAuthorGitPackages(
           existingTags.includes('git'))
       );
 
-      if (isAlreadyGitTracked && !forceRescan) {
+      if (isAlreadyGitTracked && !rescanAlreadyTracked) {
         alreadySyncedCount++;
         // Link author_id if currently unclaimed or ext_*
         const needsAuthorIdLink = !existingOwnerId || existingOwnerId.startsWith('ext_');
@@ -1175,8 +1229,13 @@ export async function syncVerifiedAuthorGitPackages(
             });
           }
 
+          const lowerPkgAuthor = item.author.toLowerCase();
+          const lowerPkgName = item.name.toLowerCase();
           cacheKeysToInvalidate.push(
-            `/__api_pkg_detail_v2/${item.author.toLowerCase()}/${item.name.toLowerCase()}`
+            `/__api_pkg_detail_v2/${lowerPkgAuthor}/${lowerPkgName}`,
+            `https://cache.luantihub.internal/pkg-detail-v7:${lowerPkgAuthor}:${lowerPkgName}`,
+            `https://cache.luantihub.internal/__for_client_v4/${encodeURIComponent(lowerPkgAuthor)}/${encodeURIComponent(lowerPkgName)}`,
+            `/__api_author_profile_v2/${encodeURIComponent(lowerPkgAuthor)}`
           );
         })
       );
@@ -1184,7 +1243,12 @@ export async function syncVerifiedAuthorGitPackages(
 
     if (newlyImportedCount > 0 || claimExistingBatchStmts.length > 0 || flaggedForReviewCount > 0) {
       invalidateCachedAuthMePayload(resolvedUserId);
+      for (const h of allAuthorHandles) {
+        cacheKeysToInvalidate.push(`/__api_author_profile_v2/${encodeURIComponent(h.toLowerCase())}`);
+      }
       await invalidateEdgeCacheKeys([
+        'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
+        '/__api_boot_catalog_bundle_v19',
         '/__api_packages_v2',
         '/__api_packages_v2?boot=1',
         ...cacheKeysToInvalidate
@@ -1215,54 +1279,383 @@ export async function syncVerifiedAuthorGitPackages(
   }
 }
 
+/**
+ * Fast, zero-Git-subrequest diagnostic inspector that reports the live Git sync state
+ * for any author handle or userId using cached ContentDB `/packages/?fmt=vcs` and 2 D1 queries.
+ */
+export async function inspectAuthorGitSyncStatus(
+  env: { DB?: any; ADMIN_USERS?: string },
+  options: { userId?: string; username?: string; authorHandles?: string[] }
+): Promise<AuthorGitSyncDiagnosticStatus> {
+  const emptyStatus: AuthorGitSyncDiagnosticStatus = {
+    isRegistered: false,
+    userId: options.userId || '',
+    username: options.username || '',
+    authorHandles: options.authorHandles || [],
+    totalContentDbPackages: 0,
+    alreadySyncedCount: 0,
+    pendingQueueCount: 0,
+    skippedNoRepoCount: 0,
+    brokenReportCount: 0,
+    conflictCount: 0,
+    packages: []
+  };
+
+  if (!env?.DB) {
+    return emptyStatus;
+  }
+
+  try {
+    let resolvedUserId = String(options.userId || '').trim();
+    let resolvedUsername = String(options.username || '').trim();
+
+    if (!resolvedUserId && resolvedUsername) {
+      const uRow = await env.DB.prepare(
+        `SELECT id, username FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+      ).bind(resolvedUsername).first().catch(() => null);
+      if (uRow?.id) {
+        resolvedUserId = String(uRow.id);
+        resolvedUsername = String(uRow.username || resolvedUsername);
+      } else {
+        const idRow = await env.DB.prepare(
+          `SELECT u.id, u.username FROM user_identities ui JOIN users u ON u.id = ui.user_id WHERE LOWER(ui.provider_username) = LOWER(?) AND ui.verified = 1 LIMIT 1`
+        ).bind(resolvedUsername).first().catch(() => null);
+        if (idRow?.id) {
+          resolvedUserId = String(idRow.id);
+          resolvedUsername = String(idRow.username || resolvedUsername);
+        }
+      }
+    } else if (resolvedUserId && !resolvedUsername) {
+      const uRow = await env.DB.prepare(
+        `SELECT id, username FROM users WHERE id = ? LIMIT 1`
+      ).bind(resolvedUserId).first().catch(() => null);
+      if (uRow?.username) {
+        resolvedUsername = String(uRow.username);
+      }
+    }
+
+    const identities: Array<{ provider: string; username: string; verified: boolean }> = [];
+    if (resolvedUserId) {
+      const idRes = await env.DB.prepare(
+        `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
+      ).bind(resolvedUserId).all().catch(() => null);
+      for (const r of idRes?.results || []) {
+        if (r?.provider && r?.username) {
+          identities.push({
+            provider: String(r.provider).trim().toLowerCase(),
+            username: String(r.username).trim(),
+            verified: Boolean(r.verified)
+          });
+        }
+      }
+    }
+
+    const verifiedIdentities = identities.filter(i => i.verified && i.username);
+    const isRegistered = Boolean(resolvedUserId && (verifiedIdentities.length > 0 || resolvedUsername));
+
+    const verifiedCdbHandles = new Set<string>(
+      verifiedIdentities
+        .filter(i => i.provider === 'contentdb')
+        .map(i => i.username.toLowerCase())
+    );
+    if (resolvedUsername && isRegistered) {
+      verifiedCdbHandles.add(resolvedUsername.toLowerCase());
+    }
+    for (const h of options.authorHandles || []) {
+      const clean = String(h || '').trim().toLowerCase();
+      if (clean) verifiedCdbHandles.add(clean);
+    }
+
+    const verifiedGitByProvider = new Map<string, Set<string>>();
+    for (const id of verifiedIdentities) {
+      if (id.provider !== 'contentdb') {
+        const set = verifiedGitByProvider.get(id.provider) || new Set<string>();
+        set.add(id.username.toLowerCase());
+        verifiedGitByProvider.set(id.provider, set);
+      }
+    }
+
+    const allAuthorHandles = Array.from(
+      new Set([
+        ...Array.from(verifiedCdbHandles),
+        ...verifiedIdentities.map(i => i.username.toLowerCase())
+      ])
+    );
+
+    if (allAuthorHandles.length === 0) {
+      return {
+        ...emptyStatus,
+        isRegistered,
+        userId: resolvedUserId,
+        username: resolvedUsername
+      };
+    }
+
+    const bulkCatalog = (await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600).catch(() => null)) || [];
+    const candidateByLowerId = new Map<string, any>();
+
+    for (const item of bulkCatalog) {
+      if (!item || !item.author || !item.name) continue;
+      const itemAuthorLower = String(item.author).trim().toLowerCase();
+      const canonicalId = `${item.author}/${item.name}`;
+      const lowerId = canonicalId.toLowerCase();
+
+      if (verifiedCdbHandles.has(itemAuthorLower)) {
+        candidateByLowerId.set(lowerId, item);
+        continue;
+      }
+      if (item.repo) {
+        const classified = classifyCandidateGitRepoUrl(item.repo);
+        if (classified.kind === 'git_candidate' && classified.provider && classified.owner) {
+          const handlesOnForge = verifiedGitByProvider.get(classified.provider);
+          if (handlesOnForge && handlesOnForge.has(classified.owner.toLowerCase())) {
+            candidateByLowerId.set(lowerId, item);
+          }
+        }
+      }
+    }
+
+    const candidateItems = Array.from(candidateByLowerId.values());
+    if (candidateItems.length === 0) {
+      return {
+        ...emptyStatus,
+        isRegistered,
+        userId: resolvedUserId,
+        username: resolvedUsername,
+        authorHandles: allAuthorHandles
+      };
+    }
+
+    const authorBindList = Array.from(
+      new Set(candidateItems.map(it => String(it.author || '').trim().toLowerCase()).filter(Boolean))
+    );
+    const existingD1ByLowerId = new Map<string, any>();
+    const openBrokenReportsByLowerId = new Set<string>();
+
+    if (authorBindList.length > 0) {
+      const authorPlaceholders = authorBindList.map(() => '?').join(', ');
+      const d1PkgRes = await env.DB.prepare(
+        `SELECT id, author_id, author_name, name, title, provider, repo_url, tags, status FROM packages WHERE LOWER(author_name) IN (${authorPlaceholders})`
+      ).bind(...authorBindList).all().catch(() => null);
+      for (const row of d1PkgRes?.results || []) {
+        if (row?.id) {
+          existingD1ByLowerId.set(String(row.id).toLowerCase(), row);
+        }
+      }
+
+      const reportPrefixClauses = authorBindList
+        .map(() => `LOWER(SUBSTR(package_id, 1, INSTR(package_id, '/') - 1)) = ?`)
+        .join(' OR ');
+      const d1RepRes = await env.DB.prepare(
+        `SELECT package_id, reason FROM moderation_reports WHERE status = 'open' AND (${reportPrefixClauses})`
+      ).bind(...authorBindList).all().catch(() => null);
+      for (const rep of d1RepRes?.results || []) {
+        if (rep?.package_id && rep.reason === 'broken') {
+          openBrokenReportsByLowerId.add(String(rep.package_id).toLowerCase());
+        }
+      }
+    }
+
+    let alreadySyncedCount = 0;
+    let pendingQueueCount = 0;
+    let skippedNoRepoCount = 0;
+    let brokenReportCount = 0;
+    let conflictCount = 0;
+    const packages: AuthorPackageSyncItem[] = [];
+
+    for (const item of candidateItems) {
+      const canonicalId = `${item.author}/${item.name}`;
+      const lowerId = canonicalId.toLowerCase();
+      const title = String(item.title || item.name);
+      const existingD1 = existingD1ByLowerId.get(lowerId) || null;
+      const existingOwnerId = existingD1?.author_id ? String(existingD1.author_id).trim() : '';
+
+      if (
+        existingOwnerId &&
+        !existingOwnerId.startsWith('ext_') &&
+        resolvedUserId &&
+        existingOwnerId !== resolvedUserId
+      ) {
+        conflictCount++;
+        packages.push({
+          packageId: canonicalId,
+          author: item.author,
+          name: item.name,
+          title,
+          status: 'conflict',
+          repoUrl: existingD1?.repo_url || item.repo
+        });
+        continue;
+      }
+
+      const existingProvider = String(existingD1?.provider || '').trim().toLowerCase();
+      const existingTags = parseJsonArray(existingD1?.tags);
+      const isAlreadyGitTracked = Boolean(
+        existingD1 &&
+        existingD1.repo_url &&
+        ((existingProvider && existingProvider !== 'contentdb' && isGitProviderId(existingProvider)) ||
+          existingTags.includes('git'))
+      );
+
+      if (isAlreadyGitTracked) {
+        alreadySyncedCount++;
+        packages.push({
+          packageId: canonicalId,
+          author: item.author,
+          name: item.name,
+          title,
+          status: 'already_synced',
+          provider: existingProvider || 'github',
+          repoUrl: existingD1.repo_url
+        });
+        continue;
+      }
+
+      const rawRepo = item.repo || item.repo_url || existingD1?.repo_url || '';
+      const classified = classifyCandidateGitRepoUrl(rawRepo);
+      if (classified.kind === 'no_repo') {
+        skippedNoRepoCount++;
+        packages.push({
+          packageId: canonicalId,
+          author: item.author,
+          name: item.name,
+          title,
+          status: 'skipped_no_repo'
+        });
+        continue;
+      }
+      if (classified.kind === 'non_git') {
+        skippedNoRepoCount++;
+        packages.push({
+          packageId: canonicalId,
+          author: item.author,
+          name: item.name,
+          title,
+          status: 'skipped_non_git',
+          repoUrl: rawRepo
+        });
+        continue;
+      }
+
+      if (openBrokenReportsByLowerId.has(lowerId)) {
+        brokenReportCount++;
+        packages.push({
+          packageId: canonicalId,
+          author: item.author,
+          name: item.name,
+          title,
+          status: 'failed_broken',
+          provider: classified.provider,
+          repoUrl: classified.normalizedUrl
+        });
+        continue;
+      }
+
+      pendingQueueCount++;
+      packages.push({
+        packageId: canonicalId,
+        author: item.author,
+        name: item.name,
+        title,
+        status: 'queued',
+        provider: classified.provider,
+        repoUrl: classified.normalizedUrl
+      });
+    }
+
+    return {
+      isRegistered,
+      userId: resolvedUserId,
+      username: resolvedUsername,
+      authorHandles: allAuthorHandles,
+      totalContentDbPackages: candidateItems.length,
+      alreadySyncedCount,
+      pendingQueueCount,
+      skippedNoRepoCount,
+      brokenReportCount,
+      conflictCount,
+      packages
+    };
+  } catch {
+    return emptyStatus;
+  }
+}
+
 let isolateBackfillChecked = false;
 const EXISTING_USERS_BACKFILL_CACHE_KEY =
-  'https://cache.luantihub.internal/__existing_users_git_backfill_v1';
+  'https://cache.luantihub.internal/__existing_users_git_backfill_v2';
 
 /**
- * One-time automatic catch-up for existing registered users in D1.
- * Runs asynchronously in the background via `context.waitUntil()` on `GET /api/auth/me`
- * and is gated by Isolate Memory + Cloudflare Edge Cache so it executes only once
- * across the existing registered user base without recurring polling overhead.
+ * Automatic catch-up for existing registered users in D1.
+ * Uses `inspectAuthorGitSyncStatus` (0 Git network calls) to locate registered users
+ * with `pendingQueueCount > 0`, processes 1 user batch per background invocation to stay
+ * well within Cloudflare Workers' 50-subrequest limit, and only marks completion when
+ * all registered users have `pendingQueueCount === 0`.
  */
-export async function runOneTimeExistingUsersGitBackfill(env: {
-  DB?: any;
-  AI?: any;
-  ADMIN_USERS?: string;
-  SESSION_SECRET?: string;
-}): Promise<void> {
-  if (!env?.DB || isolateBackfillChecked) return;
+export async function runOneTimeExistingUsersGitBackfill(
+  env: {
+    DB?: any;
+    AI?: any;
+    ADMIN_USERS?: string;
+    SESSION_SECRET?: string;
+  },
+  forceRun = false
+): Promise<{ completed: boolean; processedUsers: number; anyRemaining: boolean }> {
+  if (!env?.DB || (isolateBackfillChecked && !forceRun)) {
+    return { completed: false, processedUsers: 0, anyRemaining: false };
+  }
   isolateBackfillChecked = true;
 
   try {
     const alreadyDone = await readEdgeCacheJson<{ completed: boolean }>(EXISTING_USERS_BACKFILL_CACHE_KEY);
-    if (alreadyDone?.completed) return;
+    if (alreadyDone?.completed && !forceRun) {
+      return { completed: true, processedUsers: 0, anyRemaining: false };
+    }
 
     const verifiedUsersRes = await env.DB.prepare(
-      `SELECT DISTINCT user_id FROM user_identities WHERE verified = 1 LIMIT 20`
+      `SELECT DISTINCT user_id FROM user_identities WHERE verified = 1
+       UNION
+       SELECT id AS user_id FROM users
+       LIMIT 100`
     ).all().catch(() => null);
     const userIds = (verifiedUsersRes?.results || [])
       .map((r: any) => String(r?.user_id || '').trim())
       .filter(Boolean);
 
     let anyRemaining = false;
-    for (const uid of userIds.slice(0, 5)) {
-      const res = await syncVerifiedAuthorGitPackages(env, {
-        userId: uid,
-        maxNewImports: 4
-      });
-      if (res.remainingQueuedCount > 0) {
+    let processedActiveBatch = false;
+    let processedUsers = 0;
+
+    for (const uid of userIds) {
+      const status = await inspectAuthorGitSyncStatus(env, { userId: uid });
+      if (status.pendingQueueCount <= 0) {
+        continue;
+      }
+      if (!processedActiveBatch) {
+        processedActiveBatch = true;
+        processedUsers++;
+        const res = await syncVerifiedAuthorGitPackages(env, {
+          userId: uid,
+          authorHandles: status.authorHandles,
+          maxNewImports: 6
+        });
+        if (!res.success || res.remainingQueuedCount > 0) {
+          anyRemaining = true;
+        }
+      } else {
         anyRemaining = true;
       }
     }
 
     if (!anyRemaining) {
-      await writeEdgeCacheJson(EXISTING_USERS_BACKFILL_CACHE_KEY, { completed: true, ts: Date.now() }, 86400 * 7);
+      await writeEdgeCacheJson(EXISTING_USERS_BACKFILL_CACHE_KEY, { completed: true, ts: Date.now() }, 86400);
+      return { completed: true, processedUsers, anyRemaining: false };
     } else {
-      // Allow next invocation in another isolate or after 60s to finish remaining queued packages
       isolateBackfillChecked = false;
+      return { completed: false, processedUsers, anyRemaining: true };
     }
   } catch {
     isolateBackfillChecked = false;
+    return { completed: false, processedUsers: 0, anyRemaining: true };
   }
 }

@@ -137,6 +137,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
   if (!wantFresh) {
     const cachedUser = getCachedAuthMePayload(userId, false);
     if (cachedUser) {
+      context.waitUntil?.(runOneTimeExistingUsersGitBackfill(context.env));
       return Response.json(
         { user: cachedUser, oauthProviders },
         { headers: { 'Cache-Control': 'no-store' } }
@@ -377,13 +378,16 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
 
     if (verifiedHandles.length > 0) {
       context.waitUntil?.(
-        Promise.all([
-          syncVerifiedAuthorGitPackages(context.env, {
+        (async () => {
+          const ownRes = await syncVerifiedAuthorGitPackages(context.env, {
             userId: resolvedUserId,
             authorHandles: verifiedHandles
-          }),
-          runOneTimeExistingUsersGitBackfill(context.env)
-        ])
+          });
+          // Only run the existing-users backfill if this request did not already consume subrequest budget
+          if ((ownRes.newlyImportedCount || 0) === 0 && (ownRes.flaggedForReviewCount || 0) === 0) {
+            await runOneTimeExistingUsersGitBackfill(context.env);
+          }
+        })()
       );
     } else {
       context.waitUntil?.(runOneTimeExistingUsersGitBackfill(context.env));

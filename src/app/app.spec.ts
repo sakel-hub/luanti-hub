@@ -82,6 +82,12 @@ describe('App & Core Services', () => {
     globalThis.fetch = (async () => {
       throw new Error('Network disabled in unit tests unless explicitly mocked');
     }) as unknown as typeof fetch;
+    try {
+      localStorage.removeItem('lh_last_app_update_notif_at_v1');
+      sessionStorage.removeItem('lh_pwa_auto_updated_version');
+    } catch {
+      // Ignore storage errors
+    }
 
     await TestBed.configureTestingModule({
       imports: [App, Top10RowComponent],
@@ -4286,6 +4292,9 @@ supported_games = minetest_game, voxelibre
               },
               async all() {
                 if (sql.includes('FROM packages') && !sql.includes("status IN ('flagged'")) {
+                  if (/\brelease\b/i.test(sql) && !/\brelease_id\b/i.test(sql)) {
+                    throw new Error('D1_ERROR: no such column: release at offset 216');
+                  }
                   return {
                     results: [
                       {
@@ -4300,6 +4309,19 @@ supported_games = minetest_game, voxelibre
                         repo_url: 'https://github.com/sakel-hub/pixie',
                         tags: JSON.stringify(['mobs', 'magic']),
                         updated_at: '2026-10-31T10:00:00Z'
+                      },
+                      {
+                        id: 'sakel-hub/x_mobs',
+                        author_name: 'sakel-hub',
+                        name: 'x_mobs',
+                        title: 'X Mobs',
+                        type: 'modpack',
+                        short_desc: 'Vanilla-friendly mobs modpack for Minetest Game',
+                        status: 'active',
+                        provider: 'github',
+                        repo_url: 'https://github.com/sakel-hub/x_mobs',
+                        tags: JSON.stringify(['mobs', 'animals']),
+                        updated_at: '2026-11-01T12:00:00Z'
                       }
                     ]
                   };
@@ -4313,6 +4335,9 @@ supported_games = minetest_game, voxelibre
           },
           async all() {
             if (sql.includes('FROM packages') && !sql.includes("status IN ('flagged'")) {
+              if (/\brelease\b/i.test(sql) && !/\brelease_id\b/i.test(sql)) {
+                throw new Error('D1_ERROR: no such column: release at offset 216');
+              }
               return {
                 results: [
                   {
@@ -4327,6 +4352,19 @@ supported_games = minetest_game, voxelibre
                     repo_url: 'https://github.com/sakel-hub/pixie',
                     tags: JSON.stringify(['mobs', 'magic']),
                     updated_at: '2026-10-31T10:00:00Z'
+                  },
+                  {
+                    id: 'sakel-hub/x_mobs',
+                    author_name: 'sakel-hub',
+                    name: 'x_mobs',
+                    title: 'X Mobs',
+                    type: 'modpack',
+                    short_desc: 'Vanilla-friendly mobs modpack for Minetest Game',
+                    status: 'active',
+                    provider: 'github',
+                    repo_url: 'https://github.com/sakel-hub/x_mobs',
+                    tags: JSON.stringify(['mobs', 'animals']),
+                    updated_at: '2026-11-01T12:00:00Z'
                   }
                 ]
               };
@@ -4388,7 +4426,8 @@ supported_games = minetest_game, voxelibre
       const clientList = await clientRes.json();
       expect(Array.isArray(clientList)).toBe(true);
       // Deprecated package (`legacy_abandoned_mod`) is filtered out by `hide=desktop_default`
-      expect(clientList.length).toBe(2);
+      // Pure-Git packages (`sakel-hub/pixie` type=mod and `sakel-hub/x_mobs` type=modpack normalized to mod) are BOTH returned!
+      expect(clientList.length).toBe(3);
       expect(clientList.some((x: any) => x.name === 'legacy_abandoned_mod')).toBe(false);
       // Verify compact ContentDB-compatible fields without redundant web-only bloat (`short_desc`, `tags`, `score`, `downloads`, `license`)
       const pixieItem = clientList.find((x: any) => x.name === 'pixie');
@@ -4399,6 +4438,25 @@ supported_games = minetest_game, voxelibre
       expect(pixieItem.tags).toBeUndefined();
       expect(typeof pixieItem.release).toBe('number');
       expect(pixieItem.video_thumbnail_url).toBeUndefined();
+
+      const xMobsItem = clientList.find((x: any) => x.name === 'x_mobs');
+      expect(xMobsItem).toBeTruthy();
+      expect(xMobsItem.author).toBe('sakel-hub');
+      expect(xMobsItem.type).toBe('mod');
+      expect(xMobsItem.short_description).toBe('Vanilla-friendly mobs modpack for Minetest Game');
+      expect(typeof xMobsItem.release).toBe('number');
+
+      // Verify in-game client search query `q=x_mobs` returns `sakel-hub/x_mobs`
+      const searchXMobsRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.11.0&hide=nonfree&hide=desktop_default&q=x_mobs&nocache=1'
+        ),
+        env: { DB: mockDb }
+      } as any);
+      expect(searchXMobsRes.status).toBe(200);
+      const searchXMobsList = await searchXMobsRes.json();
+      expect(searchXMobsList.length).toBe(1);
+      expect(searchXMobsList[0].name).toBe('x_mobs');
 
       const mcl2Item = clientList.find((x: any) => x.name === 'mineclone2');
       expect(mcl2Item).toBeTruthy();
@@ -11383,6 +11441,500 @@ supported_games = minetest_game, voxelibre
       expect(healedCount).toBe(1);
       expect(resolvedPkgId).toBe('cheapie/celevator');
       expect(resolvedNote).toContain(celevatorUrl);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should handle Lua multiline strings/comments and table field accesses in runLuacheckStaticAudit without false-positive E011 errors', () => {
+    const luaWithMultilineFormspec = `
+local modname = core.get_current_modname()
+--[=[
+  Multi-line long comment with unbalanced keywords:
+  if true then do repeat function
+]=]
+local formspec = [[
+  formspec_version[4]
+  size[8,6]
+  label[0.5,0.5;What to do if you reach the end of the function]
+]]
+local alt_formspec = [=[
+  textarea[0.5,1.5;7,3;notes;Notes;if do end repeat until]
+]=]
+
+local function check_bounds(pos)
+  if pos.end and pos:end() then
+    return true
+  end
+  return false
+end
+
+core.register_node(modname .. ":panel", {
+  description = "Control Panel",
+  on_construct = function(pos)
+    if check_bounds(pos) then
+      core.log("action", "Panel constructed")
+    end
+  end
+})
+`;
+
+    const diags = runLuacheckStaticAudit(luaWithMultilineFormspec, 'celevator');
+    expect(diags.some(d => d.code.startsWith('LUA_SYNTAX_UNBALANCED'))).toBe(false);
+    expect(diags.some(d => d.code === 'LUA_SYNTAX_OK' && d.severity === 'pass')).toBe(true);
+    expect(diags.some(d => d.code === 'LUA_ENGINE_API_OK' && d.severity === 'pass')).toBe(true);
+  });
+
+  it('should support multiline mod.conf, cgit /plain repos, ContentDB cross-identity ownership, and tag auto-preselection in POST /api/packages/git & SubmitModalComponent', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      const sessionCookie = await createSessionToken('user-cheapie', 'test-secret');
+      const celevatorUrl = 'https://cheapiesystems.com/git/celevator';
+
+      globalThis.fetch = vi.fn(async (input: any) => {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        if (url === 'https://cheapiesystems.com/git/celevator/plain/mod.conf') {
+          return new Response(
+            `name = celevator\ntitle = C-Elevator\ndescription = """\nRealistic elevators for Luanti.\nIncludes controllers and dispatchers.\n"""\nlicense = Unlicense\nmin_minetest_version = 5.6.0\nmax_minetest_version = 5.11.0\nsupported_games = minetest_game, mesecons_game\ntags = transport, technology\n`,
+            { status: 200 }
+          );
+        }
+        if (url === 'https://cheapiesystems.com/git/celevator/plain/init.lua') {
+          return new Response(
+            `local modname = core.get_current_modname()\ncore.log("action", "[" .. modname .. "] loaded")\n`,
+            { status: 200 }
+          );
+        }
+        if (url.includes('/packages/?fmt=vcs')) {
+          return new Response(
+            JSON.stringify([
+              {
+                author: 'cheapie',
+                name: 'celevator',
+                title: 'C-Elevator',
+                type: 'mod',
+                repo: celevatorUrl,
+                downloads: 4200,
+                tags: ['transport', 'technology']
+              }
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as any;
+
+      const mockDb = {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            first: async () => {
+              if (sql.includes('FROM users WHERE id =')) {
+                return { id: 'user-cheapie', username: 'cheapie', display_name: 'cheapie' };
+              }
+              return null;
+            },
+            all: async () => {
+              if (sql.includes('FROM user_identities WHERE user_id =')) {
+                return {
+                  results: [{ provider: 'contentdb', username: 'cheapie', verified: 1 }]
+                };
+              }
+              return { results: [] };
+            },
+            run: async () => ({ meta: { changes: 1 } })
+          }),
+          all: async () => ({ results: [] }),
+          run: async () => ({ meta: { changes: 1 } })
+        })
+      };
+
+      const req = new Request('https://luantihub.org/api/packages/git', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `lh_session=${sessionCookie}`
+        },
+        body: JSON.stringify({
+          repoUrl: celevatorUrl,
+          dryRun: true,
+          warrantiesAccepted: true
+        })
+      });
+
+      const res = await gitOnRequestPost({
+        request: req,
+        env: { DB: mockDb, SESSION_SECRET: 'test-secret' }
+      });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.canPublish).toBe(true);
+      expect(body.ownershipVerified).toBe(true);
+      expect(body.package.short_desc).toContain('Realistic elevators for Luanti.');
+      expect(body.package.short_desc).not.toBe('"""');
+      expect(body.package.max_minetest_version).toBe('5.11.0');
+      expect(body.package.supported_games).toEqual(['minetest_game', 'mesecons_game']);
+
+      // Verify SubmitModalComponent auto-preselects matching catalog tags on dryRun audit
+      const fixture = TestBed.createComponent(SubmitModalComponent);
+      const comp = fixture.componentInstance;
+      const authService = TestBed.inject(AuthService);
+      const pkgService = TestBed.inject(PackageService);
+      (authService as any)._currentUser.set({
+        id: 'user-cheapie',
+        username: 'cheapie',
+        display_name: 'cheapie',
+        avatar_url: 'logo.svg',
+        identities: [{ provider: 'contentdb', username: 'cheapie', verified: true }]
+      });
+      (pkgService as any)._availableTags.set([
+        { name: 'transport', title: 'Transport' },
+        { name: 'technology', title: 'Technology' },
+        { name: 'magic', title: 'Magic' }
+      ]);
+      vi.spyOn(pkgService, 'auditOrSubmitGitPackage').mockResolvedValue({
+        success: true,
+        audit: body.audit
+      });
+
+      comp.repoUrl = celevatorUrl;
+      await comp.onRunAudit();
+      expect(comp.selectedTags()).toEqual(['transport', 'technology']);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should deduplicate LuantiHub Updated OS notifications across checkManifestBundleChanged, SwUpdate VERSION_READY, and Service Worker LH_APP_UPDATE_DETECTED', async () => {
+    const { Subject } = await import('rxjs');
+    const {
+      extractNgswBundleSignature,
+      buildAppUpdateRelatedTags,
+      mergeNotificationPersistenceStates
+    } = await import('./core/utils/notification-engine');
+
+    // 1. Verify unified manifest signature parser supports hyphens/underscores in bundle hashes and produces canonical versionKey + related tags
+    const sampleManifest = {
+      timestamp: 1794003200000,
+      appData: { buildTimestamp: 1794003200000 },
+      assetGroups: [
+        {
+          name: 'app',
+          urls: ['/index.html', '/main-AB_CD-12.js', '/styles-EF_GH-34.css']
+        }
+      ],
+      hashTable: {
+        '/index.html': 'idxhash999',
+        '/custom-sw.js': 'swhash888',
+        '/main-AB_CD-12.js': 'mainhash777',
+        '/styles-EF_GH-34.css': 'stylehash666'
+      }
+    };
+    const parsed = extractNgswBundleSignature(sampleManifest);
+    expect(parsed).toBeTruthy();
+    expect(parsed?.versionKey).toBe('main-AB_CD-12.js');
+    expect(parsed?.signature).toBe(
+      '/main-AB_CD-12.js|/styles-EF_GH-34.css|idxhash999|swhash888|1794003200000'
+    );
+    const related = buildAppUpdateRelatedTags(parsed!.versionKey, parsed);
+    expect(related).toContain('lh-app-update-main-AB_CD-12.js');
+    expect(related).toContain('lh-app-update-styles-EF_GH-34.css');
+    expect(related).toContain('lh-app-update-1794003200000');
+    expect(related).toContain(
+      `lh-app-update-${parsed!.signature.slice(0, 48)}`
+    );
+
+    // 2. Verify mergeNotificationPersistenceStates preserves newer bootManifestSignature by build timestamp and max lastAppUpdateNotifiedAt
+    const mergedState = mergeNotificationPersistenceStates(
+      {
+        seenTags: ['lh-app-update-old'],
+        bootManifestSignature: '/main-OLD.js|/styles-OLD.css|h1|s1|1794000000000',
+        lastAppUpdateNotifiedAt: 1000
+      },
+      {
+        seenTags: ['lh-app-update-main-AB_CD-12.js'],
+        bootManifestSignature: parsed!.signature,
+        lastAppUpdateNotifiedAt: 5000
+      }
+    );
+    expect(mergedState.bootManifestSignature).toBe(parsed!.signature);
+    expect(mergedState.lastAppUpdateNotifiedAt).toBe(5000);
+
+    // 3. Verify that when checkManifestBundleChanged fires "LuantiHub Updated" first, a subsequent SwUpdate VERSION_READY event (~1m later with 40-char SHA1 hash) does NOT fire a duplicate notification
+    const pwaService = TestBed.inject(PwaService);
+    const settingsService = TestBed.inject(SettingsService);
+    const versionUpdates$ = new Subject<any>();
+    const activateUpdateSpy = vi.fn().mockResolvedValue(true);
+    const reloadSpy = vi.spyOn(pwaService, 'reloadWindow').mockImplementation(() => {});
+    const sendNotifSpy = vi.spyOn(pwaService, 'sendNativeNotification');
+    const origSwUpdate = (pwaService as any).swUpdate;
+
+    try {
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyAppUpdates.set(true);
+      (pwaService as any).bootManifestSignature =
+        '/main-OLD000.js|/styles-OLD000.css|oldidx|oldsw|1794000000000';
+      (pwaService as any).updateAvailable.set(false);
+      (pwaService as any).appUpdateNotifiedInSession = false;
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => sampleManifest
+      }) as unknown as typeof fetch;
+
+      (pwaService as any).swUpdate = {
+        isEnabled: true,
+        versionUpdates: versionUpdates$.asObservable(),
+        activateUpdate: activateUpdateSpy,
+        checkForUpdate: vi.fn().mockResolvedValue(false)
+      };
+      (pwaService as any).initSwUpdate();
+
+      // Trigger background manifest check -> detects main-AB_CD-12.js and fires notification #1
+      const detected = await pwaService.checkForUpdate(false);
+      expect(detected).toBe(true);
+      const appUpdateCallsAfterPoll = sendNotifSpy.mock.calls.filter(
+        c => c[0]?.category === 'app_update'
+      );
+      expect(appUpdateCallsAfterPoll.length).toBe(1);
+      expect(appUpdateCallsAfterPoll[0][0].tag).toBe('lh-app-update-main-AB_CD-12.js');
+
+      // 45 seconds later, Angular SwUpdate finishes verifying assets and emits VERSION_READY with a 40-char SHA-1 hash
+      versionUpdates$.next({
+        type: 'VERSION_READY',
+        currentVersion: { hash: '0000000000000000000000000000000000000000' },
+        latestVersion: { hash: 'f5879b723ca05b41b60ef6943e3e3772949f632c' }
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const appUpdateCallsAfterVersionReady = sendNotifSpy.mock.calls.filter(
+        c => c[0]?.category === 'app_update'
+      );
+      expect(appUpdateCallsAfterVersionReady.length).toBe(1);
+
+      // Even if a BroadcastChannel LH_APP_UPDATE_DETECTED arrives or another notifyAppUpdateAvailable is called with a different version string within cooldown, no 2nd notification fires
+      (pwaService as any).notifyAppUpdateAvailable('another-version-hash-within-cooldown');
+      const appUpdateCallsFinal = sendNotifSpy.mock.calls.filter(
+        c => c[0]?.category === 'app_update'
+      );
+      expect(appUpdateCallsFinal.length).toBe(1);
+    } finally {
+      (pwaService as any).swUpdate = origSwUpdate;
+      reloadSpy.mockRestore();
+      sendNotifSpy.mockRestore();
+    }
+  });
+
+  it('should advance multi-batch Git sync across >8 packages for registered authors (e.g. TenPlus1) and expose diagnostic status via GET /api/users/:username/sync-contentdb', async () => {
+    const {
+      syncVerifiedAuthorGitPackages,
+      inspectAuthorGitSyncStatus,
+      runOneTimeExistingUsersGitBackfill
+    } = await import('../../functions/api/lib/author-git-sync');
+    const {
+      onRequestGet: syncContentDbGet,
+      onRequestPost: syncContentDbPost
+    } = await import('../../functions/api/users/[username]/sync-contentdb');
+
+    const storedPackages = new Map<string, any>();
+    const storedMeta = new Map<string, string>();
+    const tenPlusPackages = Array.from({ length: 12 }, (_, idx) => {
+      const num = idx + 1;
+      const name = `tenplus_mod_${num}`;
+      return {
+        author: 'TenPlus1',
+        name,
+        title: `TenPlus Mod ${num}`,
+        type: 'mod',
+        short_description: `TenPlus1 Mod #${num}`,
+        repo: `https://codeberg.org/tenplus1/${name}`,
+        downloads: 1000 + num
+      };
+    });
+
+    const mockDb = {
+      prepare: (sql: string) => {
+        const execAll = async (args: any[]) => {
+          if (sql.includes('SELECT DISTINCT user_id FROM user_identities')) {
+            return { results: [{ user_id: 'usr_tenplus1' }] };
+          }
+          if (sql.includes('FROM user_identities WHERE user_id =')) {
+            return {
+              results: [{ provider: 'contentdb', provider_username: 'TenPlus1', username: 'TenPlus1', verified: 1 }]
+            };
+          }
+          if (sql.includes('FROM packages')) {
+            return { results: Array.from(storedPackages.values()) };
+          }
+          if (sql.includes('FROM moderation_reports')) {
+            return { results: [] };
+          }
+          return { results: [] };
+        };
+        const execFirst = async (args: any[]) => {
+          if (sql.includes('FROM system_metadata WHERE key =')) {
+            const k = String(args[0] || '');
+            return storedMeta.has(k) ? { value: storedMeta.get(k) } : null;
+          }
+          if (sql.includes('FROM users WHERE id =')) {
+            return { id: 'usr_tenplus1', username: 'TenPlus1', display_name: 'TenPlus1', role: 'user' };
+          }
+          if (sql.includes('FROM users WHERE LOWER(username) = LOWER(?)')) {
+            return { id: 'usr_tenplus1', username: 'TenPlus1', display_name: 'TenPlus1', role: 'user' };
+          }
+          if (sql.includes('FROM user_identities WHERE LOWER(provider_username) = LOWER(?)')) {
+            return { user_id: 'usr_tenplus1', username: 'TenPlus1' };
+          }
+          if (sql.includes('SELECT id FROM user_identities WHERE user_id = ?')) {
+            return { id: 1 };
+          }
+          return null;
+        };
+        const execRun = async (args: any[]) => {
+          if (sql.includes('INSERT OR REPLACE INTO system_metadata')) {
+            storedMeta.set(String(args[0]), String(args[1]));
+          } else if (sql.includes('INSERT INTO packages')) {
+            const id = String(args[0]);
+            storedPackages.set(id.toLowerCase(), {
+              id,
+              author_id: String(args[1]),
+              author_name: String(args[2]),
+              name: String(args[3]),
+              title: String(args[4]),
+              type: String(args[5]),
+              short_desc: String(args[6]),
+              long_desc: String(args[7]),
+              repo_url: String(args[8]),
+              provider: String(args[9]),
+              default_branch: String(args[10]),
+              latest_commit_sha: args[11],
+              thumbnail_url: String(args[12] || ''),
+              banner_url: String(args[13] || ''),
+              downloads_count: Number(args[15] || 0),
+              license: String(args[18] || 'MIT'),
+              tags: String(args[20] || '["git","contentdb"]'),
+              status: 'active',
+              git_repo_status: 'verified'
+            });
+          }
+          return { success: true, meta: { changes: 1 } };
+        };
+
+        return {
+          bind: (...args: any[]) => ({
+            all: () => execAll(args),
+            first: () => execFirst(args),
+            run: () => execRun(args)
+          }),
+          all: () => execAll([]),
+          first: () => execFirst([]),
+          run: () => execRun([])
+        };
+      }
+    };
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/users/TenPlus1/sync-contentdb')) {
+        const method = (init?.method || (typeof input !== 'string' ? input?.method : 'GET') || 'GET').toUpperCase();
+        if (method === 'GET') {
+          return syncContentDbGet({
+            request: new Request(`https://luantihub.org${url.startsWith('/') ? url : `/${url}`}`),
+            env: { DB: mockDb },
+            params: { username: 'TenPlus1' }
+          });
+        }
+        return syncContentDbPost({
+          request: new Request(`https://luantihub.org${url.startsWith('/') ? url : `/${url}`}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: init?.body
+          }),
+          env: { DB: mockDb },
+          params: { username: 'TenPlus1' }
+        });
+      }
+      if (url.includes('/packages/?fmt=vcs')) {
+        return new Response(JSON.stringify(tenPlusPackages), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/users/TenPlus1/')) {
+        return new Response(
+          JSON.stringify({
+            username: 'TenPlus1',
+            display_name: 'TenPlus1',
+            connections: { forums: 'TenPlus1' }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const forgeApiMatch = url.match(/codeberg\.org\/api\/v1\/repos\/tenplus1\/(tenplus_mod_\d+)$/i);
+      if (forgeApiMatch) {
+        return new Response(
+          JSON.stringify({
+            default_branch: 'master',
+            html_url: `https://codeberg.org/tenplus1/${forgeApiMatch[1]}`
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      const rawConfMatch = url.match(
+        /codeberg\.org\/(?:api\/v1\/repos\/)?tenplus1\/(tenplus_mod_\d+)\/raw\/(?:branch\/(?:master|main)\/)?mod\.conf$/i
+      );
+      if (rawConfMatch) {
+        const modName = rawConfMatch[1];
+        return new Response(`name = ${modName}\ndescription = Automated test mod ${modName}\n`, {
+          status: 200
+        });
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // Clear cached `/packages/?fmt=vcs` entry from earlier tests in the same isolate so `tenPlusPackages` is loaded
+      const { invalidateEdgeCacheKeys } = await import('../../functions/api/lib/upstream');
+      await invalidateEdgeCacheKeys(['https://cache.luantihub.internal/upstream-v4:/packages/?fmt=vcs']);
+
+      // 1. Inspect initial diagnostic status via GET /api/users/TenPlus1/sync-contentdb (0 synced, 12 pending)
+      const initialDiag = await inspectAuthorGitSyncStatus(
+        { DB: mockDb },
+        { userId: 'usr_tenplus1', username: 'TenPlus1', authorHandles: ['tenplus1'] }
+      );
+      expect(initialDiag.isRegistered).toBe(true);
+      expect(initialDiag.totalContentDbPackages).toBe(12);
+      expect(initialDiag.alreadySyncedCount).toBe(0);
+      expect(initialDiag.pendingQueueCount).toBe(12);
+
+      // 2. Run AuthService.syncAuthorGitPackages('TenPlus1') and verify multi-batch pagination imports all 12 packages (8 in batch 0 + 4 in batch 1)
+      const authService = TestBed.inject(AuthService);
+      authService.isSyncingAuthorGit.set(false);
+      const syncSummary = await authService.syncAuthorGitPackages(
+        'TenPlus1',
+        tenPlusPackages.map(p => `TenPlus1/${p.name}`),
+        false
+      );
+      expect(syncSummary.success).toBe(true);
+      expect(syncSummary.syncedCount).toBe(12);
+      expect(storedPackages.size).toBe(12);
+
+      // 3. Inspect diagnostic status after sync -> all 12 packages are marked 'synced' and pendingQueueCount is 0
+      const finalDiagRes = await syncContentDbGet({
+        request: new Request('https://luantihub.org/api/users/TenPlus1/sync-contentdb'),
+        env: { DB: mockDb },
+        params: { username: 'TenPlus1' }
+      });
+      expect(finalDiagRes.status).toBe(200);
+      const finalDiag = await finalDiagRes.json();
+      expect(finalDiag.alreadySyncedCount).toBe(12);
+      expect(finalDiag.pendingQueueCount).toBe(0);
+
+      // 4. Verify runOneTimeExistingUsersGitBackfill marks completed=true once all registered users have pendingQueueCount === 0
+      const backfillRes = await runOneTimeExistingUsersGitBackfill({ DB: mockDb }, true);
+      expect(backfillRes.completed).toBe(true);
+      expect(backfillRes.anyRemaining).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
     }
