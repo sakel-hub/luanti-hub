@@ -726,7 +726,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19';
+  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20';
   const rawHideAndFlags = [
     ...url.searchParams.getAll('hide'),
     ...url.searchParams.getAll('flag')
@@ -987,6 +987,311 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     return mergedReviews;
   };
 
+  const applyApprovalTrackingAndBuildRecentlyAdded = async (
+    recentUpstreamMerged: any[],
+    catalogPackages: any[],
+    recentUpstreamRankById: Map<string, number>,
+    useCache = true
+  ): Promise<any[]> => {
+    const approvedSeenKey = 'https://cache.luantihub.internal/__cdb_approved_seen_v1';
+    const prevApprovedSeen = useCache
+      ? await readEdgeCacheJson<{ seededAt: number; seen: Record<string, number> }>(approvedSeenKey).catch(() => null)
+      : null;
+    const nowApprovalMs = Date.now();
+    const hasExistingSeed = Boolean(
+      prevApprovedSeen &&
+        prevApprovedSeen.seededAt > 0 &&
+        prevApprovedSeen.seen &&
+        typeof prevApprovedSeen.seen === 'object' &&
+        Object.keys(prevApprovedSeen.seen).length > 0
+    );
+    const nextSeenMap: Record<string, number> = hasExistingSeed ? { ...prevApprovedSeen!.seen } : {};
+    let seenMapChanged = !hasExistingSeed;
+
+    for (let i = 0; i < recentUpstreamMerged.length; i++) {
+      const pkg = recentUpstreamMerged[i];
+      const lowerKey = String(pkg?.id || '').toLowerCase();
+      if (!lowerKey) continue;
+      const parsedCreatedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+      const validCreatedMs = Number.isFinite(parsedCreatedMs) && parsedCreatedMs > 0 ? parsedCreatedMs : 0;
+      if (hasExistingSeed) {
+        if (nextSeenMap[lowerKey] === undefined) {
+          if (i < 12) {
+            const discoveredMs = nowApprovalMs - i * 1000;
+            nextSeenMap[lowerKey] = Math.max(validCreatedMs, discoveredMs);
+          } else {
+            nextSeenMap[lowerKey] = validCreatedMs || (nowApprovalMs - (24 + i) * 3600 * 1000);
+          }
+          seenMapChanged = true;
+        }
+        const seenMs = nextSeenMap[lowerKey];
+        if (Number.isFinite(seenMs) && seenMs > 0) {
+          const effectiveMs = Math.max(validCreatedMs, seenMs);
+          const effectiveIso = new Date(effectiveMs).toISOString();
+          pkg.approved_at = effectiveIso;
+          pkg.created_at = effectiveIso;
+        }
+      } else if (validCreatedMs > 0) {
+        nextSeenMap[lowerKey] = validCreatedMs;
+      }
+    }
+
+    let maxRecentCdbMs = 0;
+    const suffixMaxMs = new Array<number>(recentUpstreamMerged.length).fill(0);
+    for (let i = recentUpstreamMerged.length - 1; i >= 0; i--) {
+      const pkg = recentUpstreamMerged[i];
+      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+      const validMs = Number.isFinite(parsedMs) && parsedMs > 0 ? parsedMs : 0;
+      if (validMs > maxRecentCdbMs) {
+        maxRecentCdbMs = validMs;
+      }
+      const nextSuffixMax = i + 1 < recentUpstreamMerged.length ? suffixMaxMs[i + 1] : 0;
+      suffixMaxMs[i] = Math.max(validMs, nextSuffixMax);
+    }
+    const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
+    let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
+    for (let i = 0; i < recentUpstreamMerged.length; i++) {
+      const pkg = recentUpstreamMerged[i];
+      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
+      const floorMs = suffixMaxMs[i];
+      if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs >= floorMs) {
+        if (parsedMs < anchorMs) {
+          anchorMs = parsedMs;
+        } else {
+          anchorMs -= 1_000;
+          pkg.created_at = new Date(anchorMs).toISOString();
+        }
+      } else if (floorMs > 0) {
+        const candidateMs = Math.min(
+          anchorMs - 1_000,
+          floorMs + (recentUpstreamMerged.length - i) * 1_000
+        );
+        anchorMs = Math.max(floorMs, candidateMs);
+        pkg.created_at = new Date(anchorMs).toISOString();
+      } else {
+        anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
+        pkg.created_at = new Date(anchorMs).toISOString();
+      }
+      const lowerKey = String(pkg?.id || '').toLowerCase();
+      if (!hasExistingSeed && lowerKey && !nextSeenMap[lowerKey]) {
+        const resolvedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : 0;
+        if (Number.isFinite(resolvedMs) && resolvedMs > 0) {
+          nextSeenMap[lowerKey] = resolvedMs;
+        }
+      }
+    }
+
+    if (useCache && seenMapChanged && Object.keys(nextSeenMap).length > 0) {
+      const trimmedSeen = Object.fromEntries(
+        Object.entries(nextSeenMap)
+          .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+          .slice(0, 200)
+      );
+      await writeEdgeCacheJson(
+        approvedSeenKey,
+        { seededAt: prevApprovedSeen?.seededAt || nowApprovalMs, seen: trimmedSeen },
+        86400 * 30
+      ).catch(() => {});
+    }
+
+    const recentlyAddedById = new Map<string, any>();
+    for (const pkg of recentUpstreamMerged) {
+      if (pkg?.id && !isPackageDeprecated(pkg)) {
+        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
+      }
+    }
+    for (const pkg of catalogPackages) {
+      const isPureGit = pkg?.source === 'git' && !pkg?.sources?.includes('official');
+      if (pkg?.id && isPureGit && pkg.created_at && !isPackageDeprecated(pkg)) {
+        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
+      }
+    }
+    return Array.from(recentlyAddedById.values())
+      .sort((a, b) => {
+        const ta = a.created_at ? Date.parse(String(a.created_at)) : 0;
+        const tb = b.created_at ? Date.parse(String(b.created_at)) : 0;
+        if (tb !== ta) return tb - ta;
+        const rankA = recentUpstreamRankById.get(String(a.id || '').toLowerCase()) ?? 999;
+        const rankB = recentUpstreamRankById.get(String(b.id || '').toLowerCase()) ?? 999;
+        return rankA - rankB;
+      })
+      .slice(0, 24);
+  };
+
+  const overlayRecentlyAddedOnPackages = (basePackages: any[], recentlyAdded: any[]): any[] => {
+    if (!Array.isArray(recentlyAdded) || recentlyAdded.length === 0) return basePackages;
+    const recentByLowerId = new Map<string, any>();
+    for (const item of recentlyAdded) {
+      if (item?.id) {
+        recentByLowerId.set(String(item.id).toLowerCase(), item);
+      }
+    }
+    const seenInBase = new Set<string>();
+    const updatedBase = (Array.isArray(basePackages) ? basePackages : []).map((pkg: any) => {
+      const lowerId = String(pkg?.id || '').toLowerCase();
+      if (!lowerId) return pkg;
+      seenInBase.add(lowerId);
+      const recentMatch = recentByLowerId.get(lowerId);
+      if (!recentMatch) return pkg;
+      const baseMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : 0;
+      const recentMs = recentMatch.created_at ? Date.parse(String(recentMatch.created_at)) : 0;
+      const newerCreatedAt =
+        Number.isFinite(recentMs) && recentMs > (Number.isFinite(baseMs) ? baseMs : 0)
+          ? recentMatch.created_at
+          : pkg.created_at || recentMatch.created_at;
+      return {
+        ...pkg,
+        ...(newerCreatedAt ? { created_at: newerCreatedAt } : {}),
+        ...(recentMatch.approved_at ? { approved_at: recentMatch.approved_at } : {}),
+        ...(recentMatch.license && !pkg.license ? { license: recentMatch.license } : {}),
+        ...(recentMatch.media_license && !pkg.media_license ? { media_license: recentMatch.media_license } : {}),
+        ...(recentMatch.banner && (!pkg.banner || pkg.banner === 'logo.svg') ? { banner: recentMatch.banner } : {}),
+        ...(recentMatch.thumbnail && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg')
+          ? { thumbnail: recentMatch.thumbnail }
+          : {}),
+        ...(Array.isArray(recentMatch.screenshots) &&
+        recentMatch.screenshots.length > 0 &&
+        (!Array.isArray(pkg.screenshots) || pkg.screenshots.length === 0)
+          ? { screenshots: recentMatch.screenshots }
+          : {})
+      };
+    });
+    const missingNewPackages: any[] = [];
+    for (const [lowerId, item] of recentByLowerId.entries()) {
+      if (!seenInBase.has(lowerId)) {
+        missingNewPackages.push(item);
+      }
+    }
+    return missingNewPackages.length > 0 ? [...missingNewPackages, ...updatedBase] : updatedBase;
+  };
+
+  const fetchLiveRecentlyAddedOverlay = async (
+    basePackages: any[],
+    useCache = true
+  ): Promise<any[] | null> => {
+    if (useCache) {
+      const cachedRecent = await readEdgeCacheJson<any[]>('/__api_boot_recently_added_v1');
+      if (Array.isArray(cachedRecent) && cachedRecent.length > 0) {
+        return cachedRecent;
+      }
+    }
+
+    const recentUpstreamList = await fetchUpstreamJsonCached<any[]>(
+      '/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs',
+      300
+    )
+      .then(list => (Array.isArray(list) ? list : []))
+      .catch(() => []);
+    if (!Array.isArray(recentUpstreamList) || recentUpstreamList.length === 0 || recentUpstreamList.length > 100) {
+      return null;
+    }
+
+    const byLowerId = new Map<string, any>();
+    for (const pkg of Array.isArray(basePackages) ? basePackages : []) {
+      if (pkg?.id) {
+        byLowerId.set(String(pkg.id).toLowerCase(), pkg);
+      }
+    }
+
+    const rankById = new Map<string, number>();
+    const recentItems: any[] = [];
+    for (const [idx, raw] of recentUpstreamList.slice(0, 24).entries()) {
+      if (!raw?.author || !raw?.name) continue;
+      const id = `${raw.author}/${raw.name}`;
+      const lowerKey = id.toLowerCase();
+      rankById.set(lowerKey, idx);
+      const existing = byLowerId.get(lowerKey);
+      if (existing) {
+        if (!isPackageDeprecated(existing)) {
+          recentItems.push({ ...existing });
+        }
+      } else {
+        const sanitizedThumb = upgradeContentDbThumbnailUrl(raw.thumbnail || raw.thumbnail_url);
+        const resolvedBanner =
+          selectSharpPackageBanner(undefined, raw.screenshots, raw.banner, raw.banner_url, sanitizedThumb) ||
+          sanitizedThumb;
+        const fallbackPkg = {
+          ...raw,
+          id,
+          short_desc: raw.short_desc || raw.short_description || '',
+          ...(sanitizedThumb ? { thumbnail: sanitizedThumb } : {}),
+          ...(resolvedBanner ? { banner: resolvedBanner } : {}),
+          score: 0,
+          contentdb_score: Number(raw.contentdb_score ?? raw.score ?? 0),
+          contentdb_downloads: Number(raw.downloads || 0),
+          luantihub_downloads: 0,
+          downloads: Number(raw.downloads || 0),
+          min_minetest_version: raw.min_minetest_version || '5.0.0',
+          provider: 'contentdb',
+          source: 'official',
+          sources: ['official']
+        };
+        if (!isPackageDeprecated(fallbackPkg)) {
+          recentItems.push(fallbackPkg);
+        }
+      }
+    }
+
+    const toHydrate = recentItems
+      .slice(0, 12)
+      .filter(it => !it.created_at || !it.license || !it.banner || isContentDbThumbnailUrl(it.banner));
+    if (toHydrate.length > 0) {
+      await Promise.all(
+        toHydrate.map(async pkg => {
+          const detail = await fetchUpstreamJsonCached<any>(
+            `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`,
+            3600
+          ).catch(() => null);
+          if (!detail) return;
+          if (detail.license || detail.media_license) {
+            pkg.license = detail.license || detail.media_license || pkg.license || '';
+            pkg.media_license = detail.media_license || detail.license || pkg.media_license || '';
+          }
+          if (detail.created_at || detail.approved_at) {
+            const normExisting = pkg.created_at ? normalizeUtcIsoTimestamp(pkg.created_at) : '';
+            const normCreated = detail.created_at ? normalizeUtcIsoTimestamp(detail.created_at) : '';
+            const normApproved = detail.approved_at ? normalizeUtcIsoTimestamp(detail.approved_at) : '';
+            const candidates = [normApproved, normCreated, normExisting]
+              .filter(Boolean)
+              .map(iso => ({ iso, ms: Date.parse(iso) }))
+              .filter(c => Number.isFinite(c.ms) && c.ms > 0);
+            if (candidates.length > 0) {
+              candidates.sort((a, b) => b.ms - a.ms);
+              pkg.created_at = candidates[0].iso;
+            }
+          }
+          const detailThumb = upgradeContentDbThumbnailUrl(detail.thumbnail);
+          if (detailThumb && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg')) {
+            pkg.thumbnail = detailThumb;
+          }
+          const detailShots = parseJsonArray(detail.screenshots)
+            .map((s: any) => sanitizePackageImageUrl(typeof s === 'string' ? s : s?.url))
+            .filter((u): u is string => Boolean(u));
+          if (detailShots.length > 0) {
+            pkg.screenshots = detailShots;
+            pkg.banner =
+              selectSharpPackageBanner(undefined, detailShots, pkg.banner, pkg.thumbnail) || pkg.banner;
+          }
+          if (typeof detail.downloads === 'number' && detail.downloads > (pkg.contentdb_downloads || 0)) {
+            pkg.contentdb_downloads = detail.downloads;
+            pkg.downloads = detail.downloads + Number(pkg.luantihub_downloads || 0);
+          }
+        })
+      );
+    }
+
+    const builtRecentlyAdded = await applyApprovalTrackingAndBuildRecentlyAdded(
+      recentItems,
+      basePackages,
+      rankById,
+      useCache
+    );
+    if (useCache && builtRecentlyAdded.length > 0) {
+      await writeEdgeCacheJson('/__api_boot_recently_added_v1', builtRecentlyAdded, 300).catch(() => {});
+    }
+    return builtRecentlyAdded;
+  };
+
   if (catalogEdgeCacheKey && !noCache) {
     // Share the already-warmed Web Boot Bundle (`bootEdgeCacheKey`) first for standard in-game Luanti C++ client requests
     // (`GET /api/packages/?type=mod&type=game&type=txp...`) so in-game Content tab opens in < 5ms with zero D1 or upstream calls
@@ -1018,10 +1323,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       if (isBootBundle) {
         const nowMs = Date.now();
         // Zero D1 reads and zero upstream subrequests on HIT-EDGE: only read Isolate/Edge Cache overlays
-        const [cachedActivePromos, sharedRatings, cachedRecentReviews] = await Promise.all([
+        const [cachedActivePromos, sharedRatings, cachedRecentReviews, liveRecentlyAdded] = await Promise.all([
           readEdgeCacheJson<any[]>('/__active_promotions_v1'),
           readSharedEdgeRatingsMap(),
-          readEdgeCacheJson<any[]>('/__recent_reviews_v1')
+          readEdgeCacheJson<any[]>('/__recent_reviews_v1'),
+          fetchLiveRecentlyAddedOverlay(
+            Array.isArray(cachedCatalog.packages) ? cachedCatalog.packages : [],
+            true
+          ).catch(() => null)
         ]);
         const rawPromos =
           Array.isArray(cachedActivePromos)
@@ -1030,6 +1339,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               ? cachedCatalog.promotions
               : getLastKnownActivePromotions(nowMs);
         let overlaidPackages = Array.isArray(cachedCatalog.packages) ? cachedCatalog.packages : [];
+        if (Array.isArray(liveRecentlyAdded) && liveRecentlyAdded.length > 0) {
+          overlaidPackages = overlayRecentlyAddedOnPackages(overlaidPackages, liveRecentlyAdded);
+          edgeBody = {
+            ...edgeBody,
+            packages: overlaidPackages,
+            recentlyAdded: liveRecentlyAdded
+          };
+        }
         if (Array.isArray(rawPromos)) {
           const validEdgePromos = rawPromos
             .filter((r: any) => isValidActivePromotionRow(r, nowMs))
@@ -1039,7 +1356,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             overlaidPackages = overlayPromotionRowDeltaOnCatalog(overlaidPackages, promoDelta);
           }
           edgeBody = {
-            ...cachedCatalog,
+            ...edgeBody,
             packages: overlaidPackages,
             promotions: validEdgePromos
           };
@@ -1091,7 +1408,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': isBootBundle
-            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
+            ? 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'
             : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
@@ -1116,7 +1433,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         .catch(() => []);
 
   const recentUpstreamPromise = isBootBundle
-    ? fetchUpstreamJsonCached<any[]>('/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs', 900)
+    ? fetchUpstreamJsonCached<any[]>('/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs', 300)
         .then(list => Array.isArray(list) ? list : [])
         .catch(() => [])
     : Promise.resolve<any[]>([]);
@@ -1825,8 +2142,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, SharedEdgeRatingEntry>))
     : ({} as Record<string, SharedEdgeRatingEntry>);
 
-  // 5. Append Upstream ContentDB packages (excluding duplicates and D1 Kill-Switch delisted items)
-  for (const item of upstreamList) {
+  // 5. Append Upstream ContentDB packages (including any newly approved items in `recentUpstreamList` not yet in the 30-min `/packages/?fmt=vcs` cache)
+  const combinedUpstreamList =
+    isBootBundle && Array.isArray(recentUpstreamList) && recentUpstreamList.length > 0 && recentUpstreamList.length <= 100
+      ? [...upstreamList, ...recentUpstreamList]
+      : upstreamList;
+  for (const item of combinedUpstreamList) {
     if (!item || !item.author || !item.name) continue;
     const key = `${item.author}/${item.name}`.toLowerCase();
     if (blockedIds.has(key) || seenKeys.has(key)) continue;
@@ -2017,7 +2338,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         (Number(b.downloads) || 0) * computeDependencyPrioritizationMultiplier(b) -
         (Number(a.downloads) || 0) * computeDependencyPrioritizationMultiplier(a)
     );
-    pushPool(recentUpstreamMerged.slice(0, 8));
+    pushPool(recentUpstreamMerged.slice(0, 12));
     if (promoDelta && Object.keys(promoDelta.tagMap || {}).length > 0) {
       const promoPkgKeys = new Set(Object.keys(promoDelta.tagMap));
       pushPool(merged.filter(p => promoPkgKeys.has(String(p.id || '').toLowerCase())).slice(0, 8));
@@ -2029,7 +2350,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     pushPool(byDownloadsDesc.filter(p => p.type === 'mod').slice(0, 12));
     pushPool(byDownloadsDesc.filter(p => p.type === 'txp').slice(0, 12));
 
-    const batchToHydrate = carouselPool.slice(0, 16);
+    const batchToHydrate = carouselPool.slice(0, 20);
     if (batchToHydrate.length > 0) {
       let bootRepoScanBudget = 6;
       let bootReviewFetchBudget = 12;
@@ -2318,73 +2639,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week = syncPreHydratedToTop10(top10Week);
     }
 
-    // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB).
-    // `recentUpstreamMerged` is ordered by ContentDB `approved_at DESC` (where `approved_at >= created_at`).
-    // Compute the right-to-left suffix maximum `suffixMaxMs[i] = max_{j >= i} created_at[j]` so that packages
-    // drafted days/weeks before moderator approval (e.g. `titou4/x_entity` drafted Oct 9, approved Nov 5 at rank 0)
-    // receive an effective approval timestamp `>= suffixMaxMs[i]` and never drag `anchorMs` backwards.
-    let maxRecentCdbMs = 0;
-    const suffixMaxMs = new Array<number>(recentUpstreamMerged.length).fill(0);
-    for (let i = recentUpstreamMerged.length - 1; i >= 0; i--) {
-      const pkg = recentUpstreamMerged[i];
-      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-      const validMs = Number.isFinite(parsedMs) && parsedMs > 0 ? parsedMs : 0;
-      if (validMs > maxRecentCdbMs) {
-        maxRecentCdbMs = validMs;
-      }
-      const nextSuffixMax = i + 1 < recentUpstreamMerged.length ? suffixMaxMs[i + 1] : 0;
-      suffixMaxMs[i] = Math.max(validMs, nextSuffixMax);
+    // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB) with live approval timestamp tracking.
+    const recentlyAdded = await applyApprovalTrackingAndBuildRecentlyAdded(
+      recentUpstreamMerged,
+      merged,
+      recentUpstreamRankById,
+      !noCache
+    );
+    const finalMergedPackages = overlayRecentlyAddedOnPackages(merged, recentlyAdded);
+    if (!noCache && !q && types.length === 0 && !author && recentlyAdded.length > 0) {
+      await writeEdgeCacheJson('/__api_boot_recently_added_v1', recentlyAdded, 300).catch(() => {});
     }
-    const syntheticFloorCapMs = Date.now() - 24 * 60 * 60 * 1000;
-    let anchorMs = (maxRecentCdbMs > 0 ? maxRecentCdbMs : syntheticFloorCapMs) + 60_000;
-    for (let i = 0; i < recentUpstreamMerged.length; i++) {
-      const pkg = recentUpstreamMerged[i];
-      const parsedMs = pkg.created_at ? Date.parse(String(pkg.created_at)) : NaN;
-      const floorMs = suffixMaxMs[i];
-      if (Number.isFinite(parsedMs) && parsedMs > 0 && parsedMs >= floorMs) {
-        if (parsedMs < anchorMs) {
-          anchorMs = parsedMs;
-        } else {
-          anchorMs -= 1_000;
-          pkg.created_at = new Date(anchorMs).toISOString();
-        }
-      } else if (floorMs > 0) {
-        const candidateMs = Math.min(
-          anchorMs - 1_000,
-          floorMs + (recentUpstreamMerged.length - i) * 1_000
-        );
-        anchorMs = Math.max(floorMs, candidateMs);
-        pkg.created_at = new Date(anchorMs).toISOString();
-      } else {
-        anchorMs = Math.min(anchorMs, syntheticFloorCapMs) - 60_000;
-        pkg.created_at = new Date(anchorMs).toISOString();
-      }
-    }
-    const recentlyAddedById = new Map<string, any>();
-    for (const pkg of recentUpstreamMerged) {
-      if (pkg?.id && !isPackageDeprecated(pkg)) {
-        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
-      }
-    }
-    for (const pkg of merged) {
-      const isPureGit = pkg?.source === 'git' && !pkg?.sources?.includes('official');
-      if (pkg?.id && isPureGit && pkg.created_at && !isPackageDeprecated(pkg)) {
-        recentlyAddedById.set(String(pkg.id).toLowerCase(), pkg);
-      }
-    }
-    const recentlyAdded = Array.from(recentlyAddedById.values())
-      .sort((a, b) => {
-        const ta = a.created_at ? Date.parse(String(a.created_at)) : 0;
-        const tb = b.created_at ? Date.parse(String(b.created_at)) : 0;
-        if (tb !== ta) return tb - ta;
-        const rankA = recentUpstreamRankById.get(String(a.id || '').toLowerCase()) ?? 999;
-        const rankB = recentUpstreamRankById.get(String(b.id || '').toLowerCase()) ?? 999;
-        return rankA - rankB;
-      })
-      .slice(0, 24);
 
     responsePayload = {
-      packages: merged,
+      packages: finalMergedPackages,
       tags,
       top10Week,
       top10Today,
@@ -2393,7 +2661,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       latestBlogPost: latestBlogPost || null,
       recentReviews: enrichRecentReviewsWithCatalog(
         Array.isArray(recentReviews) ? recentReviews : [],
-        merged
+        finalMergedPackages
       )
     };
 
@@ -2415,7 +2683,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': !noCache
         ? (isBootBundle
-            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=3600'
+            ? 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'
             : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600')
         : 'no-cache, no-store, must-revalidate',
       'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'

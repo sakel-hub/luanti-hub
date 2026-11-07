@@ -300,6 +300,13 @@ export function deduplicateNotificationPackageCandidates(candidates: any[]): any
         ? pkg.created_at
         : existing.created_at || pkg.created_at;
 
+    const prevApprovedMs = parseNotificationTimestampMs(existing.approved_at) || 0;
+    const nextApprovedMs = parseNotificationTimestampMs(pkg.approved_at) || 0;
+    const chosenApproved =
+      nextApprovedMs > prevApprovedMs
+        ? pkg.approved_at
+        : existing.approved_at || pkg.approved_at;
+
     const chosenSha =
       normalizeCommitShaPart(pkg.latest_commit_sha || pkg.commit_sha) ||
       normalizeCommitShaPart(existing.latest_commit_sha || existing.commit_sha);
@@ -325,6 +332,7 @@ export function deduplicateNotificationPackageCandidates(candidates: any[]): any
         release_id: chosenRel || existing.release_id || pkg.release_id,
         updated_at: chosenUpd,
         created_at: chosenCreated,
+        ...(chosenApproved ? { approved_at: chosenApproved } : {}),
         latest_commit_sha: chosenSha || undefined,
         banner: existing.banner || pkg.banner || existing.banner_url || pkg.banner_url,
         thumbnail: existing.thumbnail || pkg.thumbnail || existing.thumbnail_url || pkg.thumbnail_url,
@@ -592,12 +600,12 @@ export function buildNewGitPackageNotificationSpec(
   const displayTitle = pkg?.title || idInfo.name;
   const thumb =
     pkg?.banner || pkg?.banner_url || pkg?.thumbnail || pkg?.thumbnail_url || undefined;
-  const isOfficial = Array.isArray(pkg?.sources)
-    ? pkg.sources.includes('official')
-    : pkg?.source === 'official';
   const isGit = Array.isArray(pkg?.sources)
     ? pkg.sources.includes('git')
     : pkg?.source === 'git';
+  const isOfficial = Array.isArray(pkg?.sources)
+    ? pkg.sources.includes('official')
+    : pkg?.source === 'official' || (!pkg?.source && !isGit);
   const isContentDbOnly = isOfficial && !isGit;
   const titlePrefix = isContentDbOnly ? 'New Package' : 'New Git Package';
   const defaultDesc = isContentDbOnly
@@ -900,12 +908,24 @@ export function evaluateCatalogNotificationsBatch(
 
   const rawPackages = Array.isArray(bootPayload?.packages) ? bootPayload.packages : [];
   const rawRecentlyAdded = Array.isArray(bootPayload?.recentlyAdded) ? bootPayload.recentlyAdded : [];
+  const recentlyAddedLowerIds = new Set<string>();
+  const recentlyAddedTopLowerIds = new Set<string>();
+  for (let i = 0; i < Math.min(rawRecentlyAdded.length, 16); i++) {
+    const idInfo = resolveCanonicalPackageIdentity(rawRecentlyAdded[i]);
+    if (idInfo) {
+      recentlyAddedLowerIds.add(idInfo.lowerId);
+      if (i < 4) {
+        recentlyAddedTopLowerIds.add(idInfo.lowerId);
+      }
+    }
+  }
   const packages = deduplicateNotificationPackageCandidates([...rawPackages, ...rawRecentlyAdded]);
   const baselineSeededAt = Number(state?.baselineSeededAt || 0);
 
   // 1. Evaluate New Packages (both ContentDB and Community Git packages)
   if (prefs.notifyNewGitPackages && Array.isArray(state.knownGitPackages)) {
     const knownGitSet = new Set(state.knownGitPackages.map((id: any) => String(id).toLowerCase()));
+    const hadCdbSeedOnEntry = knownGitSet.has('__cdb_seeded_v1__');
     let gitChanged = false;
     if (!knownGitSet.has('__cdb_seeded_v1__')) {
       const existingVersionKeys =
@@ -921,9 +941,35 @@ export function evaluateCatalogNotificationsBatch(
           knownGitSet.add(k);
         }
         knownGitSet.add('__cdb_seeded_v1__');
+        knownGitSet.add('__cdb_approval_heal_v1__');
         gitChanged = true;
       }
     }
+
+    const cdbBaselineReady = knownGitSet.has('__cdb_seeded_v1__');
+    if (hadCdbSeedOnEntry && !knownGitSet.has('__cdb_approval_heal_v1__') && recentlyAddedTopLowerIds.size > 0) {
+      const existingRecentDiscovered =
+        state.recentDiscoveredPackages &&
+        typeof state.recentDiscoveredPackages === 'object' &&
+        !Array.isArray(state.recentDiscoveredPackages)
+          ? state.recentDiscoveredPackages
+          : {};
+      const seenTagsSet = new Set(
+        Array.isArray(state.seenTags) ? state.seenTags.map(t => String(t).toLowerCase()) : []
+      );
+      for (const topLowerId of recentlyAddedTopLowerIds) {
+        if (
+          knownGitSet.has(topLowerId) &&
+          !existingRecentDiscovered[topLowerId] &&
+          !seenTagsSet.has(`lh-new-git-pkg-${topLowerId}`)
+        ) {
+          knownGitSet.delete(topLowerId);
+        }
+      }
+      knownGitSet.add('__cdb_approval_heal_v1__');
+      gitChanged = true;
+    }
+
     const newlyDiscoveredGit: Array<{ pkg: any; resolvedId: string; eventTimestampMs: number }> = [];
 
     for (const pkg of packages) {
@@ -931,13 +977,14 @@ export function evaluateCatalogNotificationsBatch(
       if (!idInfo) continue;
 
       if (!knownGitSet.has(idInfo.lowerId)) {
-        const isOfficial = Array.isArray(pkg.sources)
-          ? pkg.sources.includes('official')
-          : pkg.source === 'official';
         const isGit = Array.isArray(pkg.sources)
           ? pkg.sources.includes('git')
           : pkg.source === 'git';
-        if (isOfficial && !isGit && !pkg.created_at) {
+        const isOfficial = Array.isArray(pkg.sources)
+          ? pkg.sources.includes('official')
+          : pkg.source === 'official' || (!pkg.source && !isGit);
+        const inRecentlyAdded = recentlyAddedLowerIds.has(idInfo.lowerId) || Boolean(pkg.approved_at);
+        if (isOfficial && !isGit && !pkg.created_at && !pkg.approved_at && !inRecentlyAdded) {
           // Wait until `recentlyAdded` or detail hydration provides `created_at` before marking a new ContentDB package as known
           continue;
         }
@@ -945,18 +992,26 @@ export function evaluateCatalogNotificationsBatch(
         gitChanged = true;
         const isDualSource = isOfficial && isGit;
         const timeMs = isOfficial
-          ? parseNotificationTimestampMs(pkg.created_at)
+          ? parseNotificationTimestampMs(pkg.approved_at || pkg.created_at)
           : parseNotificationTimestampMs(pkg.created_at || pkg.updated_at);
-        const isRecent =
+        const withinRecencyWindow =
           timeMs !== null
             ? nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS &&
               (baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS)
             : false;
+        // ContentDB packages moderated hours/days after draft creation (`created_at`) only enter the catalog and
+        // `recentlyAdded` (`sort=approved_at&order=desc`) upon moderator approval. When the catalog baseline is already
+        // seeded (`cdbBaselineReady`) and a brand-new package appears in `recentlyAdded`, treat its approval as recent
+        // even if its original draft `created_at` predates `baselineSeededAt` or the 12h window.
+        const isNewlyApprovedInRecentlyAdded =
+          Boolean(isOfficial && !isGit && inRecentlyAdded && cdbBaselineReady);
+        const isRecent = withinRecencyWindow || isNewlyApprovedInRecentlyAdded;
+        const effectiveTimestampMs = withinRecencyWindow && timeMs ? timeMs : nowMs;
         if (!isDualSource && isRecent) {
           newlyDiscoveredGit.push({
             pkg,
             resolvedId: idInfo.resolvedId,
-            eventTimestampMs: timeMs || nowMs
+            eventTimestampMs: effectiveTimestampMs
           });
         }
       }
@@ -966,6 +1021,10 @@ export function evaluateCatalogNotificationsBatch(
       if (knownGitSet.has('__cdb_seeded_v1__')) {
         knownGitSet.delete('__cdb_seeded_v1__');
         knownGitSet.add('__cdb_seeded_v1__');
+      }
+      if (knownGitSet.has('__cdb_approval_heal_v1__')) {
+        knownGitSet.delete('__cdb_approval_heal_v1__');
+        knownGitSet.add('__cdb_approval_heal_v1__');
       }
       stateUpdates.knownGitPackages = Array.from(knownGitSet).slice(-10000);
     }
@@ -994,7 +1053,7 @@ export function evaluateCatalogNotificationsBatch(
       stateUpdates.recentDiscoveredPackages = Object.fromEntries(trimmedRecentEntries);
     }
 
-    for (const item of newlyDiscoveredGit.slice(0, 3)) {
+    for (const item of newlyDiscoveredGit.slice(0, 6)) {
       notifications.push(
         buildNewGitPackageNotificationSpec(item.pkg, item.resolvedId, item.eventTimestampMs)
       );

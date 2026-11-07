@@ -1295,6 +1295,7 @@ export class PwaService {
     // 3. Event-driven background sync & visibility/focus handoff (W3C / Edge / PWABuilder best practices)
     if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       const SW_HANDOFF_COOLDOWN_MS = 15 * 60 * 1000;
+      const VISIBILITY_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
       let lastStateSyncAt = 0;
       let lastSwCatalogCheckAt = 0;
       let lastVisibilityCheckAt = Date.now();
@@ -1326,7 +1327,7 @@ export class PwaService {
             .catch(() => {})
             .finally(() => {
               const now = Date.now();
-              if (now - lastVisibilityCheckAt >= SW_HANDOFF_COOLDOWN_MS) {
+              if (now - lastVisibilityCheckAt >= VISIBILITY_REFRESH_COOLDOWN_MS) {
                 lastVisibilityCheckAt = now;
                 this.checkForUpdate(false);
                 this.notifyCatalogSyncListeners({ source: 'visibility', ts: now });
@@ -1338,7 +1339,16 @@ export class PwaService {
       window.addEventListener('focus', () => {
         if (this.isOnline()) {
           this.syncAppBadge(0).catch(() => {});
-          this.reconcileNotifStateFromIndexedDb().catch(() => {});
+          this.reconcileNotifStateFromIndexedDb()
+            .catch(() => {})
+            .finally(() => {
+              const now = Date.now();
+              if (now - lastVisibilityCheckAt >= VISIBILITY_REFRESH_COOLDOWN_MS) {
+                lastVisibilityCheckAt = now;
+                this.checkForUpdate(false);
+                this.notifyCatalogSyncListeners({ source: 'visibility', ts: now });
+              }
+            });
         }
       });
 
@@ -1974,9 +1984,15 @@ export class PwaService {
       sources?: string[];
       status?: string;
       created_at?: string;
+      approved_at?: string;
       updated_at?: string;
     }>,
-    options?: { forceNotifyIds?: string[]; isBaselineSeedAllowed?: boolean }
+    options?: {
+      forceNotifyIds?: string[];
+      isBaselineSeedAllowed?: boolean;
+      recentlyAddedIds?: Iterable<string>;
+      recentlyAddedTopIds?: Iterable<string>;
+    }
   ): number {
     if (!Array.isArray(candidates) || candidates.length === 0) return 0;
     if (typeof localStorage === 'undefined') return 0;
@@ -1984,6 +2000,16 @@ export class PwaService {
     const nowMs = Date.now();
     const forceSet = new Set(
       (options?.forceNotifyIds || []).map(id => String(id || '').toLowerCase()).filter(Boolean)
+    );
+    const recentlyAddedSet = new Set(
+      Array.from(options?.recentlyAddedIds || [])
+        .map(id => String(id || '').toLowerCase())
+        .filter(Boolean)
+    );
+    const recentlyAddedTopSet = new Set(
+      Array.from(options?.recentlyAddedTopIds || [])
+        .map(id => String(id || '').toLowerCase())
+        .filter(Boolean)
     );
 
     const dedupedCandidates =
@@ -2016,7 +2042,8 @@ export class PwaService {
             ...allCandidates
               .map(pkg => resolveCanonicalPackageIdentity(pkg)?.lowerId || '')
               .filter(Boolean),
-            '__cdb_seeded_v1__'
+            '__cdb_seeded_v1__',
+            '__cdb_approval_heal_v1__'
           ])
         ).slice(-10000);
         localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(initialIds));
@@ -2043,6 +2070,7 @@ export class PwaService {
     }
 
     const knownSet = new Set<string>(knownList.map(id => id.toLowerCase()));
+    const hadCdbSeedOnEntry = knownSet.has('__cdb_seeded_v1__');
     let knownSetChanged = false;
 
     // One-time migration: include any package IDs already tracked in KNOWN_PACKAGE_VERSIONS_KEY so existing users
@@ -2059,6 +2087,7 @@ export class PwaService {
                 knownSet.add(key.toLowerCase());
               }
               knownSet.add('__cdb_seeded_v1__');
+              knownSet.add('__cdb_approval_heal_v1__');
               knownSetChanged = true;
             }
           }
@@ -2066,6 +2095,34 @@ export class PwaService {
       } catch {
         // ignore parse errors
       }
+    }
+
+    const cdbBaselineReady = knownSet.has('__cdb_seeded_v1__');
+    if (hadCdbSeedOnEntry && !knownSet.has('__cdb_approval_heal_v1__') && recentlyAddedTopSet.size > 0) {
+      const existingRecentDiscovered = this.recentDiscoveredPackages() || {};
+      let seenTagsSet = new Set<string>();
+      try {
+        const rawSeenTags = localStorage.getItem('lh_seen_notification_tags');
+        if (rawSeenTags) {
+          const parsedTags = JSON.parse(rawSeenTags);
+          if (Array.isArray(parsedTags)) {
+            seenTagsSet = new Set(parsedTags.map((t: any) => String(t).toLowerCase()));
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+      for (const topLowerId of recentlyAddedTopSet) {
+        if (
+          knownSet.has(topLowerId) &&
+          !existingRecentDiscovered[topLowerId] &&
+          !seenTagsSet.has(`lh-new-git-pkg-${topLowerId}`)
+        ) {
+          knownSet.delete(topLowerId);
+        }
+      }
+      knownSet.add('__cdb_approval_heal_v1__');
+      knownSetChanged = true;
     }
 
     let baselineSeededAt = 0;
@@ -2078,7 +2135,8 @@ export class PwaService {
     // 2. Strict Filter for Notifications:
     // - Exclude dual-indexed packages (sources.includes('official') && sources.includes('git')) unless forced,
     //   so linking a Git repo to an established ContentDB package never fires a "New Package" alert.
-    // - For official ContentDB packages (isOfficial && !isGit), require a valid `created_at` timestamp within 12h.
+    // - For official ContentDB packages (isOfficial && !isGit), require a valid `created_at` / `approved_at` timestamp within 12h,
+    //   or presence in `recentlyAddedSet` when `cdbBaselineReady` is true (to handle moderated ContentDB packages whose draft `created_at` predates approval).
     // - For pure Git packages (!isOfficial), check `created_at || updated_at` within 12h (or allow minimal test mocks without timestamps).
     const newlyDiscovered: Array<{ pkg: (typeof allCandidates)[number]; resolvedId: string; createdMs?: number }> = [];
 
@@ -2095,20 +2153,29 @@ export class PwaService {
         ? pkg.sources.includes('git')
         : pkg.source === 'git';
       const isDualSource = isOfficial && isGit;
+      const inRecentlyAdded = recentlyAddedSet.has(lowerId) || Boolean((pkg as any).approved_at);
 
       let isRecent = false;
       let createdMs: number | undefined;
       if (isForced) {
         isRecent = true;
       } else if (isOfficial && !isGit) {
-        // Official ContentDB package: require an explicit `created_at` within the 12h recency window
-        const timeMs = parseNotificationTimestampMs(pkg.created_at);
+        const timeMs = parseNotificationTimestampMs((pkg as any).approved_at || pkg.created_at);
+        let withinRecencyWindow = false;
         if (timeMs !== null) {
-          createdMs = timeMs;
           const withinMaxAge = nowMs - timeMs <= NOTIFICATION_MAX_EVENT_AGE_MS;
           const afterBaseline =
             baselineSeededAt <= 0 || timeMs >= baselineSeededAt - NOTIFICATION_BASELINE_SKEW_GRACE_MS;
-          isRecent = withinMaxAge && afterBaseline;
+          withinRecencyWindow = withinMaxAge && afterBaseline;
+        }
+        const isNewlyApprovedInRecentlyAdded = Boolean(inRecentlyAdded && cdbBaselineReady);
+        isRecent = withinRecencyWindow || isNewlyApprovedInRecentlyAdded;
+        if (withinRecencyWindow && timeMs !== null) {
+          createdMs = timeMs;
+        } else if (isNewlyApprovedInRecentlyAdded) {
+          createdMs = nowMs;
+        } else if (timeMs !== null) {
+          createdMs = timeMs;
         }
       } else if (!isOfficial) {
         // Pure Git package
@@ -2129,7 +2196,7 @@ export class PwaService {
       }
 
       if (!knownSet.has(lowerId)) {
-        if (isOfficial && !isGit && !pkg.created_at && !isForced) {
+        if (isOfficial && !isGit && !pkg.created_at && !(pkg as any).approved_at && !inRecentlyAdded && !isForced) {
           // Wait until `recentlyAdded` or detail hydration provides `created_at` before marking a new ContentDB package as known
           continue;
         }
@@ -2148,6 +2215,10 @@ export class PwaService {
         if (knownSet.has('__cdb_seeded_v1__')) {
           knownSet.delete('__cdb_seeded_v1__');
           knownSet.add('__cdb_seeded_v1__');
+        }
+        if (knownSet.has('__cdb_approval_heal_v1__')) {
+          knownSet.delete('__cdb_approval_heal_v1__');
+          knownSet.add('__cdb_approval_heal_v1__');
         }
         const updatedIds = Array.from(knownSet).slice(-10000);
         localStorage.setItem(KNOWN_GIT_PACKAGES_KEY, JSON.stringify(updatedIds));
@@ -2172,8 +2243,8 @@ export class PwaService {
     this.recordRecentDiscoveredPackages(discoveryUpdates);
     this.syncNotificationStateToIndexedDb().catch(() => {});
 
-    // Cap to at most 3 notifications per check so bulk imports never flood the OS tray
-    for (const item of newlyDiscovered.slice(0, 3)) {
+    // Cap to at most 6 notifications per check so approval waves of 4-6 packages notify all items without flooding the OS tray
+    for (const item of newlyDiscovered.slice(0, 6)) {
       const spec = buildNewGitPackageNotificationSpec(item.pkg, item.resolvedId, item.createdMs);
       this.sendNativeNotification({
         title: spec.title,

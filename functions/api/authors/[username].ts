@@ -3,7 +3,7 @@ import {
   safeDecodeParam,
   readEdgeCacheJson,
   writeEdgeCacheJson,
-  deleteEdgeCacheKeys,
+  invalidateEdgeCacheKeys,
   sanitizePublicErrorMessage
 } from '../lib/upstream';
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
@@ -61,7 +61,7 @@ export async function onRequestGet(context: {
             })
               .then(res => {
                 if (res && (res.newlyImportedCount > 0 || res.flaggedForReviewCount > 0)) {
-                  return deleteEdgeCacheKeys([cacheKey]);
+                  return invalidateEdgeCacheKeys([cacheKey]);
                 }
                 return null;
               })
@@ -284,7 +284,7 @@ export async function onRequestGet(context: {
             })
               .then(res => {
                 if (res && (res.newlyImportedCount > 0 || res.flaggedForReviewCount > 0)) {
-                  return deleteEdgeCacheKeys([cacheKey]);
+                  return invalidateEdgeCacheKeys([cacheKey]);
                 }
                 return null;
               })

@@ -431,6 +431,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v17',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20',
+    'https://cache.luantihub.internal/__api_boot_recently_added_v1',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1'
   ]);
@@ -529,6 +531,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       })
     );
   }
+
+export const deleteEdgeCacheKeys = invalidateEdgeCacheKeys;
 
   let lastKnownActivePromotions: any[] | null = null;
 

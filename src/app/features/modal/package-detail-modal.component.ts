@@ -2424,7 +2424,8 @@ import {
             <!-- Lightbox Top Controls -->
             <div
               (click)="$event.stopPropagation()"
-              class="absolute top-4 right-4 z-30 flex items-center gap-2">
+              style="top: max(3.5rem, calc(env(titlebar-area-height, 0px) + env(safe-area-inset-top, 0px) + 1rem))"
+              class="absolute top-14 sm:top-16 right-4 sm:right-6 z-30 flex items-center gap-2 luanti-wco-no-drag">
               <button
                 type="button"
                 (click)="toggleLightboxZoom($event)"

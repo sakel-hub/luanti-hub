@@ -214,6 +214,7 @@ export class App {
       if (typeof document === 'undefined' || typeof window === 'undefined') return;
       const anyModalOpen = this.anyOverlayOpen();
       if (anyModalOpen && !this.wasModalOpen) {
+        this.packageService.clearModalCloseScrollOverride();
         this.savedScrollY = window.scrollY || document.documentElement.scrollTop || 0;
         this.wasModalOpen = true;
         document.documentElement.style.overflow = 'hidden';
@@ -222,12 +223,14 @@ export class App {
           window.scrollTo({ top: this.savedScrollY, behavior: 'instant' as ScrollBehavior });
         }
       } else if (!anyModalOpen && this.wasModalOpen) {
-        const restoreY = this.savedScrollY;
+        const overrideScrollY = this.packageService.consumeModalCloseScrollOverride();
+        const restoreY = overrideScrollY !== null ? overrideScrollY : this.savedScrollY;
+        this.savedScrollY = 0;
         this.wasModalOpen = false;
         document.documentElement.style.overflow = '';
         document.body.style.overflow = '';
-        if (restoreY > 0 && window.scrollY !== restoreY) {
-          window.scrollTo({ top: restoreY, behavior: 'instant' as ScrollBehavior });
+        if (restoreY >= 0 && window.scrollY !== restoreY && (overrideScrollY !== null || restoreY > 0)) {
+          window.scrollTo({ top: restoreY, left: 0, behavior: 'instant' as ScrollBehavior });
         }
         this.updatePageScrollState();
       }
@@ -298,11 +301,7 @@ export class App {
     } else if (target === 'legal') {
       this.packageService.openLegalModal();
     } else {
-      this.packageService.closeAllModals(false);
       this.packageService.selectPrimaryNavTab(target);
-      if (typeof window !== 'undefined') {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
     }
   }
 

@@ -905,6 +905,7 @@ export class PackageService {
   }
 
   explorePromotionalRow(row: PromotionalPackageRow): void {
+    this.saveCurrentCatalogScrollPosition();
     const promo = row.promotion;
     this._showFavoritesOnly.set(false);
     const filterType = String(promo.row_filter_type || 'all').toLowerCase();
@@ -939,10 +940,7 @@ export class PackageService {
       this._sortBy.set('downloads');
     }
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
-    if (typeof window !== 'undefined') {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
+    this.syncQueryParamsToUrl(false, true);
   }
 
   private syncClientPromotionRowTags(activePromos: HeroPromotion[]): void {
@@ -1702,7 +1700,14 @@ export class PackageService {
       if (!Number.isFinite(discoveredAtMs) || discoveredAtMs <= 0 || nowMs - discoveredAtMs > maxDiscoveryAgeMs) {
         continue;
       }
-      const existing = candidatesById.get(lowerId) || byLowerId.get(lowerId);
+      const inCandidates = candidatesById.get(lowerId);
+      if (inCandidates?.created_at) {
+        const existingMs = Date.parse(String(inCandidates.created_at)) || 0;
+        if (existingMs > 0 && nowMs - existingMs <= maxDiscoveryAgeMs) {
+          continue;
+        }
+      }
+      const existing = inCandidates || byLowerId.get(lowerId);
       if (!existing || this.isPackageDeprecated(existing)) continue;
       const discoveredIso = new Date(discoveredAtMs).toISOString();
       candidatesById.set(lowerId, {
@@ -2897,6 +2902,7 @@ export class PackageService {
           return;
         }
         this.syncStateFromUrl(currentUrl);
+        this.restoreCatalogScrollPositionOnPopState(currentUrl);
       });
     }
     if (this.router) {
@@ -3274,6 +3280,169 @@ export class PackageService {
     return qs ? `${targetPath}?${qs}` : targetPath;
   }
 
+  private readonly catalogScrollByUrl = new Map<string, number>();
+  private scrollActionSeq = 0;
+  private modalCloseScrollOverride: number | null = null;
+
+  clearModalCloseScrollOverride(): void {
+    this.modalCloseScrollOverride = null;
+  }
+
+  consumeModalCloseScrollOverride(): number | null {
+    const val = this.modalCloseScrollOverride;
+    this.modalCloseScrollOverride = null;
+    return val;
+  }
+
+  private saveCurrentCatalogScrollPosition(): void {
+    if (typeof window === 'undefined') return;
+    const currentUrl = this.getCurrentBrowserUrl();
+    const scrollY = Math.max(0, Math.round(window.scrollY || 0));
+    if (!this.isModalUrlPath(currentUrl)) {
+      this.catalogScrollByUrl.set(currentUrl, scrollY);
+    }
+    if (window.history && typeof window.history.replaceState === 'function') {
+      try {
+        const currentState =
+          window.history.state && typeof window.history.state === 'object'
+            ? window.history.state
+            : {};
+        window.history.replaceState({ ...currentState, __lhScrollY: scrollY }, '', currentUrl);
+      } catch {
+        // Ignore history replaceState errors in restricted environments
+      }
+    }
+  }
+
+  private safeWindowScrollTo(options: ScrollToOptions): void {
+    if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return;
+    const isUnmockedJsdom =
+      typeof navigator !== 'undefined' &&
+      /jsdom/i.test(navigator.userAgent || '') &&
+      !(window.scrollTo as any).mock &&
+      !(window.scrollTo as any).__customScrollStub;
+    if (isUnmockedJsdom) return;
+
+    const docEl = typeof document !== 'undefined' ? document.documentElement : null;
+    const bodyEl = typeof document !== 'undefined' ? document.body : null;
+    const prevDocScrollBehavior = docEl ? docEl.style.scrollBehavior : '';
+    const prevBodyScrollBehavior = bodyEl ? bodyEl.style.scrollBehavior : '';
+    const prevDocOverflowAnchor = docEl ? (docEl.style as any).overflowAnchor : '';
+    const prevBodyOverflowAnchor = bodyEl ? (bodyEl.style as any).overflowAnchor : '';
+
+    if (docEl) {
+      docEl.style.scrollBehavior = 'auto';
+      (docEl.style as any).overflowAnchor = 'none';
+    }
+    if (bodyEl) {
+      bodyEl.style.scrollBehavior = 'auto';
+      (bodyEl.style as any).overflowAnchor = 'none';
+    }
+
+    try {
+      window.scrollTo(options);
+    } finally {
+      if (docEl) {
+        docEl.style.scrollBehavior = prevDocScrollBehavior;
+        (docEl.style as any).overflowAnchor = prevDocOverflowAnchor;
+      }
+      if (bodyEl) {
+        bodyEl.style.scrollBehavior = prevBodyScrollBehavior;
+        (bodyEl.style as any).overflowAnchor = prevBodyOverflowAnchor;
+      }
+    }
+  }
+
+  private scrollToCatalogTop(expectedSeq?: number): number {
+    if (expectedSeq !== undefined && expectedSeq !== this.scrollActionSeq) {
+      return this.scrollActionSeq;
+    }
+    const seq = expectedSeq ?? ++this.scrollActionSeq;
+    this.modalCloseScrollOverride = 0;
+
+    if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return seq;
+
+    if (
+      typeof document !== 'undefined' &&
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body
+    ) {
+      try {
+        const rect = document.activeElement.getBoundingClientRect?.();
+        if (rect && rect.top > 180) {
+          document.activeElement.blur();
+        }
+      } catch {
+        // Ignore blur errors
+      }
+    }
+
+    this.safeWindowScrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior });
+
+    const enforceTopIfNeeded = () => {
+      if (this.scrollActionSeq !== seq) return;
+      if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return;
+      const currentY =
+        window.scrollY ||
+        (typeof document !== 'undefined'
+          ? (document.documentElement?.scrollTop || 0) || (document.body?.scrollTop || 0)
+          : 0);
+      if (currentY > 0) {
+        this.safeWindowScrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior });
+      }
+    };
+
+    queueMicrotask(enforceTopIfNeeded);
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        enforceTopIfNeeded();
+        if (this.scrollActionSeq === seq && typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(enforceTopIfNeeded);
+        }
+      });
+    }
+    setTimeout(enforceTopIfNeeded, 0);
+    return seq;
+  }
+
+  private restoreCatalogScrollPositionOnPopState(currentUrl: string): void {
+    if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return;
+    if (this.isModalUrlPath(currentUrl)) return;
+    const stateScrollY =
+      typeof window.history?.state?.__lhScrollY === 'number' &&
+      Number.isFinite(window.history.state.__lhScrollY)
+        ? Math.max(0, Math.round(window.history.state.__lhScrollY))
+        : undefined;
+    const mapScrollY = this.catalogScrollByUrl.get(currentUrl);
+    const targetScrollY = stateScrollY ?? mapScrollY;
+    if (typeof targetScrollY !== 'number' || targetScrollY < 0) return;
+
+    const seq = ++this.scrollActionSeq;
+    this.modalCloseScrollOverride = targetScrollY;
+    this.catalogScrollByUrl.set(currentUrl, targetScrollY);
+
+    this.safeWindowScrollTo({ top: targetScrollY, left: 0, behavior: 'instant' as ScrollBehavior });
+
+    const enforceTargetScrollIfNeeded = () => {
+      if (this.scrollActionSeq !== seq) return;
+      if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return;
+      if (Math.abs((window.scrollY || 0) - targetScrollY) > 1) {
+        this.safeWindowScrollTo({ top: targetScrollY, left: 0, behavior: 'instant' as ScrollBehavior });
+      }
+    };
+
+    queueMicrotask(enforceTargetScrollIfNeeded);
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        enforceTargetScrollIfNeeded();
+        if (this.scrollActionSeq === seq && typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(enforceTargetScrollIfNeeded);
+        }
+      });
+    }
+    setTimeout(enforceTargetScrollIfNeeded, 0);
+  }
+
   private getCurrentBrowserUrl(): string {
     if (typeof window !== 'undefined' && window.location) {
       return (window.location.pathname || '/') + (window.location.search || '');
@@ -3281,8 +3450,13 @@ export class PackageService {
     return this.router?.url || '/';
   }
 
-  private syncQueryParamsToUrl(replaceUrl = false): void {
-    if (!this.router) return;
+  private syncQueryParamsToUrl(replaceUrl = false, scrollToTop = false): void {
+    if (!this.router) {
+      if (scrollToTop) {
+        this.scrollToCatalogTop();
+      }
+      return;
+    }
     if (
       !this._activePackage() &&
       !this._activeAuthorUsername() &&
@@ -3300,10 +3474,20 @@ export class PackageService {
       const currentUrl = this.getCurrentBrowserUrl();
       const shouldReplace = replaceUrl || nextUrl === currentUrl;
       const sameAsDismissed = !shouldReplace ? this.restoreDismissedOverlayBeforePush(nextUrl) : false;
-      this.router.navigate([targetPath], {
+      let scrollSeq: number | undefined;
+      if (scrollToTop) {
+        this.catalogScrollByUrl.set(nextUrl, 0);
+        scrollSeq = this.scrollToCatalogTop();
+      }
+      const navPromise = this.router.navigate([targetPath], {
         queryParams,
         replaceUrl: shouldReplace || sameAsDismissed
       });
+      if (scrollToTop && navPromise && typeof navPromise.then === 'function') {
+        navPromise.then(() => {
+          this.scrollToCatalogTop(scrollSeq);
+        }).catch(() => {});
+      }
       return;
     }
     const queryParams = this.buildActiveQueryParams();
@@ -3440,8 +3624,9 @@ export class PackageService {
       }
     }
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
+    const rawRecentlyAdded = Array.isArray(payload.recentlyAdded) ? payload.recentlyAdded : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
-    const combinedRaw = [...rawPackages, ...userPkgs];
+    const combinedRaw = [...rawPackages, ...rawRecentlyAdded, ...userPkgs];
     const deduplicated = this.deduplicateCatalog(
       combinedRaw
         .filter((item: any) => item && (item.author || item.author_name || item.id) && item.name && item.status !== 'delisted' && item.status !== 'flagged')
@@ -3456,8 +3641,8 @@ export class PackageService {
 
     let normalizedRecent: LuantiPackage[] = [];
     const recentCreatedById = new Map<string, string>();
-    if (Array.isArray(payload.recentlyAdded) && payload.recentlyAdded.length > 0) {
-      normalizedRecent = payload.recentlyAdded.map((item: any) => {
+    if (rawRecentlyAdded.length > 0) {
+      normalizedRecent = rawRecentlyAdded.map((item: any) => {
         const norm = normalizeTop10Entry(item);
         return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
       });
@@ -3469,9 +3654,20 @@ export class PackageService {
       }
     }
 
+    const pickNewerCreatedIso = (a?: string, b?: string): string | undefined => {
+      if (!a) return b;
+      if (!b) return a;
+      const msA = Date.parse(String(a));
+      const msB = Date.parse(String(b));
+      if (Number.isFinite(msA) && Number.isFinite(msB)) {
+        return msB > msA ? b : a;
+      }
+      return a || b;
+    };
+
     const normalized = deduplicated.map(pkg => {
       const revDepCount = reverseDepMap.get(String(pkg.name || '').toLowerCase()) || pkg.reverse_dep_count || 0;
-      const stampedCreatedAt = pkg.created_at || recentCreatedById.get(pkg.id.toLowerCase());
+      const stampedCreatedAt = pickNewerCreatedIso(pkg.created_at, recentCreatedById.get(pkg.id.toLowerCase()));
       if (revDepCount !== pkg.reverse_dep_count || (stampedCreatedAt && stampedCreatedAt !== pkg.created_at)) {
         return {
           ...pkg,
@@ -3486,7 +3682,11 @@ export class PackageService {
     this.reconcileFavoritesWithCatalog(normalized);
     const notifCandidates =
       normalizedRecent.length > 0 ? [...normalized, ...normalizedRecent] : normalized;
-    this.pwaService.checkAndNotifyNewGitPackages(notifCandidates, { isBaselineSeedAllowed: true });
+    this.pwaService.checkAndNotifyNewGitPackages(notifCandidates, {
+      isBaselineSeedAllowed: true,
+      recentlyAddedIds: normalizedRecent.slice(0, 16).map(r => r.id.toLowerCase()),
+      recentlyAddedTopIds: normalizedRecent.slice(0, 4).map(r => r.id.toLowerCase())
+    });
     this.pwaService.checkAndNotifyUpdatedPackages(normalized, { isBaselineSeedAllowed: true });
 
     if (Array.isArray(payload.recentReviews) && payload.recentReviews.length > 0) {
@@ -3981,9 +4181,12 @@ export class PackageService {
           for (const item of sortedRecent) {
             createdById.set(item.id.toLowerCase(), item);
           }
-          this._packages.update(curr =>
-            curr.map(p => {
-              const r = createdById.get(p.id.toLowerCase());
+          this._packages.update(curr => {
+            const seenInCurr = new Set<string>();
+            const updatedCurr = curr.map(p => {
+              const lowerKey = p.id.toLowerCase();
+              seenInCurr.add(lowerKey);
+              const r = createdById.get(lowerKey);
               if (!r) return p;
               return {
                 ...p,
@@ -3995,9 +4198,20 @@ export class PackageService {
                 banner: r.banner && r.banner !== 'logo.svg' ? r.banner : p.banner,
                 screenshots: r.screenshots?.length ? r.screenshots : p.screenshots
               };
-            })
-          );
-          this.pwaService.checkAndNotifyNewGitPackages(sortedRecent, { isBaselineSeedAllowed: false });
+            });
+            const missingNew: LuantiPackage[] = [];
+            for (const [lowerKey, r] of createdById.entries()) {
+              if (!seenInCurr.has(lowerKey)) {
+                missingNew.push(r);
+              }
+            }
+            return missingNew.length > 0 ? [...missingNew, ...updatedCurr] : updatedCurr;
+          });
+          this.pwaService.checkAndNotifyNewGitPackages(sortedRecent, {
+            isBaselineSeedAllowed: false,
+            recentlyAddedIds: sortedRecent.slice(0, 16).map(r => r.id.toLowerCase()),
+            recentlyAddedTopIds: sortedRecent.slice(0, 4).map(r => r.id.toLowerCase())
+          });
           this.prioritizePackagesForHydration(sortedRecent.slice(0, 12));
           this.scheduleBootCachePersist();
         }
@@ -4375,7 +4589,7 @@ export class PackageService {
         promotions: this._promotions(),
         latestBlogPost: this._latestBlogPost()
       };
-      let existingTs = Date.now();
+      let existingTs = this.lastCatalogSyncAt || Date.now();
       try {
         const rawCached = sessionStorage.getItem('lh_boot_cache_v23');
         if (rawCached) {
@@ -4492,7 +4706,7 @@ export class PackageService {
       } else {
         this.pwaService.triggerSwBackgroundCatalogCheck();
       }
-    }, 30 * 60 * 1000);
+    }, 10 * 60 * 1000);
 
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', () => {
@@ -4525,13 +4739,13 @@ export class PackageService {
       if (
         event.source === 'visibility' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 30 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 5 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       } else if (
         event.source === 'online' &&
         this.lastCatalogSyncAt > 0 &&
-        Date.now() - this.lastCatalogSyncAt >= 15 * 60 * 1000
+        Date.now() - this.lastCatalogSyncAt >= 5 * 60 * 1000
       ) {
         this.refreshCatalogInBackground().catch(() => {});
       }
@@ -4559,6 +4773,7 @@ export class PackageService {
           : '/api/packages/?boot=1&ngsw-bypass=true';
 
       const response = await fetch(apiUrl, {
+        cache: 'no-cache',
         headers: {
           Accept: 'application/json',
           'ngsw-bypass': 'true'
@@ -5315,6 +5530,7 @@ export class PackageService {
    * cleanly deselects the previous primary tab.
    */
   selectPrimaryNavTab(tab: 'all' | 'game' | 'mod' | 'txp' | 'git' | 'favorites'): void {
+    this.saveCurrentCatalogScrollPosition();
     this.closeAllModals(false);
     if (tab === 'all') {
       this._selectedType.set('all');
@@ -5358,7 +5574,7 @@ export class PackageService {
     }
 
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
+    this.syncQueryParamsToUrl(false, true);
   }
 
   /**
@@ -5393,7 +5609,7 @@ export class PackageService {
     this._searchQuery.set(clean);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    this.navigatePreservingScroll(['/']);
+    this.navigatePreservingScroll(['/'], undefined, true);
   }
 
   /**
@@ -5427,24 +5643,26 @@ export class PackageService {
     this._selectedTag.set(tag);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    this.navigatePreservingScroll(['/']);
+    this.navigatePreservingScroll(['/'], undefined, true);
   }
 
   setTagFilter(tag: string): void {
+    this.saveCurrentCatalogScrollPosition();
     const current = this._selectedTag();
     const next = tag === 'all' ? 'all' : (current.toLowerCase() === tag.toLowerCase() ? 'all' : tag);
     this._selectedTag.set(next);
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
+    this.syncQueryParamsToUrl(false, true);
   }
 
   setGameFilter(game: string): void {
+    this.saveCurrentCatalogScrollPosition();
     const clean = String(game || 'all').trim();
     const current = this._selectedGame();
     const next = clean === 'all' || !clean ? 'all' : (current.toLowerCase() === clean.toLowerCase() ? 'all' : clean);
     this._selectedGame.set(next);
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
+    this.syncQueryParamsToUrl(false, true);
   }
 
   filterByGameFromModal(gameSlug: string): void {
@@ -5477,7 +5695,7 @@ export class PackageService {
     this._showFavoritesOnly.set(false);
     this._visibleCount.set(PAGE_SIZE);
     this.seoService?.resetToHome();
-    this.navigatePreservingScroll(['/']);
+    this.navigatePreservingScroll(['/'], undefined, true);
   }
 
   setSortBy(sort: SortOption, updateUrl = true): void {
@@ -5490,6 +5708,7 @@ export class PackageService {
   }
 
   viewAllRecentlyAdded(): void {
+    this.saveCurrentCatalogScrollPosition();
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
@@ -5502,13 +5721,11 @@ export class PackageService {
     this._showFavoritesOnly.set(false);
     this._sortBy.set('created');
     this._visibleCount.set(PAGE_SIZE);
-    this.syncQueryParamsToUrl();
-    if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
+    this.syncQueryParamsToUrl(false, true);
   }
 
   resetFilters(navigateToRoot = false, replaceUrl = false): void {
+    this.saveCurrentCatalogScrollPosition();
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
@@ -5543,11 +5760,13 @@ export class PackageService {
       this._isLegalModalOpen.set(false);
       this.authService.closeProfileDrawer(false);
       this.seoService?.resetToHome();
+      this.catalogScrollByUrl.set('/', 0);
+      const scrollSeq = this.scrollToCatalogTop();
       if (this.router) {
         const currentUrl = this.getCurrentBrowserUrl();
         const shouldReplace = replaceUrl || currentUrl === '/';
         const sameAsDismissed = !shouldReplace ? this.restoreDismissedOverlayBeforePush('/') : false;
-        this.router.navigate(['/'], {
+        const navPromise = this.router.navigate(['/'], {
           queryParams: {
             q: null,
             type: null,
@@ -5559,11 +5778,16 @@ export class PackageService {
           },
           replaceUrl: shouldReplace || sameAsDismissed
         });
+        if (navPromise && typeof navPromise.then === 'function') {
+          navPromise.then(() => {
+            this.scrollToCatalogTop(scrollSeq);
+          }).catch(() => {});
+        }
       }
       return;
     }
 
-    this.syncQueryParamsToUrl(replaceUrl);
+    this.syncQueryParamsToUrl(replaceUrl, true);
   }
 
   loadMore(): void {
@@ -8837,11 +9061,17 @@ export class PackageService {
 
   private navigatePreservingScroll(
     commands: any[],
-    extraQueryParams?: Record<string, string | null>
+    extraQueryParams?: Record<string, string | null>,
+    scrollToTop = false
   ): void {
     const isDismissal = this.pendingDismissalReplace;
     this.pendingDismissalReplace = false;
-    if (!this.router) return;
+    if (!this.router) {
+      if (scrollToTop) {
+        this.scrollToCatalogTop();
+      }
+      return;
+    }
     const savedY = typeof window !== 'undefined' ? window.scrollY : 0;
     const firstCmd = typeof commands?.[0] === 'string' ? commands[0] : '/';
     const rawTargetPath =
@@ -8856,37 +9086,51 @@ export class PackageService {
     const nextUrl = this.buildCanonicalUrlString(targetPath, queryParams);
     const currentUrl = this.getCurrentBrowserUrl();
 
+    if (!this.isModalUrlPath(currentUrl)) {
+      this.saveCurrentCatalogScrollPosition();
+    }
+
     if (isDismissal) {
       if (this.isModalUrlPath(currentUrl)) {
         this.dismissedOverlayUrl = currentUrl;
         this.lastDismissedCatalogUrl = nextUrl;
       }
-      this.router
-        .navigate(commands, {
-          queryParams,
-          replaceUrl: true
-        })
-        .then(() => {
+      const dismissPromise = this.router.navigate(commands, {
+        queryParams,
+        replaceUrl: true
+      });
+      if (dismissPromise && typeof dismissPromise.then === 'function') {
+        dismissPromise.then(() => {
           if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
-            window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+            this.safeWindowScrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
           }
-        });
+        }).catch(() => {});
+      }
       return;
     }
 
     const isSameUrl = nextUrl === currentUrl;
     const sameAsDismissed = !isSameUrl ? this.restoreDismissedOverlayBeforePush(nextUrl) : false;
 
-    this.router
-      .navigate(commands, {
-        queryParams,
-        replaceUrl: isSameUrl || sameAsDismissed
-      })
-      .then(() => {
-        if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
-          window.scrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
+    let scrollSeq: number | undefined;
+    if (scrollToTop) {
+      this.catalogScrollByUrl.set(nextUrl, 0);
+      scrollSeq = this.scrollToCatalogTop();
+    }
+
+    const navPromise = this.router.navigate(commands, {
+      queryParams,
+      replaceUrl: isSameUrl || sameAsDismissed
+    });
+    if (navPromise && typeof navPromise.then === 'function') {
+      navPromise.then(() => {
+        if (scrollToTop) {
+          this.scrollToCatalogTop(scrollSeq);
+        } else if (typeof window !== 'undefined' && savedY > 0 && window.scrollY !== savedY) {
+          this.safeWindowScrollTo({ top: savedY, behavior: 'instant' as ScrollBehavior });
         }
-      });
+      }).catch(() => {});
+    }
   }
 
   readonly startInEditTagsMode = signal(false);

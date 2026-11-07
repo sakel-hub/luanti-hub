@@ -11758,7 +11758,7 @@ core.register_node(modname .. ":panel", {
           if (sql.includes('SELECT DISTINCT user_id FROM user_identities')) {
             return { results: [{ user_id: 'usr_tenplus1' }] };
           }
-          if (sql.includes('FROM user_identities WHERE user_id =')) {
+          if (sql.includes('FROM user_identities') && sql.includes('WHERE user_id =')) {
             return {
               results: [{ provider: 'contentdb', provider_username: 'TenPlus1', username: 'TenPlus1', verified: 1 }]
             };
@@ -11779,7 +11779,7 @@ core.register_node(modname .. ":panel", {
           if (sql.includes('FROM users WHERE id =')) {
             return { id: 'usr_tenplus1', username: 'TenPlus1', display_name: 'TenPlus1', role: 'user' };
           }
-          if (sql.includes('FROM users WHERE LOWER(username) = LOWER(?)')) {
+          if (sql.includes('FROM users') && sql.includes('LOWER(username) = LOWER(?)')) {
             return { id: 'usr_tenplus1', username: 'TenPlus1', display_name: 'TenPlus1', role: 'user' };
           }
           if (sql.includes('FROM user_identities WHERE LOWER(provider_username) = LOWER(?)')) {
@@ -11935,6 +11935,425 @@ core.register_node(modname .. ":panel", {
       const backfillRes = await runOneTimeExistingUsersGitBackfill({ DB: mockDb }, true);
       expect(backfillRes.completed).toBe(true);
       expect(backfillRes.anyRemaining).toBe(false);
+
+      // 5. Verify GET /api/authors/:username (`functions/api/authors/[username].ts`) compiles and returns git_sync status
+      const { onRequestGet: authorGet } = await import('../../functions/api/authors/[username]');
+      const { deleteEdgeCacheKeys } = await import('../../functions/api/lib/upstream');
+      expect(typeof deleteEdgeCacheKeys).toBe('function');
+      const authorRes = await authorGet({
+        request: new Request('https://luantihub.org/api/authors/TenPlus1'),
+        env: { DB: mockDb },
+        params: { username: 'TenPlus1' }
+      });
+      expect(authorRes.status).toBe(200);
+      const authorBody = await authorRes.json();
+      expect(authorBody.author.username).toBe('TenPlus1');
+      expect(authorBody.author.git_sync.alreadySyncedCount).toBe(12);
+      expect(authorBody.author.git_sync.pendingQueueCount).toBe(0);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should scroll to top when selecting "View All" on Home swimlanes while preserving scroll position on Browser Back (popstate)', async () => {
+    const packageService = TestBed.inject(PackageService);
+    const scrollCalls: Array<{ top?: number; behavior?: string }> = [];
+    const origScrollTo = window.scrollTo;
+    let simulatedScrollY = 1850;
+    const scrollYDescriptor = Object.getOwnPropertyDescriptor(window, 'scrollY');
+
+    Object.defineProperty(window, 'scrollY', {
+      configurable: true,
+      get: () => simulatedScrollY
+    });
+    window.scrollTo = ((optsOrX: any, y?: any) => {
+      if (typeof optsOrX === 'object' && optsOrX !== null) {
+        if (typeof optsOrX.top === 'number') {
+          simulatedScrollY = optsOrX.top;
+        }
+        scrollCalls.push({ top: optsOrX.top, behavior: optsOrX.behavior });
+      } else if (typeof y === 'number') {
+        simulatedScrollY = y;
+        scrollCalls.push({ top: y });
+      }
+    }) as typeof window.scrollTo;
+    (window.scrollTo as any).__customScrollStub = true;
+
+    try {
+      window.history.replaceState({}, '', '/');
+      simulatedScrollY = 1850;
+
+      // 1. User clicks "View All" on Standalone Voxel Games (`selectPrimaryNavTab('game')`) while scrolled down at 1850px
+      packageService.selectPrimaryNavTab('game');
+
+      expect(simulatedScrollY).toBe(0);
+      expect(scrollCalls.some(c => c.top === 0)).toBe(true);
+      expect((packageService as any).catalogScrollByUrl.get('/')).toBe(1850);
+
+      // 2. User presses Browser Back (`popstate` returning to `/`) -> scroll position 1850px is restored
+      window.history.replaceState({ __lhScrollY: 1850 }, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate', { state: { __lhScrollY: 1850 } }));
+      expect(simulatedScrollY).toBe(1850);
+
+      // 3. User clicks "View All" on Essential Mods & Addons (`setTagFilter('technology')`) while at 1420px
+      simulatedScrollY = 1420;
+      packageService.setTagFilter('technology');
+      expect(simulatedScrollY).toBe(0);
+      expect((packageService as any).catalogScrollByUrl.get('/')).toBe(1420);
+
+      // 4. Browser Back restores 1420px
+      window.history.replaceState({ __lhScrollY: 1420 }, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate', { state: { __lhScrollY: 1420 } }));
+      expect(simulatedScrollY).toBe(1420);
+
+      // 5. Filtering from inside an open modal overrides modal-close scroll restoration to 0
+      packageService.filterByTagFromModal('building');
+      expect(simulatedScrollY).toBe(0);
+      expect(packageService.consumeModalCloseScrollOverride()).toBe(0);
+      expect(packageService.consumeModalCloseScrollOverride()).toBeNull();
+    } finally {
+      window.scrollTo = origScrollTo;
+      if (scrollYDescriptor) {
+        Object.defineProperty(window, 'scrollY', scrollYDescriptor);
+      } else {
+        Object.defineProperty(window, 'scrollY', { configurable: true, value: 0, writable: true });
+      }
+    }
+  });
+
+  it('should position PackageDetailModalComponent lightbox zoom and close controls below browser/OS native top-right buttons', () => {
+    const fixture = TestBed.createComponent(PackageDetailModalComponent);
+    const comp = fixture.componentInstance;
+    const packageService = TestBed.inject(PackageService);
+    const mockPkg = {
+      id: 'SaKeL/pixie',
+      author: 'SaKeL',
+      name: 'pixie',
+      title: 'Pixie',
+      type: 'mod' as const,
+      short_desc: 'Pixie mod',
+      thumbnail: 'https://luantihub.org/screenshots/pixie.png',
+      banner: 'https://luantihub.org/screenshots/pixie.png',
+      screenshots: ['https://luantihub.org/screenshots/pixie.png'],
+      score: 5,
+      downloads: 100,
+      license: 'LGPL-2.1-only',
+      source: 'git' as const,
+      tags: ['git']
+    };
+    comp.package = mockPkg;
+    packageService.openPackageModal(mockPkg, false);
+    fixture.detectChanges();
+    comp.openLightbox('https://luantihub.org/screenshots/pixie.png');
+    fixture.detectChanges();
+
+    const lightboxDialog = fixture.nativeElement.querySelector('[role="dialog"].z-\\[70\\]');
+    expect(lightboxDialog).toBeTruthy();
+    const controlsContainer = lightboxDialog.querySelector('.luanti-wco-no-drag') as HTMLElement | null;
+    expect(controlsContainer).toBeTruthy();
+    expect(controlsContainer?.className).toContain('top-14');
+    expect(controlsContainer?.className).toContain('sm:top-16');
+    expect(controlsContainer?.getAttribute('style')).toContain('titlebar-area-height');
+    packageService.closePackageModal(false);
+  });
+
+  it('should surface newly approved ContentDB packages in Recently Added (even when /packages/?fmt=vcs is stale or on HIT-EDGE) and notify all 4 moderated packages with draft created_at plus one-time self-heal', async () => {
+    const { onRequestGet: bootGet } = await import('../../functions/api/packages/index');
+    const { invalidateEdgeCacheKeys } = await import('../../functions/api/lib/upstream');
+    const { evaluateCatalogNotificationsBatch } = await import('./core/utils/notification-engine');
+
+    const nowMs = Date.now();
+    // Simulate draft created_at 2 days BEFORE baselineSeededAt (package waited in ContentDB moderation queue)
+    const draftCreatedIso = new Date(nowMs - 48 * 3600 * 1000).toISOString();
+    const olderApprovedIso = new Date(nowMs - 6 * 3600 * 1000).toISOString();
+
+    const fourNewlyApproved = [
+      {
+        author: 'zempik10',
+        name: 'block_shapeshifts',
+        title: 'Block Shapeshifts',
+        type: 'mod',
+        short_desc: 'Adds a block shapeshift with many textures. Could be used for prop-hunts.',
+        thumbnail: 'https://content.luanti.org/uploads/block_shapeshifts.png',
+        downloads: 5,
+        release: 40004
+      },
+      {
+        author: 'zempik10',
+        name: 'animalia_shapeshifts',
+        title: 'Animalia Shapeshifts',
+        type: 'mod',
+        short_desc: 'Registers Animalia mobs as shapeshifts you can transform into.',
+        thumbnail: 'https://content.luanti.org/uploads/animalia_shapeshifts.png',
+        downloads: 6,
+        release: 40003
+      },
+      {
+        author: 'zempik10',
+        name: 'classic_mese_monster_shapeshift',
+        title: 'Classic Mese Monster Shapeshift',
+        type: 'mod',
+        short_desc: 'Registers the classic mese monster as a shapeshift.',
+        thumbnail: 'https://content.luanti.org/uploads/classic_mese.png',
+        downloads: 4,
+        release: 40002
+      },
+      {
+        author: 'Don',
+        name: 'myeating',
+        title: 'My Eating',
+        type: 'mod',
+        short_desc: 'Eating Animation',
+        thumbnail: 'https://content.luanti.org/uploads/myeating.png',
+        downloads: 8,
+        release: 40001
+      }
+    ];
+
+    const baselineUpstream = [
+      {
+        author: 'Minetest',
+        name: 'minetest_game',
+        title: 'Minetest Game',
+        type: 'game',
+        short_desc: 'Default game',
+        downloads: 500000,
+        release: 39000
+      }
+    ];
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs')) {
+        return new Response(JSON.stringify([...fourNewlyApproved, ...baselineUpstream]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/packages/?fmt=vcs')) {
+        // Simulate 30m cached /packages/?fmt=vcs that does NOT yet contain the 4 newly approved packages!
+        return new Response(JSON.stringify(baselineUpstream), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/tags/')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      for (const pkg of fourNewlyApproved) {
+        if (url.includes(`/packages/${pkg.author}/${pkg.name}/`)) {
+          return new Response(
+            JSON.stringify({
+              ...pkg,
+              // ContentDB detail API returns the older draft creation timestamp (48h ago), NOT approved_at
+              created_at: draftCreatedIso
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+      if (url.includes('/packages/Minetest/minetest_game/')) {
+        return new Response(
+          JSON.stringify({
+            ...baselineUpstream[0],
+            created_at: olderApprovedIso
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }) as typeof fetch;
+
+    const mockDb = {
+      prepare: () => ({
+        bind: () => ({
+          all: async () => ({ results: [] }),
+          first: async () => null,
+          run: async () => ({ meta: { changes: 0 } })
+        }),
+        all: async () => ({ results: [] }),
+        first: async () => null,
+        run: async () => ({ meta: { changes: 0 } })
+      })
+    };
+
+    try {
+      await invalidateEdgeCacheKeys([
+        'https://cache.luantihub.internal/upstream-v4:/packages/?fmt=vcs',
+        'https://cache.luantihub.internal/upstream-v4:/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs',
+        'https://cache.luantihub.internal/__cdb_approved_seen_v1'
+      ]);
+
+      // 1. Edge Worker `/api/packages/?boot=1` includes all 4 newly approved packages in both `recentlyAdded` and `packages`
+      // even when `/packages/?fmt=vcs` does not yet contain them, and assigns monotonic approval timestamps newer than `olderApprovedIso`.
+      const res = await bootGet({
+        request: new Request('https://luantihub.org/api/packages/?boot=1'),
+        env: { DB: mockDb }
+      });
+      expect(res.status).toBe(200);
+      const bootBody: any = await res.json();
+      expect(Array.isArray(bootBody.recentlyAdded)).toBe(true);
+      const recentIds = bootBody.recentlyAdded.map((p: any) => p.id);
+      expect(recentIds.slice(0, 4)).toEqual([
+        'zempik10/block_shapeshifts',
+        'zempik10/animalia_shapeshifts',
+        'zempik10/classic_mese_monster_shapeshift',
+        'Don/myeating'
+      ]);
+      const pkgIds = new Set((bootBody.packages || []).map((p: any) => p.id));
+      for (const expectedId of recentIds.slice(0, 4)) {
+        expect(pkgIds.has(expectedId)).toBe(true);
+      }
+      // Monotonic suffix floor ensures moderated draft package (`draftCreatedIso` = 48h ago) gets `created_at` >= `olderApprovedIso` (6h ago)
+      const myEatingRecent = bootBody.recentlyAdded.find((p: any) => p.id === 'Don/myeating');
+      expect(Date.parse(myEatingRecent.created_at)).toBeGreaterThanOrEqual(Date.parse(olderApprovedIso));
+
+      // 2. Notification engine (`evaluateCatalogNotificationsBatch`) notifies all 4 newly approved packages (batch cap 6)
+      // even if their raw `created_at` is `draftCreatedIso` (48h before `baselineSeededAt`)
+      const rawDraftBootPayload = {
+        packages: [
+          { ...baselineUpstream[0], id: 'Minetest/minetest_game', created_at: olderApprovedIso },
+          ...fourNewlyApproved.map((p) => ({
+            ...p,
+            id: `${p.author}/${p.name}`,
+            created_at: draftCreatedIso
+          }))
+        ],
+        recentlyAdded: [
+          ...fourNewlyApproved.map((p) => ({
+            ...p,
+            id: `${p.author}/${p.name}`,
+            created_at: draftCreatedIso
+          })),
+          { ...baselineUpstream[0], id: 'Minetest/minetest_game', created_at: olderApprovedIso }
+        ]
+      };
+
+      const evalResult = evaluateCatalogNotificationsBatch(
+        rawDraftBootPayload,
+        {
+          prefs: {
+            notificationsEnabled: true,
+            notifyNewGitPackages: true
+          },
+          knownGitPackages: ['Minetest/minetest_game', '__cdb_seeded_v1__'],
+          baselineSeededAt: nowMs - 3600 * 1000,
+          recentDiscoveredPackages: {}
+        },
+        nowMs
+      );
+      expect(evalResult.notifications.length).toBe(4);
+      expect(evalResult.notifications.map((n) => n.data?.packageId)).toEqual([
+        'zempik10/block_shapeshifts',
+        'zempik10/animalia_shapeshifts',
+        'zempik10/classic_mese_monster_shapeshift',
+        'Don/myeating'
+      ]);
+      expect(Object.keys(evalResult.stateUpdates.recentDiscoveredPackages || {}).length).toBe(4);
+
+      // 3. One-time self-heal (`__cdb_approval_heal_v1__`) recovers top `recentlyAdded` packages that were previously swallowed
+      // into `knownGitPackages` by the draft `created_at` bug without being notified or added to `recentDiscoveredPackages`
+      const healedResult = evaluateCatalogNotificationsBatch(
+        rawDraftBootPayload,
+        {
+          prefs: {
+            notificationsEnabled: true,
+            notifyNewGitPackages: true
+          },
+          knownGitPackages: [
+            'Minetest/minetest_game',
+            '__cdb_seeded_v1__',
+            'zempik10/block_shapeshifts',
+            'zempik10/animalia_shapeshifts',
+            'zempik10/classic_mese_monster_shapeshift',
+            'Don/myeating'
+          ],
+          baselineSeededAt: nowMs - 3600 * 1000,
+          recentDiscoveredPackages: {}
+        },
+        nowMs
+      );
+      expect(healedResult.notifications.length).toBe(4);
+      expect(healedResult.stateUpdates.knownGitPackages).toContain('__cdb_approval_heal_v1__');
+
+      // Subsequent run after `__cdb_approval_heal_v1__` is set does not re-notify
+      const postHealResult = evaluateCatalogNotificationsBatch(
+        rawDraftBootPayload,
+        {
+          prefs: {
+            notificationsEnabled: true,
+            notifyNewGitPackages: true
+          },
+          knownGitPackages: healedResult.stateUpdates.knownGitPackages,
+          baselineSeededAt: nowMs - 3600 * 1000,
+          recentDiscoveredPackages: healedResult.stateUpdates.recentDiscoveredPackages,
+          seenTags: healedResult.stateUpdates.seenTags
+        },
+        nowMs
+      );
+      expect(postHealResult.notifications.length).toBe(0);
+
+      // 4. Verify foreground `pwaService.checkAndNotifyNewGitPackages` also notifies all 4 moderated packages and records them
+      const pwaService = TestBed.inject(PwaService);
+      const settingsService = TestBed.inject(SettingsService);
+      settingsService.notificationsEnabled.set(true);
+      settingsService.notifyNewGitPackages.set(true);
+      localStorage.setItem(
+        'lh_known_git_packages_v1',
+        JSON.stringify(['Minetest/minetest_game', '__cdb_seeded_v1__'])
+      );
+      localStorage.setItem('lh_notif_baseline_seeded_at_v1', String(nowMs - 3600 * 1000));
+      localStorage.removeItem('lh_seen_notification_tags');
+      localStorage.setItem('lh_recent_discoveries_v1', JSON.stringify({}));
+      pwaService.recentDiscoveredPackages.set({});
+      const sentNotifs: any[] = [];
+      const origSend = pwaService.sendNativeNotification.bind(pwaService);
+      pwaService.sendNativeNotification = async (payload: any) => {
+        sentNotifs.push(payload);
+        return true;
+      };
+
+      try {
+        const notifiedCount = pwaService.checkAndNotifyNewGitPackages(
+          rawDraftBootPayload.packages.map((p) => ({
+            id: p.id,
+            title: p.title,
+            author: p.author,
+            name: p.name,
+            type: p.type,
+            source: 'official' as const,
+            created_at: p.created_at,
+            thumbnail: (p as any).thumbnail
+          })),
+          {
+            recentlyAddedIds: rawDraftBootPayload.recentlyAdded.map((p) => p.id),
+            recentlyAddedTopIds: rawDraftBootPayload.recentlyAdded.slice(0, 4).map((p) => p.id)
+          }
+        );
+
+        expect(notifiedCount).toBe(4);
+        expect(sentNotifs.length).toBe(4);
+        expect(Object.keys(pwaService.recentDiscoveredPackages())).toEqual([
+          'zempik10/block_shapeshifts',
+          'zempik10/animalia_shapeshifts',
+          'zempik10/classic_mese_monster_shapeshift',
+          'don/myeating'
+        ]);
+      } finally {
+        pwaService.sendNativeNotification = origSend;
+        pwaService.recentDiscoveredPackages.set({});
+        localStorage.removeItem('lh_known_git_packages_v1');
+        localStorage.removeItem('lh_notif_baseline_seeded_at_v1');
+        localStorage.removeItem('lh_seen_notification_tags');
+        localStorage.removeItem('lh_recent_discoveries_v1');
+      }
     } finally {
       globalThis.fetch = origFetch;
     }

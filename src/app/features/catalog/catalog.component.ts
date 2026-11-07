@@ -702,9 +702,6 @@ export class CatalogComponent {
       this.packageService.openSubmitModal();
     } else {
       this.packageService.selectPrimaryNavTab(target);
-      if (typeof window !== 'undefined') {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      }
     }
   }
 }

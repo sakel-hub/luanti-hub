@@ -900,8 +900,10 @@ select:disabled {
     -webkit-app-region: no-drag;
   }
 
+  .luanti-backdrop,
   .luanti-modal-backdrop,
-  .luanti-dialog-panel {
+  .luanti-dialog-panel,
+  .luanti-wco-no-drag {
     app-region: no-drag;
     -webkit-app-region: no-drag;
   }
