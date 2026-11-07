@@ -546,13 +546,13 @@ export const LUANTIHUB_BADGE_TAGS: Array<{
   name: string;
   title: string;
   tooltip: string;
-  icon: 'sprout';
+  icon: 'leaf';
 }> = [
   {
     name: ORGANIC_CODE_TAG,
     title: ORGANIC_CODE_LABEL,
     tooltip: ORGANIC_CODE_TOOLTIP,
-    icon: 'sprout'
+    icon: 'leaf'
   }
 ];
 

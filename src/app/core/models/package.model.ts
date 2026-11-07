@@ -12,7 +12,7 @@ export interface LuantiHubBadgeTagOption {
   name: string;
   title: string;
   tooltip: string;
-  icon: 'sprout';
+  icon: 'leaf';
 }
 
 export type PromoRowIcon = 'trophy' | 'sparkles' | 'flame' | 'gamepad' | 'star' | 'rocket';

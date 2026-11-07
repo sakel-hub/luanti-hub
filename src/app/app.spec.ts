@@ -12871,7 +12871,7 @@ core.register_node(modname .. ":panel", {
     headerFixture.destroy();
   });
 
-  it('should agnostically track metadata options and badge_tags ("100% Organic Code" sprout badge with tooltip) across tiles, detail modal, and submit modal', async () => {
+  it('should agnostically track metadata options and badge_tags ("100% Organic Code" leaf badge with consistent tooltips & arrow cursor) across tiles, detail modal, and submit modal', async () => {
     const {
       ORGANIC_CODE_TAG,
       ORGANIC_CODE_LABEL,
@@ -12883,17 +12883,19 @@ core.register_node(modname .. ":panel", {
     const { PackageBadgesComponent } = await import('./shared/components/package-badges.component');
     const { SubmitModalComponent } = await import('./features/submit/submit-modal.component');
 
-    // 1. Verify agnostic badge_tags helpers and constants
+    // 1. Verify agnostic badge_tags helpers and constants (with leaf icon)
     expect(ORGANIC_CODE_TAG).toBe('organic_code');
     expect(ORGANIC_CODE_LABEL).toBe('100% Organic Code');
     expect(ORGANIC_CODE_TOOLTIP).toBe('Zero artificial additives. Grown with sunlight, coffee, and patience.');
     expect(LUANTIHUB_BADGE_TAGS.length).toBeGreaterThanOrEqual(1);
     expect(LUANTIHUB_BADGE_TAGS[0].name).toBe('organic_code');
+    expect(LUANTIHUB_BADGE_TAGS[0].icon).toBe('leaf');
     expect(parseBadgeTagsArray('["organic_code", "100% Organic Code", "invalid_tag"]')).toEqual(['organic_code']);
     expect(hasOrganicCodeTag({ badge_tags: ['organic_code'] })).toBe(true);
     expect(hasOrganicCodeTag({ badge_tags: [] })).toBe(false);
 
-    // 2. Verify PackageBadgesComponent renders the green sprout badge in the [MOD] [ContentDB] [Git] [sprout] row
+    // 2. Verify PackageBadgesComponent renders the green leaf badge in the [TOP 10] [MOD] [ContentDB] [Git] [leaf] [Featured] row
+    //    with uniform .glass-badge sizing, arrow cursor (cursor-default, no cursor-help), and localized tooltips on every badge
     const badgesFixture = TestBed.createComponent(PackageBadgesComponent);
     const samplePkg: LuantiPackage = {
       id: 'SaKeL/everness',
@@ -12909,20 +12911,44 @@ core.register_node(modname .. ":panel", {
       license: 'LGPL-2.1-only',
       tags: ['environment'],
       badge_tags: ['organic_code'],
+      featured: true,
       source: 'git',
       sources: ['official', 'git']
     };
     badgesFixture.componentInstance.package = samplePkg;
+    badgesFixture.componentInstance.showFeatured = true;
+    badgesFixture.componentInstance.top10Label = 'TOP 10';
     badgesFixture.detectChanges();
 
     const badgesEl = badgesFixture.nativeElement as HTMLElement;
-    const sproutBadge = badgesEl.querySelector('[data-testid="organic-code-badge"]') as HTMLElement;
-    expect(sproutBadge).toBeTruthy();
-    expect(sproutBadge.getAttribute('aria-label')).toBe('100% Organic Code');
-    expect(sproutBadge.querySelector('svg[lucideSprout]')).toBeTruthy();
+    const top10Badge = badgesEl.querySelector('[data-testid="top10-badge"]') as HTMLElement;
+    const typeBadge = badgesEl.querySelector('[data-testid="type-badge"]') as HTMLElement;
+    const contentDbBadge = badgesEl.querySelector('[data-testid="contentdb-badge"]') as HTMLElement;
+    const gitBadge = badgesEl.querySelector('[data-testid="git-badge"]') as HTMLElement;
+    const leafBadge = badgesEl.querySelector('[data-testid="organic-code-badge"]') as HTMLElement;
+    const featuredBadge = badgesEl.querySelector('[data-testid="featured-badge"]') as HTMLElement;
+
+    for (const badge of [top10Badge, typeBadge, contentDbBadge, gitBadge, leafBadge, featuredBadge]) {
+      expect(badge).toBeTruthy();
+      expect(badge.classList.contains('glass-badge')).toBe(true);
+      expect(badge.classList.contains('cursor-default')).toBe(true);
+      expect(badge.classList.contains('cursor-help')).toBe(false);
+    }
+
+    expect(leafBadge.getAttribute('aria-label')).toBe('100% Organic Code');
+    expect(leafBadge.querySelector('svg[lucideLeaf]')).toBeTruthy();
+    expect(leafBadge.querySelector('svg[lucideSprout]')).toBeNull();
+
+    // Verify localized translation keys exist in Slovak as well as English
+    const i18n = TestBed.inject(TranslationService);
+    i18n.setLocale('sk');
+    badgesFixture.detectChanges();
+    expect(leafBadge.getAttribute('aria-label')).toBe('100 % organický kód');
+    i18n.setLocale('en');
+    badgesFixture.detectChanges();
     badgesFixture.destroy();
 
-    // 3. Verify PackageDetailModalComponent metadata editor & sidebar display + agnostic PATCH payload
+    // 3. Verify PackageDetailModalComponent metadata editor & sidebar display + cache-safe persistence across loadPackageDetails
     const authService = TestBed.inject(AuthService);
     const pkgService = TestBed.inject(PackageService);
     (authService as any)._currentUser.set({
@@ -12943,6 +12969,7 @@ core.register_node(modname .. ":panel", {
     (pkgService as any)._activePackage.set(basePkg);
 
     let capturedPatchBody: any = null;
+    let capturedDetailGetUrl = '';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input?.url || '';
       if (url.includes('/api/packages/SaKeL/everness') && init?.method === 'PATCH') {
@@ -12953,6 +12980,27 @@ core.register_node(modname .. ":panel", {
             package_id: 'SaKeL/everness',
             tags: capturedPatchBody.tags || ['environment'],
             badge_tags: capturedPatchBody.badge_tags || ['organic_code']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (
+        (url.includes('/api/packages/SaKeL/everness/?') || url.endsWith('/api/packages/SaKeL/everness/')) &&
+        (!init?.method || init.method === 'GET')
+      ) {
+        capturedDetailGetUrl = url;
+        // Simulate a stale browser-cached GET response from before the PATCH (badge_tags: [])
+        return new Response(
+          JSON.stringify({
+            id: 'SaKeL/everness',
+            author: 'SaKeL',
+            name: 'everness',
+            title: 'Everness',
+            type: 'mod',
+            license: 'LGPL-2.1-only',
+            downloads: 1200,
+            tags: ['environment'],
+            badge_tags: []
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         );
@@ -12973,6 +13021,7 @@ core.register_node(modname .. ":panel", {
       const editOrganicBtn = modalEl.querySelector('[data-testid="edit-badge-tag-organic"]') as HTMLButtonElement;
       expect(editOrganicBtn).toBeTruthy();
       expect(editOrganicBtn.textContent).toContain('100% Organic Code');
+      expect(editOrganicBtn.querySelector('svg[lucideLeaf]')).toBeTruthy();
 
       // Select "100% Organic Code" and save
       editOrganicBtn.click();
@@ -12988,23 +13037,31 @@ core.register_node(modname .. ":panel", {
       expect(capturedPatchBody.title).toBe('Everness');
       expect(capturedPatchBody.type).toBe('mod');
 
-      // Verify updated package state now has badge_tags: ['organic_code'] and renders sidebar + header sprout badges
+      // Verify updated package state now has badge_tags: ['organic_code'] and renders sidebar + header leaf badges
       expect(modalFixture.componentInstance.package.badge_tags).toEqual(['organic_code']);
-      expect(modalEl.querySelector('[data-testid="sidebar-organic-code-tag"]')).toBeTruthy();
-      expect(modalEl.querySelector('[data-testid="organic-code-badge"]')).toBeTruthy();
+      expect(modalEl.querySelector('[data-testid="sidebar-organic-code-tag"] svg[lucideLeaf]')).toBeTruthy();
+      expect(modalEl.querySelector('[data-testid="organic-code-badge"] svg[lucideLeaf]')).toBeTruthy();
+
+      // Simulate reopening the modal and triggering loadPackageDetails while browser cache still has stale badge_tags: []
+      (pkgService as any).edgeApiAvailable = true;
+      await pkgService.loadPackageDetails(pkgService.packages()[0], true);
+      expect(capturedDetailGetUrl).toContain('_t=');
+      expect(pkgService.packages()[0].badge_tags).toEqual(['organic_code']);
+      expect(pkgService.activePackage()?.badge_tags).toEqual(['organic_code']);
 
       modalFixture.destroy();
     } finally {
       fetchSpy.mockRestore();
     }
 
-    // 4. Verify SubmitModalComponent renders the "100% Organic Code" badge tag selector
+    // 4. Verify SubmitModalComponent renders the "100% Organic Code" badge tag selector with leaf icon
     const submitFixture = TestBed.createComponent(SubmitModalComponent);
     submitFixture.detectChanges();
     const submitEl = submitFixture.nativeElement as HTMLElement;
     const submitOrganicBtn = submitEl.querySelector('[data-testid="submit-badge-tag-organic"]') as HTMLButtonElement;
     expect(submitOrganicBtn).toBeTruthy();
     expect(submitOrganicBtn.textContent).toContain('100% Organic Code');
+    expect(submitOrganicBtn.querySelector('svg[lucideLeaf]')).toBeTruthy();
     submitOrganicBtn.click();
     submitFixture.detectChanges();
     expect(submitFixture.componentInstance.selectedBadgeTags()).toEqual(['organic_code']);

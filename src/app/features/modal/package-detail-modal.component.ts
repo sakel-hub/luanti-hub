@@ -80,7 +80,7 @@ import {
   LucideMaximize2,
   LucideZoomIn,
   LucideZoomOut,
-  LucideSprout
+  LucideLeaf
 } from '@lucide/angular';
 
 @Component({
@@ -129,7 +129,7 @@ import {
     LucideMaximize2,
     LucideZoomIn,
     LucideZoomOut,
-    LucideSprout
+    LucideLeaf
   ],
   template: `
     @if (package) {
@@ -488,7 +488,7 @@ import {
                                   ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60 shadow-sm'
                                   : 'glass-pill text-slate-300 hover:text-white'"
                                 class="px-3 py-1 rounded-full border text-[11px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer">
-                                <svg lucideSprout class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                                <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
                                 <span>{{ 'card.organicCodeLabel' | translate }}</span>
                               </button>
                             }
@@ -1630,7 +1630,7 @@ import {
                             [appTooltip]="'card.organicCodeTooltip' | translate"
                             [appTooltipTap]="true"
                             class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 hover:border-emerald-400 text-emerald-300 hover:text-white text-[10px] font-semibold inline-flex items-center gap-1 transition cursor-pointer">
-                            <svg lucideSprout class="w-3 h-3 text-emerald-400 flex-shrink-0"></svg>
+                            <svg lucideLeaf class="w-3 h-3 text-emerald-400 flex-shrink-0"></svg>
                             <span>{{ 'card.organicCodeLabel' | translate }}</span>
                           </button>
                         }
@@ -1638,6 +1638,8 @@ import {
                           <button
                             type="button"
                             (click)="filterByTag(tag)"
+                            [appTooltip]="(('modal.filterByTagTooltip' | translate) || 'Filter catalog by #{tag}').replace('{tag}', tag)"
+                            [appTooltipTap]="true"
                             class="px-2.5 py-0.5 rounded-full glass-pill hover:border-sky-400/50 text-slate-200 hover:text-white text-[10px] font-medium transition cursor-pointer">
                             #{{ tag }}
                           </button>

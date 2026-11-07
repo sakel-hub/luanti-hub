@@ -19,6 +19,7 @@ import { formatContentDbCdnUrl, selectSharpPackageBanner } from '../../core/conf
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
+import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
   LucideChevronLeft,
@@ -26,8 +27,7 @@ import {
   LucideHeart,
   LucideTrophy,
   LucideDownload,
-  LucideInfo,
-  LucideSprout
+  LucideInfo
 } from '@lucide/angular';
 
 @Component({
@@ -39,14 +39,14 @@ import {
     ImgFallbackDirective,
     TooltipDirective,
     CompactNumberPipe,
+    PackageBadgesComponent,
     TranslatePipe,
     LucideChevronLeft,
     LucideChevronRight,
     LucideHeart,
     LucideTrophy,
     LucideDownload,
-    LucideInfo,
-    LucideSprout
+    LucideInfo
   ],
   template: `
     @if (rowPackages().length > 0) {
@@ -178,20 +178,14 @@ import {
 
                 <!-- Top Rose Frosted Glass Badge + Organic Code Badge -->
                 <div class="absolute top-2 left-2 z-20 flex items-center gap-1">
-                  <span class="glass-badge glass-badge-rose font-black uppercase tracking-wider text-[9px] px-1.5 py-0.5">
-                    {{ 'carousel.top10Badge' | translate }}
-                  </span>
-                  @if (isOrganicCode(pkg)) {
-                    <span
-                      data-testid="organic-code-badge"
-                      (click)="$event.stopPropagation()"
-                      [appTooltip]="'card.organicCodeTooltip' | translate"
-                      [appTooltipTap]="true"
-                      [attr.aria-label]="'card.organicCodeLabel' | translate"
-                      class="glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0.5 cursor-help">
-                      <svg lucideSprout class="w-2.5 h-2.5 text-emerald-400 flex-shrink-0"></svg>
-                    </span>
-                  }
+                  <app-package-badges
+                    [package]="pkg"
+                    [showType]="false"
+                    [showOfficial]="false"
+                    [showGit]="false"
+                    [top10Label]="'carousel.top10Badge' | translate"
+                    [compact]="true">
+                  </app-package-badges>
                 </div>
 
                 <!-- Quick Action Buttons (Download .zip + Favorite) -->

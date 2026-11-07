@@ -4,7 +4,7 @@ import { LuantiPackage } from '../../core/models/package.model';
 import { hasOrganicCodeTag } from '../../core/config/package-utils.config';
 import { TooltipDirective } from '../directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
-import { LucideGitBranch, LucideGlobe, LucideSprout } from '@lucide/angular';
+import { LucideGitBranch, LucideGlobe, LucideLeaf } from '@lucide/angular';
 
 @Component({
   selector: 'app-package-badges',
@@ -17,31 +17,56 @@ import { LucideGitBranch, LucideGlobe, LucideSprout } from '@lucide/angular';
     TranslatePipe,
     LucideGitBranch,
     LucideGlobe,
-    LucideSprout
+    LucideLeaf
   ],
   template: `
     <div [class]="compact ? 'inline-flex items-center gap-1 flex-wrap' : 'flex items-center gap-1.5 flex-wrap'">
+      <!-- Optional Top 10 Rank Badge -->
+      @if (top10Label) {
+        <span
+          data-testid="top10-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="'card.top10BadgeTooltip' | translate"
+          [appTooltipTap]="true"
+          [class]="badgePillClass('glass-badge-rose font-black uppercase tracking-wider')">
+          {{ top10Label }}
+        </span>
+      }
+
       <!-- Category Type Badge (MOD / GAME / TXP) -->
-      <span
-        [class]="typeBadgeClass + (compact ? ' text-[9px] px-1.5 py-0' : '')"
-        class="glass-badge font-black uppercase tracking-wider">
-        {{ package.type }}
-      </span>
+      @if (showType) {
+        <span
+          data-testid="type-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="typeTooltipKey | translate"
+          [appTooltipTap]="true"
+          [class]="badgePillClass(typeBadgeClass + ' font-black uppercase tracking-wider')">
+          {{ package.type }}
+        </span>
+      }
 
       <!-- Official ContentDB Source Badge -->
       @if (showOfficial && isOfficialSource) {
-        <span [class]="compact ? 'glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-emerald font-bold'">
-          <svg lucideGlobe [class]="compact ? 'w-2.5 h-2.5 text-emerald-300 flex-shrink-0' : 'w-3 h-3 text-emerald-300 flex-shrink-0'"></svg>
+        <span
+          data-testid="contentdb-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="'card.contentDbSourceTooltip' | translate"
+          [appTooltipTap]="true"
+          [class]="badgePillClass('glass-badge-emerald font-bold')">
+          <svg lucideGlobe [class]="iconClass('text-emerald-300')"></svg>
           <span>ContentDB</span>
         </span>
       }
 
       <!-- Decentralized Git Source Badge -->
-      @if (isGitSource) {
+      @if (showGit && isGitSource) {
         <span
+          data-testid="git-badge"
+          (click)="$event.stopPropagation()"
           [appTooltip]="showGitTooltip ? ('card.gitSourceTooltip' | translate) : ''"
-          [class]="compact ? 'glass-badge glass-badge-amber font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-amber font-bold'">
-          <svg lucideGitBranch [class]="compact ? 'w-2.5 h-2.5 text-amber-300 flex-shrink-0' : 'w-3 h-3 text-amber-300 flex-shrink-0'"></svg>
+          [appTooltipTap]="true"
+          [class]="badgePillClass('glass-badge-amber font-bold')">
+          <svg lucideGitBranch [class]="iconClass('text-amber-300')"></svg>
           <span>Git</span>
         </span>
       }
@@ -54,14 +79,19 @@ import { LucideGitBranch, LucideGlobe, LucideSprout } from '@lucide/angular';
           [appTooltip]="'card.organicCodeTooltip' | translate"
           [appTooltipTap]="true"
           [attr.aria-label]="'card.organicCodeLabel' | translate"
-          [class]="compact ? 'glass-badge glass-badge-emerald font-bold text-[9px] px-1.5 py-0.5 cursor-help' : 'glass-badge glass-badge-emerald font-bold px-1.5 py-0.5 cursor-help'">
-          <svg lucideSprout [class]="compact ? 'w-2.5 h-2.5 text-emerald-400 flex-shrink-0' : 'w-3 h-3 text-emerald-400 flex-shrink-0'"></svg>
+          [class]="badgePillClass('glass-badge-emerald font-bold')">
+          <svg lucideLeaf [class]="iconClass('text-emerald-400')"></svg>
         </span>
       }
 
       <!-- Featured Badge (Detail Modal) -->
       @if (showFeatured && package.featured) {
-        <span [class]="compact ? 'glass-badge glass-badge-sky font-bold text-[9px] px-1.5 py-0' : 'glass-badge glass-badge-sky font-bold'">
+        <span
+          data-testid="featured-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="'card.featuredBadgeTooltip' | translate"
+          [appTooltipTap]="true"
+          [class]="badgePillClass('glass-badge-sky font-bold')">
           Featured
         </span>
       }
@@ -72,10 +102,21 @@ import { LucideGitBranch, LucideGlobe, LucideSprout } from '@lucide/angular';
 })
 export class PackageBadgesComponent {
   @Input({ required: true }) package!: LuantiPackage;
+  @Input() showType = true;
   @Input() showFeatured = false;
-  @Input() showGitTooltip = false;
+  @Input() showGitTooltip = true;
   @Input() showOfficial = true;
+  @Input() showGit = true;
+  @Input() top10Label = '';
   @Input() compact = false;
+
+  badgePillClass(variantClasses: string): string {
+    return `glass-badge ${variantClasses} cursor-default select-none${this.compact ? ' glass-badge-compact' : ''}`;
+  }
+
+  iconClass(colorClass: string): string {
+    return `${this.compact ? 'w-2.5 h-2.5' : 'w-3 h-3'} ${colorClass} flex-shrink-0`;
+  }
 
   get typeBadgeClass(): string {
     if (this.package?.type === 'game') {
@@ -85,6 +126,16 @@ export class PackageBadgesComponent {
       return 'glass-badge-purple';
     }
     return 'glass-badge-sky';
+  }
+
+  get typeTooltipKey(): string {
+    if (this.package?.type === 'game') {
+      return 'card.typeGameTooltip';
+    }
+    if (this.package?.type === 'txp') {
+      return 'card.typeTxpTooltip';
+    }
+    return 'card.typeModTooltip';
   }
 
   get isOfficialSource(): boolean {

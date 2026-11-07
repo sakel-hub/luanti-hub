@@ -1,6 +1,7 @@
 import {
   fetchUpstreamJsonCached,
   parseJsonArray,
+  parseBadgeTagsArray,
   ensureExtendedPackageColumns,
   scanGitRepoMetadataCached,
   extractEmbeddedVideo,
@@ -57,7 +58,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v8_${encodeURIComponent(
+      ? `/__api_hydrate_v9_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -97,6 +98,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const lowerKey = String(row.id).toLowerCase();
           d1ById.set(lowerKey, row);
           const parsedTags = parseJsonArray(row.tags);
+          const parsedBadgeTags = parseBadgeTagsArray(row.badge_tags);
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
@@ -140,6 +142,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             review_thread_counts: parsedRowRevCounts,
             rating_checked: Boolean(parsedRowRevCounts || rowScore > 0 || !isOfficialD1Row) || undefined,
             tags: parsedTags.length > 0 ? parsedTags : undefined,
+            badge_tags: parsedBadgeTags.length > 0 ? parsedBadgeTags : undefined,
             dev_state: row.dev_state || undefined,
             file_size: row.file_size || undefined,
             video_url: row.video_url || undefined,
@@ -444,6 +447,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             Number.isFinite(detailCreatedMs) && Number.isFinite(detailApprovedMs)
               ? (detailApprovedMs >= detailCreatedMs ? normDetailApproved : normDetailCreated)
               : (normDetailApproved || normDetailCreated || undefined);
+          const existingBadgeTags = parseBadgeTagsArray(existingD1Row?.badge_tags);
           hydratedMap[lowerKey] = {
             id: canonicalId,
             license: lic,
@@ -456,6 +460,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             review_thread_counts: detailRevCounts,
             rating_checked: ratingChecked || undefined,
             tags: detailTags.length > 0 ? detailTags : undefined,
+            badge_tags: existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
             dev_state: devState || undefined,
             created_at: resolvedDetailCreatedAt,
             download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,

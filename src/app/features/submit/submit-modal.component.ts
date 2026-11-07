@@ -20,7 +20,7 @@ import {
   LucideTag,
   LucideKeyRound,
   LucideAlertCircle,
-  LucideSprout
+  LucideLeaf
 } from '@lucide/angular';
 
 @Component({
@@ -43,7 +43,7 @@ import {
     LucideTag,
     LucideKeyRound,
     LucideAlertCircle,
-    LucideSprout
+    LucideLeaf
   ],
   template: `
     <div
@@ -358,7 +358,7 @@ import {
             <!-- Badge Tags (e.g. 100% Organic Code) -->
             <div class="space-y-1.5 border-b border-white/10 pb-3">
               <div class="flex items-center gap-1.5 font-bold text-emerald-400 uppercase tracking-wider text-[10px]">
-                <svg lucideSprout class="w-3.5 h-3.5"></svg>
+                <svg lucideLeaf class="w-3.5 h-3.5"></svg>
                 <span>{{ 'modal.badgeTagsLabel' | translate }}</span>
               </div>
               <div class="flex flex-wrap gap-1.5 pt-0.5">
@@ -373,7 +373,7 @@ import {
                       ? 'bg-emerald-500/25 text-emerald-300 border-emerald-400/60 shadow-sm'
                       : 'glass-pill text-slate-300 hover:text-white'"
                     class="px-3 py-1 rounded-full border text-[11px] font-semibold inline-flex items-center gap-1.5 transition cursor-pointer">
-                    <svg lucideSprout class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
+                    <svg lucideLeaf class="w-3.5 h-3.5 text-emerald-400 flex-shrink-0"></svg>
                     <span>{{ 'card.organicCodeLabel' | translate }}</span>
                   </button>
                 }

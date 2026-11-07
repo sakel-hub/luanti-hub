@@ -8,6 +8,7 @@ import {
   ensureExtendedPackageColumns,
   isPackageDeprecated,
   parseJsonArray,
+  parseBadgeTagsArray,
   sanitizePackageImageUrl,
   formatContentDbCdnUrl,
   upgradeContentDbThumbnailUrl,
@@ -100,6 +101,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.file_size,
           p.dev_state,
           p.tags,
+          p.badge_tags,
           p.updated_at
         FROM package_daily_downloads d
         LEFT JOIN packages p ON LOWER(p.id) = LOWER(d.package_id)
@@ -116,6 +118,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const pkgKey = String(r.package_id || '').toLowerCase();
           if (!pkgKey || blockedIds.has(pkgKey)) continue;
           const rowTags = parseJsonArray(r.tags);
+          const rowBadgeTags = parseBadgeTagsArray(r.badge_tags);
           if (isPackageDeprecated({ ...r, tags: rowTags })) continue;
           const parts = String(r.package_id).split('/');
           const author = r.author || parts[0];
@@ -159,6 +162,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             type: r.type || 'mod',
             short_desc: r.short_desc || '',
             tags: rowTags,
+            ...(rowBadgeTags.length > 0 ? { badge_tags: rowBadgeTags } : {}),
             dependency_ratio: depRatio > 0 ? Number(depRatio.toFixed(3)) : undefined
           };
           const depMultiplier = computeDependencyPrioritizationMultiplier(candidatePkg, depRatio);

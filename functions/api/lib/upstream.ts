@@ -5242,8 +5242,8 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v20';
-export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v20';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v21';
+export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v21';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
 

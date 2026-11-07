@@ -223,6 +223,8 @@ export class PackageService {
     Promise<Array<{ forge: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom'; fullName: string; repoUrl: string; rawBase: string }>>
   >();
   private readonly inFlightDetailsCache = new Map<string, Promise<void>>();
+  private readonly recentlyMutatedPkgKeys = new Map<string, { ts: number; seq: number }>();
+  private mutationSeq = 0;
 
   // Readonly Public Signals
   readonly packages = this._packages.asReadonly();
@@ -3623,9 +3625,14 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v20');
         sessionStorage.removeItem('lh_boot_cache_v21');
         sessionStorage.removeItem('lh_boot_cache_v22');
+        sessionStorage.removeItem('lh_boot_cache_v23');
+        sessionStorage.removeItem('lh_boot_cache_v24');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
+      }
+      if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
+        caches.delete(BOOT_SYNC_CACHE_NAME).catch(() => {});
       }
     } catch {
       // Ignore storage errors
@@ -3837,7 +3844,8 @@ export class PackageService {
             updated_at: freshMatch.updated_at || curr.updated_at,
             download_size: freshMatch.download_size || curr.download_size,
             file_size: freshMatch.file_size || curr.file_size,
-            tags: freshMatch.tags?.length ? freshMatch.tags : curr.tags
+            tags: freshMatch.tags?.length ? freshMatch.tags : curr.tags,
+            badge_tags: freshMatch.badge_tags?.length ? freshMatch.badge_tags : curr.badge_tags
           };
         });
       }
@@ -4656,7 +4664,7 @@ export class PackageService {
       };
       let existingTs = this.lastCatalogSyncAt || Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v23');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -4729,7 +4737,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v23',
+          'lh_boot_cache_v24',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -4898,7 +4906,8 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v19') ||
               sessionStorage.getItem('lh_boot_cache_v20') ||
               sessionStorage.getItem('lh_boot_cache_v21') ||
-              sessionStorage.getItem('lh_boot_cache_v22')
+              sessionStorage.getItem('lh_boot_cache_v22') ||
+              sessionStorage.getItem('lh_boot_cache_v23')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -4910,8 +4919,9 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v20');
               sessionStorage.removeItem('lh_boot_cache_v21');
               sessionStorage.removeItem('lh_boot_cache_v22');
+              sessionStorage.removeItem('lh_boot_cache_v23');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v23');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -5379,6 +5389,10 @@ export class PackageService {
           const lic = h.license || h.media_license || pkg.license || '';
           const mediaLic = h.media_license || h.license || pkg.media_license || '';
           const tags = Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : pkg.tags;
+          const badgeTags =
+            Array.isArray(h.badge_tags) && h.badge_tags.length > 0
+              ? parseBadgeTagsArray(h.badge_tags)
+              : (pkg.badge_tags && pkg.badge_tags.length > 0 ? parseBadgeTagsArray(pkg.badge_tags) : undefined);
           const minVer = h.min_minetest_version || pkg.min_minetest_version || '5.0.0';
           const sizeFormatted = h.file_size || this.formatDownloadSize(h.download_size) || pkg.file_size;
           const resolvedVideo = this.extractEmbeddedVideo(
@@ -5468,6 +5482,7 @@ export class PackageService {
             ...(wasRatingActuallyChecked ? { rating_checked: true } : {}),
             ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
             tags,
+            ...(badgeTags && badgeTags.length > 0 ? { badge_tags: badgeTags } : {}),
             min_minetest_version: minVer,
             file_size: sizeFormatted,
             video_url: resolvedVideo.video_url,
@@ -7394,6 +7409,7 @@ export class PackageService {
       return existingInFlight;
     }
 
+    const startMutationSeq = this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0;
     const work = (async () => {
       if (deepFetch) {
         this._isLoadingDetails.set(true);
@@ -7409,6 +7425,8 @@ export class PackageService {
           !pkg.sources?.includes('official') &&
           Boolean(pkg.provider && pkg.provider !== 'contentdb');
 
+        const mutationEntry = this.recentlyMutatedPkgKeys.get(cacheKey);
+        const mutationTs = mutationEntry?.ts;
         let edgeResolved = false;
         if (this.edgeApiAvailable) {
           try {
@@ -7418,8 +7436,14 @@ export class PackageService {
             if (deepFetch && currentLang && currentLang !== 'en') {
               qsParts.push(`lang=${encodeURIComponent(currentLang)}`);
             }
+            if (mutationTs) {
+              qsParts.push(`_t=${mutationTs}`);
+            }
             const qsSuffix = qsParts.length > 0 ? `?${qsParts.join('&')}` : '';
-            const res = await fetch(`/api/packages/${encAuthor}/${encName}/${qsSuffix}`).catch(() => null);
+            const res = await fetch(
+              `/api/packages/${encAuthor}/${encName}/${qsSuffix}`,
+              mutationTs ? { headers: { 'ngsw-bypass': 'true' } } : undefined
+            ).catch(() => null);
             if (res && res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
               const resJson = await res.json().catch(() => null);
               if (resJson && typeof resJson === 'object' && Object.keys(resJson).length > 0) {
@@ -8033,10 +8057,21 @@ export class PackageService {
         );
         const screenshotMeta = parseScreenshotMetaArray(data.screenshot_meta ?? pkg.screenshot_meta);
         const translations = parsePackageTranslations(data.translations ?? pkg.translations);
+        const latestMutationEntry = this.recentlyMutatedPkgKeys.get(cacheKey);
+        const wasMutatedMidFlight = Boolean(latestMutationEntry && latestMutationEntry.seq !== startMutationSeq);
+        const isRecentlyMutated = Boolean(mutationTs || wasMutatedMidFlight);
+        const cachedMetaEntry = this.hydratedMetaCache.get(cacheKey);
+        const cachedMetaBadgeTags = cachedMetaEntry?.badge_tags !== undefined
+          ? parseBadgeTagsArray(cachedMetaEntry.badge_tags)
+          : undefined;
+        const pkgBadgeTags = parseBadgeTagsArray(pkg.badge_tags ?? liveCatalogPkg?.badge_tags);
+        const dataBadgeTags = data.badge_tags !== undefined ? parseBadgeTagsArray(data.badge_tags) : undefined;
         const badgeTags =
-          data.badge_tags !== undefined
-            ? parseBadgeTagsArray(data.badge_tags)
-            : parseBadgeTagsArray(pkg.badge_tags);
+          isRecentlyMutated && cachedMetaBadgeTags !== undefined
+            ? cachedMetaBadgeTags
+            : (dataBadgeTags !== undefined && (dataBadgeTags.length > 0 || (pkgBadgeTags.length === 0 && (!cachedMetaBadgeTags || cachedMetaBadgeTags.length === 0)))
+                ? dataBadgeTags
+                : (pkgBadgeTags.length > 0 ? pkgBadgeTags : (cachedMetaBadgeTags ?? [])));
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -8169,7 +8204,7 @@ export class PackageService {
         this.queueCatalogPatch(targetIdLower, updatedFields, deepFetch);
         this.scheduleBootCachePersist();
 
-        if (deepFetch) {
+        if (deepFetch && (this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0) === startMutationSeq) {
           this.deepHydratedIds.add(cacheKey);
           this._deepHydratedVersion.update(v => v + 1);
         }
@@ -8177,13 +8212,17 @@ export class PackageService {
         console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
       } finally {
         if (deepFetch) {
-          this.deepHydratedIds.add(cacheKey);
-          this._deepHydratedVersion.update(v => v + 1);
+          if ((this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0) === startMutationSeq) {
+            this.deepHydratedIds.add(cacheKey);
+            this._deepHydratedVersion.update(v => v + 1);
+          }
           this._isLoadingDetails.set(false);
         }
       }
     })().finally(() => {
-      this.inFlightDetailsCache.delete(inFlightKey);
+      if (this.inFlightDetailsCache.get(inFlightKey) === work) {
+        this.inFlightDetailsCache.delete(inFlightKey);
+      }
     });
 
     this.inFlightDetailsCache.set(inFlightKey, work);
@@ -9363,6 +9402,9 @@ export class PackageService {
           : (payload.translations ?? pkg.translations);
 
       this.deepHydratedIds.delete(cacheKey);
+      this.inFlightDetailsCache.delete(`${cacheKey}::deep`);
+      this.inFlightDetailsCache.delete(`${cacheKey}::light`);
+      this.recentlyMutatedPkgKeys.set(cacheKey, { ts: Date.now(), seq: ++this.mutationSeq });
       const prevHydrated = this.hydratedMetaCache.get(cacheKey) || {};
       this.hydratedMetaCache.set(cacheKey, {
         ...prevHydrated,

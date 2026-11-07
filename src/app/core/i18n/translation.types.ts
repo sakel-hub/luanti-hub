@@ -139,6 +139,12 @@ export interface TranslationDictionary {
     favoriteTooltip: string;
     unfavoriteTooltip: string;
     gitSourceTooltip: string;
+    contentDbSourceTooltip?: string;
+    typeModTooltip?: string;
+    typeGameTooltip?: string;
+    typeTxpTooltip?: string;
+    featuredBadgeTooltip?: string;
+    top10BadgeTooltip?: string;
     clickToOpen: string;
     muteVideo: string;
     unmuteVideo: string;
@@ -170,6 +176,7 @@ export interface TranslationDictionary {
     genresTags: string;
     tags: string;
     badgeTagsLabel?: string;
+    filterByTagTooltip?: string;
     category: string;
     source: string;
     license: string;
