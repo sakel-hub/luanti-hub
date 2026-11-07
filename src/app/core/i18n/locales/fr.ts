@@ -369,6 +369,11 @@ export const fr: TranslationDictionary = {
     deletingAccountBtn: 'Suppression du compte et des données...',
     accountDeletedToast: 'Votre compte LuantiHub et toutes vos données personnelles enregistrées ont été définitivement supprimés.',
     verifyingGitReposProgress: 'Vérification et liaison des dépôts Git de vos paquets...',
+    verifySyncGitBtn: 'Vérifier & synchroniser Git',
+    gitSyncLabel: 'Sync Git :',
+    gitSyncedBadge: 'Synchronisés',
+    gitQueuedBadge: 'En attente',
+    gitBrokenBadge: 'Inaccessible/Vérif.',
     pkgSyncingBadge: 'Vérification Git...',
     pkgSyncedBadge: 'Git vérifié & lié',
     pkgSyncFailedBadge: 'Dépôt Git inaccessible (404) — voir Mes Signalements',
@@ -487,6 +492,7 @@ export const fr: TranslationDictionary = {
     resultsCount: '{count} trouvés',
     skipToContent: 'Passer au contenu principal',
     close: 'Fermer',
+    refresh: 'Actualiser',
     downloadStarted: 'Téléchargement de l\'archive .zip — extrayez-la dans votre dossier Luanti mods/, games/ ou textures/ !'
   },
   footer: {

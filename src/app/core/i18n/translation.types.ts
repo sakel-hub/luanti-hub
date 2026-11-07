@@ -384,6 +384,11 @@ export interface TranslationDictionary {
     deletingAccountBtn: string;
     accountDeletedToast: string;
     verifyingGitReposProgress: string;
+    verifySyncGitBtn: string;
+    gitSyncLabel: string;
+    gitSyncedBadge: string;
+    gitQueuedBadge: string;
+    gitBrokenBadge: string;
     pkgSyncingBadge: string;
     pkgSyncedBadge: string;
     pkgSyncFailedBadge: string;
@@ -502,6 +507,7 @@ export interface TranslationDictionary {
     resultsCount: string;
     skipToContent: string;
     close: string;
+    refresh: string;
     downloadStarted: string;
   };
   footer: {

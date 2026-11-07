@@ -369,6 +369,11 @@ export const en: TranslationDictionary = {
     deletingAccountBtn: 'Deleting Account...',
     accountDeletedToast: 'Your LuantiHub profile and all associated personal data have been permanently deleted.',
     verifyingGitReposProgress: 'Verifying & linking Git repositories for your packages...',
+    verifySyncGitBtn: 'Verify & Sync Git',
+    gitSyncLabel: 'Git Sync:',
+    gitSyncedBadge: 'Synced',
+    gitQueuedBadge: 'Queued',
+    gitBrokenBadge: 'Broken/Review',
     pkgSyncingBadge: 'Verifying Git...',
     pkgSyncedBadge: 'Git Verified & Linked',
     pkgSyncFailedBadge: 'Git repo unreachable (404) — see My Reports',
@@ -487,6 +492,7 @@ export const en: TranslationDictionary = {
     resultsCount: '{count} found',
     skipToContent: 'Skip to main content',
     close: 'Close',
+    refresh: 'Refresh',
     downloadStarted: 'Downloading .zip archive — extract into your Luanti mods/, games/, or textures/ folder!'
   },
   footer: {

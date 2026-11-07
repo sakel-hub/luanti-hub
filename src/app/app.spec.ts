@@ -212,7 +212,13 @@ describe('App & Core Services', () => {
       'header.reportIssueTooltip',
       'footer.reportIssue',
       'submit.guestNoticeTitle',
-      'submit.guestNoticeDesc'
+      'submit.guestNoticeDesc',
+      'profile.verifySyncGitBtn',
+      'profile.gitSyncLabel',
+      'profile.gitSyncedBadge',
+      'profile.gitQueuedBadge',
+      'profile.gitBrokenBadge',
+      'common.refresh'
     ];
 
     for (const loc of locales) {

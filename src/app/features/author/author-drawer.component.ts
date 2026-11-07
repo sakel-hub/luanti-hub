@@ -362,18 +362,18 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
                 data-testid="author-drawer-git-sync-diagnostics"
                 class="px-3 py-2 rounded-xl glass-panel border border-white/10 flex items-center justify-between gap-2 flex-wrap text-[11px]">
                 <div class="flex items-center gap-2 flex-wrap text-slate-300">
-                  <span class="font-bold text-sky-300">Git Sync:</span>
+                  <span class="font-bold text-sky-300">{{ 'profile.gitSyncLabel' | translate }}</span>
                   <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
-                    {{ author.git_sync?.alreadySyncedCount ?? gitCount() }} Synced
+                    {{ author.git_sync?.alreadySyncedCount ?? gitCount() }} {{ 'profile.gitSyncedBadge' | translate }}
                   </span>
                   @if ((author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length) > 0) {
                     <span class="glass-badge glass-badge-sky font-bold text-[10px]">
-                      {{ author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length }} Queued
+                      {{ author.git_sync?.pendingQueueCount ?? unsyncedEligibleGitPackages().length }} {{ 'profile.gitQueuedBadge' | translate }}
                     </span>
                   }
                   @if ((author.git_sync?.brokenReportCount ?? 0) > 0) {
                     <span class="glass-badge glass-badge-amber font-bold text-[10px]">
-                      {{ author.git_sync?.brokenReportCount }} Broken/Review
+                      {{ author.git_sync?.brokenReportCount }} {{ 'profile.gitBrokenBadge' | translate }}
                     </span>
                   }
                 </div>

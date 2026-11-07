@@ -369,6 +369,11 @@ export const ru: TranslationDictionary = {
     deletingAccountBtn: 'Удаление аккаунта и данных...',
     accountDeletedToast: 'Ваш аккаунт LuantiHub и все сохранённые персональные данные были навсегда удалены.',
     verifyingGitReposProgress: 'Проверка и привязка Git-репозиториев ваших пакетов...',
+    verifySyncGitBtn: 'Проверить и синхронизировать Git',
+    gitSyncLabel: 'Синхронизация Git:',
+    gitSyncedBadge: 'Синхронизировано',
+    gitQueuedBadge: 'В очереди',
+    gitBrokenBadge: 'Ошибка/Проверка',
     pkgSyncingBadge: 'Проверка Git...',
     pkgSyncedBadge: 'Git проверен и привязан',
     pkgSyncFailedBadge: 'Git-репозиторий недоступен (404) — см. Мои жалобы',
@@ -487,6 +492,7 @@ export const ru: TranslationDictionary = {
     resultsCount: '{count} найдено',
     skipToContent: 'Перейти к основному содержимому',
     close: 'Закрыть',
+    refresh: 'Обновить',
     downloadStarted: 'Скачивание .zip архива — распакуйте его в папку Luanti mods/, games/ или textures/!'
   },
   footer: {

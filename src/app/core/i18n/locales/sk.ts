@@ -369,6 +369,11 @@ export const sk: TranslationDictionary = {
     deletingAccountBtn: 'Mažem účet a dáta...',
     accountDeletedToast: 'Váš účet LuantiHub a všetky uložené osobné údaje boli natrvalo vymazané.',
     verifyingGitReposProgress: 'Overujem a prepájam Git repozitáre vašich balíčkov...',
+    verifySyncGitBtn: 'Overiť a synchronizovať Git',
+    gitSyncLabel: 'Git synchronizácia:',
+    gitSyncedBadge: 'Synchronizované',
+    gitQueuedBadge: 'Vo fronte',
+    gitBrokenBadge: 'Nedostupné/Kontrola',
     pkgSyncingBadge: 'Overujem Git...',
     pkgSyncedBadge: 'Git overený a prepojený',
     pkgSyncFailedBadge: 'Git repozitár nedostupný (404) — pozri Moje hlásenia',
@@ -487,6 +492,7 @@ export const sk: TranslationDictionary = {
     resultsCount: '{count} nájdených',
     skipToContent: 'Preskočiť na hlavný obsah',
     close: 'Zavrieť',
+    refresh: 'Obnoviť',
     downloadStarted: 'Sťahujem .zip archív — rozbaľte ho do priečinka Luanti mods/, games/ alebo textures/!'
   },
   footer: {
