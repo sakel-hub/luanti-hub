@@ -1345,10 +1345,15 @@ description = Mob animation and spawning framework.
     headerFixture.detectChanges();
     expect(headerFixture.nativeElement.textContent).not.toContain('Install App');
 
-    // 4. Verify Cloudflare Pages _routes.json includes "/packages/*" so in-game Luanti client download URLs
-    // (/packages/:author/:name/releases/:release/download/) invoke the Edge Function instead of falling back to index.html
+    // 4. Verify Cloudflare Pages _routes.json includes "/packages/*", "/", "/blog", "/privacy", "/delete-account", and "/sitemap.xml"
+    // so in-game Luanti client download URLs, canonical host 301 redirects on root "/", and "/blog" SSR SEO metadata invoke Edge Functions
     const routesConfig = (await import('../../public/_routes.json')).default;
+    expect(routesConfig.include).toContain('/');
     expect(routesConfig.include).toContain('/packages/*');
+    expect(routesConfig.include).toContain('/blog');
+    expect(routesConfig.include).toContain('/privacy');
+    expect(routesConfig.include).toContain('/delete-account');
+    expect(routesConfig.include).toContain('/sitemap.xml');
   });
 
   it('should notify for newly published Git packages with [TYPE] Title, teardown notifications on disable, and collapse/paginate My Reports when > 5', async () => {
@@ -9404,6 +9409,60 @@ supported_games = minetest_game, voxelibre
     expect(wwwRedirectRes.headers.get('location')).toBe(
       'https://luantihub.org/packages/SaKeL/waysigns?tab=releases'
     );
+
+    const wwwRootRedirectRes = await edgeMiddleware({
+      request: new Request('https://www.luantihub.org/', {
+        method: 'GET'
+      }),
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(wwwRootRedirectRes.status).toBe(301);
+    expect(wwwRootRedirectRes.headers.get('location')).toBe('https://luantihub.org/');
+
+    const wwwPrivacyRedirectRes = await edgeMiddleware({
+      request: new Request('https://www.luantihub.org/privacy?lang=en', {
+        method: 'GET'
+      }),
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(wwwPrivacyRedirectRes.status).toBe(301);
+    expect(wwwPrivacyRedirectRes.headers.get('location')).toBe('https://luantihub.org/legal?lang=en');
+
+    const blogSeoRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/blog', {
+        method: 'GET'
+      }),
+      next: async () =>
+        new Response(
+          '<!doctype html><html><head><title>Default</title><meta name="description" content="Default" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /></head><body><h1>Default</h1></body></html>',
+          { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+        ),
+      env: {}
+    });
+    expect(blogSeoRes.status).toBe(200);
+    const blogHtml = await blogSeoRes.text();
+    expect(blogHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/blog" />');
+    expect(blogHtml).toContain('Official Luanti Blog');
+
+    const sitemapMod = await import('../../functions/sitemap.xml');
+    const sitemapGetRes = await sitemapMod.onRequestGet({
+      request: new Request('https://luantihub.org/sitemap.xml', { method: 'GET' }),
+      env: {}
+    });
+    expect(sitemapGetRes.status).toBe(200);
+    const sitemapXml = await sitemapGetRes.text();
+    expect(sitemapXml).toContain('<loc>https://luantihub.org/blog</loc>');
+    expect(sitemapXml).toContain('hreflang="x-default" href="https://luantihub.org/"');
+
+    const sitemapHeadRes = await sitemapMod.onRequestHead({
+      request: new Request('https://luantihub.org/sitemap.xml', { method: 'HEAD' }),
+      env: {}
+    });
+    expect(sitemapHeadRes.status).toBe(200);
+    expect(sitemapHeadRes.headers.get('content-type')).toContain('application/xml');
+    expect(await sitemapHeadRes.text()).toBe('');
   });
 
   it('should render HeroBillboardComponent artwork-derived ambient backlight glow using LCP-safe 32x18 dual-canvas crossfade with zero extra img elements', () => {

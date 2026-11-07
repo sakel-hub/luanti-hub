@@ -18,13 +18,14 @@ function escapeXml(value: string): string {
 }
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
+  const isHead = context.request.method.toUpperCase() === 'HEAD';
   const origin = 'https://luantihub.org';
   const today = new Date().toISOString().split('T')[0];
-  const sitemapCacheKey = `https://cache.luantihub.internal/sitemap-xml-v2/${today}`;
+  const sitemapCacheKey = `https://cache.luantihub.internal/sitemap-xml-v3/${today}`;
 
   const cachedXml = await readEdgeCacheJson<{ xml: string }>(sitemapCacheKey);
   if (cachedXml && typeof cachedXml.xml === 'string' && cachedXml.xml.startsWith('<?xml')) {
-    return new Response(cachedXml.xml, {
+    return new Response(isHead ? null : cachedXml.xml, {
       headers: {
         'Content-Type': 'application/xml; charset=utf-8',
         'Cache-Control': 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400'
@@ -90,14 +91,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const urlEntries: string[] = [];
 
   for (const s of staticUrls) {
-    const hreflangLinks = locales
-      .map(
+    const xDefaultLink = `    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(s.loc)}" />`;
+    const hreflangLinks = [
+      xDefaultLink,
+      ...locales.map(
         (lang) =>
           `    <xhtml:link rel="alternate" hreflang="${lang}" href="${escapeXml(
             s.loc.includes('?') ? `${s.loc}&lang=${lang}` : `${s.loc}?lang=${lang}`
           )}" />`
       )
-      .join('\n');
+    ].join('\n');
 
     urlEntries.push(`  <url>
     <loc>${escapeXml(s.loc)}</loc>
@@ -125,10 +128,14 @@ ${urlEntries.join('\n')}
 
   await writeEdgeCacheJson(sitemapCacheKey, { xml }, 21600);
 
-  return new Response(xml, {
+  return new Response(isHead ? null : xml, {
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
       'Cache-Control': 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400'
     }
   });
+}
+
+export async function onRequestHead(context: { request: Request; env: Env }) {
+  return onRequestGet(context);
 }

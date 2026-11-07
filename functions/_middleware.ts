@@ -253,13 +253,16 @@ export async function onRequest(context: {
   // Redirect legacy *.pages.dev and www.luantihub.org web/crawler requests to canonical https://luantihub.org
   // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
   const lowerHost = url.hostname.toLowerCase();
-  if ((lowerHost === 'luanti-hub.pages.dev' || lowerHost === 'www.luantihub.org') && !isApiRoute && !isDownloadRoute) {
-    return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
+  const isLegacyWebHost = lowerHost === 'luanti-hub.pages.dev' || lowerHost === 'www.luantihub.org';
+
+  // Redirect /privacy and /delete-account to canonical /legal route in a single hop (for Google Play Console & GDPR compliance)
+  if ((pathname === '/privacy' || pathname === '/delete-account') && !isApiRoute) {
+    const targetOrigin = isLegacyWebHost ? 'https://luantihub.org' : url.origin;
+    return Response.redirect(`${targetOrigin}/legal${url.search}`, 301);
   }
 
-  // Redirect /privacy and /delete-account to canonical /legal route (for Google Play Console & GDPR compliance)
-  if ((pathname === '/privacy' || pathname === '/delete-account') && !isApiRoute) {
-    return Response.redirect(`${url.origin}/legal${url.search}`, 301);
+  if (isLegacyWebHost && !isApiRoute && !isDownloadRoute) {
+    return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
   }
 
   if (!isApiRoute && !isDownloadRoute) {

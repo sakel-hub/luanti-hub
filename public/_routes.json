@@ -1,6 +1,7 @@
 {
   "version": 1,
   "include": [
+    "/",
     "/api/*",
     "/package/*",
     "/packages/*",
@@ -8,9 +9,12 @@
     "/mods",
     "/texture-packs",
     "/git",
+    "/blog",
     "/setup",
     "/submit",
     "/legal",
+    "/privacy",
+    "/delete-account",
     "/sitemap.xml",
     "/.env*",
     "/.git*",
