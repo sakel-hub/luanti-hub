@@ -13,7 +13,8 @@ import {
   sanitizePublicErrorMessage,
   setLastKnownActivePromotions,
   upsertCustomAppTags,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
 
 interface Env {
@@ -454,10 +455,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     await invalidateEdgeCacheKeys([
       '/__active_promotions_v1',
       '/__unified_tags_v1',
-      '/__api_boot_catalog_bundle_v3',
-      '/__api_boot_catalog_bundle_v8',
-      '/__api_boot_catalog_bundle_v9',
-      '/__api_packages_v2?boot=1'
+      BOOT_CATALOG_EDGE_CACHE_KEY
     ]);
 
     return Response.json(
@@ -528,10 +526,7 @@ export async function onRequestDelete(context: { request: Request; env: Env }) {
     await writeEdgeCacheJson('/__active_promotions_v1', activePromotions, 21600);
     await invalidateEdgeCacheKeys([
       '/__active_promotions_v1',
-      '/__api_boot_catalog_bundle_v3',
-      '/__api_boot_catalog_bundle_v8',
-      '/__api_boot_catalog_bundle_v9',
-      '/__api_packages_v2?boot=1'
+      BOOT_CATALOG_EDGE_CACHE_KEY
     ]);
 
     return Response.json(

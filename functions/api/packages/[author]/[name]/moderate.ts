@@ -4,14 +4,16 @@ import {
   parseCookies,
   checkIsAdmin,
   reconcileAndMergeUserAccount,
-  verifyStrictPackageAuthorOwnership
+  verifyStrictPackageAuthorOwnership,
+  timingSafeEqualStrings
 } from '../../../auth/lib/session';
 import {
   invalidateEdgeCacheKeys,
   safeDecodeParam,
   ensureModerationColumns,
   ensureExtendedPackageColumns,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  buildPackageCacheInvalidationKeys
 } from '../../../lib/upstream';
 
 interface Env {
@@ -121,9 +123,10 @@ export async function onRequestPost(context: {
   }
 
   // Mode 2: Author Self-Delist / Self-Remove or Admin Instant Kill Switch ('delist' | 'flag' | 'restore' | 'remove')
-  const authHeader = request.headers.get('Authorization') || '';
+  const authHeader = (request.headers.get('Authorization') || '').trim();
+  const cleanSecret = (env.KILL_SWITCH_SECRET || '').trim();
   const hasSecretToken = Boolean(
-    env.KILL_SWITCH_SECRET && authHeader === `Bearer ${env.KILL_SWITCH_SECRET}`
+    cleanSecret.length >= 12 && timingSafeEqualStrings(authHeader, `Bearer ${cleanSecret}`)
   );
   const isAdmin = hasSecretToken || checkIsAdmin(currentUser, identities, env.ADMIN_USERS);
 
@@ -170,11 +173,12 @@ export async function onRequestPost(context: {
     await env.DB.prepare(`DELETE FROM moderation_reports WHERE LOWER(package_id) = LOWER(?)`).bind(canonicalId).run().catch(() => {});
     await env.DB.prepare(`DELETE FROM packages WHERE LOWER(id) = LOWER(?)`).bind(canonicalId).run();
 
-    await invalidateEdgeCacheKeys([
-      '/__api_packages_v2',
-      '/__api_packages_v2?boot=1',
-      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
-    ]);
+    await invalidateEdgeCacheKeys(
+      buildPackageCacheInvalidationKeys(author, name, {
+        includeBootCatalog: true,
+        includeAuthorProfile: true
+      })
+    );
 
     return Response.json({
       success: true,
@@ -235,11 +239,12 @@ export async function onRequestPost(context: {
     `).bind(noteToSave, currentUser?.username || 'admin', packageId).run();
   }
 
-  await invalidateEdgeCacheKeys([
-    '/__api_packages_v2',
-    '/__api_packages_v2?boot=1',
-    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`
-  ]);
+  await invalidateEdgeCacheKeys(
+    buildPackageCacheInvalidationKeys(author, name, {
+      includeBootCatalog: true,
+      includeAuthorProfile: true
+    })
+  );
 
     return Response.json({
       success: true,

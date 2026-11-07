@@ -27,7 +27,11 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   upsertCustomAppTags,
-  fetchWithAnubisSupport
+  fetchWithAnubisSupport,
+  verifyGitOrgOrRepoMembership,
+  buildPackageCacheInvalidationKeys,
+  buildAuthorProfileEdgeCacheKey,
+  BOOT_CATALOG_EDGE_CACHE_KEY
 } from './upstream';
 import { evaluateRepositoryContentSafety } from './content-safety';
 
@@ -228,60 +232,7 @@ async function verifyOrgOrContributorMatch(
   repo: string,
   verifiedHandle: string
 ): Promise<boolean> {
-  const lowerHandle = verifiedHandle.trim().toLowerCase();
-  if (!lowerHandle) return false;
-  if (lowerHandle === owner.trim().toLowerCase()) return true;
-
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
-  };
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2200);
-  try {
-    if (provider === 'github') {
-      const orgRes = await fetch(
-        `https://api.github.com/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
-        { headers, signal: ctrl.signal }
-      );
-      if (orgRes.status === 204 || orgRes.status === 200) return true;
-
-      const contribRes = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=30`,
-        { headers, signal: ctrl.signal }
-      );
-      if (contribRes.ok) {
-        const list = await contribRes.json();
-        if (Array.isArray(list) && list.some((c: any) => String(c?.login || '').toLowerCase() === lowerHandle)) {
-          return true;
-        }
-      }
-    } else if (provider === 'codeberg' || provider === 'mesehub') {
-      const orgRes = await fetchWithAnubisSupport(
-        `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
-        { headers, signal: ctrl.signal }
-      );
-      if (orgRes.status === 204 || orgRes.status === 200) return true;
-    } else if (provider === 'gitlab') {
-      const projectPath = encodeURIComponent(`${owner}/${repo}`);
-      const membersRes = await fetch(
-        `https://${host}/api/v4/projects/${projectPath}/members/all?query=${encodeURIComponent(verifiedHandle)}`,
-        { headers, signal: ctrl.signal }
-      );
-      if (membersRes.ok) {
-        const list = await membersRes.json();
-        if (Array.isArray(list) && list.some((m: any) => String(m?.username || '').toLowerCase() === lowerHandle)) {
-          return true;
-        }
-      }
-    }
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-  return false;
+  return verifyGitOrgOrRepoMembership(provider, host, owner, repo, verifiedHandle);
 }
 
 async function probeRepoRootOnlineStatus(repoUrl: string): Promise<'online' | 'broken_404' | 'unknown'> {
@@ -1232,10 +1183,10 @@ export async function syncVerifiedAuthorGitPackages(
           const lowerPkgAuthor = item.author.toLowerCase();
           const lowerPkgName = item.name.toLowerCase();
           cacheKeysToInvalidate.push(
-            `/__api_pkg_detail_v2/${lowerPkgAuthor}/${lowerPkgName}`,
-            `https://cache.luantihub.internal/pkg-detail-v7:${lowerPkgAuthor}:${lowerPkgName}`,
-            `https://cache.luantihub.internal/__for_client_v4/${encodeURIComponent(lowerPkgAuthor)}/${encodeURIComponent(lowerPkgName)}`,
-            `/__api_author_profile_v2/${encodeURIComponent(lowerPkgAuthor)}`
+            ...buildPackageCacheInvalidationKeys(lowerPkgAuthor, lowerPkgName, {
+              includeBootCatalog: false,
+              includeAuthorProfile: true
+            })
           );
         })
       );
@@ -1244,13 +1195,11 @@ export async function syncVerifiedAuthorGitPackages(
     if (newlyImportedCount > 0 || claimExistingBatchStmts.length > 0 || flaggedForReviewCount > 0) {
       invalidateCachedAuthMePayload(resolvedUserId);
       for (const h of allAuthorHandles) {
-        cacheKeysToInvalidate.push(`/__api_author_profile_v2/${encodeURIComponent(h.toLowerCase())}`);
+        cacheKeysToInvalidate.push(buildAuthorProfileEdgeCacheKey(h.toLowerCase()));
       }
       await invalidateEdgeCacheKeys([
-        'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
-        '/__api_boot_catalog_bundle_v19',
-        '/__api_packages_v2',
-        '/__api_packages_v2?boot=1',
+        `https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`,
+        BOOT_CATALOG_EDGE_CACHE_KEY,
         ...cacheKeysToInvalidate
       ]).catch(() => {});
     }

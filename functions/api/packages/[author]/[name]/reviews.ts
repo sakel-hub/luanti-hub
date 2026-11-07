@@ -10,14 +10,17 @@ import {
   deriveReviewThreadCountsFromList,
   computeStarRatingFromData,
   mergeSharedEdgeRatingsMap,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  buildPackageReviewsEdgeCacheKey,
+  buildPackageCacheInvalidationKeys
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
   verifyStrictPackageAuthorOwnership,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  shouldHonorAuthenticatedNoCache
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -53,13 +56,21 @@ export async function onRequestGet(context: {
       if (Number.isFinite(rawLimit) && rawLimit >= 1) {
         limitParam = Math.min(50, Math.max(1, Math.floor(rawLimit)));
       }
-      noCache = reqUrl.searchParams.get('nocache') === '1';
+      const requestedNoCache =
+        reqUrl.searchParams.get('nocache') === '1' || reqUrl.searchParams.get('refresh') === '1';
+      if (requestedNoCache) {
+        noCache = await shouldHonorAuthenticatedNoCache(
+          context.request,
+          context.env.SESSION_SECRET,
+          `reviews:${lowerPkgId}`
+        );
+      }
     } catch {
       // Ignore malformed request URL
     }
   }
 
-  const edgeReviewsCacheKey = `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeReviewsCacheKey = buildPackageReviewsEdgeCacheKey(author, name);
   let allReviews: any[] | null = !noCache ? await readEdgeCacheJson<any[]>(edgeReviewsCacheKey) : null;
 
   if (!Array.isArray(allReviews)) {
@@ -406,15 +417,9 @@ export async function onRequestPost(context: { request: Request; params: { autho
     ).run().catch(() => {});
 
     await invalidateEdgeCacheKeys([
-      '/__api_packages_v2',
-      '/__api_packages_v2?boot=1',
-      '/__api_boot_catalog_bundle_v4',
-      '/__api_boot_catalog_bundle_v5',
-      '/__api_boot_catalog_bundle_v19',
+      ...buildPackageCacheInvalidationKeys(author, name, { includeBootCatalog: true }),
       '/__recent_reviews_v1',
-      '/__d1_recent_reviews_v1',
-      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
-      `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
+      '/__d1_recent_reviews_v1'
     ]);
     await mergeSharedEdgeRatingsMap({
       [packageId.toLowerCase()]: {
@@ -535,15 +540,9 @@ export async function onRequestPost(context: { request: Request; params: { autho
   }
 
   await invalidateEdgeCacheKeys([
-    '/__api_packages_v2',
-    '/__api_packages_v2?boot=1',
-    '/__api_boot_catalog_bundle_v4',
-    '/__api_boot_catalog_bundle_v5',
-    '/__api_boot_catalog_bundle_v19',
+    ...buildPackageCacheInvalidationKeys(author, name, { includeBootCatalog: true }),
     '/__recent_reviews_v1',
-    '/__d1_recent_reviews_v1',
-    `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
-    `/__pkg_reviews_v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`
+    '/__d1_recent_reviews_v1'
   ]);
 
     return Response.json({

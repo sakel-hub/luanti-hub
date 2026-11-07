@@ -4,9 +4,10 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  buildAuthorProfileEdgeCacheKey
 } from '../lib/upstream';
-import { parseCookies, verifySessionToken } from '../auth/lib/session';
+import { shouldHonorAuthenticatedNoCache } from '../auth/lib/session';
 import {
   inspectAuthorGitSyncStatus,
   syncVerifiedAuthorGitPackages
@@ -17,7 +18,7 @@ interface Env {
   SESSION_SECRET?: string;
 }
 
-const authorRefreshCooldown = new Map<string, number>();
+const authorBgSyncCooldown = new Map<string, number>();
 
 export async function onRequestGet(context: {
   request: Request;
@@ -31,28 +32,31 @@ export async function onRequestGet(context: {
   }
 
   const lowerUsername = rawUsername.toLowerCase();
-  const cacheKey = `/__api_author_profile_v2/${encodeURIComponent(lowerUsername)}`;
+  const cacheKey = buildAuthorProfileEdgeCacheKey(lowerUsername);
   const url = new URL(context.request.url);
-  const requestedNoCache = url.searchParams.get('nocache') === '1';
-  let noCache = false;
-  if (requestedNoCache) {
-    const cookies = parseCookies(context.request);
-    const sessionUserId = cookies['lh_session']
-      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
-      : null;
-    const now = Date.now();
-    const lastRefresh = authorRefreshCooldown.get(lowerUsername) || 0;
-    if (sessionUserId && now - lastRefresh > 60_000) {
-      noCache = true;
-      authorRefreshCooldown.set(lowerUsername, now);
-    }
-  }
+  const requestedNoCache = url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';
+  const noCache = requestedNoCache
+    ? await shouldHonorAuthenticatedNoCache(
+        context.request,
+        context.env.SESSION_SECRET,
+        `author-profile:${lowerUsername}`
+      )
+    : false;
 
     if (!noCache) {
       const cached = await readEdgeCacheJson<any>(cacheKey);
       if (cached) {
         const cachedPending = Number(cached?.author?.git_sync?.pendingQueueCount || 0);
-        if (cached?.author?.is_registered && cachedPending > 0 && context.env.DB && context.waitUntil) {
+        const now = Date.now();
+        const lastBgSync = authorBgSyncCooldown.get(lowerUsername) || 0;
+        if (
+          cached?.author?.is_registered &&
+          cachedPending > 0 &&
+          context.env.DB &&
+          context.waitUntil &&
+          now - lastBgSync > 60_000
+        ) {
+          authorBgSyncCooldown.set(lowerUsername, now);
           context.waitUntil(
             syncVerifiedAuthorGitPackages(context.env, {
               authorHandles: [lowerUsername],

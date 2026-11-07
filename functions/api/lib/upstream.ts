@@ -481,10 +481,16 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full-readme/${a}/${n}`);
+      expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/${a}/${n}`);
       for (const loc of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full-readme/${loc}/${a}/${n}`);
+        expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/${loc}/${a}/${n}`);
         expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/%3Fformspec_version%3D8`);
         expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/`);
       }
@@ -4869,5 +4875,492 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
   }
   return undefined;
 }
+
+/**
+ * Single source of truth for Cloudflare Edge Cache key versions and builders.
+ * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
+ */
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v20';
+export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v20';
+export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
+export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
+
+export function buildPackageDetailEdgeCacheKey(
+  author: string,
+  name: string,
+  mode: 'lite' | 'full' | 'full-readme',
+  lang = 'en'
+): string {
+  const normalizedLang = String(lang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
+  const langKeySegment = normalizedLang && normalizedLang !== 'en' ? `${normalizedLang}/` : '';
+  const encA = encodeURIComponent(String(author || '').trim().toLowerCase());
+  const encN = encodeURIComponent(String(name || '').trim().toLowerCase());
+  return `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/${mode}/${langKeySegment}${encA}/${encN}`;
+}
+
+export function buildPackageReviewsEdgeCacheKey(author: string, name: string): string {
+  const encA = encodeURIComponent(String(author || '').trim().toLowerCase());
+  const encN = encodeURIComponent(String(name || '').trim().toLowerCase());
+  return `${PACKAGE_REVIEWS_CACHE_PREFIX}/${encA}/${encN}`;
+}
+
+export function buildAuthorProfileEdgeCacheKey(username: string): string {
+  const encU = encodeURIComponent(String(username || '').trim().toLowerCase());
+  return `${AUTHOR_PROFILE_CACHE_PREFIX}/${encU}`;
+}
+
+export function buildPackageStatsEdgeCacheKey(author: string, name: string, days: number): string {
+  const encA = encodeURIComponent(String(author || '').trim().toLowerCase());
+  const encN = encodeURIComponent(String(name || '').trim().toLowerCase());
+  return `/__pkg_stats_v1/${encA}/${encN}/${Number(days) || 30}`;
+}
+
+export function buildAuthorStatsEdgeCacheKey(username: string, days: number): string {
+  const encU = encodeURIComponent(String(username || '').trim().toLowerCase());
+  return `/__author_stats_v1/${encU}/${Number(days) || 30}`;
+}
+
+export interface PackageCacheInvalidationOptions {
+  includeBootCatalog?: boolean;
+  includeAuthorProfile?: boolean;
+  includeGitRepoScan?: boolean;
+  extraAuthors?: string[];
+}
+
+export function buildPackageCacheInvalidationKeys(
+  author: string,
+  name: string,
+  options?: PackageCacheInvalidationOptions
+): string[] {
+  const lowerA = String(author || '').trim().toLowerCase();
+  const lowerN = String(name || '').trim().toLowerCase();
+  const encA = encodeURIComponent(lowerA);
+  const encN = encodeURIComponent(lowerN);
+  const keys = new Set<string>([
+    buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'full', 'en'),
+    buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'lite', 'en'),
+    buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'full-readme', 'en'),
+    buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
+    `https://cache.luantihub.internal/__for_client_v5/${encA}/${encN}/en/%3Fformspec_version%3D8`
+  ]);
+
+  for (const d of [7, 30, 90, 365]) {
+    keys.add(buildPackageStatsEdgeCacheKey(lowerA, lowerN, d));
+  }
+
+  if (options?.includeBootCatalog !== false) {
+    keys.add(BOOT_CATALOG_EDGE_CACHE_KEY);
+    keys.add(`https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`);
+  }
+
+  const addAuthorKeys = (handle: string) => {
+    const clean = String(handle || '').trim().toLowerCase();
+    if (!clean) return;
+    keys.add(buildAuthorProfileEdgeCacheKey(clean));
+    keys.add(`/__author_sync_status_v1/${encodeURIComponent(clean)}`);
+    for (const d of [7, 30, 90, 365]) {
+      keys.add(buildAuthorStatsEdgeCacheKey(clean, d));
+    }
+  };
+
+  if (options?.includeAuthorProfile) {
+    addAuthorKeys(lowerA);
+  }
+
+  if (Array.isArray(options?.extraAuthors)) {
+    for (const extra of options!.extraAuthors) {
+      addAuthorKeys(extra);
+    }
+  }
+
+  if (options?.includeGitRepoScan) {
+    keys.add(`/__git_repo_scan_v11/${encA}/${encN}`);
+  }
+
+  return Array.from(keys);
+}
+
+/**
+ * Shared UTC date formatting and daily download/view telemetry series aggregation
+ * used by both package analytics (`/api/packages/:author/:name/stats`) and author analytics (`/api/authors/:username/stats`).
+ */
+export function formatUtcDate(date: Date): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function buildUtcDateRange(days: number): { startDateStr: string; endDateStr: string; dates: string[] } {
+  const safeDays = Math.max(1, Math.min(365, Math.floor(Number(days) || 30)));
+  const now = new Date();
+  const endUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const startUtc = new Date(endUtc.getTime() - (safeDays - 1) * 86400000);
+  const dates: string[] = [];
+  for (let i = 0; i < safeDays; i++) {
+    const dt = new Date(startUtc.getTime() + i * 86400000);
+    dates.push(formatUtcDate(dt));
+  }
+  return {
+    startDateStr: formatUtcDate(startUtc),
+    endDateStr: formatUtcDate(endUtc),
+    dates
+  };
+}
+
+export function buildDualPeriodDateRange(days: number): {
+  dates: string[];
+  prevDates: string[];
+  allDates: string[];
+  startDate: string;
+  endDate: string;
+  prevStartDate: string;
+} {
+  const now = new Date();
+  const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const totalDays = Math.min(365, Math.max(1, Math.round(days) || 30));
+
+  const allDates: string[] = [];
+  for (let i = totalDays * 2 - 1; i >= 0; i--) {
+    const dt = new Date(todayUtc.getTime() - i * 86400000);
+    allDates.push(formatUtcDate(dt));
+  }
+
+  const prevDates = allDates.slice(0, totalDays);
+  const dates = allDates.slice(totalDays);
+  return {
+    dates,
+    prevDates,
+    allDates,
+    startDate: dates[0],
+    endDate: dates[dates.length - 1],
+    prevStartDate: prevDates[0]
+  };
+}
+
+export function computeCombinedTelemetryArrays(
+  dates: string[],
+  prevDates: string[],
+  d1ByDate: Map<string, any>,
+  cdbStats: any
+) {
+  const cdbPlatformLuanti: number[] = Array.isArray(cdbStats?.downloads?.platform?.minetest)
+    ? cdbStats.downloads.platform.minetest
+    : [];
+  const cdbPlatformOther: number[] = Array.isArray(cdbStats?.downloads?.platform?.other)
+    ? cdbStats.downloads.platform.other
+    : [];
+  const cdbReasonNew: number[] = Array.isArray(cdbStats?.downloads?.reason?.new)
+    ? cdbStats.downloads.reason.new
+    : [];
+  const cdbReasonUpdate: number[] = Array.isArray(cdbStats?.downloads?.reason?.update)
+    ? cdbStats.downloads.reason.update
+    : [];
+  const cdbReasonDep: number[] = Array.isArray(cdbStats?.downloads?.reason?.dependency)
+    ? cdbStats.downloads.reason.dependency
+    : [];
+  const cdbReasonOther: number[] = Array.isArray(cdbStats?.downloads?.reason?.other)
+    ? cdbStats.downloads.reason.other
+    : [];
+  const cdbViews: number[] = Array.isArray(cdbStats?.views) ? cdbStats.views : [];
+
+  let prevPeriodDownloads = 0;
+  for (let i = 0; i < prevDates.length; i++) {
+    const dt = prevDates[i];
+    const d1Row = d1ByDate.get(dt);
+    const lhCount = Number(d1Row?.downloads_count) || 0;
+    const cdbCount = (Number(cdbPlatformLuanti[i]) || 0) + (Number(cdbPlatformOther[i]) || 0);
+    prevPeriodDownloads += lhCount + cdbCount;
+  }
+
+  const total: number[] = [];
+  const source_contentdb: number[] = [];
+  const source_luantihub: number[] = [];
+  const platform_luanti: number[] = [];
+  const platform_web: number[] = [];
+  const reason_new: number[] = [];
+  const reason_update: number[] = [];
+  const reason_dependency: number[] = [];
+  const reason_web: number[] = [];
+  const views_luanti: number[] = [];
+  const views_web: number[] = [];
+
+  const offset = prevDates.length;
+  for (let j = 0; j < dates.length; j++) {
+    const dt = dates[j];
+    const cdbIdx = offset + j;
+    const d1Row = d1ByDate.get(dt);
+
+    const d1Total = Number(d1Row?.downloads_count) || 0;
+    const d1PlatLuanti = Number(d1Row?.platform_luanti) || 0;
+    const d1PlatWeb = Number(d1Row?.platform_web) || Math.max(0, d1Total - d1PlatLuanti);
+    const d1RNew = Number(d1Row?.reason_new) || 0;
+    const d1RUpd = Number(d1Row?.reason_update) || 0;
+    const d1RDep = Number(d1Row?.reason_dependency) || 0;
+    const d1RWeb = Number(d1Row?.reason_web) || Math.max(0, d1Total - (d1RNew + d1RUpd + d1RDep));
+    const d1VLuanti = Number(d1Row?.views_luanti) || 0;
+    const d1VWeb = Number(d1Row?.views_web) || 0;
+
+    const cdbPlatLuanti = Number(cdbPlatformLuanti[cdbIdx]) || 0;
+    const cdbPlatWeb = Number(cdbPlatformOther[cdbIdx]) || 0;
+    const cdbTotal = cdbPlatLuanti + cdbPlatWeb;
+    const cdbRNew = Number(cdbReasonNew[cdbIdx]) || 0;
+    const cdbRUpd = Number(cdbReasonUpdate[cdbIdx]) || 0;
+    const cdbRDep = Number(cdbReasonDep[cdbIdx]) || 0;
+    const cdbROther =
+      cdbReasonOther[cdbIdx] !== undefined
+        ? Number(cdbReasonOther[cdbIdx]) || 0
+        : Math.max(0, cdbTotal - (cdbRNew + cdbRUpd + cdbRDep));
+    const cdbVLuanti = Number(cdbViews[cdbIdx]) || 0;
+
+    const dayTotal = cdbTotal + d1Total;
+    total.push(dayTotal);
+    source_contentdb.push(cdbTotal);
+    source_luantihub.push(d1Total);
+    platform_luanti.push(cdbPlatLuanti + d1PlatLuanti);
+    platform_web.push(cdbPlatWeb + d1PlatWeb);
+    reason_new.push(cdbRNew + d1RNew);
+    reason_update.push(cdbRUpd + d1RUpd);
+    reason_dependency.push(cdbRDep + d1RDep);
+    reason_web.push(cdbROther + d1RWeb);
+    views_luanti.push(cdbVLuanti + d1VLuanti);
+    views_web.push(d1VWeb);
+  }
+
+  const sumArr = (arr: number[]) => arr.reduce((acc, v) => acc + (Number(v) || 0), 0);
+  const periodDownloads = sumArr(total);
+  const sumNew = sumArr(reason_new);
+  const sumUpdate = sumArr(reason_update);
+  const sumDep = sumArr(reason_dependency);
+  const sumWeb = sumArr(reason_web);
+  const sumPlatLuanti = sumArr(platform_luanti);
+  const sumPlatWeb = sumArr(platform_web);
+  const sumSrcCdb = sumArr(source_contentdb);
+  const sumSrcLh = sumArr(source_luantihub);
+  const sumViewsLuanti = sumArr(views_luanti);
+  const sumViewsWeb = sumArr(views_web);
+  const totalViews = sumViewsLuanti + sumViewsWeb;
+
+  const trendPercent =
+    prevPeriodDownloads > 0
+      ? Number((((periodDownloads - prevPeriodDownloads) / prevPeriodDownloads) * 100).toFixed(1))
+      : periodDownloads > 0
+        ? 100
+        : 0;
+  const avgPerDay = Number((periodDownloads / Math.max(1, dates.length)).toFixed(1));
+  const conversionRatePercent =
+    totalViews > 0
+      ? Number(Math.min(100, (periodDownloads / totalViews) * 100).toFixed(1))
+      : 0;
+
+  return {
+    total,
+    source_contentdb,
+    source_luantihub,
+    platform_luanti,
+    platform_web,
+    reason_new,
+    reason_update,
+    reason_dependency,
+    reason_web,
+    views_luanti,
+    views_web,
+    summary: {
+      periodDownloads,
+      prevPeriodDownloads,
+      trendPercent,
+      avgPerDay,
+      totalViews,
+      viewsLuanti: sumViewsLuanti,
+      viewsWeb: sumViewsWeb,
+      conversionRatePercent,
+      reasonsTotal: {
+        new: sumNew,
+        update: sumUpdate,
+        dependency: sumDep,
+        web: sumWeb
+      },
+      platformsTotal: {
+        luanti: sumPlatLuanti,
+        web: sumPlatWeb
+      },
+      sourcesTotal: {
+        contentdb: sumSrcCdb,
+        luantihub: sumSrcLh
+      }
+    }
+  };
+}
+
+export interface DailyTelemetryPoint {
+  date: string;
+  downloads: number;
+  luanti: number;
+  web: number;
+  views_web: number;
+  reason_new: number;
+  reason_update: number;
+  reason_dependency: number;
+  reason_web: number;
+}
+
+export function buildDailyTelemetrySeries(
+  dates: string[],
+  rows: any[]
+): {
+  series: DailyTelemetryPoint[];
+  windowTotals: { total: number; luanti: number; web: number; views_web: number };
+} {
+  const rowByDate = new Map<string, any>();
+  for (const r of rows || []) {
+    if (r?.download_date) {
+      rowByDate.set(String(r.download_date).slice(0, 10), r);
+    }
+  }
+
+  let windowDownloadsSum = 0;
+  let windowLuantiSum = 0;
+  let windowWebSum = 0;
+  let windowViewsSum = 0;
+
+  const series: DailyTelemetryPoint[] = dates.map((d) => {
+    const row = rowByDate.get(d);
+    const downloads = Number(row?.downloads_count || 0);
+    const luanti = Number(row?.platform_luanti || 0);
+    const web = Number(row?.platform_web || Math.max(0, downloads - luanti));
+    const views_web = Number(row?.views_web || 0);
+    const reason_new = Number(row?.reason_new || 0);
+    const reason_update = Number(row?.reason_update || 0);
+    const reason_dependency = Number(row?.reason_dependency || 0);
+    const reason_web = Number(
+      row?.reason_web || Math.max(0, downloads - (reason_new + reason_update + reason_dependency))
+    );
+
+    windowDownloadsSum += downloads;
+    windowLuantiSum += luanti;
+    windowWebSum += web;
+    windowViewsSum += views_web;
+
+    return {
+      date: d,
+      downloads,
+      luanti,
+      web,
+      views_web,
+      reason_new,
+      reason_update,
+      reason_dependency,
+      reason_web
+    };
+  });
+
+  return {
+    series,
+    windowTotals: {
+      total: windowDownloadsSum,
+      luanti: windowLuantiSum,
+      web: windowWebSum,
+      views_web: windowViewsSum
+    }
+  };
+}
+
+/**
+ * Shared Git organization & repository contributor membership verifier across
+ * GitHub, Codeberg, MeseHub, GitLab, and Bitbucket.
+ */
+export async function verifyGitOrgOrRepoMembership(
+  provider: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket',
+  host: string,
+  owner: string,
+  repo: string,
+  verifiedHandle: string
+): Promise<boolean> {
+  const lowerHandle = String(verifiedHandle || '').trim().toLowerCase();
+  if (!lowerHandle) return false;
+  if (lowerHandle === String(owner || '').trim().toLowerCase()) return true;
+
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
+  };
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    if (provider === 'github') {
+      const orgRes = await fetch(
+        `https://api.github.com/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (orgRes.status === 204 || orgRes.status === 200) return true;
+
+      const contribRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=30`,
+        { headers, signal: ctrl.signal }
+      );
+      if (contribRes.ok) {
+        const list = await contribRes.json();
+        if (Array.isArray(list) && list.some((c: any) => String(c?.login || '').toLowerCase() === lowerHandle)) {
+          return true;
+        }
+      }
+    } else if (provider === 'codeberg' || provider === 'mesehub') {
+      const orgRes = await fetchWithAnubisSupport(
+        `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (orgRes.status === 204 || orgRes.status === 200) return true;
+
+      const repoRes = await fetchWithAnubisSupport(
+        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (repoRes.ok) {
+        const repoData: any = await repoRes.json();
+        if (String(repoData?.owner?.login || '').toLowerCase() === lowerHandle) {
+          return true;
+        }
+      }
+    } else if (provider === 'gitlab') {
+      const projectPath = encodeURIComponent(`${owner}/${repo}`);
+      const membersRes = await fetch(
+        `https://${host}/api/v4/projects/${projectPath}/members/all?query=${encodeURIComponent(verifiedHandle)}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (membersRes.ok) {
+        const list = await membersRes.json();
+        if (Array.isArray(list) && list.some((m: any) => String(m?.username || '').toLowerCase() === lowerHandle)) {
+          return true;
+        }
+      }
+    } else if (provider === 'bitbucket') {
+      const repoRes = await fetch(
+        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`,
+        { headers, signal: ctrl.signal }
+      );
+      if (repoRes.ok) {
+        const repoData: any = await repoRes.json();
+        const ownerCandidates = [
+          repoData?.owner?.username,
+          repoData?.owner?.nickname,
+          repoData?.workspace?.slug
+        ]
+          .filter(Boolean)
+          .map((s: any) => String(s).toLowerCase());
+        if (ownerCandidates.includes(lowerHandle)) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return false;
+}
+
 
 

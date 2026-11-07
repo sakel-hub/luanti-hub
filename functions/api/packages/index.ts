@@ -45,7 +45,8 @@ import {
   normalizeUtcIsoTimestamp,
   computeLuantiHubFrecencyMetrics,
   mergeLuantiHubAndContentDbGameSupport,
-  parsePackageTranslations
+  parsePackageTranslations,
+  BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
 
@@ -726,7 +727,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ? '/packages/?fmt=vcs'
     : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
-  const bootEdgeCacheKey = 'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20';
+  const bootEdgeCacheKey = `https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`;
   const rawHideAndFlags = [
     ...url.searchParams.getAll('hide'),
     ...url.searchParams.getAll('flag')

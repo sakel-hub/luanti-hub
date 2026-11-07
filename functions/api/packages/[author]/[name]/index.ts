@@ -53,14 +53,18 @@ import {
   computeLuantiHubFrecencyMetrics,
   parsePackageTranslations,
   resolveLocalizedPackageText,
-  parseScreenshotMetaArray
+  parseScreenshotMetaArray,
+  buildPackageDetailEdgeCacheKey,
+  buildPackageCacheInvalidationKeys,
+  BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../../../lib/upstream';
 import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
   reconcileAndMergeUserAccount,
-  verifyStrictPackageAuthorOwnership
+  verifyStrictPackageAuthorOwnership,
+  shouldHonorAuthenticatedNoCache
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -412,8 +416,6 @@ async function recordWebPackageView(
   }
 }
 
-const pkgDetailRefreshCooldown = new Map<string, number>();
-
 export async function onRequestGet(context: { request?: Request; params: { author: string; name: string }; env: Env }) {
   const author = safeDecodeParam(context.params.author);
   const name = safeDecodeParam(context.params.name);
@@ -422,28 +424,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const isLite = reqUrl?.searchParams.get('lite') === '1';
   const requestedNoCache =
     reqUrl?.searchParams.get('nocache') === '1' || reqUrl?.searchParams.get('refresh') === '1';
-  let noCache = false;
-  if (requestedNoCache && context.request) {
-    const cookies = parseCookies(context.request);
-    const sessionUserId = cookies['lh_session']
-      ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
-      : null;
-    const now = Date.now();
-    const lowerPkgKey = pkgId.toLowerCase();
-    const lastRefresh = pkgDetailRefreshCooldown.get(lowerPkgKey) || 0;
-    if (sessionUserId && now - lastRefresh > 60_000) {
-      noCache = true;
-      pkgDetailRefreshCooldown.set(lowerPkgKey, now);
-    }
-  }
+  const noCache = requestedNoCache
+    ? await shouldHonorAuthenticatedNoCache(
+        context.request,
+        context.env.SESSION_SECRET,
+        `pkg-detail:${pkgId}`
+      )
+    : false;
   const wantsReadme = reqUrl?.searchParams.get('readme') === '1';
   const rawLang =
     reqUrl?.searchParams.get('lang') ||
     (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
     'en';
   const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
-  const langKeySegment = normalizedLang && normalizedLang !== 'en' ? `${normalizedLang}/` : '';
-  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-detail-v20/${isLite ? 'lite' : (wantsReadme ? 'full-readme' : 'full')}/${langKeySegment}${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const edgeCacheKey = buildPackageDetailEdgeCacheKey(
+    author,
+    name,
+    isLite ? 'lite' : wantsReadme ? 'full-readme' : 'full',
+    normalizedLang
+  );
 
   if (!isLite && context.env.DB) {
     const viewTask = recordWebPackageView(context.env.DB, context.request, pkgId, context.env.SESSION_SECRET);
@@ -1438,7 +1437,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               SET download_size = ?, file_size = ?
               WHERE LOWER(id) = LOWER(?)
             `).bind(repoEst.downloadSize, repoEst.fileSize, d1Pkg.id).run().catch(() => {});
-            await invalidateEdgeCacheKeys(['/__api_boot_catalog_bundle_v3']).catch(() => {});
+            await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY]).catch(() => {});
           }
         }
       }
@@ -2470,18 +2469,12 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       await upsertCustomAppTags(context.env.DB, cleanedCustomTags, 'custom');
     }
 
-    const lowerA = encodeURIComponent(author.toLowerCase());
-    const lowerN = encodeURIComponent(name.toLowerCase());
-    await invalidateEdgeCacheKeys([
-      '/__api_packages_v2',
-      '/__api_packages_v2?boot=1',
-      '/__api_boot_catalog_bundle_v3',
-      `/__api_pkg_detail_v2/${author.toLowerCase()}/${name.toLowerCase()}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v5/full/${lowerA}/${lowerN}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v5/lite/${lowerA}/${lowerN}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
-    ]);
+    await invalidateEdgeCacheKeys(
+      buildPackageCacheInvalidationKeys(author, name, {
+        includeBootCatalog: true,
+        includeAuthorProfile: true
+      })
+    );
 
     return Response.json({
       success: true,

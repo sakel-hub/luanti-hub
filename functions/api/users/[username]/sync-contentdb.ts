@@ -1,13 +1,19 @@
 import {
   verifySessionTokenClaims,
   parseCookies,
-  checkIsAdmin
+  checkIsAdmin,
+  shouldHonorAuthenticatedNoCache
 } from '../../auth/lib/session';
 import {
   syncVerifiedAuthorGitPackages,
   inspectAuthorGitSyncStatus
 } from '../../lib/author-git-sync';
-import { sanitizePublicErrorMessage } from '../../lib/upstream';
+import {
+  sanitizePublicErrorMessage,
+  readEdgeCacheJson,
+  writeEdgeCacheJson,
+  invalidateEdgeCacheKeys
+} from '../../lib/upstream';
 
 interface Env {
   DB?: any;
@@ -30,25 +36,45 @@ export async function onRequestGet(context: {
   }
 
   try {
-    const status = await inspectAuthorGitSyncStatus(context.env, {
-      username: rawParamUsername,
-      authorHandles: [rawParamUsername]
-    });
-
+    const lowerUsername = rawParamUsername.toLowerCase();
     const url = new URL(context.request.url);
+    const requestedNoCache = url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';
+    const noCache = requestedNoCache
+      ? await shouldHonorAuthenticatedNoCache(
+          context.request,
+          context.env.SESSION_SECRET,
+          `sync-status:${lowerUsername}`
+        )
+      : false;
+
+    const statusCacheKey = `/__author_sync_status_v1/${encodeURIComponent(lowerUsername)}`;
+    let status = !noCache ? await readEdgeCacheJson<any>(statusCacheKey) : null;
+    if (!status) {
+      status = await inspectAuthorGitSyncStatus(context.env, {
+        username: rawParamUsername,
+        authorHandles: [rawParamUsername]
+      });
+      await writeEdgeCacheJson(statusCacheKey, status, 60);
+    }
+
     const autoTrigger = url.searchParams.get('autotrig') === '1';
     if (autoTrigger && status.isRegistered && status.userId && status.pendingQueueCount > 0) {
-      context.waitUntil?.(
-        syncVerifiedAuthorGitPackages(context.env, {
-          userId: status.userId,
-          authorHandles: status.authorHandles,
-          verifiedUsername: status.username || rawParamUsername,
-          maxNewImports: 8,
-          forceRescan: false,
-          rescanAlreadyTracked: false,
-          reportAmbiguousRepos: true
-        })
-      );
+      const autoTrigLockKey = `/__author_autotrig_lock_v1/${encodeURIComponent(lowerUsername)}`;
+      const existingLock = await readEdgeCacheJson<{ ts: number }>(autoTrigLockKey);
+      if (!existingLock) {
+        await writeEdgeCacheJson(autoTrigLockKey, { ts: Date.now() }, 300);
+        context.waitUntil?.(
+          syncVerifiedAuthorGitPackages(context.env, {
+            userId: status.userId,
+            authorHandles: status.authorHandles,
+            verifiedUsername: status.username || rawParamUsername,
+            maxNewImports: 8,
+            forceRescan: false,
+            rescanAlreadyTracked: false,
+            reportAmbiguousRepos: true
+          }).then(() => invalidateEdgeCacheKeys([statusCacheKey]).catch(() => {}))
+        );
+      }
     }
 
     return Response.json(
@@ -104,6 +130,12 @@ export async function onRequestPost(context: {
     ? await verifySessionTokenClaims(sessionToken, context.env.SESSION_SECRET)
     : null;
   const userId = claims?.userId || null;
+  if (!userId && (forceRescan || rescanAlreadyTracked)) {
+    return Response.json(
+      { error: 'Authentication required to force-rescan Git repositories.' },
+      { status: 401 }
+    );
+  }
 
   try {
     let userRow: any = null;
@@ -225,6 +257,10 @@ export async function onRequestPost(context: {
       rescanAlreadyTracked,
       reportAmbiguousRepos: true
     });
+
+    if (requestedHandle) {
+      await invalidateEdgeCacheKeys([`/__author_sync_status_v1/${encodeURIComponent(requestedHandle)}`]).catch(() => {});
+    }
 
     return Response.json({
       ...syncResult,

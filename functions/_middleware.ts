@@ -31,7 +31,7 @@ function pruneRateLimitStore(now: number): void {
 
 export function checkEdgeRateLimit(
   ip: string,
-  bucketType: 'mutation' | 'download' | 'api_read',
+  bucketType: 'mutation' | 'download' | 'hydrate' | 'api_read',
   limit: number,
   windowMs: number,
   now = Date.now()
@@ -412,9 +412,11 @@ export async function onRequest(context: {
 
   const rateCheck = isHeavyEndpoint
     ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
-    : isDownloadRoute
-      ? checkEdgeRateLimit(clientIp, 'download', 30, 60_000)
-      : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
+    : isHydrateEndpoint
+      ? checkEdgeRateLimit(clientIp, 'hydrate', 45, 60_000)
+      : isDownloadRoute
+        ? checkEdgeRateLimit(clientIp, 'download', 30, 60_000)
+        : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
 
   if (!rateCheck.allowed) {
     return new Response(

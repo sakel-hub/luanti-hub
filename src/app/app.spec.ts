@@ -12423,4 +12423,105 @@ core.register_node(modname .. ":panel", {
       globalThis.fetch = origFetch;
     }
   });
+
+  it('should enforce single-source-of-truth Edge Cache invalidation keys, shared analytics telemetry builders, and authenticated cache-bypass/sync protection', async () => {
+    const {
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      PACKAGE_DETAIL_CACHE_VERSION,
+      buildPackageDetailEdgeCacheKey,
+      buildPackageReviewsEdgeCacheKey,
+      buildAuthorProfileEdgeCacheKey,
+      buildPackageCacheInvalidationKeys,
+      buildDualPeriodDateRange,
+      computeCombinedTelemetryArrays
+    } = await import('../../functions/api/lib/upstream');
+    const {
+      timingSafeEqualStrings,
+      shouldHonorAuthenticatedNoCache,
+      createSessionToken
+    } = await import('../../functions/api/auth/lib/session');
+    const { onRequestPost: syncContentDbPost } = await import('../../functions/api/users/[username]/sync-contentdb');
+
+    // 1. Verify centralized Edge Cache key builders & invalidation list
+    expect(buildPackageDetailEdgeCacheKey('Sakel', 'X_Farming', 'full', 'en')).toBe(
+      `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/sakel/x_farming`
+    );
+    expect(buildPackageDetailEdgeCacheKey('Sakel', 'X_Farming', 'lite', 'sk')).toBe(
+      `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/sk/sakel/x_farming`
+    );
+    const invalidationKeys = buildPackageCacheInvalidationKeys('Sakel', 'X_Farming', {
+      includeBootCatalog: true,
+      includeAuthorProfile: true,
+      includeGitRepoScan: true
+    });
+    expect(invalidationKeys).toContain(
+      `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/sakel/x_farming`
+    );
+    expect(invalidationKeys).toContain(
+      `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/sakel/x_farming`
+    );
+    expect(invalidationKeys).toContain(
+      `https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full-readme/sakel/x_farming`
+    );
+    expect(invalidationKeys).toContain(buildPackageReviewsEdgeCacheKey('sakel', 'x_farming'));
+    expect(invalidationKeys).toContain(buildAuthorProfileEdgeCacheKey('sakel'));
+    expect(invalidationKeys).toContain(BOOT_CATALOG_EDGE_CACHE_KEY);
+    expect(invalidationKeys).toContain('/__git_repo_scan_v11/sakel/x_farming');
+
+    // 2. Verify shared dual-period date range & combined telemetry builder
+    const range = buildDualPeriodDateRange(7);
+    expect(range.dates.length).toBe(7);
+    expect(range.prevDates.length).toBe(7);
+    const d1Map = new Map<string, any>([
+      [
+        range.dates[6],
+        {
+          downloads_count: 5,
+          platform_luanti: 3,
+          platform_web: 2,
+          reason_new: 2,
+          reason_update: 1,
+          reason_dependency: 0,
+          reason_web: 2,
+          views_luanti: 4,
+          views_web: 6
+        }
+      ]
+    ]);
+    const combined = computeCombinedTelemetryArrays(range.dates, range.prevDates, d1Map, null);
+    expect(combined.summary.periodDownloads).toBe(5);
+    expect(combined.summary.platformsTotal).toEqual({ luanti: 3, web: 2 });
+    expect(combined.summary.reasonsTotal).toEqual({ new: 2, update: 1, dependency: 0, web: 2 });
+    expect(combined.summary.totalViews).toBe(10);
+    expect(combined.summary.conversionRatePercent).toBe(50);
+
+    // 3. Verify constant-time secret comparison & authenticated ?nocache=1 gate
+    expect(timingSafeEqualStrings('Bearer super_secret_token_12345', 'Bearer super_secret_token_12345')).toBe(true);
+    expect(timingSafeEqualStrings('Bearer super_secret_token_12345', 'Bearer super_secret_token_12346')).toBe(false);
+    expect(timingSafeEqualStrings('Bearer short', 'Bearer super_secret_token_12345')).toBe(false);
+    expect(timingSafeEqualStrings('', '')).toBe(false);
+
+    const unauthReq = new Request('https://luantihub.local/api/packages/sakel/x_farming/reviews?nocache=1');
+    expect(await shouldHonorAuthenticatedNoCache(unauthReq, 'test_secret', 'reviews:sakel/x_farming')).toBe(false);
+
+    const token = await createSessionToken('usr_sakel', 'test_secret', { username: 'sakel', verified: true });
+    const authReq = new Request('https://luantihub.local/api/packages/sakel/x_farming/reviews?nocache=1', {
+      headers: { Cookie: `lh_session=${token}` }
+    });
+    expect(await shouldHonorAuthenticatedNoCache(authReq, 'test_secret', 'reviews:sakel/x_farming', 60_000)).toBe(true);
+    // Second immediate call within cooldown window is rejected
+    expect(await shouldHonorAuthenticatedNoCache(authReq, 'test_secret', 'reviews:sakel/x_farming', 60_000)).toBe(false);
+
+    // 4. Verify POST /api/users/:username/sync-contentdb with force=true or unregistered author requires authentication (401)
+    const unauthForceSyncRes = await syncContentDbPost({
+      request: new Request('https://luantihub.local/api/users/sakel/sync-contentdb', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true })
+      }),
+      env: { DB: {}, SESSION_SECRET: 'test_secret' },
+      params: { username: 'sakel' }
+    });
+    expect(unauthForceSyncRes.status).toBe(401);
+  });
 });

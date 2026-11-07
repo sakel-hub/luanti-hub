@@ -12,7 +12,9 @@ import {
   fetchWithAnubisSupport,
   autoResolveBrokenRepoReport,
   invalidateEdgeCacheKeys,
-  sanitizePublicErrorMessage
+  sanitizePublicErrorMessage,
+  buildPackageCacheInvalidationKeys,
+  BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
 
 interface Env {
@@ -145,6 +147,8 @@ export async function autoHealOpenSystemBrokenReports(db: any): Promise<number> 
   return healedCount;
 }
 
+let lastAdminAutoHealTs = 0;
+
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const { request, env } = context;
 
@@ -174,7 +178,6 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   }
 
   await ensureModerationColumns(env.DB);
-  await autoHealOpenSystemBrokenReports(env.DB);
 
   const currentUser = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(userId).first();
   const idRes = await env.DB.prepare(
@@ -267,6 +270,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
     const pageSize = Math.min(25, Math.max(1, parseInt(url.searchParams.get('limit') || '10', 10) || 10));
     const offset = (page - 1) * pageSize;
+
+    // Only auto-heal broken system reports on Admin page 1 with a 5-minute isolate cooldown
+    const now = Date.now();
+    if (page === 1 && statusFilter === 'open' && now - lastAdminAutoHealTs > 300_000) {
+      lastAdminAutoHealTs = now;
+      await autoHealOpenSystemBrokenReports(env.DB);
+    }
 
     // 1. Global Open vs Closed Counters
     const countsRes = await env.DB.prepare(`
@@ -616,15 +626,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       if (Number(claimRes?.meta?.changes || 0) > 0) {
         packageClaimApproved = true;
         const [pkgAuthor, pkgName] = claimedPkgId.split('/');
-        await invalidateEdgeCacheKeys([
-          '/__api_packages_v2',
-          '/__api_packages_v2?boot=1',
-          '/__api_boot_catalog_bundle_v4',
-          '/__api_boot_catalog_bundle_v5',
-          ...(pkgAuthor && pkgName
-            ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
-            : [])
-        ]);
+        await invalidateEdgeCacheKeys(
+          pkgAuthor && pkgName
+            ? buildPackageCacheInvalidationKeys(pkgAuthor, pkgName, {
+                includeBootCatalog: true,
+                includeAuthorProfile: true
+              })
+            : [BOOT_CATALOG_EDGE_CACHE_KEY]
+        );
       }
     }
   }
@@ -648,13 +657,14 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     if (Number(approveRes?.meta?.changes || 0) > 0) {
       packageApprovedAndPublished = true;
       const [pkgAuthor, pkgName] = pkgId.split('/');
-      await invalidateEdgeCacheKeys([
-        '/__api_packages_v2',
-        '/__api_packages_v2?boot=1',
-        ...(pkgAuthor && pkgName
-          ? [`/__api_pkg_detail_v2/${pkgAuthor.toLowerCase()}/${pkgName.toLowerCase()}`]
-          : [])
-      ]);
+      await invalidateEdgeCacheKeys(
+        pkgAuthor && pkgName
+          ? buildPackageCacheInvalidationKeys(pkgAuthor, pkgName, {
+              includeBootCatalog: true,
+              includeAuthorProfile: true
+            })
+          : [BOOT_CATALOG_EDGE_CACHE_KEY]
+      );
     }
   }
 

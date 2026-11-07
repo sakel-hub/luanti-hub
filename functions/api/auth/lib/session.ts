@@ -799,7 +799,7 @@ export async function verifyProviderToken(
   if (!cleanToken) return { verified: false };
 
   // 1. Check Cloudflare ADMIN_SECRET override if configured
-  if (adminSecret && adminSecret.length >= 12 && cleanToken === adminSecret) {
+  if (adminSecret && adminSecret.length >= 12 && timingSafeEqualStrings(cleanToken, adminSecret)) {
     return {
       verified: true,
       providerUserId: `${provider}:${expectedUsername.toLowerCase()}`,
@@ -909,3 +909,55 @@ export async function verifyProviderToken(
 
   return { verified: false };
 }
+
+/**
+ * Constant-time string equality check to prevent timing side-channels when comparing secrets.
+ */
+export function timingSafeEqualStrings(a?: string | null, b?: string | null): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length === 0 || b.length === 0 || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+const authenticatedRefreshCooldown = new Map<string, number>();
+
+/**
+ * Verifies that a request asking for `?nocache=1` / `?refresh=1` / `?sync=1` carries a valid
+ * authenticated `lh_session` cookie and respects a per-resource cooldown window (default 60s),
+ * preventing unauthenticated actors from bypassing Edge Cache and exhausting D1/upstream quotas.
+ */
+export async function shouldHonorAuthenticatedNoCache(
+  request: Request | undefined,
+  sessionSecret: string | undefined,
+  resourceKey: string,
+  cooldownMs = 60_000
+): Promise<boolean> {
+  if (!request) return false;
+  const cookies = parseCookies(request);
+  const sessionToken = cookies['lh_session'];
+  if (!sessionToken) return false;
+
+  const sessionUserId = await verifySessionToken(sessionToken, sessionSecret);
+  if (!sessionUserId) return false;
+
+  const now = Date.now();
+  if (authenticatedRefreshCooldown.size > 1000) {
+    for (const [k, ts] of authenticatedRefreshCooldown.entries()) {
+      if (now - ts > cooldownMs) authenticatedRefreshCooldown.delete(k);
+    }
+  }
+
+  const normalizedKey = String(resourceKey || '').trim().toLowerCase();
+  const lastRefresh = authenticatedRefreshCooldown.get(normalizedKey) || 0;
+  if (now - lastRefresh <= cooldownMs) {
+    return false;
+  }
+
+  authenticatedRefreshCooldown.set(normalizedKey, now);
+  return true;
+}
+

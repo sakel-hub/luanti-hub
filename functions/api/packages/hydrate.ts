@@ -41,9 +41,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   const hydratedMap: Record<string, any> = {};
 
   // Resolve requested package IDs in batch (D1 lookup + server-side upstream edge cache fallback)
-  const rawIds = Array.isArray(body.ids)
-    ? Array.from(new Set(body.ids.map(id => String(id || '').trim()).filter(id => id.includes('/')))).slice(0, 32)
-    : [];
+  const seenLower = new Set<string>();
+  const rawIds: string[] = [];
+  if (Array.isArray(body.ids)) {
+    for (const raw of body.ids) {
+      const id = String(raw || '').trim();
+      if (!/^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,80}$/.test(id)) continue;
+      const lower = id.toLowerCase();
+      if (seenLower.has(lower)) continue;
+      seenLower.add(lower);
+      rawIds.push(id);
+      if (rawIds.length >= 32) break;
+    }
+  }
 
   const hydrateCacheKey =
     rawIds.length > 0

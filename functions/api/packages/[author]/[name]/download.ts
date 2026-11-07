@@ -14,7 +14,10 @@ import {
   fetchWithAnubisSupport,
   buildSharedZipCacheKey,
   getCachedNormalizedZip,
-  setCachedNormalizedZip
+  setCachedNormalizedZip,
+  buildPackageCacheInvalidationKeys,
+  buildPackageStatsEdgeCacheKey,
+  buildAuthorStatsEdgeCacheKey
 } from '../../../lib/upstream';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
@@ -198,6 +201,15 @@ export async function onRequest(context: {
             WHERE LOWER(id) = LOWER(?)
           `).bind(effectivePkgId).run();
 
+          const statsAuthor = pkgRecord?.author_name || author;
+          const statsName = pkgRecord?.name || name;
+          await invalidateEdgeCacheKeys(
+            [7, 30, 90, 365].flatMap((d) => [
+              buildPackageStatsEdgeCacheKey(statsAuthor, statsName, d),
+              buildAuthorStatsEdgeCacheKey(statsAuthor, d)
+            ])
+          ).catch(() => {});
+
           const cookies = parseCookies(request);
           const sessionToken = cookies['lh_session'];
           const userId = sessionToken
@@ -248,14 +260,11 @@ export async function onRequest(context: {
       SET download_size = ?, file_size = ?
       WHERE LOWER(id) = LOWER(?)
     `).bind(zipBytes, formattedSize, pkgRecord.id).run().catch(() => {});
-    const lowerA = encodeURIComponent(effectiveAuthor.toLowerCase());
-    const lowerN = encodeURIComponent(effectiveName.toLowerCase());
-    await invalidateEdgeCacheKeys([
-      '/__api_boot_catalog_bundle_v19',
-      `https://edge-cache.luantihub.local/pkg-detail-v19/full/${lowerA}/${lowerN}`,
-      `https://edge-cache.luantihub.local/pkg-detail-v19/lite/${lowerA}/${lowerN}`,
-      `https://cache.luantihub.internal/__for_client_v5/${lowerA}/${lowerN}/en/%3Fformspec_version%3D8`
-    ]).catch(() => {});
+    await invalidateEdgeCacheKeys(
+      buildPackageCacheInvalidationKeys(effectiveAuthor, effectiveName, {
+        includeBootCatalog: true
+      })
+    ).catch(() => {});
   };
 
   // 3. If it is a background telemetry POST ping

@@ -36,7 +36,9 @@ import {
   isGitRepositoryAssetUrl,
   toProxiedGitImageIfNeeded,
   mergeScreenshotsPreferringGit,
-  upsertCustomAppTags
+  upsertCustomAppTags,
+  verifyGitOrgOrRepoMembership,
+  buildPackageCacheInvalidationKeys
 } from '../lib/upstream';
 import { GitProviderId } from '../../../src/app/core/config/git-providers.config';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
@@ -125,63 +127,6 @@ async function fetchRepoRootEntries(
   return null;
 }
 
-async function fetchRepoSizeEstimate(
-  provider: GitProviderId,
-  host: string,
-  owner: string,
-  repo: string
-): Promise<{ downloadSize: number; fileSize: string } | null> {
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
-  };
-  try {
-    if (provider === 'github') {
-      const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
-      if (res.ok) {
-        const data: any = await res.json();
-        const kb = Number(data?.size);
-        if (Number.isFinite(kb) && kb > 0) {
-          const bytes = Math.round(kb * 1024);
-          return { downloadSize: bytes, fileSize: formatByteSize(bytes) || `${kb} KB` };
-        }
-      }
-    } else if (provider === 'codeberg' || provider === 'mesehub') {
-      const res = await fetchWithAnubisSupport(`https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, { headers });
-      if (res.ok) {
-        const data: any = await res.json();
-        const kb = Number(data?.size);
-        if (Number.isFinite(kb) && kb > 0) {
-          const bytes = Math.round(kb * 1024);
-          return { downloadSize: bytes, fileSize: formatByteSize(bytes) || `${kb} KB` };
-        }
-      }
-    } else if (provider === 'gitlab') {
-      const projectPath = encodeURIComponent(`${owner}/${repo}`);
-      const res = await fetch(`https://${host}/api/v4/projects/${projectPath}`, { headers });
-      if (res.ok) {
-        const data: any = await res.json();
-        const bytes = Number(data?.statistics?.repository_size || (data?.size ? data.size * 1024 : 0));
-        if (Number.isFinite(bytes) && bytes > 0) {
-          return { downloadSize: Math.round(bytes), fileSize: formatByteSize(bytes) || `${Math.round(bytes / 1024)} KB` };
-        }
-      }
-    } else if (provider === 'bitbucket') {
-      const res = await fetch(`https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`, { headers });
-      if (res.ok) {
-        const data: any = await res.json();
-        const bytes = Number(data?.size);
-        if (Number.isFinite(bytes) && bytes > 0) {
-          return { downloadSize: Math.round(bytes), fileSize: formatByteSize(bytes) || `${Math.round(bytes / 1024)} KB` };
-        }
-      }
-    }
-  } catch {
-    // Non-blocking estimate
-  }
-  return null;
-}
-
 async function verifyOrgOrRepoMembership(
   provider: GitProviderId,
   host: string,
@@ -189,86 +134,13 @@ async function verifyOrgOrRepoMembership(
   repo: string,
   verifiedHandle: string
 ): Promise<boolean> {
-  const lowerHandle = verifiedHandle.trim().toLowerCase();
-  if (!lowerHandle) return false;
-  if (lowerHandle === owner.trim().toLowerCase()) return true;
-
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
-    'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
-  };
-
-  try {
-    if (provider === 'github') {
-      const orgRes = await fetch(
-        `https://api.github.com/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
-        { headers }
-      );
-      if (orgRes.status === 204 || orgRes.status === 200) return true;
-
-      const contribRes = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=30`,
-        { headers }
-      );
-      if (contribRes.ok) {
-        const list = await contribRes.json();
-        if (Array.isArray(list) && list.some((c: any) => String(c?.login || '').toLowerCase() === lowerHandle)) {
-          return true;
-        }
-      }
-    } else if (provider === 'codeberg' || provider === 'mesehub') {
-      const orgRes = await fetchWithAnubisSupport(
-        `https://${host}/api/v1/orgs/${encodeURIComponent(owner)}/members/${encodeURIComponent(verifiedHandle)}`,
-        { headers }
-      );
-      if (orgRes.status === 204 || orgRes.status === 200) return true;
-
-      const repoRes = await fetchWithAnubisSupport(
-        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
-        { headers }
-      );
-      if (repoRes.ok) {
-        const repoData: any = await repoRes.json();
-        if (String(repoData?.owner?.login || '').toLowerCase() === lowerHandle) {
-          return true;
-        }
-      }
-    } else if (provider === 'gitlab') {
-      const projectPath = encodeURIComponent(`${owner}/${repo}`);
-      const membersRes = await fetch(
-        `https://${host}/api/v4/projects/${projectPath}/members/all?query=${encodeURIComponent(verifiedHandle)}`,
-        { headers }
-      );
-      if (membersRes.ok) {
-        const list = await membersRes.json();
-        if (Array.isArray(list) && list.some((m: any) => String(m?.username || '').toLowerCase() === lowerHandle)) {
-          return true;
-        }
-      }
-    } else if (provider === 'bitbucket') {
-      const repoRes = await fetch(
-        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`,
-        { headers }
-      );
-      if (repoRes.ok) {
-        const repoData: any = await repoRes.json();
-        const ownerCandidates = [
-          repoData?.owner?.username,
-          repoData?.owner?.nickname,
-          repoData?.workspace?.slug
-        ]
-          .filter(Boolean)
-          .map((s: any) => String(s).toLowerCase());
-        if (ownerCandidates.includes(lowerHandle)) {
-          return true;
-        }
-      }
-    }
-  } catch {
-    return false;
-  }
-
-  return false;
+  return verifyGitOrgOrRepoMembership(
+    provider as 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket',
+    host,
+    owner,
+    repo,
+    verifiedHandle
+  );
 }
 
 export interface GitAuditDiagnostic {
@@ -1810,7 +1682,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             tag: discoveredReleases[0]?.tag_name || discoveredReleases[0]?.version || null,
             defaultBranch: branch,
             packageType
-          })) || (await fetchRepoSizeEstimate(provider, host, owner, repo));
+          }));
       const estDownloadSize = sizeEstimate?.downloadSize || null;
       const estFileSize = sizeEstimate?.fileSize || null;
       if (estDownloadSize) {
@@ -2031,22 +1903,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }
     }
 
-    const lowerA = canonicalAuthor.toLowerCase();
-    const lowerN = technicalName.toLowerCase();
-    await invalidateEdgeCacheKeys([
-      '/__api_packages_v2',
-      '/__api_packages_v2?boot=1',
-      '/__api_boot_catalog_bundle_v3',
-      'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
-      `/__api_pkg_detail_v2/${lowerA}/${lowerN}`,
-      `/__git_repo_scan_v11/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/pkg-detail-v5/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/pkg-detail-v5/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/pkg-detail-v7/full/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/pkg-detail-v7/lite/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}`,
-      `https://cache.luantihub.internal/__for_client_v3/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`,
-      `https://cache.luantihub.internal/__for_client_v4/${encodeURIComponent(lowerA)}/${encodeURIComponent(lowerN)}/8`
-    ]);
+    await invalidateEdgeCacheKeys(
+      buildPackageCacheInvalidationKeys(canonicalAuthor, technicalName, {
+        includeBootCatalog: true,
+        includeAuthorProfile: true,
+        includeGitRepoScan: true
+      })
+    );
 
     if (safetyEval.holdForAdminReview) {
       return Response.json({
