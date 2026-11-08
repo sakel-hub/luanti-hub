@@ -805,10 +805,13 @@ const DEFUNCT_GIT_HOSTS = [
 ];
 
 /**
- * Checks if a repository URL belongs to a defunct Git forge
+ * Checks if a repository URL belongs to a defunct Git forge or an untrusted ephemeral tunnel / private IP
  */
 export function isDefunctGitHost(urlStr: string): boolean {
   try {
+    if (isUntrustedTunnelOrPrivateHost(urlStr)) {
+      return true;
+    }
     const parsed = new URL(urlStr);
     const host = parsed.hostname.toLowerCase();
     return DEFUNCT_GIT_HOSTS.some(d => host === d || host.endsWith(`.${d}`));
@@ -1518,7 +1521,13 @@ export function parseGitRepoTarget(
   if (repoUrl && typeof repoUrl === 'string' && repoUrl.trim()) {
     try {
       const u = new URL(repoUrl.trim());
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+        throw new Error('Invalid protocol');
+      }
       let host = u.hostname.toLowerCase();
+      if (isUntrustedTunnelOrPrivateHost(host)) {
+        return null;
+      }
       // Normalize defunct NotABug URLs to Codeberg
       if (host.includes('notabug.org')) {
         host = 'codeberg.org';
@@ -3538,6 +3547,9 @@ export interface GitRepoScanResult {
 export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
   if (!rawUrl || typeof rawUrl !== 'string') return undefined;
   const trimmed = rawUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (isUntrustedTunnelOrPrivateHost(trimmed)) {
+    return undefined;
+  }
   try {
     const u = new URL(trimmed);
     const host = u.hostname.toLowerCase();
@@ -3596,6 +3608,8 @@ import {
   isGitProviderId,
   isAuthLoginGitProvider,
   detectGitProviderFromUrl,
+  EPHEMERAL_TUNNEL_HOST_PATTERN,
+  isUntrustedTunnelOrPrivateHost,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
   toProxiedGitImageIfNeeded,
@@ -3622,6 +3636,8 @@ export {
   isGitProviderId,
   isAuthLoginGitProvider,
   detectGitProviderFromUrl,
+  EPHEMERAL_TUNNEL_HOST_PATTERN,
+  isUntrustedTunnelOrPrivateHost,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
   toProxiedGitImageIfNeeded,
@@ -4381,6 +4397,39 @@ export async function fetchWithAnubisSupport(
   url: string,
   init: RequestInit = {}
 ): Promise<Response> {
+  if (isUntrustedTunnelOrPrivateHost(url)) {
+    console.warn(
+      JSON.stringify({
+        event: 'SECURITY_ALERT:OUTBOUND_TUNNEL_SSRF_BLOCKED',
+        targetUrl: String(url || '').slice(0, 200),
+        timestamp: new Date().toISOString()
+      })
+    );
+    return new Response('Forbidden: Untrusted tunnel or private network host blocked.', { status: 403 });
+  }
+
+  const verifySafeRedirectResponse = (res: Response): Response => {
+    const finalUrl = res?.url;
+    const locHeader = res?.headers?.get?.('location');
+    if (
+      (finalUrl && isUntrustedTunnelOrPrivateHost(finalUrl)) ||
+      (locHeader && (locHeader.includes('://') || locHeader.startsWith('//')) && isUntrustedTunnelOrPrivateHost(locHeader))
+    ) {
+      console.warn(
+        JSON.stringify({
+          event: 'SECURITY_ALERT:OUTBOUND_TUNNEL_SSRF_REDIRECT_BLOCKED',
+          sourceUrl: String(url || '').slice(0, 200),
+          redirectUrl: String(finalUrl || locHeader || '').slice(0, 200),
+          timestamp: new Date().toISOString()
+        })
+      );
+      return new Response('Forbidden: Redirect to untrusted tunnel or private network host blocked.', {
+        status: 403
+      });
+    }
+    return res;
+  };
+
   let host = '';
   let origin = '';
   let pathname = '/';
@@ -4390,7 +4439,7 @@ export async function fetchWithAnubisSupport(
     origin = parsed.origin;
     pathname = parsed.pathname || '/';
   } catch {
-    return fetch(url, init);
+    return new Response('Bad Request: Invalid URL', { status: 400 });
   }
 
   const isAnubisCandidate =
@@ -4400,7 +4449,8 @@ export async function fetchWithAnubisSupport(
     host.includes('forgejo') ||
     host.includes('codeberg');
   if (!isAnubisCandidate) {
-    return fetch(url, init);
+    const directRes = await fetch(url, init);
+    return verifySafeRedirectResponse(directRes);
   }
 
   const cookieCacheKey = `/__anubis_cookie_v3/${encodeURIComponent(host)}`;
@@ -4450,10 +4500,14 @@ export async function fetchWithAnubisSupport(
     return merged;
   };
 
-  const firstRes = await fetch(url, {
+  const rawFirstRes = await fetch(url, {
     ...init,
     headers: buildHeadersWithCookie(cachedCookieObj?.cookie)
   });
+  const firstRes = verifySafeRedirectResponse(rawFirstRes);
+  if (firstRes !== rawFirstRes) {
+    return firstRes;
+  }
 
   const contentType = (firstRes.headers.get('content-type') || '').toLowerCase();
   const isPotentialAnubisBlock =
@@ -4541,10 +4595,11 @@ export async function fetchWithAnubisSupport(
 
     await writeEdgeCacheJson(cookieCacheKey, { cookie: allCookies }, 86400);
 
-    return fetch(url, {
+    const retryRes = await fetch(url, {
       ...init,
       headers: buildHeadersWithCookie(allCookies)
     });
+    return verifySafeRedirectResponse(retryRes);
   } catch {
     return firstRes;
   }

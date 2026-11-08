@@ -131,6 +131,83 @@ export function isAuthLoginGitProvider(provider?: string | null): provider is Au
 }
 
 /**
+ * Matches ephemeral reverse-tunnel domains (Cloudflare Quick Tunnels `*.trycloudflare.com`,
+ * disposable Argo tunnels `*.cfargotunnel.com`, ngrok, localtunnel, serveo, localhost.run,
+ * pinggy, bore, zrok, pagekite, telebit, packetriot) and OAST / SSRF callback catchers
+ * (`webhook.site`, `oastify.com`, `interact.sh`, `burpcollaborator.net`, `requestbin.com`, `pipedream.net`).
+ */
+export const EPHEMERAL_TUNNEL_HOST_PATTERN =
+  /(?:^|\.)(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|pagekite\.me|expose\.dev|telebit\.io|pktriot\.net|packetriot\.net|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh|oast\.(?:pro|live|site|online|fun|me)|requestbin\.(?:com|net)|pipedream\.net)$/i;
+
+/**
+ * Returns `true` if the given URL or hostname points to:
+ * 1. An ephemeral reverse tunnel (`*.trycloudflare.com`, `*.ngrok-free.app`, `*.loca.lt`, etc.) or OAST callback catcher.
+ * 2. A loopback, RFC1918 private network, link-local / cloud metadata (`169.254.169.254`), IPv6 private/loopback, or raw IP literal host.
+ * 3. Non-HTTP(S) schemes when a full URL is provided.
+ */
+export function isUntrustedTunnelOrPrivateHost(urlOrHost?: string | null): boolean {
+  if (!urlOrHost || typeof urlOrHost !== 'string') return true;
+  const trimmed = urlOrHost.trim();
+  if (!trimmed) return true;
+
+  let host = trimmed.toLowerCase();
+  if (trimmed.includes('://') || trimmed.startsWith('//')) {
+    try {
+      const parsed = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : trimmed);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return true;
+      }
+      host = parsed.hostname.toLowerCase();
+    } catch {
+      return true;
+    }
+  } else {
+    // Strip path/query/port from bare host inputs while preserving IPv6 brackets
+    host = host.split('/')[0].split('?')[0].split('#')[0];
+    if (host.startsWith('[')) {
+      const closeBracket = host.indexOf(']');
+      if (closeBracket !== -1) {
+        host = host.slice(1, closeBracket);
+      }
+    } else if (host.includes(':') && host.indexOf(':') === host.lastIndexOf(':')) {
+      host = host.split(':')[0];
+    }
+  }
+
+  host = host.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!host) return true;
+
+  // 1. Localhost & internal DNS suffixes
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.home.arpa') ||
+    host.endsWith('.lan')
+  ) {
+    return true;
+  }
+
+  // 2. IPv6 loopback / unspecified / link-local / unique-local (`::1`, `::`, `fe80::/10`, `fc00::/7`, IPv4-mapped `::ffff:...`)
+  if (host.includes(':')) {
+    return true;
+  }
+
+  // 3. IPv4 literal (loopback 127.0.0.0/8, RFC1918 10/8, 172.16/12, 192.168/16, link-local/cloud metadata 169.254/16, or any raw IPv4 literal)
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || /^0x[0-9a-f]+$/i.test(host) || /^\d+$/.test(host)) {
+    return true;
+  }
+
+  // 4. Ephemeral reverse tunnels (Cloudflare Quick Tunnel `*.trycloudflare.com`, ngrok, etc.) & OAST domains
+  if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(host)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Detects the Git provider config from a repository URL or hostname.
  */
 export function detectGitProviderFromUrl(
@@ -139,7 +216,9 @@ export function detectGitProviderFromUrl(
   if (!repoUrl || typeof repoUrl !== 'string') return null;
   try {
     const u = new URL(repoUrl.trim());
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
     const host = u.hostname.toLowerCase();
+    if (isUntrustedTunnelOrPrivateHost(host)) return null;
     const cleanedPath = u.pathname
       .replace(/\/-\/(?:tree|blob|commits|releases|tags|archive)(?:\/.*)?$/i, '')
       .replace(/\/(?:tree|blob|src|plain|log|commits|releases|tags|archive)(?:\/.*)?$/i, '')
@@ -601,6 +680,10 @@ export function sanitizePackageImageUrl(rawUrl?: string | null): string | undefi
     return undefined;
   }
   if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('/api/packages?proxy_image=')) {
+    return undefined;
+  }
+  const targetUrl = unwrapProxiedImageUrl(trimmed);
+  if (!targetUrl || isUntrustedTunnelOrPrivateHost(targetUrl)) {
     return undefined;
   }
   let normalized = toProxiedGitImageIfNeeded(trimmed);

@@ -13,7 +13,8 @@ import {
   OnInit,
   OnChanges,
   AfterViewInit,
-  OnDestroy
+  OnDestroy,
+  SecurityContext
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -2959,11 +2960,14 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private parseSafeMarkdown(markdownText: string): SafeHtml {
     try {
       const rawHtml = marked.parse(markdownText, { async: false }) as string;
-      const sanitizedHtml = rawHtml
-        .replace(/<(script|iframe|object|embed|style|form)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
-        .replace(/<(script|iframe|object|embed|style|form)[^>]*\/?>/gi, '')
-        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/href\s*=\s*["']\s*javascript:[^"']*["']/gi, 'href="#"')
+      const preCleanedHtml = rawHtml
+        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
+        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[^>]*\/?>/gi, '')
+        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+      const domSanitized = this.sanitizer.sanitize(SecurityContext.HTML, preCleanedHtml) ?? '';
+      const sanitizedHtml = domSanitized
+        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/(?:href|src)\s*=\s*["']\s*(?:unsafe:)?(?:javascript|vbscript|data):[^"']*["']/gi, 'href="#"')
         .replace(
           /<a\s+href="(https?:\/\/[^"]+)"/gi,
           '<a href="$1" target="_blank" rel="noopener noreferrer"'

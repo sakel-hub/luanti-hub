@@ -27,6 +27,7 @@ import {
   fetchGitSmartHttpRefs,
   buildProviderRawBaseCandidates,
   detectGitProviderFromUrl,
+  isUntrustedTunnelOrPrivateHost,
   ensureExtendedPackageColumns,
   extractEmbeddedVideo,
   ensureModerationColumns,
@@ -290,6 +291,7 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
   const diagnostics: GitAuditDiagnostic[] = [];
   const cleanedLua = stripLuaCommentsAndStringsPreservingLines(luaSource);
   const lines = cleanedLua.split(/\r?\n/);
+  const rawLines = luaSource.split(/\r?\n/);
 
   let openBlocks = 0;
   let lastOpenLine = 1;
@@ -297,6 +299,7 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
   const undeclaredGlobals: Array<{ name: string; line: number }> = [];
   const deprecatedCalls: Array<{ call: string; replacement: string; line: number }> = [];
   const sandboxViolations: Array<{ call: string; line: number }> = [];
+  const tunnelEndpoints: Array<{ domain: string; line: number }> = [];
 
   const allowedGlobals = new Set([
     modName, 'minetest', 'core', 'vector', 'VoxelArea', 'VoxelManip',
@@ -308,9 +311,18 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
     'getmetatable', 'dofile', 'loadfile', 'require', 'collectgarbage', 'print', '_'
   ]);
 
+  const tunnelC2Pattern =
+    /\b((?:[a-z0-9-]+\.)*(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh))\b/i;
+
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
     const codeOnly = lines[i];
+    const rawLineNoComment = (rawLines[i] || '').replace(/--.*$/, '');
+
+    const tunnelMatch = rawLineNoComment.match(tunnelC2Pattern);
+    if (tunnelMatch?.[1]) {
+      tunnelEndpoints.push({ domain: tunnelMatch[1].toLowerCase(), line: lineNum });
+    }
 
     if (!codeOnly.trim()) continue;
 
@@ -336,7 +348,9 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
     }
 
     // 2. Check for dangerous sandbox violations (E901)
-    const unsafeMatch = codeOnly.match(/\b(os\.execute|io\.popen|os\.remove|debug\.setmetatable|loadstring)\s*\(/);
+    const unsafeMatch = codeOnly.match(
+      /\b(os\.execute|io\.popen|os\.remove|debug\.setmetatable|loadstring|package\.loadlib|(?:core|minetest)\.request_insecure_environment)\s*\(/
+    );
     if (unsafeMatch) {
       sandboxViolations.push({ call: unsafeMatch[1], line: lineNum });
     }
@@ -413,6 +427,18 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
       message: `Line ${v.line} calls '${v.call}()', which is blocked by the Luanti mod security sandbox and prohibited on LuantiHub.`,
       howToFix: `Remove '${v.call}()' at init.lua:${v.line} and use safe Luanti engine APIs such as 'core.safe_file_write()' or 'core.get_modpath()'.`,
       snippet: `-- Replace unsafe OS/shell calls with Luanti safe storage:\nlocal storage = core.get_mod_storage()\nstorage:set_string("key", "value")`
+    });
+  }
+
+  for (const t of tunnelEndpoints) {
+    diagnostics.push({
+      code: 'LUA_SUSPICIOUS_TUNNEL_ENDPOINT (E902)',
+      severity: 'error',
+      file: 'init.lua',
+      line: t.line,
+      title: `Prohibited Ephemeral Tunnel / Callback Endpoint: ${t.domain}`,
+      message: `Line ${t.line} references an ephemeral reverse tunnel or callback catcher ('${t.domain}'), which is prohibited on LuantiHub to prevent C2 exfiltration and bait-and-switch payloads.`,
+      howToFix: `Remove references to '${t.domain}' at init.lua:${t.line} and use a verified permanent domain if your mod legitimately uses HTTP APIs.`
     });
   }
 
@@ -499,6 +525,26 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return Response.json({
         error: 'Invalid URL format. Please enter a full HTTPS Git URL (e.g., https://codeberg.org/user/mod_name).'
       }, { status: 400 });
+    }
+
+    if (isUntrustedTunnelOrPrivateHost(repoUrl.trim()) || isUntrustedTunnelOrPrivateHost(urlObj.hostname)) {
+      console.warn(
+        JSON.stringify({
+          event: 'SECURITY_ALERT:GIT_SUBMIT_TUNNEL_BLOCKED',
+          userId: loggedInUserId,
+          repoUrl: repoUrl.trim().slice(0, 200),
+          timestamp: new Date().toISOString()
+        })
+      );
+      return Response.json(
+        {
+          success: false,
+          canPublish: false,
+          error:
+            'Ephemeral reverse tunnels (such as *.trycloudflare.com, *.ngrok.io) and private/local network addresses are not permitted for package repositories.'
+        },
+        { status: 400 }
+      );
     }
 
     const branchHint = extractGitBranchHint(repoUrl.trim());

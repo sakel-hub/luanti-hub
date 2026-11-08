@@ -1,4 +1,5 @@
 // Global Edge Security, Origin Guard & Per-IP Quota Protection Middleware
+import { EPHEMERAL_TUNNEL_HOST_PATTERN } from '../src/app/core/config/git-providers.config';
 
 interface RateBucket {
   count: number;
@@ -9,10 +10,67 @@ const rateLimitStore = new Map<string, RateBucket>();
 const MAX_STORE_ENTRIES = 5000;
 
 const BLOCKED_BOT_PATTERN =
-  /\b(GPTBot|ChatGPT-User|CCBot|ClaudeBot|anthropic-ai|Bytespider|PetalBot|SemrushBot|AhrefsBot|MJ12bot|DotBot|BLEXBot|DataForSeoBot|Scrapy)\b/i;
+  /\b(GPTBot|ChatGPT-User|CCBot|ClaudeBot|anthropic-ai|Bytespider|PetalBot|SemrushBot|AhrefsBot|MJ12bot|DotBot|BLEXBot|DataForSeoBot|Scrapy|sqlmap|nuclei|nikto|ffuf|gobuster|dirbuster|feroxbuster|wfuzz|masscan|zgrab|nmap|acunetix|nessus|metasploit|dalfox|commix)\b/i;
 
 const SCANNER_PROBE_PATTERN =
-  /^\/(?:\.env|\.git|wp-admin|wp-login|wp-content|wp-includes|phpmyadmin|xmlrpc\.php|vendor\/phpunit)(?:\/|$|\.)/i;
+  /^\/(?:\.env|\.git|\.aws|\.docker|\.ssh|\.kube|wp-admin|wp-login|wp-content|wp-includes|phpmyadmin|xmlrpc\.php|vendor\/phpunit|actuator|server-status|cgi-bin|_ignition|cloudflared|etc\/passwd)(?:\/|$|\.)/i;
+
+const INBOUND_TUNNEL_SUBSTRING_PATTERN =
+  /(?:^|[./:@\s"=])(?:[a-z0-9-]+\.)*(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh)\b/i;
+
+export function detectInboundEphemeralTunnelHeader(
+  request: Request
+): { header: string; value: string } | null {
+  const candidateHeaders = ['Origin', 'Referer', 'X-Forwarded-Host', 'Forwarded'];
+  for (const headerName of candidateHeaders) {
+    const raw = request.headers.get(headerName);
+    if (!raw) continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      if (trimmed.includes('://')) {
+        const parsed = new URL(trimmed);
+        if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(parsed.hostname.toLowerCase())) {
+          return { header: headerName, value: trimmed.slice(0, 200) };
+        }
+      }
+    } catch {
+      // Fall through to substring inspection
+    }
+    if (
+      EPHEMERAL_TUNNEL_HOST_PATTERN.test(trimmed.toLowerCase()) ||
+      INBOUND_TUNNEL_SUBSTRING_PATTERN.test(trimmed)
+    ) {
+      return { header: headerName, value: trimmed.slice(0, 200) };
+    }
+  }
+  return null;
+}
+
+function withSecurityHeaders(res: Response): Response {
+  try {
+    const headers = new Headers(res.headers);
+    if (!headers.has('X-Content-Type-Options')) {
+      headers.set('X-Content-Type-Options', 'nosniff');
+    }
+    if (!headers.has('X-Frame-Options')) {
+      headers.set('X-Frame-Options', 'SAMEORIGIN');
+    }
+    if (!headers.has('Referrer-Policy')) {
+      headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    }
+    if (!headers.has('Permissions-Policy')) {
+      headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    }
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers
+    });
+  } catch {
+    return res;
+  }
+}
 
 function pruneRateLimitStore(now: number): void {
   if (rateLimitStore.size <= MAX_STORE_ENTRIES) return;
@@ -234,17 +292,47 @@ export async function onRequest(context: {
   const url = new URL(request.url);
   const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
+  const clientIp =
+    request.headers.get('CF-Connecting-IP') ||
+    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'anonymous';
+  const userAgent = request.headers.get('User-Agent') || '';
+
+  // 0. Detect & block inbound Cloudflare Quick Tunnel (*.trycloudflare.com) or disposable reverse-tunnel proxying / spoofed forwarding headers
+  const matchedTunnelHeader = detectInboundEphemeralTunnelHeader(request);
+  if (matchedTunnelHeader) {
+    console.warn(
+      JSON.stringify({
+        event: 'SECURITY_ALERT:EPHEMERAL_TUNNEL_BLOCKED',
+        clientIp,
+        method,
+        pathname,
+        matchedHeader: matchedTunnelHeader.header,
+        matchedValue: matchedTunnelHeader.value,
+        userAgent: userAgent.slice(0, 160),
+        timestamp: new Date().toISOString()
+      })
+    );
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Forbidden: Requests proxied or originated through ephemeral tunnels are blocked.' },
+        { status: 403 }
+      )
+    );
+  }
 
   // Immediately block automated vulnerability scanner probes (/.env, /wp-admin/*, /.git/*, etc.)
   // with an edge-cached 404 Not Found so they do not fall through to the SPA 200 OK shell.
   if (SCANNER_PROBE_PATTERN.test(pathname)) {
-    return new Response('Not Found', {
-      status: 404,
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'public, max-age=86400, s-maxage=86400'
-      }
-    });
+    return withSecurityHeaders(
+      new Response('Not Found', {
+        status: 404,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=86400, s-maxage=86400'
+        }
+      })
+    );
   }
 
   const isApiRoute = pathname.startsWith('/api/');
@@ -280,33 +368,39 @@ export async function onRequest(context: {
         );
         if (sectionMeta) {
           const rawHtml = await spaRes.text();
-          return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+          return withSecurityHeaders(
+            new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'public, max-age=300, s-maxage=900'
+              }
+            })
+          );
+        }
+        return withSecurityHeaders(
+          new Response(spaRes.body, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store, no-cache, must-revalidate'
+            }
+          })
+        );
+      }
+      if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+        const rawHtml = await res.text();
+        return withSecurityHeaders(
+          new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
             status: 200,
             headers: {
               'Content-Type': 'text/html; charset=utf-8',
               'Cache-Control': 'public, max-age=300, s-maxage=900'
             }
-          });
-        }
-        return new Response(spaRes.body, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-store, no-cache, must-revalidate'
-          }
-        });
+          })
+        );
       }
-      if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
-        const rawHtml = await res.text();
-        return new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'public, max-age=300, s-maxage=900'
-          }
-        });
-      }
-      return res;
+      return withSecurityHeaders(res);
     } catch (err: any) {
       console.error('[Edge Navigation Error]', {
         method,
@@ -322,27 +416,30 @@ export async function onRequest(context: {
           })
         );
         const rawHtml = await spaRes.text();
-        return new Response(
-          sectionMeta ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta) : rawHtml,
-          {
-            status: 200,
-            headers: {
-              'Content-Type': 'text/html; charset=utf-8',
-              'Cache-Control': 'no-store, no-cache, must-revalidate'
+        return withSecurityHeaders(
+          new Response(
+            sectionMeta ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta) : rawHtml,
+            {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store, no-cache, must-revalidate'
+              }
             }
-          }
+          )
         );
       }
       throw err;
     }
   }
 
-  // 1. Block known aggressive AI scrapers & automated SEO crawlers from burning Function/D1 quotas
-  const userAgent = request.headers.get('User-Agent') || '';
+  // 1. Block known aggressive AI scrapers, automated SEO crawlers & offensive scanners from burning Function/D1 quotas
   if (BLOCKED_BOT_PATTERN.test(userAgent)) {
-    return Response.json(
-      { error: 'Automated scraping of API and download endpoints is not permitted.' },
-      { status: 403 }
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Automated scraping of API and download endpoints is not permitted.' },
+        { status: 403 }
+      )
     );
   }
 
@@ -362,9 +459,11 @@ export async function onRequest(context: {
     (pathname.includes('/callback') || pathname.includes('/login'));
 
   if (!isOAuthFlow && origin && !isSameHostOrigin(origin, requestHost)) {
-    return Response.json(
-      { error: 'Forbidden: Cross-origin API hotlinking is not allowed.' },
-      { status: 403 }
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Forbidden: Cross-origin API hotlinking is not allowed.' },
+        { status: 403 }
+      )
     );
   }
 
@@ -381,25 +480,24 @@ export async function onRequest(context: {
 
   if (isStateMutating || isInternalWebEndpoint) {
     if (secFetchSite === 'cross-site') {
-      return Response.json(
-        { error: 'Forbidden: Cross-site requests are blocked.' },
-        { status: 403 }
+      return withSecurityHeaders(
+        Response.json(
+          { error: 'Forbidden: Cross-site requests are blocked.' },
+          { status: 403 }
+        )
       );
     }
     if (referer && !isSameHostOrigin(referer, requestHost)) {
-      return Response.json(
-        { error: 'Forbidden: Invalid request referer.' },
-        { status: 403 }
+      return withSecurityHeaders(
+        Response.json(
+          { error: 'Forbidden: Invalid request referer.' },
+          { status: 403 }
+        )
       );
     }
   }
 
   // 3. Per-IP Sliding-Window Edge Rate Limiting (protects Worker & D1 quotas before hitting DB/upstreams)
-  const clientIp =
-    request.headers.get('CF-Connecting-IP') ||
-    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
-    'anonymous';
-
   const isHydrateEndpoint = pathname.startsWith('/api/packages/hydrate');
   const isHeavyEndpoint =
     !isHydrateEndpoint && (
@@ -419,31 +517,36 @@ export async function onRequest(context: {
         : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
 
   if (!rateCheck.allowed) {
-    return new Response(
-      JSON.stringify({
-        error: 'Rate limit exceeded. Please wait a moment before making more requests.'
-      }),
-      {
-        status: 429,
-        headers: {
-          'Content-Type': 'application/json',
-          'Retry-After': String(rateCheck.retryAfterSeconds)
+    return withSecurityHeaders(
+      new Response(
+        JSON.stringify({
+          error: 'Rate limit exceeded. Please wait a moment before making more requests.'
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'Retry-After': String(rateCheck.retryAfterSeconds)
+          }
         }
-      }
+      )
     );
   }
 
   try {
-    return await next();
+    const res = await next();
+    return withSecurityHeaders(res);
   } catch (err: any) {
     console.error('[Edge API Unhandled Error]', {
       method,
       url: request.url,
       error: err?.stack || String(err)
     });
-    return Response.json(
-      { error: 'Internal server error.' },
-      { status: 500 }
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Internal server error.' },
+        { status: 500 }
+      )
     );
   }
 }
