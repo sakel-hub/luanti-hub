@@ -1,0 +1,23 @@
+# =============================================================================
+# LuantiHub Isolated Sandbox Container Worker (Cloudflare Workers Paid + Containers)
+# Deployed separately from the root Cloudflare Pages project when ready for production:
+#   npx wrangler deploy -c sandbox-worker/wrangler.toml
+# =============================================================================
+name = "luanti-hub-sandbox"
+main = "src/index.ts"
+compatibility_date = "2026-03-01"
+
+[[containers]]
+class_name = "SandboxSessionDO"
+image = "./Dockerfile"
+instance_type = "basic" # 1/4 vCPU, 1 GiB RAM, 4 GB Disk (25 hrs/mo included free in $5/mo plan)
+max_instances = 3       # Cap concurrent containers to protect monthly quota
+
+[[durable_objects.bindings]]
+name = "SANDBOX_SESSION"
+class_name = "SandboxSessionDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SandboxSessionDO"]
+

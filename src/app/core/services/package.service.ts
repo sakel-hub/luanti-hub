@@ -4015,7 +4015,8 @@ export class PackageService {
     this.lastRecentReviewsCheckAt = now;
 
     const isLocalhost =
-      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+      (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+      window.location?.port !== '8788';
     if (!forceInTest && !isLocalhost && this.edgeApiAvailable) {
       return;
     }
@@ -4170,7 +4171,8 @@ export class PackageService {
     }
 
     const isLocalhost =
-      window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1';
+      (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+      window.location?.port !== '8788';
     const candidateUrls = isLocalhost
       ? [
           '/cdb-api/packages/?sort=approved_at&order=desc&limit=24&fmt=vcs&ngsw-bypass=true',
@@ -5350,6 +5352,7 @@ export class PackageService {
         const isDevServerLocalhost =
           typeof window !== 'undefined' &&
           (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788' &&
           typeof (globalThis as any).__karma__ === 'undefined' &&
           typeof (globalThis as any).jasmine === 'undefined' &&
           typeof (globalThis as any).vi === 'undefined' &&
@@ -7581,6 +7584,7 @@ export class PackageService {
         const isDevServerLocalhost =
           typeof window !== 'undefined' &&
           (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788' &&
           typeof (globalThis as any).__karma__ === 'undefined' &&
           typeof (globalThis as any).jasmine === 'undefined' &&
           typeof (globalThis as any).vi === 'undefined' &&
@@ -10567,7 +10571,8 @@ export class PackageService {
       if (!hasOfficialInEdge && isOfficialPkg && this.contentDbOnline) {
         const isLocalhost =
           typeof window !== 'undefined' &&
-          (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1');
+          (window.location?.hostname === 'localhost' || window.location?.hostname === '127.0.0.1') &&
+          window.location?.port !== '8788';
         let upstreamReviews: any = null;
 
         if (isLocalhost && this.edgeApiAvailable) {

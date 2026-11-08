@@ -459,6 +459,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             score: resolvedScore > 0 ? resolvedScore : undefined,
             review_thread_counts: detailRevCounts,
             rating_checked: ratingChecked || undefined,
+            screenshots_checked: Boolean(detail || mergedHydrateScreenshots.length > 0) || undefined,
             tags: detailTags.length > 0 ? detailTags : undefined,
             badge_tags: existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
             dev_state: devState || undefined,

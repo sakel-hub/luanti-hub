@@ -35,6 +35,17 @@ async function shouldRecordDownloadWrite(request: Request, packageId: string): P
     return false;
   }
 
+  try {
+    const reqUrl = new URL(request.url, 'https://luantihub.local');
+    const reason = (reqUrl.searchParams.get('reason') || '').trim().toLowerCase();
+    const sandboxFlag = (reqUrl.searchParams.get('sandbox') || '').trim().toLowerCase();
+    if (reason === 'sandbox' || reason === 'preview' || sandboxFlag === '1' || sandboxFlag === 'true') {
+      return false;
+    }
+  } catch {
+    // Proceed with header checks
+  }
+
   const purpose = (
     request.headers.get('Sec-Purpose') ||
     request.headers.get('Purpose') ||
@@ -572,6 +583,7 @@ export async function onRequest(context: {
     .replace(/^_+|_+$/g, '') || 'mod';
 
   const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB threshold for in-memory ZIP normalization
+  const isSandboxRequest = reqUrl.searchParams.get('sandbox') === '1';
 
   for (const candidateUrl of candidateUrls) {
     const ctrl = new AbortController();
@@ -591,12 +603,15 @@ export async function onRequest(context: {
       if (!res.ok) continue;
 
       const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/plain')) {
+      if (ct.includes('text/html') || ct.includes('text/plain')) {
         continue;
       }
 
       const contentLength = Number(res.headers.get('content-length') || 0);
       if (contentLength > MAX_BUFFER_BYTES) {
+        if (!requestedTag && contentLength > 0) {
+          await scheduleBackground(healPackageDownloadSizeIfChanged(contentLength));
+        }
         return Response.redirect(res.url || candidateUrl, 302);
       }
 

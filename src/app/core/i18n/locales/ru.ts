@@ -143,6 +143,8 @@ export const ru: TranslationDictionary = {
     installInGame: 'Настройка в игре',
     setupGuide: 'Настройка в игре',
     setupGuideTooltip: 'Настроить luanti.conf для установки пакетов прямо в игре',
+    tryInBrowserTooltip: 'Попробовать этот пакет в изолированной браузерной сессии Luanti',
+    tryInBrowserNoSupportedGameTooltip: 'Недоступно: Для этого мода не найдено поддерживаемых игр.',
     directZipDownload: 'Скачать .zip',
     downloadZip: 'Скачать .zip',
     viewGitRepo: 'Открыть Git Репозиторий',

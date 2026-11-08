@@ -484,7 +484,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   if (context.env.DB) {
     d1Pkg = await context.env.DB.prepare(
       `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, pkgId.toLowerCase(), author, name).first();
+    ).bind(pkgId, pkgId.toLowerCase(), author, name).first().catch(() => null);
 
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({

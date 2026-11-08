@@ -13304,4 +13304,254 @@ core.register_node(modname .. ":panel", {
     expect(modalFixture.componentInstance.getAuthorProfileUrl('SaKeL')).toBe('/author/SaKeL');
     modalFixture.destroy();
   });
+
+  it('should restrict sandbox manifest and Try in Browser button to LuantiHub verified Git packages, resolve compatible games from D1, disable Try in Browser with touch-compatible tooltip when a verified Git mod has no supported game, and allow typing L in chat while using Shift+Esc for mouse lock', async () => {
+    const { onRequestGet: onManifestGet } = await import('../../functions/api/sandbox/manifest');
+    const { PwaSandboxModalComponent } = await import('./features/sandbox/pwa-sandbox-modal.component');
+
+    const mockD1Packages: Record<string, any> = {
+      'mcl_author/nether_wand': {
+        id: 'mcl_author/nether_wand',
+        author_id: 'usr_mcl_verified',
+        author_name: 'mcl_author',
+        name: 'nether_wand',
+        title: 'Nether Wand',
+        type: 'mod',
+        status: 'active',
+        provider: 'github',
+        repo_url: 'https://github.com/mcl_author/nether_wand',
+        tags: JSON.stringify(['git', 'magic']),
+        dependencies: JSON.stringify(['mcl_core']),
+        optional_dependencies: JSON.stringify([]),
+        supports_all_games: 0,
+        game_support: JSON.stringify([
+          {
+            supports: true,
+            game: { id: 'ryvnf/mineclonia', author: 'ryvnf', name: 'mineclonia', title: 'Mineclonia' }
+          }
+        ]),
+        download_size: 40960
+      },
+      'orphan_author/mystery_mod': {
+        id: 'orphan_author/mystery_mod',
+        author_id: 'usr_orphan_verified',
+        author_name: 'orphan_author',
+        name: 'mystery_mod',
+        title: 'Mystery Mod',
+        type: 'mod',
+        status: 'active',
+        provider: 'gitlab',
+        repo_url: 'https://gitlab.com/orphan_author/mystery_mod',
+        tags: JSON.stringify(['git']),
+        dependencies: JSON.stringify([]),
+        optional_dependencies: JSON.stringify([]),
+        supports_all_games: 0,
+        game_support: JSON.stringify([]),
+        download_size: 12000
+      },
+      'cdb_only/classic_mod': {
+        id: 'cdb_only/classic_mod',
+        author_id: 'ext_cdb_only',
+        author_name: 'cdb_only',
+        name: 'classic_mod',
+        title: 'Classic Mod',
+        type: 'mod',
+        status: 'active',
+        provider: 'contentdb',
+        repo_url: null,
+        tags: JSON.stringify([]),
+        dependencies: JSON.stringify(['default']),
+        optional_dependencies: JSON.stringify([]),
+        supports_all_games: 1,
+        game_support: JSON.stringify([]),
+        download_size: 10000
+      }
+    };
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            first: async () => {
+              if (sql.includes('FROM packages') && sql.includes('SELECT id, author_id')) {
+                const key = String(args[0] || '').toLowerCase();
+                return mockD1Packages[key] || null;
+              }
+              return null;
+            }
+          })
+        })
+      }
+    };
+
+    // 1. Verified Git mod supporting Mineclonia (and not minetest_game) prepends the Mineclonia game bundle directly from D1
+    const mclManifestRes = await onManifestGet({
+      request: new Request('https://luantihub.org/api/sandbox/manifest?author=mcl_author&name=nether_wand'),
+      env: mockEnv
+    });
+    expect(mclManifestRes.status).toBe(200);
+    const mclManifest = await mclManifestRes.json();
+    expect(mclManifest.compatible).toBe(true);
+    expect(mclManifest.baseEnvironment).toBe('native_game');
+    expect(mclManifest.targetGame?.name).toBe('mineclonia');
+    expect(mclManifest.bundles[0]).toMatchObject({
+      id: 'ryvnf/mineclonia',
+      type: 'game',
+      isPrimary: false,
+      mountPath: '/games/mineclonia'
+    });
+    expect(mclManifest.bundles[1]).toMatchObject({
+      id: 'mcl_author/nether_wand',
+      type: 'mod',
+      isPrimary: true,
+      mountPath: '/mods/nether_wand'
+    });
+
+    // 2. Verified Git mod with no supported games returns compatible=false & incompatibleReason='NO_SUPPORTED_GAME'
+    const orphanManifestRes = await onManifestGet({
+      request: new Request('https://luantihub.org/api/sandbox/manifest?author=orphan_author&name=mystery_mod'),
+      env: mockEnv
+    });
+    expect(orphanManifestRes.status).toBe(200);
+    const orphanManifest = await orphanManifestRes.json();
+    expect(orphanManifest.compatible).toBe(false);
+    expect(orphanManifest.incompatibleReason).toBe('NO_SUPPORTED_GAME');
+
+    // 3. Unverified / ContentDB-only package is rejected with 403 UNVERIFIED_PACKAGE
+    const unverifiedManifestRes = await onManifestGet({
+      request: new Request('https://luantihub.org/api/sandbox/manifest?author=cdb_only&name=classic_mod'),
+      env: mockEnv
+    });
+    expect(unverifiedManifestRes.status).toBe(403);
+    const unverifiedManifest = await unverifiedManifestRes.json();
+    expect(unverifiedManifest.compatible).toBe(false);
+    expect(unverifiedManifest.incompatibleReason).toBe('UNVERIFIED_PACKAGE');
+
+    // 4. PackageDetailModalComponent hides Try in Browser on unverified packages and disables it with touch tooltip when a verified Git mod has no supported game
+    const pkgService = TestBed.inject(PackageService);
+    const loadDetailsSpy = vi.spyOn(pkgService, 'loadPackageDetails').mockResolvedValue();
+    const fetchReleasesSpy = vi.spyOn(pkgService, 'fetchPackageReleases').mockResolvedValue([]);
+    const fetchReviewsSpy = vi.spyOn(pkgService, 'fetchReviews').mockResolvedValue([]);
+
+    const unverifiedMod = (pkgService as any).normalizePackage({
+      id: 'cdb_only/classic_mod',
+      author: 'cdb_only',
+      author_id: 'ext_cdb_only',
+      name: 'classic_mod',
+      title: 'Classic Mod',
+      type: 'mod',
+      source: 'official',
+      sources: ['official'],
+      supports_all_games: true,
+      readme: 'Loaded details'
+    });
+    (pkgService as any)._activePackage.set(unverifiedMod);
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    modalComp.package = unverifiedMod;
+    modalFixture.detectChanges();
+
+    expect(modalComp.isSandboxEnabled()).toBe(false);
+    expect(modalFixture.nativeElement.querySelector('[data-testid="try-in-browser-btn"]')).toBeNull();
+
+    const unsupportedMod = (pkgService as any).normalizePackage({
+      id: 'orphan_author/mystery_mod',
+      author: 'orphan_author',
+      author_id: 'usr_orphan_verified',
+      name: 'mystery_mod',
+      title: 'Mystery Mod',
+      type: 'mod',
+      source: 'git',
+      sources: ['git'],
+      provider: 'gitlab',
+      repo_url: 'https://gitlab.com/orphan_author/mystery_mod',
+      supports_all_games: false,
+      game_support: [],
+      dependencies: [],
+      optional_dependencies: [],
+      readme: 'Loaded details'
+    });
+    (pkgService as any)._activePackage.set(unsupportedMod);
+    modalComp.package = unsupportedMod;
+    modalFixture.detectChanges();
+
+    expect(modalComp.isSandboxEnabled()).toBe(true);
+    expect(modalComp.isSandboxButtonDisabled()).toBe(true);
+
+    const tryBtn = modalFixture.nativeElement.querySelector('[data-testid="try-in-browser-btn"]') as HTMLButtonElement;
+    expect(tryBtn).toBeTruthy();
+    expect(tryBtn.getAttribute('aria-disabled')).toBe('true');
+
+    // Simulate a touch tap (touchstart + click) on the disabled Try in Browser button
+    tryBtn.dispatchEvent(new Event('touchstart', { bubbles: true }));
+    tryBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    modalFixture.detectChanges();
+
+    // Sandbox modal must NOT open when disabled
+    expect(modalComp.isSandboxOpen()).toBe(false);
+
+    // Tooltip explaining why the button is disabled must appear in the DOM on touch tap
+    const activeTooltip = document.querySelector('.luanti-tooltip');
+    expect(activeTooltip).toBeTruthy();
+    expect(activeTooltip?.textContent).toContain('Unavailable: No supported games could be found for this mod.');
+
+    // Once a supported game is present on the verified Git mod, the button becomes enabled
+    const supportedMod = {
+      ...unsupportedMod,
+      game_support: [
+        {
+          supports: true,
+          game: { id: 'ryvnf/mineclonia', author: 'ryvnf', name: 'mineclonia', title: 'Mineclonia' }
+        }
+      ]
+    };
+    (pkgService as any)._activePackage.set(supportedMod);
+    modalComp.package = supportedMod;
+    modalFixture.detectChanges();
+
+    expect(modalComp.isSandboxButtonDisabled()).toBe(false);
+    expect(tryBtn.getAttribute('aria-disabled')).toBeNull();
+
+    modalFixture.destroy();
+    loadDetailsSpy.mockRestore();
+    fetchReleasesSpy.mockRestore();
+    fetchReviewsSpy.mockRestore();
+
+    // 5. PwaSandboxModalComponent allows unmodified KeyL in chat, toggles mouse lock on Shift+Escape, and hides lock button on touch devices
+    const sandboxFixture = TestBed.createComponent(PwaSandboxModalComponent);
+    const sandboxComp = sandboxFixture.componentInstance;
+    vi.spyOn(sandboxComp, 'startSandboxBootSequence').mockResolvedValue();
+    sandboxFixture.componentRef.setInput('pkg', supportedMod);
+    sandboxFixture.detectChanges();
+    sandboxComp.status.set('running');
+    sandboxComp.isTouchDevice.set(false);
+    sandboxFixture.detectChanges();
+
+    const sendKeySpy = vi.spyOn(sandboxComp, 'sendKeyCommand').mockImplementation(() => {});
+
+    // Unmodified 'L' key must NOT trigger TOGGLE_MOUSE_LOCK (so players can type 'l' in chat)
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyL', key: 'l', bubbles: true }));
+    expect(sendKeySpy).not.toHaveBeenCalled();
+
+    // Shift + Escape toggles mouse lock
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', shiftKey: true, bubbles: true })
+    );
+    expect(sendKeySpy).toHaveBeenCalledWith('TOGGLE_MOUSE_LOCK');
+
+    // Desktop shows the HUD mouse lock button; touch mode hides it
+    expect(sandboxFixture.nativeElement.querySelector('[data-testid="sandbox-mouse-lock-btn"]')).toBeTruthy();
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        data: { source: 'luanti-sandbox-container', type: 'SANDBOX_INPUT_MODE', touchMode: true }
+      })
+    );
+    sandboxFixture.detectChanges();
+    expect(sandboxComp.isTouchDevice()).toBe(true);
+    expect(sandboxFixture.nativeElement.querySelector('[data-testid="sandbox-mouse-lock-btn"]')).toBeNull();
+
+    sendKeySpy.mockRestore();
+    sandboxFixture.destroy();
+  });
 });

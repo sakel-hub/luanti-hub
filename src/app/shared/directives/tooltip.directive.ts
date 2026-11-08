@@ -70,7 +70,11 @@ export class TooltipDirective implements OnInit, OnDestroy {
   private isInteractiveTapTarget(native: HTMLElement): boolean {
     if (this.appTooltipTap || this.appTooltipMultiline) return true;
     if (!native) return false;
-    if (native.classList?.contains('cursor-help') || native.hasAttribute?.('data-tooltip-tap')) {
+    if (
+      native.classList?.contains('cursor-help') ||
+      native.hasAttribute?.('data-tooltip-tap') ||
+      native.getAttribute?.('aria-disabled') === 'true'
+    ) {
       return true;
     }
     if (native.tagName === 'SPAN') {
@@ -120,8 +124,17 @@ export class TooltipDirective implements OnInit, OnDestroy {
 
       const onClick = (e: MouseEvent) => {
         if (this.isInteractiveTapTarget(native)) {
-          if (native.classList?.contains('cursor-help') || this.appTooltipMultiline || this.appTooltipTap) {
+          const isAriaDisabled = native.getAttribute?.('aria-disabled') === 'true';
+          if (
+            native.classList?.contains('cursor-help') ||
+            this.appTooltipMultiline ||
+            this.appTooltipTap ||
+            isAriaDisabled
+          ) {
             e.stopPropagation();
+            if (isAriaDisabled) {
+              e.preventDefault();
+            }
           }
           if (TooltipDirective.activeInstance === this && this.tooltipEl) {
             this.hide();

@@ -33,6 +33,7 @@ import {
 } from '../../core/config/git-providers.config';
 import {
   hasOrganicCodeTag,
+  inferGameSupportFromDependencies,
   ORGANIC_CODE_TAG,
   parseBadgeTagsArray
 } from '../../core/config/package-utils.config';
@@ -40,6 +41,8 @@ import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { AuthService } from '../../core/services/auth.service';
+import { SandboxMemoryGuardService } from '../../core/services/sandbox-memory-guard.service';
+import { PwaSandboxModalComponent } from '../sandbox/pwa-sandbox-modal.component';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
@@ -99,6 +102,7 @@ import {
     BackToTopComponent,
     TranslatePipe,
     ThemeIconComponent,
+    PwaSandboxModalComponent,
     LucideX,
     LucideShare2,
     LucideHeart,
@@ -233,6 +237,26 @@ import {
                     <span class="text-slate-200 font-bold text-xs">({{ package.file_size }})</span>
                   }
                 </button>
+
+                <!-- Try in Browser (In-PWA WebAssembly Sandbox) Button -->
+                @if (isSandboxEnabled()) {
+                  <button
+                    type="button"
+                    (click)="openSandboxModal()"
+                    data-testid="try-in-browser-btn"
+                    [attr.aria-disabled]="isSandboxButtonDisabled() ? 'true' : null"
+                    [appTooltip]="isSandboxButtonDisabled() ? ('modal.tryInBrowserNoSupportedGameTooltip' | translate) : ('modal.tryInBrowserTooltip' | translate)"
+                    [appTooltipTap]="isSandboxButtonDisabled()"
+                    [class]="isSandboxButtonDisabled()
+                      ? 'h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-slate-800/60 border border-slate-600/40 text-slate-400 font-bold text-xs sm:text-sm flex items-center gap-2 transition whitespace-nowrap opacity-50 cursor-not-allowed'
+                      : 'h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 hover:text-white font-bold text-xs sm:text-sm flex items-center gap-2 transition hover:scale-[1.03] whitespace-nowrap cursor-pointer'">
+                    <svg
+                      lucidePlay
+                      [class]="isSandboxButtonDisabled() ? 'w-4 h-4 text-slate-400 flex-shrink-0' : 'w-4 h-4 text-emerald-400 flex-shrink-0'">
+                    </svg>
+                    <span>Try in Browser</span>
+                  </button>
+                }
 
                 <!-- In-Game Setup Guide Button -->
                 <button
@@ -2541,6 +2565,15 @@ import {
           </div>
         }
 
+        @if (isSandboxOpen()) {
+          <app-pwa-sandbox-modal
+            [pkg]="package"
+            (close)="closeSandboxModal()"
+            (downloadRequested)="onDownloadClick()"
+            (click)="$event.stopPropagation()"
+          ></app-pwa-sandbox-modal>
+        }
+
       </div>
     }
   `
@@ -2552,8 +2585,39 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
+  readonly sandboxGuard = inject(SandboxMemoryGuardService);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly ngZone = inject(NgZone);
+
+  readonly isSandboxOpen = signal<boolean>(false);
+  readonly sandboxManifestCompatible = signal<boolean>(true);
+  readonly sandboxManifestNoSupportedGame = signal<boolean>(false);
+
+  readonly hasSupportedGameForSandbox = computed<boolean>(() => {
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return false;
+    if (pkg.type === 'game' || pkg.type === 'txp') return true;
+    if (this.sandboxManifestNoSupportedGame()) return false;
+    if (pkg.supports_all_games || this.compatibleGames().length > 0) return true;
+    if (inferGameSupportFromDependencies(pkg.dependencies, pkg.optional_dependencies).length > 0) {
+      return true;
+    }
+    if (this.isHydratingDetails()) return true;
+    return false;
+  });
+
+  readonly isSandboxButtonDisabled = computed<boolean>(() => !this.hasSupportedGameForSandbox());
+
+  readonly isSandboxEnabled = computed<boolean>(() => {
+    if (!this.sandboxGuard.isSandboxFeatureEnabled() || this.isPackageDelisted()) {
+      return false;
+    }
+    const pkg = this.packageService.activePackage() || this.package;
+    return (
+      this.sandboxManifestCompatible() &&
+      this.sandboxGuard.isPackageEligibleForSandbox(pkg, this.releases())
+    );
+  });
 
   readonly activeTab = signal<'reviews' | 'releases' | 'compliance' | 'analytics'>('reviews');
   readonly reviews = signal<CommunityReview[]>([]);
@@ -3470,6 +3534,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   ngOnInit(): void {
     this.packageService.registerModalSubOverlayCloser(() => {
+      if (this.isSandboxOpen()) {
+        this.closeSandboxModal();
+        return true;
+      }
       if (this.lightboxImageUrl()) {
         this.closeLightbox();
         return true;
@@ -3773,6 +3841,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isLoadingReadme.set(false);
     this.dependenciesManualOverride.set(null);
     this.reverseDepsManualOverride.set(null);
+    this.sandboxManifestCompatible.set(true);
+    this.sandboxManifestNoSupportedGame.set(false);
+    this.verifySandboxEligibilityInBackground(resolvedAuthor, this.package.name, key);
 
     const initialCachedReviews = this.packageService.getCachedReviews(this.package);
     if (initialCachedReviews !== undefined && initialCachedReviews.length > 0) {
@@ -4448,6 +4519,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onBackdropClick(_event: MouseEvent): void {
+    if (this.isSandboxOpen()) return;
     this.packageService.closePackageModal();
   }
 
@@ -4455,6 +4527,38 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     this.packageService.closePackageModal(false);
     this.packageService.openSetupModal(true, pkg);
+  }
+
+  openSandboxModal(): void {
+    if (!this.isSandboxEnabled() || this.isSandboxButtonDisabled()) return;
+    this.isSandboxOpen.set(true);
+  }
+
+  closeSandboxModal(): void {
+    this.isSandboxOpen.set(false);
+  }
+
+  private verifySandboxEligibilityInBackground(author: string, name: string, expectedKey: string): void {
+    if (typeof fetch === 'undefined' || !this.sandboxGuard.isSandboxFeatureEnabled()) return;
+    if (!author || !name) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!this.sandboxGuard.isVerifiedGitPackage(pkg)) return;
+    const url = `/api/sandbox/manifest?author=${encodeURIComponent(author)}&name=${encodeURIComponent(name)}`;
+    fetch(url, { headers: { Accept: 'application/json', 'X-Purpose': 'preview' } })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!data || this.loadedPackageKey !== expectedKey) return;
+        if (data.quota) {
+          this.sandboxGuard.updateQuotaStatus(data.quota);
+        }
+        if (data.quotaExhausted === true) {
+          this.sandboxManifestCompatible.set(false);
+        }
+        if (data.incompatibleReason === 'NO_SUPPORTED_GAME') {
+          this.sandboxManifestNoSupportedGame.set(true);
+        }
+      })
+      .catch(() => {});
   }
 
   openSignInForReview(): void {

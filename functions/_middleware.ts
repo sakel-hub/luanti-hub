@@ -247,6 +247,17 @@ export async function onRequest(context: {
     });
   }
 
+  if (
+    pathname.startsWith('/cdb-api/') ||
+    pathname.startsWith('/mirror-api/') ||
+    pathname.startsWith('/blog-api/')
+  ) {
+    return Response.json(
+      { error: 'Dev proxy route is only available on Angular CLI dev server.' },
+      { status: 404 }
+    );
+  }
+
   const isApiRoute = pathname.startsWith('/api/');
   const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
@@ -410,13 +421,16 @@ export async function onRequest(context: {
       pathname.startsWith('/api/promotions')
     );
 
+  const isLocalDevHost =
+    url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+
   const rateCheck = isHeavyEndpoint
     ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
     : isHydrateEndpoint
-      ? checkEdgeRateLimit(clientIp, 'hydrate', 45, 60_000)
+      ? checkEdgeRateLimit(clientIp, 'hydrate', isLocalDevHost ? 600 : 45, 60_000)
       : isDownloadRoute
-        ? checkEdgeRateLimit(clientIp, 'download', 30, 60_000)
-        : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
+        ? checkEdgeRateLimit(clientIp, 'download', isLocalDevHost ? 120 : 30, 60_000)
+        : checkEdgeRateLimit(clientIp, 'api_read', isLocalDevHost ? 600 : 120, 60_000);
 
   if (!rateCheck.allowed) {
     return new Response(
