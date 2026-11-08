@@ -254,7 +254,7 @@ import {
                       lucidePlay
                       [class]="isSandboxButtonDisabled() ? 'w-4 h-4 text-slate-400 flex-shrink-0' : 'w-4 h-4 text-emerald-400 flex-shrink-0'">
                     </svg>
-                    <span>Try in Browser</span>
+                    <span>{{ 'modal.tryInBrowser' | translate }}</span>
                   </button>
                 }
 
@@ -2597,11 +2597,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return false;
     if (pkg.type === 'game' || pkg.type === 'txp') return true;
-    if (this.sandboxManifestNoSupportedGame()) return false;
     if (pkg.supports_all_games || this.compatibleGames().length > 0) return true;
     if (inferGameSupportFromDependencies(pkg.dependencies, pkg.optional_dependencies).length > 0) {
       return true;
     }
+    if (this.sandboxManifestNoSupportedGame()) return false;
     if (this.isHydratingDetails()) return true;
     return false;
   });
@@ -4342,6 +4342,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         game_support: res.game_support ?? this.package.game_support,
         translations: res.translations ?? this.package.translations
       };
+      this.sandboxGuard.clearManifestCache();
+      this.sandboxManifestNoSupportedGame.set(false);
       this.isEditingTags.set(false);
       this.pwaService.showToast('Package metadata updated!');
     } else if (res.message) {
@@ -4373,6 +4375,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isSyncingReleases.set(true);
     try {
       const freshReleases = await this.packageService.fetchPackageReleases(pkg, true);
+      this.sandboxGuard.clearManifestCache();
       if (this.loadedPackageKey === targetKey) {
         this.releases.set(freshReleases);
         this.releasesPage.set(1);
@@ -4538,25 +4541,39 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.isSandboxOpen.set(false);
   }
 
+  private applySandboxManifestEligibility(data: any): void {
+    if (!data) return;
+    if (data.quota) {
+      this.sandboxGuard.updateQuotaStatus(data.quota);
+    }
+    if (data.quotaExhausted === true) {
+      this.sandboxManifestCompatible.set(false);
+    }
+    if (data.incompatibleReason === 'NO_SUPPORTED_GAME') {
+      this.sandboxManifestNoSupportedGame.set(true);
+    }
+  }
+
   private verifySandboxEligibilityInBackground(author: string, name: string, expectedKey: string): void {
     if (typeof fetch === 'undefined' || !this.sandboxGuard.isSandboxFeatureEnabled()) return;
     if (!author || !name) return;
     const pkg = this.packageService.activePackage() || this.package;
     if (!this.sandboxGuard.isVerifiedGitPackage(pkg)) return;
+
+    const cached = this.sandboxGuard.getCachedManifest(author, name, 'latest');
+    if (cached) {
+      this.applySandboxManifestEligibility(cached);
+      return;
+    }
+
     const url = `/api/sandbox/manifest?author=${encodeURIComponent(author)}&name=${encodeURIComponent(name)}`;
     fetch(url, { headers: { Accept: 'application/json', 'X-Purpose': 'preview' } })
       .then(res => (res.ok ? res.json() : null))
       .then(data => {
-        if (!data || this.loadedPackageKey !== expectedKey) return;
-        if (data.quota) {
-          this.sandboxGuard.updateQuotaStatus(data.quota);
-        }
-        if (data.quotaExhausted === true) {
-          this.sandboxManifestCompatible.set(false);
-        }
-        if (data.incompatibleReason === 'NO_SUPPORTED_GAME') {
-          this.sandboxManifestNoSupportedGame.set(true);
-        }
+        if (!data) return;
+        this.sandboxGuard.setCachedManifest(author, name, 'latest', data);
+        if (this.loadedPackageKey !== expectedKey) return;
+        this.applySandboxManifestEligibility(data);
       })
       .catch(() => {});
   }

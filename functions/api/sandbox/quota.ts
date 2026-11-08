@@ -1,3 +1,5 @@
+import { readEdgeCacheJson, writeEdgeCacheJson } from '../lib/upstream';
+
 export interface SandboxQuotaStatus {
   exhausted: boolean;
   billingCycle: string;
@@ -75,8 +77,10 @@ export function resolveBillingCycleWindow(
   };
 }
 
-async function ensureQuotaTable(db: any): Promise<void> {
-  if (!db) return;
+let quotaTableEnsured = false;
+
+async function ensureQuotaTable(db: any, force = false): Promise<void> {
+  if (!db || (!force && quotaTableEnsured)) return;
   try {
     await db
       .prepare(
@@ -91,17 +95,33 @@ async function ensureQuotaTable(db: any): Promise<void> {
         )`
       )
       .run();
+    quotaTableEnsured = true;
   } catch {
     // Ignore if read-only
   }
 }
 
+export function buildSandboxQuotaEdgeCacheKey(billingCycle: string): string {
+  return `https://cache.luantihub.internal/__sandbox_quota_v1/${encodeURIComponent(billingCycle)}`;
+}
+
 export async function getSandboxQuotaStatus(
   env?: { DB?: any; SANDBOX_BILLING_RESET_DAY?: string; SANDBOX_FORCE_QUOTA_EXHAUSTED?: string },
-  now: Date = new Date()
+  now: Date = new Date(),
+  skipCache = false
 ): Promise<SandboxQuotaStatus> {
   const resetDay = Number(env?.SANDBOX_BILLING_RESET_DAY || 2) || 2;
   const { billingCycle, periodStart, resetsAt } = resolveBillingCycleWindow(now, resetDay);
+  const forcedExhausted =
+    env?.SANDBOX_FORCE_QUOTA_EXHAUSTED === 'true' || env?.SANDBOX_FORCE_QUOTA_EXHAUSTED === '1';
+
+  const quotaCacheKey = buildSandboxQuotaEdgeCacheKey(billingCycle);
+  if (!skipCache && !forcedExhausted && env?.DB) {
+    const cached = await readEdgeCacheJson<SandboxQuotaStatus>(quotaCacheKey);
+    if (cached && cached.billingCycle === billingCycle) {
+      return cached;
+    }
+  }
 
   let awakeSeconds = 0;
   let memoryGibSeconds = 0;
@@ -111,18 +131,23 @@ export async function getSandboxQuotaStatus(
 
   if (env?.DB) {
     try {
-      await ensureQuotaTable(env.DB);
-      const row = await env.DB.prepare(
-        `SELECT awake_seconds, memory_gib_seconds, disk_gb_seconds, cpu_vcpu_seconds, sessions_count
+      const selectQuery = `SELECT awake_seconds, memory_gib_seconds, disk_gb_seconds, cpu_vcpu_seconds, sessions_count
          FROM sandbox_quota_usage
          WHERE billing_cycle = ?
-         LIMIT 1`
-      )
+         LIMIT 1`;
+      let row = await env.DB.prepare(selectQuery)
         .bind(billingCycle)
         .first()
-        .catch(() => null);
+        .catch(async (err: any) => {
+          if (/no such table/i.test(String(err?.message || err || ''))) {
+            await ensureQuotaTable(env.DB, true);
+            return env.DB.prepare(selectQuery).bind(billingCycle).first().catch(() => null);
+          }
+          return null;
+        });
 
       if (row) {
+        quotaTableEnsured = true;
         awakeSeconds = Number(row.awake_seconds || 0);
         memoryGibSeconds = Number(row.memory_gib_seconds || 0);
         diskGbSeconds = Number(row.disk_gb_seconds || 0);
@@ -139,14 +164,13 @@ export async function getSandboxQuotaStatus(
   const diskPct = (diskGbSeconds / MAX_SAFE_DISK_GB_SECONDS) * 100;
   const usagePercent = Math.min(100, Math.round(Math.max(memPct, cpuPct, diskPct) * 10) / 10);
 
-  const forcedExhausted = env?.SANDBOX_FORCE_QUOTA_EXHAUSTED === 'true' || env?.SANDBOX_FORCE_QUOTA_EXHAUSTED === '1';
   const exhausted =
     forcedExhausted ||
     memoryGibSeconds >= MAX_SAFE_MEMORY_GIB_SECONDS ||
     cpuVcpuSeconds >= MAX_SAFE_CPU_VCPU_SECONDS ||
     diskGbSeconds >= MAX_SAFE_DISK_GB_SECONDS;
 
-  return {
+  const statusPayload: SandboxQuotaStatus = {
     exhausted,
     billingCycle,
     periodStart,
@@ -161,6 +185,12 @@ export async function getSandboxQuotaStatus(
     usagePercent,
     sessionsCount
   };
+
+  if (!forcedExhausted && env?.DB) {
+    await writeEdgeCacheJson(quotaCacheKey, statusPayload, 60);
+  }
+
+  return statusPayload;
 }
 
 export async function recordSandboxSessionUsage(
@@ -202,7 +232,7 @@ export async function recordSandboxSessionUsage(
     }
   }
 
-  return getSandboxQuotaStatus(env, now);
+  return getSandboxQuotaStatus(env, now, true);
 }
 
 export async function onRequestGet(context: { env?: any }) {

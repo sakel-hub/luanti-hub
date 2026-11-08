@@ -1,4 +1,5 @@
 import { Injectable, signal } from '@angular/core';
+import { parseDownloadSizeBytes } from '../config/package-utils.config';
 
 export type SandboxMemoryTier = 'constrained' | 'standard' | 'desktop';
 
@@ -64,8 +65,60 @@ export class SandboxMemoryGuardService {
   private static readonly HEARTBEAT_TIMEOUT_MS = 10000;
   private static readonly OOM_TRIPWIRE_RATIO = 0.9;
   private static readonly ELEVATED_MEMORY_RATIO = 0.75;
+  private static readonly MANIFEST_CACHE_TTL_MS = 120_000;
+  private static readonly MAX_MANIFEST_CACHE_ENTRIES = 60;
 
   readonly quotaState = signal<SandboxQuotaClientState | null>(null);
+  private readonly manifestCache = new Map<string, { exp: number; data: any }>();
+
+  private buildManifestCacheKey(author: string, name: string, release = 'latest'): string {
+    return `${String(author || '').trim().toLowerCase()}/${String(name || '').trim().toLowerCase()}@${String(release || 'latest').trim().toLowerCase()}`;
+  }
+
+  getCachedManifest<T = any>(author: string, name: string, release = 'latest', nowMs = Date.now()): T | null {
+    const key = this.buildManifestCacheKey(author, name, release);
+    const entry = this.manifestCache.get(key);
+    if (!entry) return null;
+    if (nowMs > entry.exp) {
+      this.manifestCache.delete(key);
+      return null;
+    }
+    const currentQuota = this.quotaState();
+    if (currentQuota && entry.data && typeof entry.data === 'object') {
+      return {
+        ...entry.data,
+        quota: currentQuota,
+        quotaExhausted: this.isQuotaExhausted(nowMs)
+      } as T;
+    }
+    return entry.data as T;
+  }
+
+  setCachedManifest(
+    author: string,
+    name: string,
+    release = 'latest',
+    data: any,
+    ttlMs = SandboxMemoryGuardService.MANIFEST_CACHE_TTL_MS,
+    nowMs = Date.now()
+  ): void {
+    if (!data || typeof data !== 'object') return;
+    if (this.manifestCache.size >= SandboxMemoryGuardService.MAX_MANIFEST_CACHE_ENTRIES) {
+      for (const [k, v] of this.manifestCache.entries()) {
+        if (nowMs > v.exp) this.manifestCache.delete(k);
+      }
+      if (this.manifestCache.size >= SandboxMemoryGuardService.MAX_MANIFEST_CACHE_ENTRIES) {
+        const oldestKey = this.manifestCache.keys().next().value;
+        if (oldestKey) this.manifestCache.delete(oldestKey);
+      }
+    }
+    const key = this.buildManifestCacheKey(author, name, release);
+    this.manifestCache.set(key, { exp: nowMs + ttlMs, data });
+  }
+
+  clearManifestCache(): void {
+    this.manifestCache.clear();
+  }
 
   /**
    * Determines whether the "Try in Browser" PWA Sandbox feature is enabled
@@ -157,25 +210,15 @@ export class SandboxMemoryGuardService {
 
   /**
    * Parses human-readable byte strings (e.g. "93.1 MB", "420 KB", "1.2 GB") into raw bytes.
+   * Delegates to shared `parseDownloadSizeBytes` in `package-utils.config.ts`.
    */
   parseByteString(raw?: string | number | null): number {
-    if (typeof raw === 'number') {
-      return Number.isFinite(raw) && raw > 0 ? raw : 0;
-    }
-    if (typeof raw !== 'string' || !raw.trim()) return 0;
-    const match = raw.trim().match(/^([\d.]+)\s*(B|KB|KIB|MB|MIB|GB|GIB)?$/i);
-    if (!match) return 0;
-    const val = parseFloat(match[1]);
-    if (!Number.isFinite(val) || val <= 0) return 0;
-    const unit = (match[2] || 'B').toUpperCase();
-    if (unit === 'GB' || unit === 'GIB') return Math.round(val * 1024 * 1024 * 1024);
-    if (unit === 'MB' || unit === 'MIB') return Math.round(val * 1024 * 1024);
-    if (unit === 'KB' || unit === 'KIB') return Math.round(val * 1024);
-    return Math.round(val);
+    return parseDownloadSizeBytes(raw);
   }
 
   /**
-   * Returns true if the package is a LuantiHub Verified Git package claimed by a verified OAuth author account in D1.
+   * Returns true if the package is a LuantiHub Verified Git package claimed by a verified OAuth author account in D1
+   * and its Git repository is not flagged as broken (`broken_404`).
    */
   isVerifiedGitPackage(
     pkg:
@@ -184,11 +227,13 @@ export class SandboxMemoryGuardService {
           source?: string;
           sources?: string[];
           provider?: string;
+          git_repo_status?: 'verified' | 'broken_404' | 'unverified';
         }
       | null
       | undefined
   ): boolean {
     if (!pkg) return false;
+    if (pkg.git_repo_status === 'broken_404') return false;
     const rawAuthorId = typeof pkg.author_id === 'string' ? pkg.author_id.trim() : '';
     const hasVerifiedAuthor = Boolean(rawAuthorId && !rawAuthorId.startsWith('ext_'));
     const isGitPkg =
@@ -214,6 +259,7 @@ export class SandboxMemoryGuardService {
           source?: string;
           sources?: string[];
           provider?: string;
+          git_repo_status?: 'verified' | 'broken_404' | 'unverified';
         }
       | null
       | undefined,

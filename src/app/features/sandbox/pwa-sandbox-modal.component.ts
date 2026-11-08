@@ -576,6 +576,16 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     releaseTag: string,
     signal: AbortSignal
   ): Promise<SandboxManifest> {
+    const relKey = releaseTag || 'latest';
+    const cachedManifest = this.memoryGuard.getCachedManifest<SandboxManifest>(
+      p.author,
+      p.name,
+      relKey
+    );
+    if (cachedManifest && Array.isArray(cachedManifest.bundles) && cachedManifest.bundles.length > 0) {
+      return cachedManifest;
+    }
+
     const safeDir = (p.name || 'mod').toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'mod';
     const relParam = releaseTag ? `&release=${encodeURIComponent(releaseTag)}` : '';
     const manifestUrl = `/api/sandbox/manifest?author=${encodeURIComponent(p.author)}&name=${encodeURIComponent(p.name)}${relParam}`;
@@ -588,6 +598,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
       if (res.ok) {
         const json = await res.json();
         if (json && Array.isArray(json.bundles) && json.bundles.length > 0) {
+          this.memoryGuard.setCachedManifest(p.author, p.name, relKey, json);
           return json as SandboxManifest;
         }
       }

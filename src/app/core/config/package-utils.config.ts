@@ -55,14 +55,14 @@ export function parseDownloadSizeBytes(val: unknown): number {
   if (typeof val === 'string') {
     const trimmed = val.trim();
     if (!trimmed) return 0;
-    const match = trimmed.match(/^([\d.]+)\s*(gb|mb|kb|b)?$/i);
+    const match = trimmed.match(/^([\d.]+)\s*(gb|gib|mb|mib|kb|kib|b)?$/i);
     if (match) {
       const num = Number(match[1]);
       if (!Number.isFinite(num) || num <= 0) return 0;
       const unit = (match[2] || 'b').toLowerCase();
-      if (unit === 'gb') return Math.round(num * 1024 * 1024 * 1024);
-      if (unit === 'mb') return Math.round(num * 1024 * 1024);
-      if (unit === 'kb') return Math.round(num * 1024);
+      if (unit === 'gb' || unit === 'gib') return Math.round(num * 1024 * 1024 * 1024);
+      if (unit === 'mb' || unit === 'mib') return Math.round(num * 1024 * 1024);
+      if (unit === 'kb' || unit === 'kib') return Math.round(num * 1024);
       return Math.round(num);
     }
   }

@@ -143,6 +143,7 @@ export const sk: TranslationDictionary = {
     installInGame: 'Nastavenie v Hre',
     setupGuide: 'Nastavenie v Hre',
     setupGuideTooltip: 'Nakonfigurujte luanti.conf pre inštaláciu balíčkov priamo v hre',
+    tryInBrowser: 'Vyskúšať v prehliadači',
     tryInBrowserTooltip: 'Vyskúšajte tento balíček naživo v izolovanej relácii Luanti v prehliadači',
     tryInBrowserNoSupportedGameTooltip: 'Nedostupné: Pre tento mod sa nenašli žiadne podporované hry.',
     directZipDownload: 'Stiahnuť .zip',

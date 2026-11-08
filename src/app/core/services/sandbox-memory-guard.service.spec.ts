@@ -102,6 +102,41 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
         })
       ).toBe(false);
     });
+
+    it('hides Try in Browser when git_repo_status is broken_404', () => {
+      expect(
+        service.isPackageEligibleForSandbox({
+          status: 'active',
+          author_id: 'usr_verified_1',
+          source: 'git',
+          provider: 'github',
+          git_repo_status: 'broken_404',
+          download_size: 1024
+        })
+      ).toBe(false);
+    });
+
+    it('parses human-readable byte strings including MB and MiB via shared parseDownloadSizeBytes', () => {
+      expect(service.parseByteString('2 MB')).toBe(2 * 1024 * 1024);
+      expect(service.parseByteString('1.5 MiB')).toBe(Math.round(1.5 * 1024 * 1024));
+      expect(service.parseByteString('512 KB')).toBe(512 * 1024);
+    });
+
+    it('caches pre-fetched sandbox manifests with TTL so modal boot avoids duplicate API calls', () => {
+      const dummyManifest: any = {
+        compatible: true,
+        targetId: 'author/mod',
+        targetType: 'mod',
+        baseEnvironment: 'minetest_game',
+        totalEstimatedBytes: 4096,
+        bundles: []
+      };
+      expect(service.getCachedManifest('Author', 'Mod')).toBeNull();
+      service.setCachedManifest('Author', 'Mod', 'latest', dummyManifest, 120_000, 1000);
+      expect(service.getCachedManifest('author', 'mod', 'latest', 1000 + 60_000)).toEqual(dummyManifest);
+      // Expired after 2 minutes (120_000ms)
+      expect(service.getCachedManifest('author', 'mod', 'latest', 1000 + 125_000)).toBeNull();
+    });
   });
 
   describe('Monthly $5 Quota Circuit Breaker & Billing Cycle Auto-Reset', () => {

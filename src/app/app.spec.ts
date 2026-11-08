@@ -13385,6 +13385,13 @@ core.register_node(modname .. ":panel", {
     };
 
     // 1. Verified Git mod supporting Mineclonia (and not minetest_game) prepends the Mineclonia game bundle directly from D1
+    const { buildPackageCacheInvalidationKeys, buildSandboxManifestEdgeCacheKey } = await import(
+      '../../functions/api/lib/upstream'
+    );
+    expect(buildPackageCacheInvalidationKeys('mcl_author', 'nether_wand')).toContain(
+      buildSandboxManifestEdgeCacheKey('mcl_author', 'nether_wand', 'latest')
+    );
+
     const mclManifestRes = await onManifestGet({
       request: new Request('https://luantihub.org/api/sandbox/manifest?author=mcl_author&name=nether_wand'),
       env: mockEnv

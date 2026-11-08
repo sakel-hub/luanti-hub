@@ -158,6 +158,7 @@ export interface TranslationDictionary {
     installInGame: string;
     setupGuide: string;
     setupGuideTooltip: string;
+    tryInBrowser: string;
     tryInBrowserTooltip: string;
     tryInBrowserNoSupportedGameTooltip: string;
     directZipDownload: string;

@@ -143,6 +143,7 @@ export const es: TranslationDictionary = {
     installInGame: 'Config en Juego',
     setupGuide: 'Config en Juego',
     setupGuideTooltip: 'Configura luanti.conf para instalar paquetes directamente en el juego',
+    tryInBrowser: 'Probar en el Navegador',
     tryInBrowserTooltip: 'Prueba este paquete en vivo en una sesión aislada de Luanti en el navegador',
     tryInBrowserNoSupportedGameTooltip: 'No disponible: No se encontraron juegos compatibles para este mod.',
     directZipDownload: 'Descargar .zip',

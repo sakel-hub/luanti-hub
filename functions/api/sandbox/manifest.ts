@@ -2,7 +2,9 @@ import {
   safeDecodeParam,
   parseJsonArray,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  buildSandboxManifestEdgeCacheKey,
+  isDefunctGitHost
 } from '../lib/upstream';
 import { mergeLuantiHubAndContentDbGameSupport } from '../../../src/app/core/config/package-utils.config';
 import { getSandboxQuotaStatus, SandboxQuotaStatus } from './quota';
@@ -105,7 +107,7 @@ function normalizePackageType(raw?: string): 'mod' | 'game' | 'txp' | 'modpack' 
 async function resolveStandaloneModCandidate(
   depModName: string,
   env?: Env
-): Promise<{ author: string; name: string } | null> {
+): Promise<{ author: string; name: string; title: string; estimatedBytes: number } | null> {
   if (!env?.DB) return null;
 
   const cleanDep = String(depModName || '').trim();
@@ -118,14 +120,20 @@ async function resolveStandaloneModCandidate(
     const candName = cleanDep.slice(slashIdx + 1);
     try {
       const d1Row = await env.DB.prepare(
-        `SELECT author_name, name, type FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+        `SELECT author_name, name, title, type, download_size FROM packages WHERE status = 'active' AND LOWER(id) = LOWER(?) LIMIT 1`
       )
         .bind(cleanDep)
         .first();
       if (d1Row?.type) {
         const pkgType = normalizePackageType(d1Row.type);
         if (pkgType === 'mod' || pkgType === 'modpack') {
-          return { author: d1Row.author_name || candAuthor, name: d1Row.name || candName };
+          const resolvedName = d1Row.name || candName;
+          return {
+            author: d1Row.author_name || candAuthor,
+            name: resolvedName,
+            title: d1Row.title || resolvedName,
+            estimatedBytes: Number(d1Row.download_size || 0)
+          };
         }
         return null;
       }
@@ -137,12 +145,17 @@ async function resolveStandaloneModCandidate(
   // 2. Look up standalone mod/modpack by technical mod name in D1
   try {
     const row = await env.DB.prepare(
-      `SELECT author_name, name, type FROM packages WHERE status = 'active' AND LOWER(type) IN ('mod', 'modpack') AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
+      `SELECT author_name, name, title, type, download_size FROM packages WHERE status = 'active' AND LOWER(type) IN ('mod', 'modpack') AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
     )
       .bind(cleanDep)
       .first();
     if (row?.author_name && row?.name) {
-      return { author: row.author_name, name: row.name };
+      return {
+        author: row.author_name,
+        name: row.name,
+        title: row.title || row.name,
+        estimatedBytes: Number(row.download_size || 0)
+      };
     }
   } catch {
     // Ignore D1 lookup error
@@ -169,13 +182,11 @@ export async function onRequestGet(context: {
 
   const author = safeDecodeParam(rawAuthor);
   const name = safeDecodeParam(rawName);
-  const encAuthor = encodeURIComponent(author);
-  const encName = encodeURIComponent(name);
   const pkgId = `${author}/${name}`;
 
   const quota = await getSandboxQuotaStatus(context.env);
 
-  const edgeCacheKey = `https://cache.luantihub.internal/__sandbox_manifest_v6/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(rawRelease || 'latest')}`;
+  const edgeCacheKey = buildSandboxManifestEdgeCacheKey(author, name, rawRelease || 'latest');
   const cachedManifest = await readEdgeCacheJson<SandboxManifestResponse>(edgeCacheKey);
   if (cachedManifest) {
     const hasSupportedGame = cachedManifest.incompatibleReason !== 'NO_SUPPORTED_GAME';
@@ -246,10 +257,11 @@ export async function onRequestGet(context: {
   }
 
   const d1Tags = parseJsonArray(d1Pkg?.tags).map((t: any) => String(t || '').toLowerCase());
+  const hasValidRepoUrl = Boolean(d1Pkg?.repo_url && !isDefunctGitHost(String(d1Pkg.repo_url)));
   const isGitPkg =
     Boolean(d1Pkg?.provider && String(d1Pkg.provider).toLowerCase() !== 'contentdb') ||
     d1Tags.includes('git') ||
-    Boolean(d1Pkg?.repo_url);
+    hasValidRepoUrl;
 
   if (!d1Pkg || !hasVerifiedAuthor || !isGitPkg) {
     return Response.json(
@@ -385,12 +397,12 @@ export async function onRequestGet(context: {
           id: depId,
           author: candidate.author,
           name: candidate.name,
-          title: candidate.name,
+          title: candidate.title || candidate.name,
           type: 'mod',
           isPrimary: false,
           downloadUrl: `/api/packages/${encodeURIComponent(candidate.author)}/${encodeURIComponent(candidate.name)}/download?sandbox=1`,
           mountPath: `/mods/${safeDepDir}`,
-          estimatedBytes: 0
+          estimatedBytes: candidate.estimatedBytes || 0
         });
         addedModDeps++;
       }

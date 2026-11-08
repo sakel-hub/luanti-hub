@@ -385,6 +385,7 @@ export async function onRequest(context: {
     (pathname.startsWith('/api/auth/') && !isOAuthFlow && !isReadOnlyAuthStatus) ||
     pathname.startsWith('/api/packages/git') ||
     pathname.startsWith('/api/packages/top10') ||
+    pathname.startsWith('/api/sandbox/') ||
     pathname.startsWith('/api/users/') ||
     pathname.startsWith('/api/admin/') ||
     pathname.startsWith('/api/promotions') ||

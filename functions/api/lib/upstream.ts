@@ -499,6 +499,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/latest`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/hard`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/all`);
+      expandedUrls.add(`https://cache.luantihub.internal/__sandbox_manifest_v6/${a}/${n}/latest`);
       const zipPrefix = `https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/`;
       for (const zk of Array.from(sharedIsolateZipCache.keys())) {
         if (zk.startsWith(zipPrefix)) {
@@ -517,6 +518,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         k.startsWith('https://cache.luantihub.internal/__api_updates_v') ||
         k.startsWith('https://cache.luantihub.internal/__for_client_v') ||
         k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
+        k.startsWith('https://cache.luantihub.internal/__sandbox_manifest_v') ||
+        k.startsWith('https://cache.luantihub.internal/__sandbox_quota_v') ||
         k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
         k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v1_') ||
         k.startsWith('https://cache.luantihub.internal/__unified_tags_v')
@@ -5324,6 +5327,18 @@ export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v22';
 export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v21';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
+export const SANDBOX_MANIFEST_CACHE_PREFIX = '/__sandbox_manifest_v6';
+
+export function buildSandboxManifestEdgeCacheKey(
+  author: string,
+  name: string,
+  release = 'latest'
+): string {
+  const encA = encodeURIComponent(String(author || '').trim().toLowerCase());
+  const encN = encodeURIComponent(String(name || '').trim().toLowerCase());
+  const encRel = encodeURIComponent(String(release || 'latest').trim() || 'latest');
+  return `https://cache.luantihub.internal${SANDBOX_MANIFEST_CACHE_PREFIX}/${encA}/${encN}/${encRel}`;
+}
 
 export function buildPackageDetailEdgeCacheKey(
   author: string,
@@ -5381,6 +5396,7 @@ export function buildPackageCacheInvalidationKeys(
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'lite', 'en'),
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'full-readme', 'en'),
     buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
+    buildSandboxManifestEdgeCacheKey(lowerA, lowerN, 'latest'),
     `https://cache.luantihub.internal/__for_client_v5/${encA}/${encN}/en/%3Fformspec_version%3D8`
   ]);
 
