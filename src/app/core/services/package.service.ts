@@ -3934,6 +3934,11 @@ export class PackageService {
       }
     }
 
+    const activeAuthor = this._activeAuthorProfile();
+    if (activeAuthor && this._activeAuthorUsername()) {
+      this.seoService?.updateForAuthor(activeAuthor, this.getAuthorPackages(activeAuthor.username));
+    }
+
     if (Array.isArray(payload.tags) && payload.tags.length > 0) {
       const parsedTags: ContentDbTag[] = payload.tags
         .map((t: any) => ({
@@ -9818,6 +9823,10 @@ export class PackageService {
       return rawDisplay;
     }
 
+    if (rawAuthor.toLowerCase() === 'sakel-hub' || rawAuthor.toLowerCase() === 'sakel') {
+      return 'SaKeL';
+    }
+
     if (/[-_](?:hub|git|dev|lab|mods?)$/i.test(rawAuthor)) {
       const base = rawAuthor.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
       if (base) {
@@ -9994,11 +10003,7 @@ export class PackageService {
         };
 
     this._activeAuthorProfile.set(initialProfile);
-    this.seoService?.updateStaticRoute(
-      `${initialProfile.display_name} (@${initialProfile.username})`,
-      initialProfile.bio || `Browse Luanti mods, games, and texture packs by ${initialProfile.display_name} on Luanti Hub.`,
-      `/author/${encodeURIComponent(clean)}`
-    );
+    this.seoService?.updateForAuthor(initialProfile, authorPkgs);
 
     if (updateUrl) {
       this.navigatePreservingScroll(['/author', clean]);
@@ -10111,11 +10116,7 @@ export class PackageService {
         };
         this.authorProfileCache.set(lower, mergedProfile);
         this._activeAuthorProfile.set(mergedProfile);
-        this.seoService?.updateStaticRoute(
-          `${mergedProfile.display_name} (@${mergedProfile.username})`,
-          mergedProfile.bio || `Browse Luanti mods, games, and texture packs by ${mergedProfile.display_name} on Luanti Hub.`,
-          `/author/${encodeURIComponent(clean)}`
-        );
+        this.seoService?.updateForAuthor(mergedProfile, latestPkgs);
       }
     } catch {
       // Keep local catalog-derived profile

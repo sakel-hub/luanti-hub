@@ -171,7 +171,7 @@ import {
                   [src]="getHighResImage(pkg)"
                   [fallbackThumbnail]="pkg.thumbnail"
                   appImgFallback
-                  [alt]="pkg.title"
+                  [alt]="getSeoImageAlt(pkg)"
                   loading="lazy"
                   class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
@@ -224,7 +224,12 @@ import {
                     #{{ idx + 1 }} {{ pkg.type }}
                   </span>
                   <h3 class="text-xs sm:text-sm font-bold text-white line-clamp-1 group-hover:text-rose-300 transition-colors">
-                    {{ pkg.title }}
+                    <a
+                      [href]="getPackageUrl(pkg)"
+                      (click)="onTitleLinkClick($event, pkg)"
+                      class="text-inherit hover:text-rose-300 no-underline focus:outline-none">
+                      {{ pkg.title }}
+                    </a>
                   </h3>
                   <div class="flex items-center justify-between text-[10px] text-slate-400">
                     <span class="text-emerald-400 font-semibold">{{ packageService.getMatchScore(pkg) }}% {{ 'card.match' | translate }}</span>
@@ -368,6 +373,27 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
 
   openDetails(pkg: LuantiPackage): void {
     this.packageService.openPackageModal(pkg);
+  }
+
+  getPackageUrl(pkg: LuantiPackage): string {
+    return `/package/${encodeURIComponent(pkg?.author || '')}/${encodeURIComponent(pkg?.name || '')}`;
+  }
+
+  getSeoImageAlt(pkg: LuantiPackage): string {
+    if (!pkg) return 'Luanti Package';
+    const typeLabel = pkg.type === 'game' ? 'Game' : pkg.type === 'txp' ? 'Texture Pack' : 'Mod';
+    const authorName = this.packageService.getAuthorDisplayName(pkg) || pkg.author;
+    return `${pkg.title} – Luanti ${typeLabel} by ${authorName}`;
+  }
+
+  onTitleLinkClick(event: MouseEvent, pkg: LuantiPackage): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.openDetails(pkg);
   }
 
   onDownloadClick(event: MouseEvent, pkg: LuantiPackage): void {

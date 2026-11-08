@@ -278,15 +278,15 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             }
           </div>
 
-          <button
-            type="button"
+          <a
+            [href]="authorUrl"
             (click)="onAuthorClick($event)"
             [appTooltip]="('author.viewProfile' | translate) + ' (@' + authorDisplayName + ')'"
             [attr.aria-label]="('author.viewProfile' | translate) + ' ' + authorDisplayName"
-            class="min-w-6 min-h-6 px-2 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer">
+            class="min-w-6 min-h-6 px-2 py-0.5 rounded-md glass-pill text-slate-300 hover:text-sky-300 hover:border-sky-400/40 inline-flex items-center gap-1 flex-shrink-0 max-w-[110px] transition cursor-pointer no-underline">
             <svg lucideUser class="w-2.5 h-2.5 text-sky-400 flex-shrink-0"></svg>
             <span class="truncate font-medium">{{ authorDisplayName }}</span>
-          </button>
+          </a>
         </div>
 
       </div>
@@ -646,6 +646,11 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     return this.packageService.getAuthorDisplayName(this.package);
   }
 
+  get authorUrl(): string {
+    const slug = this.authorDisplayName || this.package?.author || '';
+    return `/author/${encodeURIComponent(slug)}`;
+  }
+
   get seoImageAlt(): string {
     if (!this.package) return 'Luanti Package';
     const typeLabel =
@@ -693,6 +698,11 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   }
 
   onAuthorClick(event: MouseEvent): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
     event.stopPropagation();
     this.packageService.openAuthorDrawer(this.authorDisplayName || this.package.author, true, this.packageService.activePackage());
   }

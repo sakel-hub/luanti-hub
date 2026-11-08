@@ -5,6 +5,7 @@
     "/api/*",
     "/package/*",
     "/packages/*",
+    "/author/*",
     "/games",
     "/mods",
     "/texture-packs",

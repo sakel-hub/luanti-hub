@@ -484,10 +484,10 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
               <div class="space-y-2">
                 @for (pkg of pagedAuthorPackages(); track pkg.id) {
                   <div class="p-3 rounded-2xl glass-panel flex items-center justify-between gap-3 text-xs hover:border-sky-400/40 transition">
-                    <button
-                      type="button"
-                      (click)="openPackage(pkg)"
-                      class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer">
+                    <a
+                      [href]="getPackageUrl(pkg)"
+                      (click)="onPackageLinkClick($event, pkg)"
+                      class="flex items-center gap-3 text-left flex-1 min-w-0 group cursor-pointer no-underline">
                       <img
                         [src]="pkg.banner || pkg.thumbnail || 'logo.svg'"
                         [fallbackThumbnail]="pkg.thumbnail || ''"
@@ -548,7 +548,7 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
                           }
                         </div>
                       </div>
-                    </button>
+                    </a>
 
                     <div class="flex items-center gap-1.5 flex-shrink-0">
                       <button
@@ -849,6 +849,20 @@ export class AuthorDrawerComponent {
 
   openPackage(pkg: LuantiPackage): void {
     this.packageService.openPackageFromAuthorDrawer(pkg, true);
+  }
+
+  getPackageUrl(pkg: LuantiPackage): string {
+    return `/package/${encodeURIComponent(pkg?.author || '')}/${encodeURIComponent(pkg?.name || '')}`;
+  }
+
+  onPackageLinkClick(event: MouseEvent, pkg: LuantiPackage): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.openPackage(pkg);
   }
 
   filterCatalogByAuthor(): void {

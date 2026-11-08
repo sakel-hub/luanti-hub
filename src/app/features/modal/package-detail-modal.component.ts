@@ -1301,15 +1301,15 @@ import {
                         <span class="font-bold text-white group-hover:text-sky-400 transition text-sm truncate">{{ packageService.getAuthorDisplayName(package) }}</span>
                       </button>
 
-                      <button
-                        type="button"
-                        (click)="openAuthorProfile(packageService.getAuthorDisplayName(package))"
+                      <a
+                        [href]="getAuthorProfileUrl(packageService.getAuthorDisplayName(package))"
+                        (click)="onAuthorProfileClick($event, packageService.getAuthorDisplayName(package))"
                         [appTooltip]="'author.viewProfile' | translate"
                         [attr.aria-label]="'author.viewProfile' | translate"
-                        class="px-2 py-1 rounded-lg glass-btn text-sky-300 hover:text-white text-[11px] font-bold flex items-center gap-1 flex-shrink-0 transition cursor-pointer">
+                        class="px-2 py-1 rounded-lg glass-btn text-sky-300 hover:text-white text-[11px] font-bold flex items-center gap-1 flex-shrink-0 transition cursor-pointer no-underline">
                         <svg lucideUser class="w-3 h-3 text-sky-400"></svg>
                         <span>{{ 'author.viewProfile' | translate }}</span>
-                      </button>
+                      </a>
                     </div>
                   </div>
 
@@ -1327,14 +1327,14 @@ import {
                               class="px-2 py-0.5 text-slate-300 hover:text-sky-300 font-medium text-[11px] transition cursor-pointer">
                               @{{ m }}
                             </button>
-                            <button
-                              type="button"
-                              (click)="openAuthorProfile(m)"
+                            <a
+                              [href]="getAuthorProfileUrl(m)"
+                              (click)="onAuthorProfileClick($event, m)"
                               [appTooltip]="'author.viewProfile' | translate"
                               [attr.aria-label]="'author.viewProfile' | translate"
-                              class="px-1.5 py-0.5 border-l border-white/10 text-sky-400 hover:text-white hover:bg-white/10 transition cursor-pointer">
+                              class="px-1.5 py-0.5 border-l border-white/10 text-sky-400 hover:text-white hover:bg-white/10 transition cursor-pointer no-underline">
                               <svg lucideUser class="w-2.5 h-2.5"></svg>
-                            </button>
+                            </a>
                           </div>
                         }
                       </div>
@@ -4471,6 +4471,23 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   openAuthorProfile(username: string): void {
     this.packageService.openAuthorDrawer(username, true, this.package);
+  }
+
+  getAuthorProfileUrl(username: string): string {
+    const trimmed = (username || '').trim();
+    const canonical =
+      trimmed.toLowerCase() === 'sakel-hub' || trimmed.toLowerCase() === 'sakel' ? 'SaKeL' : trimmed;
+    return `/author/${encodeURIComponent(canonical)}`;
+  }
+
+  onAuthorProfileClick(event: MouseEvent, username: string): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.openAuthorProfile(username);
   }
 
   filterByTag(tag: string): void {

@@ -3272,7 +3272,7 @@ supported_games = minetest_game, voxelibre
       Object.defineProperty(scrollContainer, 'scrollTop', { value: 640, writable: true, configurable: true });
       modalComp.onModalContainerScroll();
 
-      const firstSimCardAuthorBtn = renderedCards[0].querySelector('button[aria-label*="View Author Profile"]') as HTMLButtonElement;
+      const firstSimCardAuthorBtn = renderedCards[0].querySelector('a[aria-label*="View Author Profile"]') as HTMLAnchorElement;
       expect(firstSimCardAuthorBtn).toBeTruthy();
       firstSimCardAuthorBtn.click();
       modalFixture.destroy();
@@ -13089,5 +13089,219 @@ core.register_node(modname .. ":panel", {
     submitFixture.detectChanges();
     expect(submitFixture.componentInstance.selectedBadgeTags()).toEqual(['organic_code']);
     submitFixture.destroy();
+  });
+
+  it('should promote SaKeL packages and /author/SaKeL via Edge SSR, canonical alias resolution, sitemap deduplication, Schema.org JSON-LD, and crawlable links', async () => {
+    const { onRequestGet: authorSsrGet } = await import('../../functions/author/[username]');
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const sitemapMod = await import('../../functions/sitemap.xml');
+    const routesConfig = (await import('../../public/_routes.json')).default;
+
+    // 1. _routes.json includes "/author/*" so Cloudflare Pages invokes Edge SSR for author hubs
+    expect(routesConfig.include).toContain('/author/*');
+
+    const sampleShellHtml = `<!doctype html><html><head><title>Default</title><meta name="description" content="" /><meta name="keywords" content="" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><meta property="og:title" content="" /><meta property="og:description" content="" /><meta property="og:url" content="" /><meta property="og:image" content="" /><meta name="twitter:title" content="" /><meta name="twitter:description" content="" /><meta name="twitter:image" content="" /></head><body><main class="sr-only"></main></body></html>`;
+
+    // 2. Edge SSR for /author/sakel-hub canonicalizes to https://luantihub.org/author/SaKeL and injects ProfilePage + ItemList JSON-LD + crawlable package links
+    const authorRes = await authorSsrGet({
+      request: new Request('https://luantihub.org/author/sakel-hub'),
+      params: { username: 'sakel-hub' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(sampleShellHtml, { status: 200 })
+        }
+      }
+    });
+    expect(authorRes.status).toBe(200);
+    const authorHtml = await authorRes.text();
+    expect(authorHtml).toContain('<title>SaKeL — Luanti Mods, Games &amp; Texture Packs by SaKeL | Luanti Hub</title>');
+    expect(authorHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/author/SaKeL" />');
+    expect(authorHtml).toContain('"@type":"ProfilePage"');
+    expect(authorHtml).toContain('"@type":"ItemList"');
+    expect(authorHtml).toContain('href="/package/SaKeL/everness"');
+    expect(authorHtml).toContain('href="/package/SaKeL/x_farming"');
+    expect(authorHtml).toContain('href="/package/sakel-hub/x_mobs"');
+
+    // Double-encoded /author/SaKeL%2520Hub 301-redirects cleanly
+    const encodedAuthorRes = await authorSsrGet({
+      request: new Request('https://luantihub.org/author/SaKeL%2520Test'),
+      params: { username: 'SaKeL%2520Test' },
+      env: {}
+    });
+    expect(encodedAuthorRes.status).toBe(301);
+
+    // 3. Edge SSR for /package/sakel-hub/x_mobs resolves SaKeL display name, enriches SoftwareApplication JSON-LD, and renders sibling SaKeL links
+    const pkgSsrRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/sakel-hub/x_mobs'),
+      params: { author: 'sakel-hub', name: 'x_mobs' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(sampleShellHtml, { status: 200 })
+        },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('FROM packages')
+                  ? {
+                      title: 'X Mobs',
+                      author_name: 'sakel-hub',
+                      name: 'x_mobs',
+                      provider: 'github',
+                      short_desc: 'Community mobs for Luanti',
+                      long_desc: 'Detailed mob behavior and spawning for Luanti.',
+                      type: 'mod',
+                      license: 'LGPL-2.1-only',
+                      downloads_count: 1500
+                    }
+                  : { avg_rating: 4.9, cnt: 12 }
+            })
+          })
+        }
+      }
+    });
+    expect(pkgSsrRes.status).toBe(200);
+    const pkgSsrHtml = await pkgSsrRes.text();
+    expect(pkgSsrHtml).toContain('<title>X Mobs by SaKeL — Luanti Mod | Luanti Hub</title>');
+    expect(pkgSsrHtml).toContain('SaKeL, sakel-hub');
+    expect(pkgSsrHtml).toContain('"name":"SaKeL","alternateName":"sakel-hub","url":"https://luantihub.org/author/SaKeL"');
+    expect(pkgSsrHtml).toContain('"downloadUrl":"https://luantihub.org/package/sakel-hub/x_mobs/download"');
+    expect(pkgSsrHtml).toContain('More Luanti Packages by <a href="/author/SaKeL">SaKeL</a>');
+    expect(pkgSsrHtml).toContain('href="/package/SaKeL/everness"');
+
+    // 4. Sitemap includes /author/SaKeL, prioritizes SaKeL packages at 0.9, and deduplicates sakel-hub/everness vs SaKeL/everness
+    const sitemapRes = await sitemapMod.onRequestGet({
+      request: new Request('https://luantihub.org/sitemap.xml', { method: 'GET' }),
+      env: {
+        DB: {
+          prepare: (sql: string) => ({
+            all: async () =>
+              sql.includes('FROM packages')
+                ? {
+                    results: [
+                      {
+                        author_name: 'sakel-hub',
+                        name: 'everness',
+                        provider: 'codeberg',
+                        updated_at: '2026-11-01'
+                      },
+                      {
+                        author_name: 'sakel-hub',
+                        name: 'x_custom_git_mod',
+                        provider: 'github',
+                        updated_at: '2026-11-02'
+                      }
+                    ]
+                  }
+                : { results: [] }
+          })
+        }
+      }
+    });
+    expect(sitemapRes.status).toBe(200);
+    const sitemapXml = await sitemapRes.text();
+    expect(sitemapXml).toContain('<loc>https://luantihub.org/author/SaKeL</loc>');
+    expect(sitemapXml).toContain('<loc>https://luantihub.org/package/SaKeL/everness</loc>');
+    expect(sitemapXml).not.toContain('<loc>https://luantihub.org/package/sakel-hub/everness</loc>');
+    expect(sitemapXml).toContain('<loc>https://luantihub.org/package/sakel-hub/x_custom_git_mod</loc>');
+
+    // 5. Client SeoService resolves SaKeL for sakel-hub packages and generates ProfilePage JSON-LD for /author/SaKeL
+    const seo = TestBed.inject(SeoService);
+    seo.updateForPackage({
+      id: 'sakel-hub/x_mobs',
+      author: 'sakel-hub',
+      name: 'x_mobs',
+      title: 'X Mobs',
+      type: 'mod',
+      short_desc: 'Community mobs for Luanti',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 1500,
+      license: 'LGPL-2.1-only',
+      source: 'git',
+      tags: ['mobs']
+    });
+    expect(document.title).toContain('X Mobs by SaKeL — Luanti Mod | Luanti Hub');
+    const pkgJsonLd = document.getElementById('luanti-pkg-jsonld')?.textContent || '';
+    expect(pkgJsonLd).toContain('"name":"SaKeL"');
+    expect(pkgJsonLd).toContain('"url":"https://luantihub.org/author/SaKeL"');
+
+    seo.updateForAuthor(
+      {
+        username: 'sakel-hub',
+        display_name: 'SaKeL',
+        avatar_url: 'https://github.com/sakel-hub.png',
+        bio: 'Creator of Everness and X Farming',
+        identities: []
+      },
+      [
+        {
+          id: 'SaKeL/everness',
+          author: 'SaKeL',
+          name: 'everness',
+          title: 'Everness',
+          type: 'mod',
+          short_desc: 'Custom biomes and dimensions',
+          thumbnail: 'logo.svg',
+          score: 5,
+          downloads: 50000,
+          license: 'LGPL-2.1-only',
+          source: 'official',
+          tags: ['biomes']
+        }
+      ]
+    );
+    expect(document.title).toContain('SaKeL — Luanti Mods, Games & Texture Packs by SaKeL | Luanti Hub');
+    expect(document.querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe(
+      'https://luantihub.org/author/SaKeL'
+    );
+    const authorJsonLd = document.getElementById('luanti-pkg-jsonld')?.textContent || '';
+    expect(authorJsonLd).toContain('"@type":"ProfilePage"');
+    expect(authorJsonLd).toContain('"@type":"ItemList"');
+    expect(authorJsonLd).toContain('https://luantihub.org/package/SaKeL/everness');
+
+    // Verify fallback ItemList when updateForAuthor is called with empty packages array at initial boot
+    seo.updateForAuthor(
+      {
+        username: 'SaKeL',
+        display_name: 'SaKeL',
+        avatar_url: 'https://github.com/sakel-hub.png',
+        bio: 'Creator of Everness and X Farming',
+        identities: []
+      },
+      []
+    );
+    const fallbackAuthorJsonLd = document.getElementById('luanti-pkg-jsonld')?.textContent || '';
+    expect(fallbackAuthorJsonLd).toContain('https://luantihub.org/package/SaKeL/everness');
+    expect(fallbackAuthorJsonLd).toContain('https://luantihub.org/package/SaKeL/x_farming');
+
+    // 6. Verify crawlable <a href="/author/SaKeL"> on PackageCardComponent and PackageDetailModalComponent
+    const cardFixture = TestBed.createComponent(PackageCardComponent);
+    cardFixture.componentInstance.package = {
+      id: 'sakel-hub/x_mobs',
+      author: 'sakel-hub',
+      author_display_name: 'SaKeL',
+      name: 'x_mobs',
+      title: 'X Mobs',
+      type: 'mod',
+      short_desc: 'Community mobs for Luanti',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 1500,
+      license: 'LGPL-2.1-only',
+      source: 'git',
+      tags: ['mobs']
+    };
+    cardFixture.detectChanges();
+    const cardEl = cardFixture.nativeElement as HTMLElement;
+    const authorAnchor = cardEl.querySelector('a[href="/author/SaKeL"]') as HTMLAnchorElement;
+    expect(authorAnchor).toBeTruthy();
+    expect(authorAnchor.textContent).toContain('SaKeL');
+    cardFixture.destroy();
+
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    expect(modalFixture.componentInstance.getAuthorProfileUrl('sakel-hub')).toBe('/author/SaKeL');
+    expect(modalFixture.componentInstance.getAuthorProfileUrl('SaKeL')).toBe('/author/SaKeL');
+    modalFixture.destroy();
   });
 });

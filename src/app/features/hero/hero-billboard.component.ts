@@ -166,7 +166,17 @@ import {
 
                     <!-- Title -->
                     <h2 class="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white drop-shadow-md">
-                      {{ slidePkg.title }}
+                      @if (!slidePkg._promo) {
+                        <a
+                          [href]="getPackageUrl(slidePkg)"
+                          (click)="onSlideTitleClick($event, slidePkg)"
+                          [attr.tabindex]="idx === currentIndex() ? null : -1"
+                          class="text-inherit hover:text-sky-300 transition-colors no-underline focus:outline-none">
+                          {{ slidePkg.title }}
+                        </a>
+                      } @else {
+                        {{ slidePkg.title }}
+                      }
                     </h2>
 
                     <!-- Description -->
@@ -616,6 +626,20 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
       return normalized;
     }
     return `https://content.luanti.org/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`;
+  }
+
+  getPackageUrl(pkg: LuantiPackage): string {
+    return `/package/${encodeURIComponent(pkg?.author || '')}/${encodeURIComponent(pkg?.name || '')}`;
+  }
+
+  onSlideTitleClick(event: MouseEvent, pkg: LuantiPackage): void {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) {
+      event.stopPropagation();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.packageService.openPackageModal(pkg);
   }
 
   goTo(index: number, event?: Event): void {

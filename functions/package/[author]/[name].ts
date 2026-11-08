@@ -5,6 +5,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../../api/lib/upstream';
+import { resolveCanonicalAuthorDisplay } from '../../author/[username]';
 
 interface Env {
   DB?: any;
@@ -150,8 +151,12 @@ export async function onRequestGet(context: {
     });
   }
 
+  const resolvedAuthorIdentity = resolveCanonicalAuthorDisplay(author);
+  const authorDisplayName = resolvedAuthorIdentity.displayName;
+  const authorHubSlug = resolvedAuthorIdentity.canonicalSlug;
+
   let pkgCleanTitle = name;
-  let pkgDesc = `Download and install ${name} by ${author} for Luanti (Minetest) on Luanti Hub.`;
+  let pkgDesc = `Download and install ${name} by ${authorDisplayName} for Luanti (Minetest) on Luanti Hub.`;
   let pkgLongDesc = '';
   let pkgThumb = `${canonicalOrigin}/icons/icon-512x512.png`;
   let pkgBanner = '';
@@ -172,7 +177,7 @@ export async function onRequestGet(context: {
     return `${canonicalOrigin}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
   };
 
-  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v2/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v3/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   const lookupMetadata = async () => {
     try {
@@ -206,6 +211,21 @@ export async function onRequestGet(context: {
           ).bind(`${author}/${name}`).first()
         ]);
         pkgData = pkgRow;
+        if (!pkgData) {
+          const altAuthor =
+            author.toLowerCase() === `${resolvedAuthorIdentity.baseAuthor}-hub`
+              ? resolvedAuthorIdentity.canonicalSlug
+              : `${resolvedAuthorIdentity.baseAuthor}-hub`;
+          if (altAuthor.toLowerCase() !== author.toLowerCase()) {
+            try {
+              pkgData = await context.env.DB.prepare(
+                `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)`
+              ).bind(altAuthor, name).first();
+            } catch {
+              // ignore fallback D1 error
+            }
+          }
+        }
         if (ratingRow && Number(ratingRow.cnt) > 0 && ratingRow.avg_rating != null) {
           d1RatingAvg = Number(ratingRow.avg_rating);
           pkgReviewCount += Number(ratingRow.cnt);
@@ -237,10 +257,16 @@ export async function onRequestGet(context: {
       }
 
       if (!pkgData || pkgData.provider === 'contentdb') {
-        const upstream = await fetchUpstreamJsonCached<any>(
+        let upstream = await fetchUpstreamJsonCached<any>(
           `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
           600
         );
+        if (!upstream && author.toLowerCase() !== authorHubSlug.toLowerCase()) {
+          upstream = await fetchUpstreamJsonCached<any>(
+            `/packages/${encodeURIComponent(authorHubSlug)}/${encodeURIComponent(name)}/`,
+            600
+          );
+        }
         if (upstream) {
           pkgCleanTitle = upstream.title || pkgCleanTitle;
           pkgDesc = upstream.short_desc || upstream.short_description || pkgDesc;
@@ -303,18 +329,24 @@ export async function onRequestGet(context: {
     const typeLabel = pkgType === 'game' ? 'Game' : pkgType === 'txp' ? 'Texture Pack' : 'Mod';
     const sectionPath = pkgType === 'game' ? '/games' : pkgType === 'txp' ? '/texture-packs' : '/mods';
     const sectionLabel = pkgType === 'game' ? 'Luanti Games' : pkgType === 'txp' ? 'Luanti Texture Packs' : 'Luanti Mods';
-    const fullTitle = `${pkgCleanTitle} by ${author} — Luanti ${typeLabel} | Luanti Hub`;
-    const keywordsContent = [
-      'luanti',
-      `luanti ${pkgType === 'txp' ? 'texture pack' : pkgType}`,
-      pkgCleanTitle,
-      name,
-      author,
-      'luanti hub',
-      'luantihub',
-      'minetest',
-      ...pkgTags.slice(0, 8)
-    ].join(', ');
+    const fullTitle = `${pkgCleanTitle} by ${authorDisplayName} — Luanti ${typeLabel} | Luanti Hub`;
+    const keywordTokens = Array.from(
+      new Set([
+        'luanti',
+        `luanti ${pkgType === 'txp' ? 'texture pack' : pkgType}`,
+        pkgCleanTitle,
+        name,
+        authorDisplayName,
+        author,
+        'luanti hub',
+        'luantihub',
+        'minetest',
+        ...pkgTags.slice(0, 8)
+      ].filter(Boolean))
+    );
+    const keywordsContent = keywordTokens.join(', ');
+
+    const authorProfileUrl = `${canonicalOrigin}/author/${encodeURIComponent(authorHubSlug)}`;
 
     const softwareAppSchema: Record<string, any> = {
       '@type': 'SoftwareApplication',
@@ -326,8 +358,10 @@ export async function onRequestGet(context: {
       operatingSystem: 'Windows, macOS, Linux, Android, iOS',
       description: pkgDesc,
       url: canonicalUrl,
+      downloadUrl: `${canonicalUrl}/download`,
       image: pkgThumb,
       license: pkgLicense,
+      keywords: keywordsContent,
       isPartOf: {
         '@type': 'WebSite',
         '@id': 'https://luantihub.org/#website',
@@ -335,7 +369,9 @@ export async function onRequestGet(context: {
       },
       author: {
         '@type': 'Person',
-        name: author
+        name: authorDisplayName,
+        ...(authorDisplayName.toLowerCase() !== author.toLowerCase() ? { alternateName: author } : {}),
+        url: authorProfileUrl
       },
       offers: {
         '@type': 'Offer',
@@ -384,6 +420,7 @@ export async function onRequestGet(context: {
     });
     const initialPkgScript = serializeInlineScriptJson({
       author,
+      ...(authorDisplayName !== author ? { author_display_name: authorDisplayName } : {}),
       name,
       title: pkgCleanTitle,
       short_desc: pkgDesc,
@@ -395,28 +432,49 @@ export async function onRequestGet(context: {
     });
 
     const cleanLongDescSnippet = escapeHtml((pkgLongDesc || pkgDesc).slice(0, 1800));
+    const authorHubPath = `/author/${encodeURIComponent(authorHubSlug)}`;
+    const siblingSakelSection = resolvedAuthorIdentity.isSakel
+      ? `
+      <section>
+        <h2>More Luanti Packages by <a href="/author/SaKeL">SaKeL</a></h2>
+        <ul>
+          <li><a href="/package/SaKeL/everness">Everness by SaKeL</a> — Custom biomes, structures, dungeons, and dimensions</li>
+          <li><a href="/package/SaKeL/x_farming">X Farming by SaKeL</a> — Crops, trees, farming, bees, and food recipes</li>
+          <li><a href="/package/SaKeL/x_bows">X Bows by SaKeL</a> — Bows, quivers, and custom arrows</li>
+          <li><a href="/package/SaKeL/x_enchanting">X Enchanting by SaKeL</a> — Enchanting table and custom enchantments</li>
+          <li><a href="/package/SaKeL/x_tumbleweed">X Tumbleweed by SaKeL</a> — Desert tumbleweeds for survival</li>
+          <li><a href="/package/SaKeL/mcl_decor">MineClone2 Decor by SaKeL</a> — Furniture and decorative blocks</li>
+          <li><a href="/package/SaKeL/pixie">Pixie by SaKeL</a> — Magical glowing pixies</li>
+          <li><a href="/package/SaKeL/rhotator">Rhotator by SaKeL</a> — Multi-axis node rotation tool</li>
+          <li><a href="/package/sakel-hub/x_mobs">X Mobs by SaKeL</a> — Community Git mob collection</li>
+          <li><a href="/package/sakel-hub/waysigns">Waysigns by SaKeL</a> — Directional signposts and wayfinding</li>
+        </ul>
+      </section>`
+      : '';
+
     const semanticBodyHtml = `
     <nav aria-label="Breadcrumb">
       <a href="/">Luanti Hub</a> &rsaquo;
       <a href="${escapeHtml(sectionPath)}">${escapeHtml(sectionLabel)}</a> &rsaquo;
+      <a href="${escapeHtml(authorHubPath)}">${escapeHtml(authorDisplayName)}</a> &rsaquo;
       <span>${escapeHtml(pkgCleanTitle)}</span>
     </nav>
     <article>
-      <h1>${escapeHtml(pkgCleanTitle)} — Luanti ${escapeHtml(typeLabel)} by ${escapeHtml(author)}</h1>
+      <h1>${escapeHtml(pkgCleanTitle)} — Luanti ${escapeHtml(typeLabel)} by ${escapeHtml(authorDisplayName)}</h1>
       <p><strong>${escapeHtml(pkgDesc)}</strong></p>
       <div>${cleanLongDescSnippet}</div>
       <ul>
         <li><strong>Engine:</strong> Luanti (formerly Minetest)</li>
         <li><strong>Package Type:</strong> Luanti ${escapeHtml(typeLabel)}</li>
-        <li><strong>Author:</strong> ${escapeHtml(author)}</li>
+        <li><strong>Author:</strong> <a href="${escapeHtml(authorHubPath)}">${escapeHtml(authorDisplayName)}</a>${authorDisplayName.toLowerCase() !== author.toLowerCase() ? ` (<code>${escapeHtml(author)}</code>)` : ''}</li>
         <li><strong>Technical Name:</strong> <code>${escapeHtml(name)}</code></li>
         <li><strong>License:</strong> ${escapeHtml(pkgLicense)}</li>
         ${pkgTags.length > 0 ? `<li><strong>Tags:</strong> ${escapeHtml(pkgTags.join(', '))}</li>` : ''}
         ${pkgDeps.length > 0 ? `<li><strong>Dependencies:</strong> ${escapeHtml(pkgDeps.join(', '))}</li>` : ''}
-      </ul>
+      </ul>${siblingSakelSection}
       <p>
         Download <strong>${escapeHtml(pkgCleanTitle)}</strong> as a ready-to-drop <code>.zip</code> archive or install directly inside the Luanti client via Luanti Hub.
-        Explore more <a href="/games">Luanti Games</a>, <a href="/mods">Luanti Mods</a>, and <a href="/texture-packs">Luanti Texture Packs</a> on <a href="/">Luanti Hub (LuantiHub)</a>.
+        Explore more packages by <a href="${escapeHtml(authorHubPath)}">${escapeHtml(authorDisplayName)}</a>, or browse <a href="/games">Luanti Games</a>, <a href="/mods">Luanti Mods</a>, and <a href="/texture-packs">Luanti Texture Packs</a> on <a href="/">Luanti Hub (LuantiHub)</a>.
       </p>
     </article>
   `;

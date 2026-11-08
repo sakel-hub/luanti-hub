@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { Title, Meta } from '@angular/platform-browser';
 import { DOCUMENT } from '@angular/common';
-import { LuantiPackage } from '../models/package.model';
+import { LuantiPackage, PublicAuthorProfile } from '../models/package.model';
 
 @Injectable({
   providedIn: 'root'
@@ -17,26 +17,58 @@ export class SeoService {
     'Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub). Direct .zip downloads, Git repository packages, and 1-click in-game ContentDB setup.';
   private readonly baseUrl = 'https://luantihub.org';
 
+  private resolveAuthorIdentity(rawAuthor: string, explicitDisplayName?: string | null): {
+    displayName: string;
+    canonicalSlug: string;
+    isSakel: boolean;
+  } {
+    const trimmed = String(rawAuthor || '').trim();
+    const base = trimmed.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    if (base.toLowerCase() === 'sakel') {
+      return {
+        displayName: 'SaKeL',
+        canonicalSlug: 'SaKeL',
+        isSakel: true
+      };
+    }
+    const cleanDisplay = String(explicitDisplayName || '').trim();
+    const displayName = cleanDisplay || base || trimmed;
+    const canonicalSlug = !/\s/.test(displayName) ? displayName : trimmed;
+    return {
+      displayName,
+      canonicalSlug,
+      isSakel: false
+    };
+  }
+
   updateForPackage(pkg: LuantiPackage): void {
     const typeLabel =
       pkg.type === 'game' ? 'Game' : pkg.type === 'txp' ? 'Texture Pack' : 'Mod';
-    const pageTitle = `${pkg.title} by ${pkg.author} — Luanti ${typeLabel} | Luanti Hub`;
+    const { displayName, canonicalSlug } = this.resolveAuthorIdentity(
+      pkg.author,
+      pkg.author_display_name
+    );
+    const pageTitle = `${pkg.title} by ${displayName} — Luanti ${typeLabel} | Luanti Hub`;
     const pageDesc =
       pkg.short_desc ||
-      `Download ${pkg.title} by ${pkg.author} (${typeLabel}) for Luanti / Minetest on Luanti Hub.`;
+      `Download ${pkg.title} by ${displayName} (${typeLabel}) for Luanti / Minetest on Luanti Hub.`;
     const canonicalUrl = `${this.baseUrl}/package/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}`;
     const imageUrl = this.toAbsoluteImageUrl(pkg.banner || pkg.thumbnail);
-    const keywords = [
-      'luanti',
-      `luanti ${pkg.type === 'txp' ? 'texture pack' : pkg.type}`,
-      pkg.title,
-      pkg.name,
-      pkg.author,
-      'luanti hub',
-      'luantihub',
-      'minetest',
-      ...(Array.isArray(pkg.tags) ? pkg.tags.slice(0, 8) : [])
-    ].join(', ');
+    const keywordTokens = Array.from(
+      new Set([
+        'luanti',
+        `luanti ${pkg.type === 'txp' ? 'texture pack' : pkg.type}`,
+        pkg.title,
+        pkg.name,
+        displayName,
+        pkg.author,
+        'luanti hub',
+        'luantihub',
+        'minetest',
+        ...(Array.isArray(pkg.tags) ? pkg.tags.slice(0, 8) : [])
+      ].filter(Boolean))
+    );
+    const keywords = keywordTokens.join(', ');
 
     this.title.setTitle(pageTitle);
     this.meta.updateTag({ name: 'description', content: pageDesc });
@@ -50,7 +82,50 @@ export class SeoService {
     this.meta.updateTag({ name: 'twitter:image', content: imageUrl });
 
     this.setCanonicalUrl(canonicalUrl);
-    this.setPackageJsonLd(pkg, canonicalUrl, imageUrl, pageDesc);
+    this.setPackageJsonLd(pkg, canonicalUrl, imageUrl, pageDesc, displayName, canonicalSlug, keywords);
+  }
+
+  updateForAuthor(profile: PublicAuthorProfile, packages: LuantiPackage[] = []): void {
+    const { displayName, canonicalSlug, isSakel } = this.resolveAuthorIdentity(
+      profile.username,
+      profile.display_name
+    );
+    const canonicalUrl = `${this.baseUrl}/author/${encodeURIComponent(canonicalSlug)}`;
+    const pageTitle = `${displayName} — Luanti Mods, Games & Texture Packs by ${displayName} | Luanti Hub`;
+    const pageDesc =
+      profile.bio?.trim() ||
+      (isSakel
+        ? 'Creator of Everness, X Farming, X Bows, X Enchanting, X Mobs, Waysigns, and open-source Luanti (Minetest) mods, games, and texture packs on Luanti Hub.'
+        : `Browse Luanti mods, games, and texture packs by ${displayName} on Luanti Hub.`);
+    const imageUrl = this.toAbsoluteImageUrl(profile.avatar_url);
+    const topPkgTitles = packages.slice(0, 6).map(p => p.title);
+    const keywords = Array.from(
+      new Set([
+        displayName,
+        profile.username,
+        ...(isSakel ? ['SaKeL', 'sakel-hub', 'SaKeL Luanti mods'] : []),
+        `${displayName} luanti`,
+        'luanti',
+        'luanti hub',
+        'luantihub',
+        'minetest',
+        ...topPkgTitles
+      ].filter(Boolean))
+    ).join(', ');
+
+    this.title.setTitle(pageTitle);
+    this.meta.updateTag({ name: 'description', content: pageDesc });
+    this.meta.updateTag({ name: 'keywords', content: keywords });
+    this.meta.updateTag({ property: 'og:title', content: pageTitle });
+    this.meta.updateTag({ property: 'og:description', content: pageDesc });
+    this.meta.updateTag({ property: 'og:url', content: canonicalUrl });
+    this.meta.updateTag({ property: 'og:image', content: imageUrl });
+    this.meta.updateTag({ name: 'twitter:title', content: pageTitle });
+    this.meta.updateTag({ name: 'twitter:description', content: pageDesc });
+    this.meta.updateTag({ name: 'twitter:image', content: imageUrl });
+
+    this.setCanonicalUrl(canonicalUrl);
+    this.setAuthorJsonLd(profile, packages, displayName, canonicalUrl, imageUrl, pageDesc, isSakel);
   }
 
   updateStaticRoute(routeTitle: string, routeDesc: string, path = '/'): void {
@@ -117,7 +192,10 @@ export class SeoService {
     pkg: LuantiPackage,
     canonicalUrl: string,
     imageUrl: string,
-    description: string
+    description: string,
+    displayName: string,
+    canonicalAuthorSlug: string,
+    keywords: string
   ): void {
     if (!this.doc?.head) return;
     let scriptEl = this.doc.getElementById('luanti-pkg-jsonld') as HTMLScriptElement | null;
@@ -134,6 +212,7 @@ export class SeoService {
       pkg.type === 'game' ? '/games' : pkg.type === 'txp' ? '/texture-packs' : '/mods';
     const sectionLabel =
       pkg.type === 'game' ? 'Luanti Games' : pkg.type === 'txp' ? 'Luanti Texture Packs' : 'Luanti Mods';
+    const authorProfileUrl = `${this.baseUrl}/author/${encodeURIComponent(canonicalAuthorSlug)}`;
 
     const softwareAppSchema: Record<string, any> = {
       '@type': 'SoftwareApplication',
@@ -145,8 +224,10 @@ export class SeoService {
       operatingSystem: 'Windows, macOS, Linux, Android, iOS',
       description,
       url: canonicalUrl,
+      downloadUrl: `${canonicalUrl}/download`,
       image: imageUrl,
       license: pkg.license,
+      keywords,
       isPartOf: {
         '@type': 'WebSite',
         '@id': `${this.baseUrl}/#website`,
@@ -154,7 +235,9 @@ export class SeoService {
       },
       author: {
         '@type': 'Person',
-        name: pkg.author
+        name: displayName,
+        ...(displayName.toLowerCase() !== pkg.author.toLowerCase() ? { alternateName: pkg.author } : {}),
+        url: authorProfileUrl
       },
       offers: {
         '@type': 'Offer',
@@ -207,6 +290,123 @@ export class SeoService {
     scriptEl.textContent = JSON.stringify({
       '@context': 'https://schema.org',
       '@graph': [softwareAppSchema, breadcrumbSchema]
+    });
+  }
+
+  private setAuthorJsonLd(
+    profile: PublicAuthorProfile,
+    packages: LuantiPackage[],
+    displayName: string,
+    canonicalUrl: string,
+    imageUrl: string,
+    description: string,
+    isSakel: boolean
+  ): void {
+    if (!this.doc?.head) return;
+    let scriptEl = this.doc.getElementById('luanti-pkg-jsonld') as HTMLScriptElement | null;
+    if (!scriptEl) {
+      scriptEl = this.doc.createElement('script');
+      scriptEl.id = 'luanti-pkg-jsonld';
+      scriptEl.type = 'application/ld+json';
+      this.doc.head.appendChild(scriptEl);
+    }
+
+    const sameAs = new Set<string>();
+    if (profile.contentdb_url) sameAs.add(profile.contentdb_url);
+    if (profile.website_url) sameAs.add(profile.website_url);
+    if (profile.donate_url) sameAs.add(profile.donate_url);
+    for (const id of profile.identities || []) {
+      if (id.profile_url) sameAs.add(id.profile_url);
+    }
+    if (isSakel) {
+      sameAs.add('https://content.luanti.org/users/SaKeL/');
+      sameAs.add('https://codeberg.org/SaKeL');
+      sameAs.add('https://github.com/sakel-hub');
+      sameAs.add('https://ko-fi.com/sakel');
+    }
+
+    const profilePageSchema: Record<string, any> = {
+      '@type': 'ProfilePage',
+      '@id': `${canonicalUrl}#profile`,
+      name: `${displayName} Creator Profile — Luanti Hub`,
+      description,
+      url: canonicalUrl,
+      mainEntity: {
+        '@type': 'Person',
+        '@id': `${canonicalUrl}#person`,
+        name: displayName,
+        ...(isSakel ? { alternateName: ['sakel-hub', 'sakel'] } : {}),
+        description,
+        url: canonicalUrl,
+        image: imageUrl,
+        ...(sameAs.size > 0 ? { sameAs: Array.from(sameAs) } : {})
+      },
+      isPartOf: {
+        '@type': 'WebSite',
+        '@id': `${this.baseUrl}/#website`,
+        name: 'Luanti Hub'
+      }
+    };
+
+    const effectivePackages: Array<Pick<LuantiPackage, 'author' | 'name' | 'title' | 'type' | 'short_desc'>> =
+      packages.length > 0
+        ? packages
+        : isSakel
+          ? [
+              { author: 'SaKeL', name: 'everness', title: 'Everness', type: 'mod', short_desc: 'Custom biomes, structures, dungeons, and dimensions in Luanti.' },
+              { author: 'SaKeL', name: 'x_farming', title: 'X Farming', type: 'mod', short_desc: 'Crops, trees, farming, bees, and food recipes for Luanti.' },
+              { author: 'SaKeL', name: 'x_bows', title: 'X Bows', type: 'mod', short_desc: 'Bows, quivers, and custom arrows for Luanti.' },
+              { author: 'SaKeL', name: 'x_enchanting', title: 'X Enchanting', type: 'mod', short_desc: 'Enchanting table and custom enchantments for Luanti.' },
+              { author: 'sakel-hub', name: 'x_mobs', title: 'X Mobs', type: 'mod', short_desc: 'Community Git mob collection for Luanti.' },
+              { author: 'sakel-hub', name: 'waysigns', title: 'Waysigns', type: 'mod', short_desc: 'Directional signposts and wayfinding markers for Luanti.' }
+            ]
+          : [];
+
+    const itemListSchema: Record<string, any> = {
+      '@type': 'ItemList',
+      '@id': `${canonicalUrl}#packages`,
+      name: `Luanti Packages by ${displayName}`,
+      numberOfItems: effectivePackages.length,
+      itemListElement: effectivePackages.slice(0, 30).map((pkg, idx) => {
+        const pkgUrl = `${this.baseUrl}/package/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}`;
+        const typeLabel = pkg.type === 'game' ? 'Game' : pkg.type === 'txp' ? 'Texture Pack' : 'Mod';
+        return {
+          '@type': 'ListItem',
+          position: idx + 1,
+          item: {
+            '@type': 'SoftwareApplication',
+            '@id': `${pkgUrl}#software`,
+            name: pkg.title,
+            applicationCategory: 'GameApplication',
+            applicationSubCategory: `Luanti ${typeLabel}`,
+            url: pkgUrl,
+            description: pkg.short_desc
+          }
+        };
+      })
+    };
+
+    const breadcrumbSchema = {
+      '@type': 'BreadcrumbList',
+      itemListElement: [
+        {
+          '@type': 'ListItem',
+          position: 1,
+          name: 'Luanti Hub',
+          item: `${this.baseUrl}/`
+        },
+        {
+          '@type': 'ListItem',
+          position: 2,
+          name: `${displayName} Packages`,
+          item: canonicalUrl
+        }
+      ]
+    };
+
+    scriptEl.textContent = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@graph': [profilePageSchema, itemListSchema, breadcrumbSchema]
     });
   }
 
