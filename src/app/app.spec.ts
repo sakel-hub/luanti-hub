@@ -13057,6 +13057,7 @@ core.register_node(modname .. ":panel", {
       pkgService.setTagFilter('organic_code');
       expect(pkgService.filteredPackages().map(p => p.id)).toEqual(['SaKeL/everness']);
       pkgService.setTagFilter('all');
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       // Verify drawer filtering (Author / Profile Drawer) matches packages by badge_tags as well as tags
       expect(filterAndSortDrawerPackages(pkgService.packages(), { tag: 'organic_code' }).map(p => p.id)).toEqual([
@@ -13065,6 +13066,7 @@ core.register_node(modname .. ":panel", {
 
       // Simulate reopening the modal and triggering loadPackageDetails while browser cache still has stale badge_tags: []
       (pkgService as any).edgeApiAvailable = true;
+      (pkgService as any)._activePackage.set(pkgService.packages()[0]);
       await pkgService.loadPackageDetails(pkgService.packages()[0], true);
       expect(capturedDetailGetUrl).toContain('_t=');
       expect(pkgService.packages()[0].badge_tags).toEqual(['organic_code']);

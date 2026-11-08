@@ -31,6 +31,7 @@ import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.ser
 import { AuthService, ProfileDrawerTab, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 import { TranslationService } from '../i18n/translation.service';
+import { syncJam2026ClientRowTagIfNeeded } from './jam-2026-sync.helper';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
@@ -1060,6 +1061,13 @@ export class PackageService {
       this.syncedPromoTagsInSession.add(lowerTag);
       (async () => {
         try {
+          await syncJam2026ClientRowTagIfNeeded({
+            tag,
+            packagesSignal: this._packages,
+            normalizePackage: (raw) => this.normalizePackage(raw),
+            deduplicateCatalog: (pkgs) => this.deduplicateCatalog(pkgs),
+            buildSearchBlob: (pkg) => this.buildSearchBlob(pkg)
+          });
           const list = await this.fetchUpstreamWithMirrorFallback(
             `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
           );

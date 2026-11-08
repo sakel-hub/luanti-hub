@@ -51,6 +51,11 @@ import {
   BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
+import {
+  isJam2026AllowedImageHost,
+  syncJam2026IntoPromoRowDelta,
+  applyJam2026RepoOverlayOnCatalog
+} from '../lib/jam-2026';
 
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
 
@@ -63,6 +68,7 @@ let lastCatalogNoCacheAt = 0;
 
 interface PromoRowDelta {
   tagMap: Record<string, string[]>;
+  repoTagMap?: Record<string, string[]>;
   items: any[];
 }
 
@@ -104,7 +110,7 @@ export async function syncActivePromotionRowPackages(
   if (uniqueTags.length === 0 && uniqueAuthors.length === 0) return null;
 
   const cacheSignature = `tags=${uniqueTags.map((t) => t.toLowerCase()).sort().join(',')}|authors=${uniqueAuthors.map((a) => a.toLowerCase()).sort().join(',')}`;
-  const syncCacheKey = `/__promo_row_sync_v1_${encodeURIComponent(cacheSignature)}`;
+  const syncCacheKey = `/__promo_row_sync_v2_${encodeURIComponent(cacheSignature)}`;
 
   if (!noCache) {
     const cachedDelta = await readEdgeCacheJson<PromoRowDelta>(syncCacheKey);
@@ -193,6 +199,17 @@ export async function syncActivePromotionRowPackages(
     })
   ]);
 
+  const repoTagMap = await syncJam2026IntoPromoRowDelta({
+    uniqueTags,
+    addTagStamp,
+    discoveredByKey,
+    existingD1Pairs,
+    queuedUpsertKeys,
+    d1UpsertPairs,
+    db,
+    noCache
+  });
+
   if (db && d1UpsertPairs.length > 0) {
     const runTagPkgUpsert = async () => {
       const stmts = d1UpsertPairs.slice(0, 120).map((pair) =>
@@ -225,6 +242,7 @@ export async function syncActivePromotionRowPackages(
 
   const delta: PromoRowDelta = {
     tagMap,
+    ...(repoTagMap ? { repoTagMap } : {}),
     items: Array.from(discoveredByKey.values())
   };
 
@@ -242,8 +260,9 @@ export function overlayPromotionRowDeltaOnCatalog(
 ): any[] {
   if (!Array.isArray(packagesList) || !delta) return packagesList;
   const tagMapEntries = Object.entries(delta.tagMap || {});
+  const repoTagEntries = Object.entries(delta.repoTagMap || {});
   const items = Array.isArray(delta.items) ? delta.items : [];
-  if (tagMapEntries.length === 0 && items.length === 0) return packagesList;
+  if (tagMapEntries.length === 0 && repoTagEntries.length === 0 && items.length === 0) return packagesList;
 
   let result: any[] | null = null;
   const indexByLowerId = new Map<string, number>();
@@ -277,14 +296,22 @@ export function overlayPromotionRowDeltaOnCatalog(
     }
   }
 
-  // 2. Inject brand-new ContentDB submissions that arrived after the 30-min catalog bundle was built
-  const baseList = result || packagesList;
+  // 1b. Stamp promotional tags onto existing catalog items matched by repository URL (e.g. Game Jam 2026 entries also on ContentDB)
+  const { packages: repoOverlaidList, matchedRepoKeys } = applyJam2026RepoOverlayOnCatalog(
+    result || packagesList,
+    delta.repoTagMap
+  );
+
+  // 2. Inject brand-new ContentDB or Jam 2026 submissions that arrived after the 30-min catalog bundle was built
+  const baseList = repoOverlaidList;
   const appendedNew: any[] = [];
   for (const item of items) {
     if (!item?.author || !item?.name) continue;
     const canonicalId = `${item.author}/${item.name}`;
     const lowerId = canonicalId.toLowerCase();
     if (blockedIds?.has(lowerId) || indexByLowerId.has(lowerId)) continue;
+    const itemRepoKey = normalizeRepoKey(item.repo_url || item.repo);
+    if (itemRepoKey && matchedRepoKeys.has(itemRepoKey)) continue;
 
     const itemTags = Array.from(
       new Set([
@@ -323,9 +350,9 @@ export function overlayPromotionRowDeltaOnCatalog(
       min_minetest_version: item.min_minetest_version || '5.0.0',
       created_at: item.created_at || isoDate,
       updated_at: item.updated_at || isoDate,
-      provider: 'contentdb',
-      source: 'official',
-      sources: ['official']
+      provider: item.provider || 'contentdb',
+      source: item.source || 'official',
+      sources: Array.isArray(item.sources) && item.sources.length > 0 ? item.sources : ['official']
     };
     indexByLowerId.set(lowerId, baseList.length + appendedNew.length);
     appendedNew.push(newCatalogItem);
@@ -606,7 +633,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       const targetUrl = new URL(proxyImageRaw);
       if (
         targetUrl.protocol !== 'https:' ||
-        !ALLOWED_IMAGE_PROXY_HOSTS.has(targetUrl.hostname.toLowerCase())
+        (!ALLOWED_IMAGE_PROXY_HOSTS.has(targetUrl.hostname.toLowerCase()) &&
+          !isJam2026AllowedImageHost(targetUrl.hostname))
       ) {
         return new Response('Forbidden image host', { status: 403 });
       }

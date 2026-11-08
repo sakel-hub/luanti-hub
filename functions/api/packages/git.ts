@@ -1,4 +1,5 @@
 // Ingestion & Static Audit Endpoint for Decentralized Git Repositories (Codeberg, GitLab, GitHub, Gitea)
+import { detectJam2026RootParticipationTags } from '../lib/jam-2026';
 import {
   verifySessionToken,
   parseCookies,
@@ -1287,6 +1288,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ...confTags,
         ...cdbTags,
         ...upstreamTags,
+        ...detectJam2026RootParticipationTags(discoveredRootEntries),
         ...(isAlsoOnContentDb ? ['contentdb'] : []),
         'git',
         provider,

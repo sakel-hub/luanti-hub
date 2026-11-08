@@ -7,6 +7,7 @@ import {
   normalizeGitRepoInputUrl,
   rewriteRelativeMarkdownUrls
 } from '../../../lib/upstream';
+import { fetchJam2026FallbackReadme } from '../../../lib/jam-2026';
 
 interface Env {
   DB?: any;
@@ -69,6 +70,9 @@ export async function onRequestGet(context: {
   let readme: string | undefined;
   if (repoUrl) {
     readme = await fetchRepoReadmeCached(repoUrl);
+    if (!readme) {
+      readme = await fetchJam2026FallbackReadme(repoUrl);
+    }
   }
 
   if (!readme && d1Pkg?.long_desc && d1Pkg.long_desc !== d1Pkg.short_desc && repoUrl) {

@@ -63,6 +63,7 @@ import {
   buildPackageCacheInvalidationKeys,
   BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../../../lib/upstream';
+import { fetchJam2026FallbackReadme } from '../../../lib/jam-2026';
 import {
   verifySessionToken,
   parseCookies,
@@ -1364,7 +1365,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       if (isGitPkg) sources.push('git');
       if (sources.length === 0) sources.push('git');
 
-      const readme = (!isLite && wantsReadme && resolvedRepo) ? await fetchRepoReadmeCached(resolvedRepo) : undefined;
+      let readme = (!isLite && wantsReadme && resolvedRepo) ? await fetchRepoReadmeCached(resolvedRepo) : undefined;
+      if (!readme && !isLite && wantsReadme && resolvedRepo && d1Tags.some((t: string) => String(t).toLowerCase() === 'jam_game_2026')) {
+        readme = await fetchJam2026FallbackReadme(resolvedRepo);
+      }
       const fallbackRawBase =
         gitScan?.rawBaseUrl ||
         (resolvedRepo
