@@ -1,5 +1,6 @@
 import { Injectable, signal } from '@angular/core';
 import { parseDownloadSizeBytes } from '../config/package-utils.config';
+import { isUntrustedTunnelOrPrivateHost } from '../config/git-providers.config';
 
 export type SandboxMemoryTier = 'constrained' | 'standard' | 'desktop';
 
@@ -227,6 +228,7 @@ export class SandboxMemoryGuardService {
           source?: string;
           sources?: string[];
           provider?: string;
+          repo_url?: string;
           git_repo_status?: 'verified' | 'broken_404' | 'unverified';
         }
       | null
@@ -234,6 +236,7 @@ export class SandboxMemoryGuardService {
   ): boolean {
     if (!pkg) return false;
     if (pkg.git_repo_status === 'broken_404') return false;
+    if (pkg.repo_url && isUntrustedTunnelOrPrivateHost(pkg.repo_url)) return false;
     const rawAuthorId = typeof pkg.author_id === 'string' ? pkg.author_id.trim() : '';
     const hasVerifiedAuthor = Boolean(rawAuthorId && !rawAuthorId.startsWith('ext_'));
     const isGitPkg =

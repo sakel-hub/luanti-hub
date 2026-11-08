@@ -534,6 +534,22 @@ function stopLuantiProcess() {
   return durationSec;
 }
 
+const EPHEMERAL_TUNNEL_HOST_PATTERN =
+  /(?:^|\.)(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|serveousercontent\.com|localhost\.run|lhr\.life|pinggy\.io|pinggy\.link|bore\.pub|zrok\.io|playit\.gg|telebit\.io|expose\.sh|pagekite\.me|pktriot\.net|tailscale\.com|ts\.net|webhook\.site|pipedream\.net|requestbin\.com|beeceptor\.com|oastify\.com|interact\.sh|burpcollaborator\.net)$/i;
+
+function isBlockedSandboxDownloadUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
+    const host = parsed.hostname.toLowerCase();
+    if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(host)) return true;
+    if (host === '169.254.169.254' || host === 'metadata.google.internal') return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 async function downloadAndExtractBundle(bundle, originBaseUrl) {
   const rawUrl = String(bundle.downloadUrl || '');
   const fullUrl = rawUrl.startsWith('http')
@@ -551,6 +567,9 @@ async function downloadAndExtractBundle(bundle, originBaseUrl) {
     : [cdbFallbackUrl, fullUrl];
 
   for (const candidate of candidates) {
+    if (isBlockedSandboxDownloadUrl(candidate)) {
+      continue;
+    }
     try {
       execFileSync('curl', [
         '-L',

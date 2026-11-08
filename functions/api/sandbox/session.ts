@@ -1,4 +1,15 @@
 import { getSandboxQuotaStatus, recordSandboxSessionUsage } from './quota';
+import { EPHEMERAL_TUNNEL_HOST_PATTERN, isUntrustedTunnelOrPrivateHost } from '../lib/upstream';
+
+function isEphemeralTunnelUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const parsed = new URL(rawUrl);
+    return EPHEMERAL_TUNNEL_HOST_PATTERN.test(parsed.hostname.toLowerCase());
+  } catch {
+    return EPHEMERAL_TUNNEL_HOST_PATTERN.test(rawUrl.toLowerCase());
+  }
+}
 
 interface Env {
   DB?: any;
@@ -17,6 +28,12 @@ function resolveContainerEndpoint(request: Request, env?: Env): {
   streamUrl: string;
 } {
   if (env?.SANDBOX_CONTAINER_URL) {
+    if (isUntrustedTunnelOrPrivateHost(env.SANDBOX_CONTAINER_URL)) {
+      return {
+        controlBaseUrl: '',
+        streamUrl: ''
+      };
+    }
     const base = env.SANDBOX_CONTAINER_URL.replace(/\/+$/, '');
     return {
       controlBaseUrl: base,
@@ -111,6 +128,21 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
 
   const body = await context.request.json().catch(() => ({} as any));
   const action = String(body.action || 'boot');
+  if (
+    isEphemeralTunnelUrl(body?.originUrl) ||
+    (Array.isArray(body?.bundles) &&
+      body.bundles.some((b: any) => isEphemeralTunnelUrl(b?.downloadUrl)))
+  ) {
+    return Response.json(
+      {
+        ok: false,
+        code: 'SANDBOX_UNTRUSTED_TUNNEL_URL',
+        message: 'Ephemeral tunnel URLs are not permitted in sandbox session requests.',
+        quota
+      },
+      { status: 403, headers: { 'Access-Control-Allow-Origin': '*' } }
+    );
+  }
   const { controlBaseUrl, streamUrl } = resolveContainerEndpoint(context.request, context.env);
 
   if (!controlBaseUrl && !context.env?.SANDBOX_SESSION) {

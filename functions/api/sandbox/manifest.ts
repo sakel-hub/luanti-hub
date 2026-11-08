@@ -257,11 +257,13 @@ export async function onRequestGet(context: {
   }
 
   const d1Tags = parseJsonArray(d1Pkg?.tags).map((t: any) => String(t || '').toLowerCase());
-  const hasValidRepoUrl = Boolean(d1Pkg?.repo_url && !isDefunctGitHost(String(d1Pkg.repo_url)));
+  const hasInvalidRepoUrl = Boolean(d1Pkg?.repo_url && isDefunctGitHost(String(d1Pkg.repo_url)));
+  const hasValidRepoUrl = Boolean(d1Pkg?.repo_url && !hasInvalidRepoUrl);
   const isGitPkg =
-    Boolean(d1Pkg?.provider && String(d1Pkg.provider).toLowerCase() !== 'contentdb') ||
-    d1Tags.includes('git') ||
-    hasValidRepoUrl;
+    !hasInvalidRepoUrl &&
+    (Boolean(d1Pkg?.provider && String(d1Pkg.provider).toLowerCase() !== 'contentdb') ||
+      d1Tags.includes('git') ||
+      hasValidRepoUrl);
 
   if (!d1Pkg || !hasVerifiedAuthor || !isGitPkg) {
     return Response.json(

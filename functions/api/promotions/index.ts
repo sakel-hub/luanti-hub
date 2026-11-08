@@ -8,6 +8,7 @@ import {
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables,
   invalidateEdgeCacheKeys,
+  isUntrustedTunnelOrPrivateHost,
   isValidActivePromotionRow,
   parseJsonArray,
   sanitizePublicErrorMessage,
@@ -75,7 +76,10 @@ export function normalizePromoUrl(raw: string, allowBareRelativeAsset = true): s
   if (trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
     try {
       const parsed = new URL(trimmed);
-      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      if (
+        (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+        !isUntrustedTunnelOrPrivateHost(parsed.hostname)
+      ) {
         return parsed.toString();
       }
     } catch {

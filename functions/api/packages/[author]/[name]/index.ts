@@ -2314,10 +2314,10 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         type: typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : 'mod',
         short_description: typeof body.short_desc === 'string' ? body.short_desc.trim() : '',
         long_description: '',
-        repo: typeof body.repo_url === 'string' ? body.repo_url.trim() : '',
+        repo: typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
         license: typeof body.license === 'string' && body.license.trim() ? body.license.trim() : 'MIT',
         media_license: typeof body.media_license === 'string' && body.media_license.trim() ? body.media_license.trim() : 'CC-BY-SA-4.0',
-        thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? body.thumbnail.trim() : null,
+        thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? (sanitizePackageImageUrl(body.thumbnail.trim()) || null) : null,
         tags: Array.isArray(body.tags) ? body.tags : []
       };
       const virtualPkgRow = {
