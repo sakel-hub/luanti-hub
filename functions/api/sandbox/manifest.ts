@@ -4,7 +4,10 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   buildSandboxManifestEdgeCacheKey,
-  isDefunctGitHost
+  isDefunctGitHost,
+  parseGitRepoTarget,
+  buildGitBranchArchiveUrl,
+  buildGitTagArchiveUrl
 } from '../lib/upstream';
 import { mergeLuantiHubAndContentDbGameSupport } from '../../../src/app/core/config/package-utils.config';
 import { getSandboxQuotaStatus, SandboxQuotaStatus } from './quota';
@@ -23,6 +26,7 @@ export interface SandboxBundleItem {
   type: 'mod' | 'game' | 'txp' | 'modpack';
   isPrimary: boolean;
   downloadUrl: string;
+  gitArchiveUrl?: string;
   mountPath: string;
   estimatedBytes: number;
 }
@@ -104,10 +108,36 @@ function normalizePackageType(raw?: string): 'mod' | 'game' | 'txp' | 'modpack' 
   return 'mod';
 }
 
+function resolveDirectGitArchiveUrl(
+  repoUrl?: string | null,
+  author?: string,
+  name?: string,
+  defaultBranch?: string | null,
+  releaseTag?: string
+): string | undefined {
+  if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim() || isDefunctGitHost(repoUrl)) {
+    return undefined;
+  }
+  const target = parseGitRepoTarget(repoUrl, author, name);
+  if (!target) return undefined;
+  const cleanTag = (releaseTag || '').trim();
+  if (cleanTag && cleanTag.toLowerCase() !== 'latest' && cleanTag.toUpperCase() !== 'HEAD') {
+    return buildGitTagArchiveUrl(target.provider, target.host, target.owner, target.repo, cleanTag);
+  }
+  const branch = (defaultBranch || '').trim() || 'HEAD';
+  return buildGitBranchArchiveUrl(repoUrl, author, name, branch);
+}
+
 async function resolveStandaloneModCandidate(
   depModName: string,
   env?: Env
-): Promise<{ author: string; name: string; title: string; estimatedBytes: number } | null> {
+): Promise<{
+  author: string;
+  name: string;
+  title: string;
+  estimatedBytes: number;
+  gitArchiveUrl?: string;
+} | null> {
   if (!env?.DB) return null;
 
   const cleanDep = String(depModName || '').trim();
@@ -120,19 +150,26 @@ async function resolveStandaloneModCandidate(
     const candName = cleanDep.slice(slashIdx + 1);
     try {
       const d1Row = await env.DB.prepare(
-        `SELECT author_name, name, title, type, download_size FROM packages WHERE status = 'active' AND LOWER(id) = LOWER(?) LIMIT 1`
+        `SELECT author_name, name, title, type, download_size, repo_url, default_branch FROM packages WHERE status = 'active' AND LOWER(id) = LOWER(?) LIMIT 1`
       )
         .bind(cleanDep)
         .first();
       if (d1Row?.type) {
         const pkgType = normalizePackageType(d1Row.type);
         if (pkgType === 'mod' || pkgType === 'modpack') {
+          const resolvedAuthor = d1Row.author_name || candAuthor;
           const resolvedName = d1Row.name || candName;
           return {
-            author: d1Row.author_name || candAuthor,
+            author: resolvedAuthor,
             name: resolvedName,
             title: d1Row.title || resolvedName,
-            estimatedBytes: Number(d1Row.download_size || 0)
+            estimatedBytes: Number(d1Row.download_size || 0),
+            gitArchiveUrl: resolveDirectGitArchiveUrl(
+              d1Row.repo_url,
+              resolvedAuthor,
+              resolvedName,
+              d1Row.default_branch
+            )
           };
         }
         return null;
@@ -145,7 +182,7 @@ async function resolveStandaloneModCandidate(
   // 2. Look up standalone mod/modpack by technical mod name in D1
   try {
     const row = await env.DB.prepare(
-      `SELECT author_name, name, title, type, download_size FROM packages WHERE status = 'active' AND LOWER(type) IN ('mod', 'modpack') AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
+      `SELECT author_name, name, title, type, download_size, repo_url, default_branch FROM packages WHERE status = 'active' AND LOWER(type) IN ('mod', 'modpack') AND LOWER(name) = LOWER(?) ORDER BY downloads_count DESC LIMIT 1`
     )
       .bind(cleanDep)
       .first();
@@ -154,7 +191,13 @@ async function resolveStandaloneModCandidate(
         author: row.author_name,
         name: row.name,
         title: row.title || row.name,
-        estimatedBytes: Number(row.download_size || 0)
+        estimatedBytes: Number(row.download_size || 0),
+        gitArchiveUrl: resolveDirectGitArchiveUrl(
+          row.repo_url,
+          row.author_name,
+          row.name,
+          row.default_branch
+        )
       };
     }
   } catch {
@@ -218,7 +261,7 @@ export async function onRequestGet(context: {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       d1Pkg = await context.env.DB.prepare(
-        `SELECT id, author_id, author_name, name, title, type, status, status_reason, provider, repo_url, tags, dependencies, optional_dependencies, supports_all_games, game_support, download_size
+        `SELECT id, author_id, author_name, name, title, type, status, status_reason, provider, repo_url, default_branch, tags, dependencies, optional_dependencies, supports_all_games, game_support, download_size
          FROM packages
          WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
          LIMIT 1`
@@ -295,6 +338,14 @@ export async function onRequestGet(context: {
         ? `/textures/${safeModDir}`
         : `/mods/${safeModDir}`;
 
+  const primaryGitArchiveUrl = resolveDirectGitArchiveUrl(
+    d1Pkg.repo_url,
+    effectiveAuthor,
+    effectiveName,
+    d1Pkg.default_branch,
+    rawRelease
+  );
+
   const bundles: SandboxBundleItem[] = [
     {
       id: `${effectiveAuthor}/${effectiveName}`,
@@ -304,6 +355,7 @@ export async function onRequestGet(context: {
       type: effectiveType,
       isPrimary: true,
       downloadUrl: `/api/packages/${encodeURIComponent(effectiveAuthor)}/${encodeURIComponent(effectiveName)}/download?sandbox=1${releaseQuery}`,
+      ...(primaryGitArchiveUrl ? { gitArchiveUrl: primaryGitArchiveUrl } : {}),
       mountPath: primaryMountPath,
       estimatedBytes: primaryBytes
     }
@@ -403,6 +455,7 @@ export async function onRequestGet(context: {
           type: 'mod',
           isPrimary: false,
           downloadUrl: `/api/packages/${encodeURIComponent(candidate.author)}/${encodeURIComponent(candidate.name)}/download?sandbox=1`,
+          ...(candidate.gitArchiveUrl ? { gitArchiveUrl: candidate.gitArchiveUrl } : {}),
           mountPath: `/mods/${safeDepDir}`,
           estimatedBytes: candidate.estimatedBytes || 0
         });

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS packages (
     license TEXT NOT NULL,
     media_license TEXT NOT NULL,
     tags TEXT,                           -- JSON array of tag strings
+    badge_tags TEXT,                     -- JSON array of verified LuantiHub badge tags
     dependencies TEXT,                   -- JSON array of required dependency names
     optional_dependencies TEXT,          -- JSON array of optional dependency names
     min_minetest_version TEXT DEFAULT '5.0.0',

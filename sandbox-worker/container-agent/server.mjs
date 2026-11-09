@@ -552,19 +552,21 @@ function isBlockedSandboxDownloadUrl(rawUrl) {
 
 async function downloadAndExtractBundle(bundle, originBaseUrl) {
   const rawUrl = String(bundle.downloadUrl || '');
+  const gitArchiveUrl = typeof bundle.gitArchiveUrl === 'string' ? bundle.gitArchiveUrl.trim() : '';
   const fullUrl = rawUrl.startsWith('http')
     ? rawUrl
     : `${originBaseUrl.replace(/\/+$/, '')}${rawUrl.startsWith('/') ? rawUrl : '/' + rawUrl}`;
 
-  // Prefer direct ContentDB CDN stream first to avoid blocking single-threaded local wrangler dev
+  // Prefer direct Git repository archive URL or ContentDB CDN stream first to avoid blocking single-threaded local wrangler dev
   const cdbFallbackUrl = `https://content.luanti.org/packages/${encodeURIComponent(bundle.author)}/${encodeURIComponent(bundle.name)}/download/`;
 
   const tmpZip = `/tmp/pkg_${Date.now()}_${Math.random().toString(36).slice(2)}.zip`;
   let downloaded = false;
 
-  const candidates = rawUrl.startsWith('http://content.luanti.org') || rawUrl.startsWith('https://content.luanti.org')
+  const baseCandidates = rawUrl.startsWith('http://content.luanti.org') || rawUrl.startsWith('https://content.luanti.org')
     ? [rawUrl]
     : [cdbFallbackUrl, fullUrl];
+  const candidates = gitArchiveUrl ? [gitArchiveUrl, ...baseCandidates] : baseCandidates;
 
   for (const candidate of candidates) {
     if (isBlockedSandboxDownloadUrl(candidate)) {

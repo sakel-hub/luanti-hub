@@ -37,6 +37,7 @@ export interface SandboxBundleDescriptor {
   type: 'mod' | 'game' | 'txp' | 'modpack';
   isPrimary: boolean;
   downloadUrl: string;
+  gitArchiveUrl?: string;
   mountPath: string;
   estimatedBytes: number;
 }

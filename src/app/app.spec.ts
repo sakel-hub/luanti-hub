@@ -13433,6 +13433,7 @@ core.register_node(modname .. ":panel", {
       id: 'mcl_author/nether_wand',
       type: 'mod',
       isPrimary: true,
+      gitArchiveUrl: 'https://github.com/mcl_author/nether_wand/archive/HEAD.zip',
       mountPath: '/mods/nether_wand'
     });
 
@@ -13695,5 +13696,23 @@ core.register_node(modname .. ":panel", {
     expect(tunnelSandboxRes.status).toBe(403);
     const tunnelSandboxJson = await tunnelSandboxRes.json();
     expect(tunnelSandboxJson.code).toBe('SANDBOX_UNTRUSTED_TUNNEL_URL');
+
+    const tunnelGitArchiveRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'boot',
+          bundles: [
+            {
+              downloadUrl: '/api/packages/author/mod/download?sandbox=1',
+              gitArchiveUrl: 'https://evil-tunnel.trycloudflare.com/archive/main.zip'
+            }
+          ]
+        })
+      }),
+      env: {}
+    });
+    expect(tunnelGitArchiveRes.status).toBe(403);
   });
 });

@@ -131,7 +131,9 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
   if (
     isEphemeralTunnelUrl(body?.originUrl) ||
     (Array.isArray(body?.bundles) &&
-      body.bundles.some((b: any) => isEphemeralTunnelUrl(b?.downloadUrl)))
+      body.bundles.some(
+        (b: any) => isEphemeralTunnelUrl(b?.downloadUrl) || isEphemeralTunnelUrl(b?.gitArchiveUrl)
+      ))
   ) {
     return Response.json(
       {
@@ -161,9 +163,14 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
 
   try {
     const reqOrigin = new URL(context.request.url, 'http://localhost:8788').origin;
+    const normalizedDockerOrigin = reqOrigin
+      .replace('localhost:4200', 'host.docker.internal:8788')
+      .replace('127.0.0.1:4200', 'host.docker.internal:8788')
+      .replace('localhost', 'host.docker.internal')
+      .replace('127.0.0.1', 'host.docker.internal');
     const forwardPayload = {
       ...body,
-      originUrl: body.originUrl || reqOrigin.replace('localhost', 'host.docker.internal').replace('127.0.0.1', 'host.docker.internal')
+      originUrl: body.originUrl || normalizedDockerOrigin
     };
 
     const ctrl = new AbortController();
