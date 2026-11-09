@@ -561,7 +561,10 @@ export const LUANTIHUB_BADGE_TAGS: Array<{
  */
 export function parseBadgeTagsArray(val: unknown): string[] {
   const raw = parseJsonArray(val);
-  const validSet = new Set(LUANTIHUB_BADGE_TAGS.map(b => b.name.toLowerCase()));
+  const validSet = new Set([
+    ...LUANTIHUB_BADGE_TAGS.map(b => b.name.toLowerCase()),
+    'jam_game_2026'
+  ]);
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of raw) {

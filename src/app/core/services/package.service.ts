@@ -1020,6 +1020,39 @@ export class PackageService {
     this.syncQueryParamsToUrl(false, true);
   }
 
+  private readonly promoTagSyncInFlight = new Set<string>();
+
+  private persistPromotionalTagsForPackage(
+    lowerId: string,
+    tags: string[],
+    badgeTags?: string[]
+  ): void {
+    if (!lowerId) return;
+    const prevMeta = this.hydratedMetaCache.get(lowerId) || {};
+    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMeta.tags);
+    const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...(prevMeta.badge_tags || [])]);
+    this.hydratedMetaCache.set(lowerId, {
+      ...prevMeta,
+      tags: mergedTags,
+      ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+    });
+    this._serverRecentlyAdded.update(list =>
+      list.map(item => {
+        if ((item.id || `${item.author}/${item.name}`).toLowerCase() !== lowerId) return item;
+        const nextItemTags = this.mergePackageTagsPreservingExisting(mergedTags, item.tags);
+        const nextItemBadgeTags = parseBadgeTagsArray([
+          ...mergedBadgeTags,
+          ...(item.badge_tags || [])
+        ]);
+        return {
+          ...item,
+          tags: nextItemTags,
+          ...(nextItemBadgeTags.length > 0 ? { badge_tags: nextItemBadgeTags } : {})
+        };
+      })
+    );
+  }
+
   private syncClientPromotionRowTags(activePromos: HeroPromotion[]): void {
     const rowPromos = activePromos.filter(p =>
       Boolean(p.row_enabled === true || p.row_enabled === 1 || (p.row_enabled as any) === '1')
@@ -1038,36 +1071,62 @@ export class PackageService {
 
     this.ensureTagsRegisteredInAvailableTags(allRowTags);
 
+    const currentPkgs = this._packages();
+    if (currentPkgs.length === 0) return;
+
+    let cachedMetaUpdated = false;
+    for (const tag of allRowTags.slice(0, 3)) {
+      const lowerTag = tag.toLowerCase();
+      const stampedPkgs = currentPkgs.filter(p =>
+        (p.tags || []).some(t => t.toLowerCase() === lowerTag)
+      );
+      if (stampedPkgs.length > 0) {
+        this.syncedPromoTagsInSession.add(lowerTag);
+        for (const sp of stampedPkgs) {
+          this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags);
+          cachedMetaUpdated = true;
+        }
+      }
+    }
+    if (cachedMetaUpdated) {
+      this.scheduleHydratedMetaPersist();
+    }
+
     const isUnitTestEnv =
       typeof (globalThis as any).describe === 'function' &&
       typeof (globalThis as any).it === 'function';
     if (isUnitTestEnv || typeof fetch !== 'function') return;
 
-    const currentPkgs = this._packages();
-    if (currentPkgs.length === 0) return;
-
     for (const tag of allRowTags.slice(0, 3)) {
       const lowerTag = tag.toLowerCase();
-      if (this.syncedPromoTagsInSession.has(lowerTag)) continue;
-      // Check if catalog already has packages stamped with this tag from the Edge Worker
+      // Check if current catalog already has packages stamped with this tag
       const alreadyStampedCount = currentPkgs.filter(p =>
         (p.tags || []).some(t => t.toLowerCase() === lowerTag)
       ).length;
-      if (alreadyStampedCount > 0) {
-        this.syncedPromoTagsInSession.add(lowerTag);
+      if (alreadyStampedCount > 0 || this.promoTagSyncInFlight.has(lowerTag)) {
         continue;
       }
 
+      this.promoTagSyncInFlight.add(lowerTag);
       this.syncedPromoTagsInSession.add(lowerTag);
       (async () => {
         try {
+          let stampedAny = false;
           await syncJam2026ClientRowTagIfNeeded({
             tag,
             packagesSignal: this._packages,
             normalizePackage: (raw) => this.normalizePackage(raw),
             deduplicateCatalog: (pkgs) => this.deduplicateCatalog(pkgs),
-            buildSearchBlob: (pkg) => this.buildSearchBlob(pkg)
+            buildSearchBlob: (pkg) => this.buildSearchBlob(pkg),
+            onPackageStamped: (lowerId, tags, badgeTags) => {
+              stampedAny = true;
+              this.persistPromotionalTagsForPackage(lowerId, tags, badgeTags);
+            }
           });
+          if (stampedAny) {
+            this.scheduleHydratedMetaPersist();
+            this.scheduleBootCachePersist();
+          }
           const list = await this.fetchUpstreamWithMirrorFallback(
             `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
           );
@@ -1091,9 +1150,11 @@ export class PackageService {
 
           this._packages.update(pkgs => {
             const updated = pkgs.map(pkg => {
-              if (!matchedLowerIds.has(pkg.id.toLowerCase())) return pkg;
+              const lowerId = pkg.id.toLowerCase();
+              if (!matchedLowerIds.has(lowerId)) return pkg;
               if ((pkg.tags || []).some(t => t.toLowerCase() === lowerTag)) return pkg;
               const nextTags = [...(pkg.tags || []), tag];
+              this.persistPromotionalTagsForPackage(lowerId, nextTags, pkg.badge_tags);
               return {
                 ...pkg,
                 tags: nextTags,
@@ -1101,12 +1162,19 @@ export class PackageService {
               };
             });
             const normalizedNew = newRawItems.map(it => this.normalizePackage(it));
+            for (const np of normalizedNew) {
+              this.persistPromotionalTagsForPackage(np.id.toLowerCase(), np.tags, np.badge_tags);
+            }
             return normalizedNew.length > 0
               ? this.deduplicateCatalog([...normalizedNew, ...updated])
               : updated;
           });
+          this.scheduleHydratedMetaPersist();
+          this.scheduleBootCachePersist();
         } catch {
           // Non-fatal fallback
+        } finally {
+          this.promoTagSyncInFlight.delete(lowerTag);
         }
       })();
     }
@@ -2280,6 +2348,59 @@ export class PackageService {
     return [];
   }
 
+  /**
+   * Merges incoming and existing package tag arrays case-insensitively without losing
+   * previously stamped promotional/event tags (such as `jam_game_2026` or `gamejam`)
+   * when background tile hydration (`/api/packages/hydrate`) or detail probing returns
+   * a subset of tags (e.g. `['git']`).
+   */
+  private mergePackageTagsPreservingExisting(
+    primaryTags?: string[] | null,
+    ...fallbackTagLists: Array<string[] | undefined | null>
+  ): string[] {
+    const result: string[] = [];
+    const seenLower = new Set<string>();
+    const pushTag = (raw: unknown) => {
+      if (typeof raw !== 'string') return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      const lower = trimmed.toLowerCase();
+      if (seenLower.has(lower)) return;
+      seenLower.add(lower);
+      result.push(trimmed);
+    };
+
+    if (Array.isArray(primaryTags)) {
+      for (const t of primaryTags) pushTag(t);
+    }
+    for (const list of fallbackTagLists) {
+      if (!Array.isArray(list)) continue;
+      for (const t of list) pushTag(t);
+    }
+
+    if (result.length > 1) {
+      const bareTypeFallbackTags = new Set(['mod', 'game', 'txp', 'texture_pack']);
+      const nonTypeTags = result.filter(t => !bareTypeFallbackTags.has(t.toLowerCase()));
+      if (nonTypeTags.length > 0) {
+        const primaryLower = new Set(
+          (Array.isArray(primaryTags) ? primaryTags : [])
+            .map(t => (typeof t === 'string' ? t.trim().toLowerCase() : ''))
+            .filter(Boolean)
+        );
+        const primaryHadNonType = Array.from(primaryLower).some(t => !bareTypeFallbackTags.has(t));
+        const filtered = result.filter(t => {
+          const lower = t.toLowerCase();
+          if (!bareTypeFallbackTags.has(lower)) return true;
+          return primaryHadNonType && primaryLower.has(lower);
+        });
+        if (filtered.length > 0) {
+          return filtered;
+        }
+      }
+    }
+    return result;
+  }
+
   private normalizePackage(item: any): LuantiPackage {
     const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
     const pkgId = item.id || `${resolvedAuthor}/${item.name}`;
@@ -2414,9 +2535,10 @@ export class PackageService {
     const rawTagsFromItem = parsedTagList
       .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
       .filter(Boolean);
-    const rawTags = rawTagsFromItem.length > 0
-      ? rawTagsFromItem
-      : (Array.isArray(cachedMeta?.tags) ? cachedMeta!.tags! : []);
+    const rawTags = this.mergePackageTagsPreservingExisting(
+      rawTagsFromItem,
+      Array.isArray(cachedMeta?.tags) ? cachedMeta!.tags! : undefined
+    );
 
     const lowerTags = rawTags.map((t: string) => t.toLowerCase());
     const explicitSources: PackageSource[] = Array.isArray(item.sources)
@@ -2491,7 +2613,10 @@ export class PackageService {
       [...deps, ...optDeps]
     );
     const parsedScreenshotMeta = parseScreenshotMetaArray(item.screenshot_meta ?? cachedMeta?.screenshot_meta);
-    const parsedBadgeTags = parseBadgeTagsArray(item.badge_tags ?? cachedMeta?.badge_tags);
+    const parsedBadgeTags = parseBadgeTagsArray([
+      ...this.parseArrayField(item.badge_tags),
+      ...this.parseArrayField(cachedMeta?.badge_tags)
+    ]);
     if (lowerTags.includes(ORGANIC_CODE_TAG) && !parsedBadgeTags.includes(ORGANIC_CODE_TAG)) {
       parsedBadgeTags.push(ORGANIC_CODE_TAG);
     }
@@ -2659,7 +2784,7 @@ export class PackageService {
       : (incomingIsOfficial && !existingIsOfficial ? incoming : existing);
     const secondary = primary === existing ? incoming : existing;
 
-    const mergedTags = Array.from(new Set([...(primary.tags || []), ...(secondary.tags || [])]));
+    const mergedTags = this.mergePackageTagsPreservingExisting(primary.tags, secondary.tags);
     const mergedBadgeTags = Array.from(
       new Set([
         ...parseBadgeTagsArray(primary.badge_tags),
@@ -3768,10 +3893,34 @@ export class PackageService {
         this.ensureLatestBlogPostLoaded(false, true);
       }
     }
+    const prevPackages = this._packages();
+    const prevByLowerId = new Map<string, LuantiPackage>();
+    const activeRowTagSet = new Set([
+      'jam_game_2026',
+      'gamejam',
+      ...this.activePromotions()
+        .filter(p => Boolean(p.row_enabled === true || p.row_enabled === 1 || (p.row_enabled as any) === '1'))
+        .flatMap(p => this.parseStringList(p.row_filter_tags))
+        .map(t => t.trim().toLowerCase())
+        .filter(Boolean)
+    ]);
+    const preservedPromoPackages: LuantiPackage[] = [];
+    for (const prev of prevPackages) {
+      if (!prev?.id) continue;
+      prevByLowerId.set(prev.id.toLowerCase(), prev);
+      if (
+        activeRowTagSet.size > 0 &&
+        Array.isArray(prev.tags) &&
+        prev.tags.some(t => activeRowTagSet.has(String(t || '').toLowerCase()))
+      ) {
+        preservedPromoPackages.push(prev);
+      }
+    }
+
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const rawRecentlyAdded = Array.isArray(payload.recentlyAdded) ? payload.recentlyAdded : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
-    const combinedRaw = [...rawPackages, ...rawRecentlyAdded, ...userPkgs];
+    const combinedRaw = [...rawPackages, ...rawRecentlyAdded, ...userPkgs, ...preservedPromoPackages];
     const deduplicated = this.deduplicateCatalog(
       combinedRaw
         .filter((item: any) => item && (item.author || item.author_name || item.id) && item.name && item.status !== 'delisted' && item.status !== 'flagged')
@@ -3781,7 +3930,19 @@ export class PackageService {
     const normalizeTop10Entry = (item: any): LuantiPackage => {
       const norm = this.normalizePackage(item);
       const revDepCount = reverseDepMap.get(String(norm.name || '').toLowerCase()) || norm.reverse_dep_count || 0;
-      return revDepCount !== norm.reverse_dep_count ? { ...norm, reverse_dep_count: revDepCount } : norm;
+      const prev = prevByLowerId.get(norm.id.toLowerCase());
+      const mergedTags = prev?.tags?.length
+        ? this.mergePackageTagsPreservingExisting(norm.tags, prev.tags)
+        : norm.tags;
+      const mergedBadgeTags = prev?.badge_tags?.length
+        ? parseBadgeTagsArray([...(norm.badge_tags || []), ...prev.badge_tags])
+        : norm.badge_tags;
+      return {
+        ...norm,
+        ...(revDepCount !== norm.reverse_dep_count ? { reverse_dep_count: revDepCount } : {}),
+        tags: mergedTags,
+        ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+      };
     };
 
     let normalizedRecent: LuantiPackage[] = [];
@@ -3811,14 +3972,35 @@ export class PackageService {
     };
 
     const normalized = deduplicated.map(pkg => {
+      const lowerId = pkg.id.toLowerCase();
+      const prev = prevByLowerId.get(lowerId);
       const revDepCount = reverseDepMap.get(String(pkg.name || '').toLowerCase()) || pkg.reverse_dep_count || 0;
-      const stampedCreatedAt = pickNewerCreatedIso(pkg.created_at, recentCreatedById.get(pkg.id.toLowerCase()));
-      if (revDepCount !== pkg.reverse_dep_count || (stampedCreatedAt && stampedCreatedAt !== pkg.created_at)) {
-        return {
+      const stampedCreatedAt = pickNewerCreatedIso(pkg.created_at, recentCreatedById.get(lowerId));
+      const mergedTags = prev?.tags?.length
+        ? this.mergePackageTagsPreservingExisting(pkg.tags, prev.tags)
+        : pkg.tags;
+      const mergedBadgeTags = prev?.badge_tags?.length
+        ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...prev.badge_tags])
+        : pkg.badge_tags;
+      const tagsChanged =
+        mergedTags.length !== (pkg.tags?.length || 0) ||
+        (mergedBadgeTags?.length || 0) !== (pkg.badge_tags?.length || 0);
+      if (
+        revDepCount !== pkg.reverse_dep_count ||
+        (stampedCreatedAt && stampedCreatedAt !== pkg.created_at) ||
+        tagsChanged
+      ) {
+        const nextPkg: LuantiPackage = {
           ...pkg,
           reverse_dep_count: revDepCount,
-          ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {})
+          ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {}),
+          tags: mergedTags,
+          ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
         };
+        if (tagsChanged) {
+          nextPkg._searchBlob = this.buildSearchBlob(nextPkg);
+        }
+        return nextPkg;
       }
       return pkg;
     });
@@ -3917,8 +4099,8 @@ export class PackageService {
             updated_at: freshMatch.updated_at || curr.updated_at,
             download_size: freshMatch.download_size || curr.download_size,
             file_size: freshMatch.file_size || curr.file_size,
-            tags: freshMatch.tags?.length ? freshMatch.tags : curr.tags,
-            badge_tags: freshMatch.badge_tags?.length ? freshMatch.badge_tags : curr.badge_tags
+            tags: this.mergePackageTagsPreservingExisting(freshMatch.tags, curr.tags),
+            badge_tags: parseBadgeTagsArray([...(freshMatch.badge_tags || []), ...(curr.badge_tags || [])])
           };
         });
       }
@@ -5243,6 +5425,43 @@ export class PackageService {
     }
   }
 
+  private applyCatalogPatchToPackageItem(
+    item: LuantiPackage,
+    patch: Partial<LuantiPackage>,
+    preserveNewerCreatedAt = false
+  ): LuantiPackage {
+    const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
+    const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(key);
+    const mergedTags =
+      patch.tags !== undefined
+        ? (isRecentlyMutated ? patch.tags : this.mergePackageTagsPreservingExisting(patch.tags, item.tags))
+        : item.tags;
+    const mergedBadgeTags =
+      patch.badge_tags !== undefined
+        ? (isRecentlyMutated
+            ? patch.badge_tags
+            : parseBadgeTagsArray([...(patch.badge_tags || []), ...(item.badge_tags || [])]))
+        : item.badge_tags;
+    let resolvedCreatedAt = patch.created_at ?? item.created_at;
+    if (preserveNewerCreatedAt) {
+      const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
+      const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
+      resolvedCreatedAt =
+        Number.isFinite(itemMs) && Number.isFinite(patchMs)
+          ? (itemMs >= patchMs ? item.created_at : patch.created_at)
+          : (item.created_at || patch.created_at);
+    }
+    const merged: LuantiPackage = {
+      ...item,
+      ...patch,
+      ...(resolvedCreatedAt ? { created_at: resolvedCreatedAt } : {}),
+      tags: mergedTags,
+      ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+    };
+    merged._searchBlob = this.buildSearchBlob(merged);
+    return merged;
+  }
+
   private flushCatalogPatches(): void {
     if (this.catalogPatchTimer) {
       clearTimeout(this.catalogPatchTimer);
@@ -5257,9 +5476,7 @@ export class PackageService {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
         if (!patch) return item;
-        const merged = { ...item, ...patch };
-        merged._searchBlob = this.buildSearchBlob(merged);
-        return merged;
+        return this.applyCatalogPatchToPackageItem(item, patch, false);
       })
     );
 
@@ -5267,20 +5484,13 @@ export class PackageService {
       list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
-        return patch ? { ...item, ...patch } : item;
+        return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
       });
     const syncRecentlyAdded = (list: LuantiPackage[]) =>
       list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
-        if (!patch) return item;
-        const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
-        const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
-        const preservedCreatedAt =
-          Number.isFinite(itemMs) && Number.isFinite(patchMs)
-            ? (itemMs >= patchMs ? item.created_at : patch.created_at)
-            : (item.created_at || patch.created_at);
-        return { ...item, ...patch, created_at: preservedCreatedAt };
+        return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
       });
     this._serverTop10Today.update(syncTop10);
     this._serverTop10Week.update(syncTop10);
@@ -5289,7 +5499,29 @@ export class PackageService {
 
   private queueCatalogPatch(targetIdLower: string, patch: Partial<LuantiPackage>, flushImmediately = false): void {
     const existing = this.pendingCatalogPatches.get(targetIdLower);
-    this.pendingCatalogPatches.set(targetIdLower, existing ? { ...existing, ...patch } : patch);
+    if (existing) {
+      const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(targetIdLower);
+      const mergedTags =
+        patch.tags !== undefined || existing.tags !== undefined
+          ? (isRecentlyMutated && patch.tags !== undefined
+              ? patch.tags
+              : this.mergePackageTagsPreservingExisting(patch.tags, existing.tags))
+          : undefined;
+      const mergedBadgeTags =
+        patch.badge_tags !== undefined || existing.badge_tags !== undefined
+          ? (isRecentlyMutated && patch.badge_tags !== undefined
+              ? patch.badge_tags
+              : parseBadgeTagsArray([...(patch.badge_tags || []), ...(existing.badge_tags || [])]))
+          : undefined;
+      this.pendingCatalogPatches.set(targetIdLower, {
+        ...existing,
+        ...patch,
+        ...(mergedTags !== undefined ? { tags: mergedTags } : {}),
+        ...(mergedBadgeTags !== undefined ? { badge_tags: mergedBadgeTags } : {})
+      });
+    } else {
+      this.pendingCatalogPatches.set(targetIdLower, patch);
+    }
     if (flushImmediately || this.activeHydrationWorkers === 0) {
       this.flushCatalogPatches();
       return;
@@ -5467,11 +5699,23 @@ export class PackageService {
           const totalDl = Math.max(Number(pkg.downloads || 0), Number(h.downloads || 0), cdbDl + lhDl);
           const lic = h.license || h.media_license || pkg.license || '';
           const mediaLic = h.media_license || h.license || pkg.media_license || '';
-          const tags = Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : pkg.tags;
-          const badgeTags =
-            Array.isArray(h.badge_tags) && h.badge_tags.length > 0
-              ? parseBadgeTagsArray(h.badge_tags)
-              : (pkg.badge_tags && pkg.badge_tags.length > 0 ? parseBadgeTagsArray(pkg.badge_tags) : undefined);
+          const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
+          const livePkgForHydrate = this._packages().find(
+            p => (p.id || `${p.author}/${p.name}`).toLowerCase() === lowerKey
+          );
+          const tags = this.mergePackageTagsPreservingExisting(
+            Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : undefined,
+            pkg.tags,
+            livePkgForHydrate?.tags,
+            prevMetaForHydrate?.tags
+          );
+          const mergedBadgeTags = parseBadgeTagsArray([
+            ...(Array.isArray(h.badge_tags) ? h.badge_tags : []),
+            ...(pkg.badge_tags || []),
+            ...(livePkgForHydrate?.badge_tags || []),
+            ...(prevMetaForHydrate?.badge_tags || [])
+          ]);
+          const badgeTags = mergedBadgeTags.length > 0 ? mergedBadgeTags : undefined;
           const minVer = h.min_minetest_version || pkg.min_minetest_version || '5.0.0';
           const sizeFormatted = h.file_size || this.formatDownloadSize(h.download_size) || pkg.file_size;
           const resolvedVideo = this.extractEmbeddedVideo(
@@ -5621,29 +5865,20 @@ export class PackageService {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
                 if (!patch) return item;
-                const merged = { ...item, ...patch };
-                merged._searchBlob = this.buildSearchBlob(merged);
-                return merged;
+                return this.applyCatalogPatchToPackageItem(item, patch, false);
               })
             );
             const patchTopList = (list: LuantiPackage[]) =>
               list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
-                return patch ? { ...item, ...patch } : item;
+                return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
               });
             const patchRecentlyAddedList = (list: LuantiPackage[]) =>
               list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
-                if (!patch) return item;
-                const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
-                const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
-                const preservedCreatedAt =
-                  Number.isFinite(itemMs) && Number.isFinite(patchMs)
-                    ? (itemMs >= patchMs ? item.created_at : patch.created_at)
-                    : (item.created_at || patch.created_at);
-                return { ...item, ...patch, created_at: preservedCreatedAt };
+                return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
               });
             this._serverTop10Today.update(patchTopList);
             this._serverTop10Week.update(patchTopList);
@@ -8161,9 +8396,20 @@ export class PackageService {
         const badgeTags =
           isRecentlyMutated && cachedMetaBadgeTags !== undefined
             ? cachedMetaBadgeTags
-            : (dataBadgeTags !== undefined && (dataBadgeTags.length > 0 || (pkgBadgeTags.length === 0 && (!cachedMetaBadgeTags || cachedMetaBadgeTags.length === 0)))
-                ? dataBadgeTags
-                : (pkgBadgeTags.length > 0 ? pkgBadgeTags : (cachedMetaBadgeTags ?? [])));
+            : parseBadgeTagsArray([
+                ...(dataBadgeTags || []),
+                ...pkgBadgeTags,
+                ...(cachedMetaBadgeTags || [])
+              ]);
+        const mergedDetailTags =
+          isRecentlyMutated && Array.isArray(cachedMetaEntry?.tags) && cachedMetaEntry.tags.length > 0
+            ? cachedMetaEntry.tags
+            : this.mergePackageTagsPreservingExisting(
+                rawTags.length > 0 ? rawTags : undefined,
+                pkg.tags,
+                liveCatalogPkg?.tags,
+                cachedMetaEntry?.tags
+              );
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -8173,8 +8419,8 @@ export class PackageService {
           this.setBoundedCache(this.readmeCache, cacheKey, readmeText, 40);
         }
 
-        if (rawTags.length > 0 || badgeTags.length > 0) {
-          this.ensureTagsRegisteredInAvailableTags([...rawTags, ...badgeTags]);
+        if (mergedDetailTags.length > 0 || badgeTags.length > 0) {
+          this.ensureTagsRegisteredInAvailableTags([...mergedDetailTags, ...badgeTags]);
         }
 
         const resolvedCreatedAt =
@@ -8201,7 +8447,7 @@ export class PackageService {
           score_downloads: data.score_downloads !== undefined ? Number(data.score_downloads) || 0 : pkg.score_downloads,
           score_reviews: data.score_reviews !== undefined ? Number(data.score_reviews) || 0 : pkg.score_reviews,
           score: resolvedScore,
-          tags: rawTags.length > 0 ? rawTags : pkg.tags,
+          tags: mergedDetailTags.length > 0 ? mergedDetailTags : pkg.tags,
           ...(badgeTags.length > 0 || data.badge_tags !== undefined ? { badge_tags: badgeTags } : {}),
           screenshots,
           ...(screenshotMeta ? { screenshot_meta: screenshotMeta } : {}),
@@ -8260,7 +8506,7 @@ export class PackageService {
               : {}),
             rating_checked: true,
             dev_state: data.dev_state ?? prevMeta.dev_state,
-            tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
+            tags: mergedDetailTags.length > 0 ? mergedDetailTags : prevMeta.tags,
             ...(badgeTags.length > 0 ? { badge_tags: badgeTags } : prevMeta.badge_tags ? { badge_tags: prevMeta.badge_tags } : {}),
             download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
             file_size: sizeFormatted || prevMeta.file_size,

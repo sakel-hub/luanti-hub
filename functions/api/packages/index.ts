@@ -1399,9 +1399,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (promoDelta && overlaidPackages.length > 0) {
             overlaidPackages = overlayPromotionRowDeltaOnCatalog(overlaidPackages, promoDelta);
           }
+          const overlaidRecent =
+            promoDelta && Array.isArray(edgeBody.recentlyAdded) && edgeBody.recentlyAdded.length > 0
+              ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, promoDelta)
+              : edgeBody.recentlyAdded;
           edgeBody = {
             ...edgeBody,
             packages: overlaidPackages,
+            ...(Array.isArray(overlaidRecent) ? { recentlyAdded: overlaidRecent } : {}),
             promotions: validEdgePromos
           };
         }

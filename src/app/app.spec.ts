@@ -12130,13 +12130,75 @@ core.register_node(modname .. ":panel", {
     comp.openLightbox('https://luantihub.org/screenshots/pixie.png');
     fixture.detectChanges();
 
-    const lightboxDialog = fixture.nativeElement.querySelector('[role="dialog"].z-\\[70\\]');
+    const lightboxDialog = fixture.nativeElement.querySelector('[role="dialog"].z-\\[70\\]') as HTMLElement | null;
     expect(lightboxDialog).toBeTruthy();
-    const controlsContainer = lightboxDialog.querySelector('.luanti-wco-no-drag') as HTMLElement | null;
+    expect(lightboxDialog?.className).toContain('w-screen');
+    expect(lightboxDialog?.className).toContain('h-screen');
+
+    const controlsContainer = lightboxDialog!.querySelector('.luanti-wco-no-drag') as HTMLElement | null;
     expect(controlsContainer).toBeTruthy();
     expect(controlsContainer?.className).toContain('top-14');
     expect(controlsContainer?.className).toContain('sm:top-16');
     expect(controlsContainer?.getAttribute('style')).toContain('titlebar-area-height');
+
+    const viewportDiv = lightboxDialog!.querySelector('.overflow-auto') as HTMLElement | null;
+    expect(viewportDiv).toBeTruthy();
+    expect(viewportDiv?.className).toContain('w-full');
+    expect(viewportDiv?.className).toContain('h-full');
+    expect(viewportDiv?.className).not.toContain('max-w-6xl');
+    expect(viewportDiv?.className).not.toContain('items-center');
+    expect(viewportDiv?.className).not.toContain('justify-center');
+
+    const imgEl = viewportDiv!.querySelector('img') as HTMLImageElement | null;
+    expect(imgEl).toBeTruthy();
+    expect(imgEl?.className).toContain('m-auto');
+    expect(imgEl?.className).toContain('max-w-[96vw]');
+    expect(imgEl?.className).toContain('max-h-[92vh]');
+
+    // Toggle zoom to 2x and verify full-bleed uncropped scrollable classes + shrink-0 + min magnification width
+    comp.toggleLightboxZoom();
+    fixture.detectChanges();
+    expect(comp.isLightboxZoomed()).toBe(true);
+    expect(lightboxDialog?.className).toContain('p-0');
+    expect(imgEl?.className).toContain('m-auto');
+    expect(imgEl?.className).toContain('shrink-0');
+    expect(imgEl?.className).toContain('w-[180vw]');
+    expect(imgEl?.className).toContain('sm:w-[160vw]');
+    expect(imgEl?.getAttribute('draggable')).toBe('false');
+    expect(imgEl?.style.width).toBe('max(200vw, 1600px)');
+    expect(imgEl?.style.minWidth).toBe('max(200vw, 1600px)');
+
+    // Simulate click-and-drag panning on the zoomed viewport: should scroll and NOT zoom out on release click
+    viewportDiv!.scrollLeft = 100;
+    viewportDiv!.scrollTop = 80;
+    comp.onLightboxMouseDown(new MouseEvent('mousedown', { button: 0, clientX: 200, clientY: 200 }));
+    expect(comp.isLightboxDragging()).toBe(true);
+    comp.onLightboxMouseMove(new MouseEvent('mousemove', { clientX: 140, clientY: 150 }));
+    expect(viewportDiv!.scrollLeft).toBe(160);
+    expect(viewportDiv!.scrollTop).toBe(130);
+    comp.onLightboxMouseUp();
+    expect(comp.isLightboxDragging()).toBe(false);
+    // Subsequent click after drag > 5px is consumed without exiting zoom
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(true);
+
+    // Simulate single-finger touch-drag panning on the zoomed viewport: should scroll and ignore synthesized post-touch click
+    comp.onLightboxTouchStart({ touches: [{ clientX: 180, clientY: 160 }] } as unknown as TouchEvent);
+    comp.onLightboxTouchMove({
+      touches: [{ clientX: 120, clientY: 110 }],
+      cancelable: true,
+      preventDefault: () => {}
+    } as unknown as TouchEvent);
+    expect(viewportDiv!.scrollLeft).toBe(220);
+    expect(viewportDiv!.scrollTop).toBe(180);
+    comp.onLightboxTouchEnd({ changedTouches: [{ clientX: 120, clientY: 110 }] } as unknown as TouchEvent);
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(true);
+
+    // Clean click without drag exits zoom back to 1x
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(false);
+
     packageService.closePackageModal(false);
   });
 

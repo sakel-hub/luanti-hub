@@ -12,6 +12,7 @@ import {
   normalizeRepoKey,
   readEdgeCacheJson,
   writeEdgeCacheJson,
+  invalidateEdgeCacheKeys,
   rewriteRelativeMarkdownUrls,
   fetchWithAnubisSupport,
   ensureExtendedPackageColumns,
@@ -527,11 +528,20 @@ export async function syncJam2026IntoPromoRowDelta(params: {
         }
 
         const nextDigestMap: Record<string, string> = { ...persistedDigestMap };
+        const cacheKeysToInvalidate: string[] = [];
         for (const b of unsyncedBrews) {
           nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
           isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
+          const lowerId = b.id.toLowerCase();
+          cacheKeysToInvalidate.push(
+            `/__api_hydrate_v9_${lowerId}`,
+            `/__api_pkg_detail_v2/${encodeURIComponent(b.author.toLowerCase())}/${encodeURIComponent(b.name.toLowerCase())}`
+          );
         }
-        await writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {});
+        await Promise.all([
+          writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {}),
+          invalidateEdgeCacheKeys(cacheKeysToInvalidate).catch(() => {})
+        ]);
       }
     } catch {
       // Non-fatal D1 sync error; Edge PromoRowDelta still serves all jam entries

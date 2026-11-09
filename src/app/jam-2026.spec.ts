@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import {
   fetchJam2026BrewsCached,
   parseJam2026RepositoryUrl,
@@ -23,6 +26,7 @@ import {
   convertJam2026BrewToRawPackage,
   syncJam2026ClientRowTagIfNeeded
 } from './core/services/jam-2026-sync.helper';
+import { PackageService } from './core/services/package.service';
 import { LuantiPackage } from './core/models/package.model';
 
 describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
@@ -430,5 +434,177 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(pureGitAdded?.source).toBe('git');
     expect(pureGitAdded?.provider).toBe('mesehub');
     expect(pureGitAdded?.tags).toContain('jam_game_2026');
+  });
+
+  it('preserves jam_game_2026 and gamejam tags on pure-Git jam submissions (sztest/confspace) across background tile hydration and stale-while-revalidate boot refreshes', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+
+    const confspaceInitial: LuantiPackage = (pkgService as any).normalizePackage({
+      id: 'sztest/confspace',
+      author: 'sztest',
+      name: 'confspace',
+      title: 'confspace',
+      type: 'game',
+      short_desc: 'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+      thumbnail:
+        '/api/packages?proxy_image=https%3A%2F%2Fjam.greenxenith.com%2Fapi%2Fbrews%2Fconfspace-id%2Fimages%2F1234',
+      banner:
+        '/api/packages?proxy_image=https%3A%2F%2Fjam.greenxenith.com%2Fapi%2Fbrews%2Fconfspace-id%2Fimages%2F1234',
+      score: 4.5,
+      downloads: 0,
+      license: 'MIT',
+      source: 'git',
+      sources: ['git'],
+      provider: 'github',
+      repo_url: 'https://github.com/sztest/confspace',
+      tags: ['git', 'jam_game_2026', 'gamejam'],
+      badge_tags: ['jam_game_2026'],
+      created_at: '2026-11-08T10:00:00.000Z'
+    });
+
+    (pkgService as any)._packages.set([confspaceInitial]);
+    (pkgService as any)._serverRecentlyAdded.set([confspaceInitial]);
+
+    // 1. Simulate background tile hydration (/api/packages/hydrate) and detail probe (/api/packages/sztest/confspace/) returning tags: ['git']
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/api/packages/hydrate')) {
+        return new Response(
+          JSON.stringify({
+            hydrated: {
+              'sztest/confspace': {
+                tags: ['git'],
+                license: 'MIT',
+                min_minetest_version: '5.0.0',
+                downloads: 0,
+                short_desc:
+                  'A plain stone room, a small pit in the floor, and a space far larger than it looks.'
+              }
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/sztest/confspace/')) {
+        return new Response(
+          JSON.stringify({
+            id: 'sztest/confspace',
+            author: 'sztest',
+            name: 'confspace',
+            title: 'confspace',
+            type: 'game',
+            tags: ['git'],
+            license: 'MIT',
+            downloads: 0,
+            repo_url: 'https://github.com/sztest/confspace'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    }) as any;
+
+    await (pkgService as any).hydratePackageBatch([confspaceInitial]);
+    (pkgService as any).flushCatalogPatches();
+    await pkgService.loadPackageDetails(confspaceInitial, false);
+    (pkgService as any).flushCatalogPatches();
+
+    const afterHydrate = pkgService.packages().find((p) => p.id.toLowerCase() === 'sztest/confspace');
+    expect(afterHydrate).toBeDefined();
+    expect(afterHydrate?.tags).toContain('git');
+    expect(afterHydrate?.tags).toContain('jam_game_2026');
+    expect(afterHydrate?.tags).toContain('gamejam');
+
+    const recentAfterHydrate = (pkgService as any)
+      ._serverRecentlyAdded()
+      .find((p: LuantiPackage) => p.id.toLowerCase() === 'sztest/confspace');
+    expect(recentAfterHydrate?.tags).toContain('jam_game_2026');
+    expect(recentAfterHydrate?.tags).toContain('gamejam');
+
+    // 2. Simulate stale-while-revalidate applyBootPayload() arriving with raw confspace entry that only has tags: ['git']
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          id: 'sztest/confspace',
+          author: 'sztest',
+          name: 'confspace',
+          title: 'confspace',
+          type: 'game',
+          short_desc:
+            'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+          source: 'git',
+          sources: ['git'],
+          provider: 'github',
+          repo_url: 'https://github.com/sztest/confspace',
+          tags: ['git'],
+          downloads: 0,
+          license: 'MIT',
+          created_at: '2026-11-08T10:00:00.000Z'
+        }
+      ],
+      recentlyAdded: [
+        {
+          id: 'sztest/confspace',
+          author: 'sztest',
+          name: 'confspace',
+          title: 'confspace',
+          type: 'game',
+          short_desc:
+            'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+          source: 'git',
+          sources: ['git'],
+          provider: 'github',
+          repo_url: 'https://github.com/sztest/confspace',
+          tags: ['git'],
+          downloads: 0,
+          license: 'MIT',
+          created_at: '2026-11-08T10:00:00.000Z'
+        }
+      ],
+      promotions: [
+        {
+          id: 'promo-jam-2026',
+          title: 'Luanti Game Jam 2026',
+          subtitle: 'Annual community game jam',
+          cta_label: 'View Jam',
+          cta_url: 'https://jam.luanti.org',
+          is_active: true,
+          priority: 100,
+          show_in_hero: false,
+          expires_at: new Date(Date.now() + 86400000).toISOString(),
+          row_enabled: true,
+          row_title: 'Luanti Game Jam 2026 Submissions',
+          row_badge: 'GAME JAM 2026',
+          row_icon: 'trophy',
+          row_filter_tags: ['jam_game_2026'],
+          row_sort: 'newest'
+        }
+      ],
+      top10Today: [],
+      top10Week: []
+    });
+
+    const afterBootRefresh = pkgService
+      .packages()
+      .find((p) => p.id.toLowerCase() === 'sztest/confspace');
+    expect(afterBootRefresh).toBeDefined();
+    expect(afterBootRefresh?.tags).toContain('jam_game_2026');
+    expect(afterBootRefresh?.tags).toContain('gamejam');
+    expect(afterBootRefresh?.badge_tags).toContain('jam_game_2026');
+
+    const recentAfterBootRefresh = (pkgService as any)
+      ._serverRecentlyAdded()
+      .find((p: LuantiPackage) => p.id.toLowerCase() === 'sztest/confspace');
+    expect(recentAfterBootRefresh?.tags).toContain('jam_game_2026');
+    expect(recentAfterBootRefresh?.tags).toContain('gamejam');
+
+    const promoRows = pkgService.activePromotionalRows();
+    expect(promoRows.length).toBeGreaterThan(0);
+    expect(promoRows[0].packages.map((p: LuantiPackage) => p.id.toLowerCase())).toContain(
+      'sztest/confspace'
+    );
   });
 });

@@ -2473,7 +2473,7 @@ import {
             role="dialog"
             aria-modal="true"
             [attr.aria-label]="package.title + ' enlarged screenshot'"
-            class="fixed inset-0 z-[70] bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-3 sm:p-6 select-none">
+            [class]="isLightboxZoomed() ? 'fixed inset-0 z-[70] w-screen h-screen bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-0 select-none' : 'fixed inset-0 z-[70] w-screen h-screen bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-2 sm:p-4 select-none'">
 
             <!-- Lightbox Top Controls -->
             <div
@@ -2503,20 +2503,34 @@ import {
 
             <!-- Lightbox Image Viewport -->
             <div
-              (click)="$event.stopPropagation()"
-              class="relative max-w-6xl max-h-[86vh] w-full h-full flex items-center justify-center overflow-auto">
+              #lightboxViewport
+              (mousedown)="onLightboxMouseDown($event)"
+              (mousemove)="onLightboxMouseMove($event)"
+              (mouseup)="onLightboxMouseUp()"
+              (mouseleave)="onLightboxMouseUp()"
+              (touchmove)="onLightboxTouchMove($event)"
+              (click)="onLightboxViewportClick($event)"
+              [class]="isLightboxZoomed() ? 'relative w-full h-full flex overflow-auto touch-pan-x touch-pan-y ' + (isLightboxDragging() ? 'cursor-grabbing' : 'cursor-grab') : 'relative w-full h-full flex overflow-auto'">
               <img
                 [src]="getLightboxDisplayUrl(zoomImg)"
                 [alt]="package.title + ' full resolution screenshot'"
+                draggable="false"
                 (click)="toggleLightboxZoom($event)"
-                [class]="isLightboxZoomed() ? 'max-w-none w-[165%] sm:w-[150%] h-auto object-contain cursor-zoom-out transition-transform duration-300' : 'max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl cursor-zoom-in transition-transform duration-300'"
+                [style.width]="isLightboxZoomed() ? 'max(200vw, 1600px)' : null"
+                [style.minWidth]="isLightboxZoomed() ? 'max(200vw, 1600px)' : null"
+                [style.maxWidth]="isLightboxZoomed() ? 'none' : null"
+                [style.maxHeight]="isLightboxZoomed() ? 'none' : null"
+                [class]="isLightboxZoomed() ? 'm-auto shrink-0 max-w-none w-[180vw] sm:w-[160vw] h-auto select-none ' + (isLightboxDragging() ? 'cursor-grabbing' : 'cursor-grab') : 'm-auto max-w-[96vw] max-h-[92vh] w-auto h-auto object-contain rounded-xl shadow-2xl cursor-zoom-in select-none transition-transform duration-300'"
               />
-              @if (getScreenshotCaption(zoomImg); as lbCaption) {
-                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-xs font-medium text-slate-200 max-w-[85%] truncate pointer-events-none">
-                  {{ lbCaption }}
-                </div>
-              }
             </div>
+
+            @if (getScreenshotCaption(zoomImg); as lbCaption) {
+              <div
+                (click)="$event.stopPropagation()"
+                class="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-xs font-medium text-slate-200 max-w-[85%] truncate pointer-events-none">
+                {{ lbCaption }}
+              </div>
+            }
 
             @if (activeScreenshots().length > 1) {
               <!-- Lightbox Prev / Next Navigation Controls -->
@@ -2701,15 +2715,22 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   // Media Carousel, Video Player & Zoom Lightbox state
   @ViewChild('mediaThumbStrip') mediaThumbStripRef?: ElementRef<HTMLDivElement>;
+  @ViewChild('lightboxViewport') lightboxViewportRef?: ElementRef<HTMLDivElement>;
   readonly mediaCarouselIndex = signal<number>(0);
   readonly isVideoPlaying = signal<boolean>(false);
   readonly lightboxImageUrl = signal<string | null>(null);
   readonly isLightboxZoomed = signal<boolean>(false);
+  readonly isLightboxDragging = signal<boolean>(false);
   readonly failedScreenshotUrls = signal<Set<string>>(new Set());
   private mediaTouchStartX = 0;
   private mediaTouchStartY = 0;
   private lightboxTouchStartX = 0;
   private lightboxTouchStartY = 0;
+  private lightboxDragStartX = 0;
+  private lightboxDragStartY = 0;
+  private lightboxDragScrollLeft = 0;
+  private lightboxDragScrollTop = 0;
+  private lightboxDragMoved = false;
 
   onScreenshotLoad(event: Event, url?: string | null): void {
     const img = event?.target as HTMLImageElement | null;
@@ -3966,17 +3987,103 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (!imageUrl) return;
     this.lightboxImageUrl.set(imageUrl);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
   }
 
   closeLightbox(event?: Event): void {
     if (event) event.stopPropagation();
+    if (this.lightboxDragMoved) {
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
     this.lightboxImageUrl.set(null);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
   }
 
   toggleLightboxZoom(event?: Event): void {
     if (event) event.stopPropagation();
-    this.isLightboxZoomed.update(v => !v);
+    if (this.lightboxDragMoved) {
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
+    const willZoomIn = !this.isLightboxZoomed();
+    let ratioX = 0.5;
+    let ratioY = 0.5;
+    if (
+      willZoomIn &&
+      event &&
+      typeof (event as MouseEvent).clientX === 'number' &&
+      event.target instanceof HTMLElement &&
+      event.target.tagName === 'IMG'
+    ) {
+      const rect = event.target.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        ratioX = Math.min(1, Math.max(0, ((event as MouseEvent).clientX - rect.left) / rect.width));
+        ratioY = Math.min(1, Math.max(0, ((event as MouseEvent).clientY - rect.top) / rect.height));
+      }
+    }
+    this.isLightboxZoomed.set(willZoomIn);
+    this.isLightboxDragging.set(false);
+    if (willZoomIn) {
+      setTimeout(() => {
+        const vp = this.lightboxViewportRef?.nativeElement;
+        if (!vp) return;
+        const maxLeft = Math.max(0, vp.scrollWidth - vp.clientWidth);
+        const maxTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+        vp.scrollLeft = Math.round(maxLeft * ratioX);
+        vp.scrollTop = Math.round(maxTop * ratioY);
+      }, 0);
+    }
+  }
+
+  onLightboxMouseDown(event: MouseEvent): void {
+    if (!this.isLightboxZoomed() || event.button !== 0) return;
+    const vp = this.lightboxViewportRef?.nativeElement;
+    if (!vp) return;
+    this.isLightboxDragging.set(true);
+    this.lightboxDragMoved = false;
+    this.lightboxDragStartX = event.clientX;
+    this.lightboxDragStartY = event.clientY;
+    this.lightboxDragScrollLeft = vp.scrollLeft;
+    this.lightboxDragScrollTop = vp.scrollTop;
+  }
+
+  onLightboxMouseMove(event: MouseEvent): void {
+    if (!this.isLightboxDragging() || !this.isLightboxZoomed()) return;
+    const vp = this.lightboxViewportRef?.nativeElement;
+    if (!vp) return;
+    const dx = event.clientX - this.lightboxDragStartX;
+    const dy = event.clientY - this.lightboxDragStartY;
+    if (!this.lightboxDragMoved && Math.hypot(dx, dy) > 5) {
+      this.lightboxDragMoved = true;
+    }
+    if (this.lightboxDragMoved) {
+      event.preventDefault();
+      vp.scrollLeft = Math.max(0, this.lightboxDragScrollLeft - dx);
+      vp.scrollTop = Math.max(0, this.lightboxDragScrollTop - dy);
+    }
+  }
+
+  onLightboxMouseUp(): void {
+    if (this.isLightboxDragging()) {
+      this.isLightboxDragging.set(false);
+    }
+  }
+
+  onLightboxViewportClick(event: MouseEvent): void {
+    if (this.lightboxDragMoved) {
+      event.stopPropagation();
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
+    if (this.isLightboxZoomed()) {
+      event.stopPropagation();
+    }
   }
 
   prevLightboxImage(event?: Event): void {
@@ -3989,6 +4096,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextShot = shots[prevIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
     const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
     if (slideIdx >= 0) {
       this.mediaCarouselIndex.set(slideIdx);
@@ -4006,6 +4115,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextShot = shots[nextIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
     const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
     if (slideIdx >= 0) {
       this.mediaCarouselIndex.set(slideIdx);
@@ -4035,15 +4146,51 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onLightboxTouchStart(event: TouchEvent): void {
-    if (this.isLightboxZoomed()) return;
-    const touch = event.changedTouches?.[0];
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
     if (!touch) return;
     this.lightboxTouchStartX = touch.clientX;
     this.lightboxTouchStartY = touch.clientY;
+    this.lightboxDragMoved = false;
+    if (this.isLightboxZoomed() && (!event.touches || event.touches.length <= 1)) {
+      const vp = this.lightboxViewportRef?.nativeElement;
+      if (vp) {
+        this.lightboxDragScrollLeft = vp.scrollLeft;
+        this.lightboxDragScrollTop = vp.scrollTop;
+      }
+    }
+  }
+
+  onLightboxTouchMove(event: TouchEvent): void {
+    if (!this.isLightboxZoomed()) return;
+    if (event.touches && event.touches.length > 1) return;
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - this.lightboxTouchStartX;
+    const dy = touch.clientY - this.lightboxTouchStartY;
+    if (!this.lightboxDragMoved && Math.hypot(dx, dy) > 6) {
+      this.lightboxDragMoved = true;
+    }
+    if (this.lightboxDragMoved) {
+      const vp = this.lightboxViewportRef?.nativeElement;
+      if (vp) {
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+        vp.scrollLeft = Math.max(0, this.lightboxDragScrollLeft - dx);
+        vp.scrollTop = Math.max(0, this.lightboxDragScrollTop - dy);
+      }
+    }
   }
 
   onLightboxTouchEnd(event: TouchEvent): void {
-    if (this.isLightboxZoomed()) return;
+    if (this.isLightboxZoomed()) {
+      if (this.lightboxDragMoved) {
+        setTimeout(() => {
+          this.lightboxDragMoved = false;
+        }, 300);
+      }
+      return;
+    }
     const touch = event.changedTouches?.[0];
     if (!touch) return;
     const dx = touch.clientX - this.lightboxTouchStartX;
