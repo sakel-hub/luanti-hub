@@ -46,7 +46,7 @@
   </app-back-to-top>
 
   <!-- Modals & Drawers (With Unified Enter & Exit Motion + Code-Split Lazy Chunks via @defer) -->
-  @defer (when displayedPackage() !== null) {
+  @defer (when displayedPackage() !== null; prefetch on idle) {
     @if (displayedPackage(); as pkg) {
       <app-package-detail-modal
         [package]="pkg"
@@ -205,8 +205,8 @@
           <!-- Top Banner Hero (True 16:9 Widescreen Aspect Ratio, Matched to Package Detail Dialog) -->
           <div class="relative w-full aspect-video min-h-[260px] sm:min-h-[380px] lg:min-h-[480px] max-h-[630px] bg-slate-950 flex-shrink-0 overflow-hidden">
             <img
-              [src]="blogPost.image_url || '/banners/luanti-5-18-0.png'"
-              [fallbackThumbnail]="'/banners/luanti-5-18-0.png'"
+              [src]="blogPost.image_url || '/screenshot-desktop.png'"
+              [fallbackThumbnail]="'/screenshot-desktop.png'"
               appImgFallback
               [alt]="blogPost.title"
               decoding="async"

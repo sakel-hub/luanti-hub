@@ -551,10 +551,16 @@ export const deleteEdgeCacheKeys = invalidateEdgeCacheKeys;
    */
   export function isValidActivePromotionRow(r: any, nowMs = Date.now()): boolean {
     if (!r || !r.expires_at) return false;
-    const showInHero = r.show_in_hero !== false && r.show_in_hero !== 0 && r.show_in_hero !== '0';
+    const bannerUrl = String(r.banner_url || '').trim();
+    const isRetiredHeroBanner = bannerUrl.includes('luanti-5-18-0');
+    const showInHero =
+      !isRetiredHeroBanner &&
+      r.show_in_hero !== false &&
+      r.show_in_hero !== 0 &&
+      r.show_in_hero !== '0';
     const rowEnabled = Boolean(r.row_enabled === true || r.row_enabled === 1 || r.row_enabled === '1');
     if (!showInHero && !rowEnabled) return false;
-    if (showInHero && (!r.title || !r.banner_url)) return false;
+    if (showInHero && (!r.title || !bannerUrl)) return false;
     if (!showInHero && rowEnabled && !r.title && !r.row_title) return false;
     const expMs = Date.parse(String(r.expires_at));
     if (!Number.isFinite(expMs) || expMs <= nowMs) return false;

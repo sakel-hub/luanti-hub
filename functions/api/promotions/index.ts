@@ -148,7 +148,13 @@ export function sanitizePromotionTranslations(raw: any): Record<string, Record<s
 
 export function normalizePromotionRow(r: any): any {
   if (!r || typeof r !== 'object') return r;
-  const showInHero = r.show_in_hero !== false && r.show_in_hero !== 0 && r.show_in_hero !== '0';
+  const bannerUrl = String(r.banner_url || '').trim();
+  const isRetiredHeroBanner = bannerUrl.includes('luanti-5-18-0');
+  const showInHero =
+    !isRetiredHeroBanner &&
+    r.show_in_hero !== false &&
+    r.show_in_hero !== 0 &&
+    r.show_in_hero !== '0';
   const rowEnabled = Boolean(r.row_enabled === true || r.row_enabled === 1 || r.row_enabled === '1');
   const rowShowEmptyCta = r.row_show_empty_cta !== false && r.row_show_empty_cta !== 0 && r.row_show_empty_cta !== '0';
   const rowFilterTags = parseJsonArray(r.row_filter_tags);

@@ -641,7 +641,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
       const imageUrl =
         resolveBlogAssetUrl(first.image || first.banner_image || attachmentImg) ||
         extractFirstImageFromHtml(rawHtml) ||
-        '/banners/luanti-5-18-0.png';
+        '/screenshot-desktop.png';
       const contentHtml = sanitizeAndFormatBlogHtml(rawHtml, imageUrl);
       const pubTime = Date.parse(String(first.date_published || first.date_modified || ''));
       const publishedAt = Number.isFinite(pubTime) && pubTime > 0
@@ -695,7 +695,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
     itemXml.match(/<enclosure\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i) ||
     itemXml.match(/<media:content\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i);
   const enclosureUrl = enclosureMatch?.[1] ? resolveBlogAssetUrl(decodeHtmlAndXmlEntities(enclosureMatch[1])) : null;
-  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/banners/luanti-5-18-0.png';
+  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/screenshot-desktop.png';
 
   const summary =
     extractCleanBlogSummary(rawDesc) ||
@@ -736,7 +736,11 @@ export function enrichLuantiBlogPostFromArticleHtml(
   }
 
   let bestImageUrl = post.image_url;
-  const isFallbackImg = !bestImageUrl || bestImageUrl === '/banners/luanti-5-18-0.png' || bestImageUrl === '/promo.png';
+  const isFallbackImg =
+    !bestImageUrl ||
+    bestImageUrl === '/screenshot-desktop.png' ||
+    bestImageUrl === '/promo.png' ||
+    bestImageUrl.includes('luanti-5-18-0');
   if (isFallbackImg) {
     const heroBgMatch = articlePageHtml.match(/class=["'][^"']*\bhero-image\b[^"']*["'][^>]*style=["'][^"']*url\((?:['"]?)([^'")]+)(?:['"]?)\)/i);
     const jsonLdImgMatch = articlePageHtml.match(/"@type"\s*:\s*"BlogPosting"[\s\S]*?"image"\s*:\s*"([^"]+)"/i);

@@ -211,6 +211,7 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
     packagesSignal.update((currentPkgs) => {
       const existingLowerIds = new Set<string>();
       const existingRepoKeys = new Set<string>();
+      let anyMutated = false;
 
       const updated = currentPkgs.map((pkg) => {
         const lowerId = pkg.id.toLowerCase();
@@ -237,9 +238,10 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
           nextBadgeTags.push('jam_game_2026');
           changed = true;
         }
-        stampedPackages.push({ lowerId, tags: nextTags, badgeTags: nextBadgeTags });
         if (!changed) return pkg;
 
+        anyMutated = true;
+        stampedPackages.push({ lowerId, tags: nextTags, badgeTags: nextBadgeTags });
         return {
           ...pkg,
           tags: nextTags,
@@ -264,6 +266,10 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
           badgeTags: norm.badge_tags || ['jam_game_2026']
         });
         newNormalized.push(norm);
+      }
+
+      if (!anyMutated && newNormalized.length === 0) {
+        return currentPkgs;
       }
 
       return newNormalized.length > 0

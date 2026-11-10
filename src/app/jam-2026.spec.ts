@@ -814,5 +814,37 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
 
     expect(deletedCacheUrls.some((u) => u.includes('__api_boot_catalog_bundle'))).toBe(true);
     expect(deletedCacheUrls.some((u) => u.includes('sztest/confspace'))).toBe(true);
+
+    // 5. Verify syncJam2026ClientRowTagIfNeeded preserves array reference (===) when already stamped to prevent infinite reactive effect loops
+    const currentRef = pkgService.packages();
+    let stampedCount = 0;
+    await syncJam2026ClientRowTagIfNeeded({
+      tag: 'jam_game_2026',
+      packagesSignal: (pkgService as any)._packages,
+      normalizePackage: (raw) => (pkgService as any).normalizePackage(raw),
+      deduplicateCatalog: (pkgs) => (pkgService as any).deduplicateCatalog(pkgs),
+      buildSearchBlob: (pkg) => (pkgService as any).buildSearchBlob(pkg),
+      fetchJson: async () => ({
+        brews: [
+          {
+            id: 1,
+            name: 'confspace',
+            author: 'sztest',
+            gitUrl: 'https://codeberg.org/sztest/confspace',
+            latestCommit: 'abc1234',
+            submittedAt: '2026-11-08T10:00:00.000Z'
+          }
+        ]
+      }),
+      onPackageStamped: () => {
+        stampedCount++;
+      }
+    });
+    expect(stampedCount).toBe(0);
+    expect(pkgService.packages()).toBe(currentRef);
+
+    // 6. Verify clicking a package tile (openPackageModal) opens the package modal cleanly
+    pkgService.openPackageModal(pkgService.packages()[0], false);
+    expect(pkgService.activePackage()?.id.toLowerCase()).toBe('sztest/confspace');
   });
 });

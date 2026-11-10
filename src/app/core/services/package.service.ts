@@ -284,7 +284,8 @@ export class PackageService {
           promo.show_in_hero !== false &&
           promo.show_in_hero !== 0 &&
           (promo.show_in_hero as any) !== '0';
-        return showInHero && Boolean(promo.title && promo.banner_url);
+        const bannerUrl = String(promo.banner_url || '').trim();
+        return showInHero && Boolean(promo.title && bannerUrl && !bannerUrl.includes('luanti-5-18-0'));
       })
       .map(promo => this.localizeHeroPromotion(promo));
   });
@@ -680,7 +681,10 @@ export class PackageService {
       id: `blog:${post.id || post.url}`,
       title: post.title,
       short_desc: post.summary || 'Read the latest official announcement and development update on the Luanti Blog.',
-      banner_url: post.image_url && post.image_url !== '/promo.png' ? post.image_url : '/banners/luanti-5-18-0.png',
+      banner_url:
+        post.image_url && post.image_url !== '/promo.png' && !post.image_url.includes('luanti-5-18-0')
+          ? post.image_url
+          : '/screenshot-desktop.png',
       cta_label: 'Read Article',
       cta_url: post.url,
       badge_text: badgeText,
@@ -695,7 +699,10 @@ export class PackageService {
 
   private isValidActivePromotion(promo: HeroPromotion | null | undefined, nowMs = Date.now()): boolean {
     if (!promo || !promo.expires_at) return false;
+    const bannerUrl = String(promo.banner_url || '').trim();
+    const isRetiredHeroBanner = bannerUrl.includes('luanti-5-18-0');
     const showInHero =
+      !isRetiredHeroBanner &&
       promo.show_in_hero !== false &&
       promo.show_in_hero !== 0 &&
       (promo.show_in_hero as any) !== '0';
@@ -705,7 +712,7 @@ export class PackageService {
         (promo.row_enabled as any) === '1'
     );
     if (!showInHero && !rowEnabled) return false;
-    if (showInHero && (!promo.title || !promo.banner_url)) return false;
+    if (showInHero && (!promo.title || !bannerUrl)) return false;
     if (!showInHero && rowEnabled && !promo.title && !promo.row_title) return false;
 
     const expMs = Date.parse(String(promo.expires_at));
@@ -1021,36 +1028,53 @@ export class PackageService {
   }
 
   private readonly promoTagSyncInFlight = new Set<string>();
+  private readonly lastPromoTagSyncAt = new Map<string, number>();
 
   private persistPromotionalTagsForPackage(
     lowerId: string,
     tags: string[],
     badgeTags?: string[]
-  ): void {
-    if (!lowerId) return;
+  ): boolean {
+    if (!lowerId) return false;
     const prevMeta = this.hydratedMetaCache.get(lowerId) || {};
-    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMeta.tags);
-    const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...(prevMeta.badge_tags || [])]);
-    this.hydratedMetaCache.set(lowerId, {
-      ...prevMeta,
-      tags: mergedTags,
-      ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
-    });
-    this._serverRecentlyAdded.update(list =>
-      list.map(item => {
+    const prevMetaTags = Array.isArray(prevMeta.tags) ? prevMeta.tags : [];
+    const prevMetaBadges = Array.isArray(prevMeta.badge_tags) ? prevMeta.badge_tags : [];
+    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMetaTags);
+    const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...prevMetaBadges]);
+    const metaChanged =
+      mergedTags.length !== prevMetaTags.length ||
+      mergedBadgeTags.length !== prevMetaBadges.length ||
+      mergedTags.some((t, i) => t !== prevMetaTags[i]);
+    if (metaChanged) {
+      this.hydratedMetaCache.set(lowerId, {
+        ...prevMeta,
+        tags: mergedTags,
+        ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+      });
+    }
+    this._serverRecentlyAdded.update(list => {
+      let listChanged = false;
+      const nextList = list.map(item => {
         if ((item.id || `${item.author}/${item.name}`).toLowerCase() !== lowerId) return item;
         const nextItemTags = this.mergePackageTagsPreservingExisting(mergedTags, item.tags);
         const nextItemBadgeTags = parseBadgeTagsArray([
           ...mergedBadgeTags,
           ...(item.badge_tags || [])
         ]);
+        const itemTagsChanged =
+          nextItemTags.length !== (item.tags?.length || 0) ||
+          nextItemBadgeTags.length !== (item.badge_tags?.length || 0);
+        if (!itemTagsChanged) return item;
+        listChanged = true;
         return {
           ...item,
           tags: nextItemTags,
           ...(nextItemBadgeTags.length > 0 ? { badge_tags: nextItemBadgeTags } : {})
         };
-      })
-    );
+      });
+      return listChanged ? nextList : list;
+    });
+    return metaChanged;
   }
 
   private syncClientPromotionRowTags(activePromos: HeroPromotion[]): void {
@@ -1081,10 +1105,13 @@ export class PackageService {
         (p.tags || []).some(t => t.toLowerCase() === lowerTag)
       );
       if (stampedPkgs.length > 0) {
-        this.syncedPromoTagsInSession.add(lowerTag);
+        if (!isJam2026PromoTag(lowerTag)) {
+          this.syncedPromoTagsInSession.add(lowerTag);
+        }
         for (const sp of stampedPkgs) {
-          this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags);
-          cachedMetaUpdated = true;
+          if (this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags)) {
+            cachedMetaUpdated = true;
+          }
         }
       }
     }
@@ -1108,11 +1135,20 @@ export class PackageService {
         (p.tags || []).some(t => t.toLowerCase() === lowerTag)
       ).length;
       if (!isJamTag && alreadyStampedCount > 0) {
+        this.syncedPromoTagsInSession.add(lowerTag);
+        continue;
+      }
+      const lastSyncAt = this.lastPromoTagSyncAt.get(lowerTag) || 0;
+      if (
+        this.syncedPromoTagsInSession.has(lowerTag) &&
+        (alreadyStampedCount > 0 || Date.now() - lastSyncAt < 60_000)
+      ) {
         continue;
       }
 
       this.promoTagSyncInFlight.add(lowerTag);
       this.syncedPromoTagsInSession.add(lowerTag);
+      this.lastPromoTagSyncAt.set(lowerTag, Date.now());
       (async () => {
         try {
           const stampedByLowerId = new Map<string, { tags: string[]; badgeTags: string[] }>();
@@ -1170,10 +1206,12 @@ export class PackageService {
           }
 
           this._packages.update(pkgs => {
+            let anyModified = false;
             const updated = pkgs.map(pkg => {
               const lowerId = pkg.id.toLowerCase();
               if (!matchedLowerIds.has(lowerId)) return pkg;
               if ((pkg.tags || []).some(t => t.toLowerCase() === lowerTag)) return pkg;
+              anyModified = true;
               const nextTags = [...(pkg.tags || []), tag];
               this.persistPromotionalTagsForPackage(lowerId, nextTags, pkg.badge_tags);
               return {
@@ -1185,6 +1223,9 @@ export class PackageService {
             const normalizedNew = newRawItems.map(it => this.normalizePackage(it));
             for (const np of normalizedNew) {
               this.persistPromotionalTagsForPackage(np.id.toLowerCase(), np.tags, np.badge_tags);
+            }
+            if (!anyModified && normalizedNew.length === 0) {
+              return pkgs;
             }
             return normalizedNew.length > 0
               ? this.deduplicateCatalog([...normalizedNew, ...updated])
@@ -1236,8 +1277,12 @@ export class PackageService {
   private persistActivePromotionsCache(promotions: HeroPromotion[]): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      if (promotions.length > 0) {
-        localStorage.setItem('lh_active_promotions_v1', JSON.stringify(promotions));
+      const nowMs = Date.now();
+      const activeOnly = (Array.isArray(promotions) ? promotions : []).filter(p =>
+        this.isValidActivePromotion(p, nowMs)
+      );
+      if (activeOnly.length > 0) {
+        localStorage.setItem('lh_active_promotions_v1', JSON.stringify(activeOnly));
       } else {
         localStorage.removeItem('lh_active_promotions_v1');
       }
@@ -1252,14 +1297,16 @@ export class PackageService {
     overrideImageUrl?: string
   ): LuantiBlogPost {
     const isFallbackImg = (url?: string | null) =>
-      !url || url === '/banners/luanti-5-18-0.png' || url === '/promo.png';
+      !url || url === '/screenshot-desktop.png' || url === '/promo.png' || url.includes('luanti-5-18-0');
+    const sanitizeImg = (url?: string | null) =>
+      url && !url.includes('luanti-5-18-0') ? url : undefined;
     const bestImage =
       (!isFallbackImg(overrideImageUrl) ? overrideImageUrl : undefined) ||
       (!isFallbackImg(incoming.image_url) ? incoming.image_url : undefined) ||
       (!isFallbackImg(existing?.image_url) ? existing?.image_url : undefined) ||
-      incoming.image_url ||
-      existing?.image_url ||
-      '/banners/luanti-5-18-0.png';
+      sanitizeImg(incoming.image_url) ||
+      sanitizeImg(existing?.image_url) ||
+      '/screenshot-desktop.png';
     return {
       ...existing,
       ...incoming,
@@ -2212,6 +2259,11 @@ export class PackageService {
             const validPromos = parsedPromos.filter((p: any) => this.isValidActivePromotion(p, nowMs));
             if (validPromos.length > 0) {
               this._promotions.set(validPromos);
+              if (validPromos.length !== parsedPromos.length) {
+                localStorage.setItem('lh_active_promotions_v1', JSON.stringify(validPromos));
+              }
+            } else {
+              localStorage.removeItem('lh_active_promotions_v1');
             }
           }
         }
@@ -3857,6 +3909,7 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v22');
         sessionStorage.removeItem('lh_boot_cache_v23');
         sessionStorage.removeItem('lh_boot_cache_v24');
+        sessionStorage.removeItem('lh_boot_cache_v25');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
@@ -4969,7 +5022,7 @@ export class PackageService {
         top10Week: this.top10WeekPackages().map(stripHeavyFields),
         top10Today: this.top10TodayPackages().map(stripHeavyFields),
         recentlyAdded: this.recentlyAddedPackages().map(stripHeavyFields),
-        promotions: this._promotions(),
+        promotions: this.activePromotions(),
         latestBlogPost: this._latestBlogPost()
       };
       let existingTs = this.lastCatalogSyncAt || Date.now();
@@ -11893,6 +11946,7 @@ export class PackageService {
           this._adminPromotions.set(data.promotions);
           this._promotions.set(data.promotions);
           this.refreshPromoClock();
+          this.persistActivePromotionsCache(this.activePromotions());
           this.scheduleBootCachePersist();
           return data.promotions;
         }
@@ -11924,6 +11978,7 @@ export class PackageService {
           this.ensureTagsRegisteredInAvailableTags(draft.row_filter_tags);
         }
         this.refreshPromoClock();
+        this.persistActivePromotionsCache(this.activePromotions());
         this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();
@@ -11967,6 +12022,7 @@ export class PackageService {
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         this.refreshPromoClock();
+        this.persistActivePromotionsCache(this.activePromotions());
         this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();

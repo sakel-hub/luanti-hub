@@ -5313,7 +5313,7 @@ supported_games = minetest_game, voxelibre
         url.includes('/icons/notif-') ||
         url.includes('/icons/icon-72x72.png') ||
         url.includes('blog.luanti.org/static/') ||
-        url.includes('/banners/luanti-5-18-0.png')
+        url.includes('/screenshot-desktop.png')
       ) {
         return new Response(onePixelPngBytes, {
           status: 200,
@@ -6334,7 +6334,7 @@ supported_games = minetest_game, voxelibre
     // Updating blog post with a payload that lacks a cover image must preserve the real hero cover image
     pkgService.setLatestBlogPost({
       ...parsedBlog!,
-      image_url: '/banners/luanti-5-18-0.png'
+      image_url: '/screenshot-desktop.png'
     });
     expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
 
@@ -6425,9 +6425,9 @@ supported_games = minetest_game, voxelibre
     pkgService.setPromotions([
       {
         id: 'promo_keep_active',
-        title: 'Luanti 5.18.0 Released!',
-        short_desc: 'Official release promotion',
-        banner_url: '/banners/luanti-5-18-0.png',
+        title: 'Luanti Game Jam 2026!',
+        short_desc: 'Official Game Jam promotion',
+        banner_url: '/banners/gamejam_2026.png',
         cta_label: 'Download',
         cta_url: 'https://www.luanti.org',
         badge_text: 'PROMOTED',
@@ -6455,6 +6455,27 @@ supported_games = minetest_game, voxelibre
 
     expect(pkgService.activePromotions()[0]?.id).toBe('promo_keep_active');
     expect(pkgService.heroShowcasePackages().some(p => p.id === 'promo:promo_keep_active')).toBe(true);
+
+    // Disabling show_in_hero and row_enabled immediately prunes it from activeHeroPromotions, heroShowcasePackages, and localStorage
+    pkgService.setPromotions([
+      {
+        id: 'promo_keep_active',
+        title: 'Luanti Game Jam 2026!',
+        short_desc: 'Official Game Jam promotion',
+        banner_url: '/banners/gamejam_2026.png',
+        cta_label: 'Download',
+        cta_url: 'https://www.luanti.org',
+        badge_text: 'PROMOTED',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 100,
+        show_in_hero: false,
+        row_enabled: false
+      }
+    ]);
+    expect(pkgService.activeHeroPromotions().length).toBe(0);
+    expect(pkgService.heroShowcasePackages().some(p => p.id === 'promo:promo_keep_active')).toBe(false);
+    expect(localStorage.getItem('lh_active_promotions_v1')).toBeNull();
 
     // Verify self-contained session token claims round-trip
     const token = await createSessionToken('usr_sakel', 'test-secret', {
@@ -9510,6 +9531,8 @@ supported_games = minetest_game, voxelibre
 
     // 1. Ensure ZERO <img> elements exist inside the oversized ambient glow container so Chromium/Lighthouse LCP never picks the glow layer
     expect(glowContainer.querySelectorAll('img').length).toBe(0);
+    // Ensure no hardcoded luanti-5-18-0 backdrop image exists in HeroBillboardComponent
+    expect(heroEl.querySelectorAll('img[src*="luanti-5-18-0"]').length).toBe(0);
 
     // 2. Ensure two full-size 32x18 <canvas> buffers are mounted for smooth crossfading with matching rectangular corners
     const canvases = glowContainer.querySelectorAll('canvas');
