@@ -256,7 +256,9 @@ export async function syncActivePromotionRowPackages(
 export function overlayPromotionRowDeltaOnCatalog(
   packagesList: any[],
   delta: PromoRowDelta | null,
-  blockedIds?: Set<string>
+  blockedIds?: Set<string>,
+  lhDownloadsMap?: Map<string, number>,
+  appendMissingItems = true
 ): any[] {
   if (!Array.isArray(packagesList) || !delta) return packagesList;
   const tagMapEntries = Object.entries(delta.tagMap || {});
@@ -304,6 +306,9 @@ export function overlayPromotionRowDeltaOnCatalog(
 
   // 2. Inject brand-new ContentDB or Jam 2026 submissions that arrived after the 30-min catalog bundle was built
   const baseList = repoOverlaidList;
+  if (!appendMissingItems) {
+    return baseList;
+  }
   const appendedNew: any[] = [];
   for (const item of items) {
     if (!item?.author || !item?.name) continue;
@@ -329,6 +334,20 @@ export function overlayPromotionRowDeltaOnCatalog(
     const relEpochMs = Number(item.release) > 100000000 ? Number(item.release) * 1000 : Date.now();
     const isoDate = new Date(relEpochMs).toISOString();
 
+    const isGitOnlyDeltaItem = item.source === 'git' && (!Array.isArray(item.sources) || !item.sources.includes('official'));
+    const itemCdbDl = Number(
+      item.contentdb_downloads !== undefined
+        ? item.contentdb_downloads
+        : isGitOnlyDeltaItem
+          ? 0
+          : item.downloads || 0
+    );
+    const itemLhDl = Math.max(
+      Number(item.luantihub_downloads || 0),
+      lhDownloadsMap?.get(lowerId) || 0
+    );
+    const itemTotalDl = Math.max(Number(item.downloads || 0), itemCdbDl + itemLhDl);
+
     const newCatalogItem = {
       ...item,
       id: canonicalId,
@@ -342,9 +361,9 @@ export function overlayPromotionRowDeltaOnCatalog(
       thumbnail: thumb,
       banner,
       tags: itemTags,
-      downloads: Number(item.downloads || 0),
-      contentdb_downloads: Number(item.downloads || 0),
-      luantihub_downloads: 0,
+      downloads: itemTotalDl,
+      contentdb_downloads: itemCdbDl,
+      luantihub_downloads: itemLhDl,
       score: computeCatalogStarRating(item),
       contentdb_score: Number(item.score || 0),
       min_minetest_version: item.min_minetest_version || '5.0.0',
@@ -1376,12 +1395,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             true
           ).catch(() => null)
         ]);
-        const rawPromos =
+        let rawPromos =
           Array.isArray(cachedActivePromos)
             ? cachedActivePromos
             : Array.isArray(cachedCatalog.promotions) && cachedCatalog.promotions.length > 0
               ? cachedCatalog.promotions
               : getLastKnownActivePromotions(nowMs);
+        if ((!Array.isArray(rawPromos) || rawPromos.length === 0) && env.DB) {
+          try {
+            const promoRes = await env.DB.prepare(
+              `SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 20`
+            ).all();
+            const fetchedPromos = (promoRes?.results || [])
+              .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+              .map((r: any) => normalizePromotionRow(r));
+            setLastKnownActivePromotions(fetchedPromos);
+            await writeEdgeCacheJson('/__active_promotions_v1', fetchedPromos, 21600);
+            rawPromos = fetchedPromos;
+          } catch {
+            // Ignore D1 fallback error on HIT-EDGE
+          }
+        }
         let overlaidPackages = Array.isArray(cachedCatalog.packages) ? cachedCatalog.packages : [];
         if (Array.isArray(liveRecentlyAdded) && liveRecentlyAdded.length > 0) {
           overlaidPackages = overlayRecentlyAddedOnPackages(overlaidPackages, liveRecentlyAdded);
@@ -1401,7 +1435,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           }
           const overlaidRecent =
             promoDelta && Array.isArray(edgeBody.recentlyAdded) && edgeBody.recentlyAdded.length > 0
-              ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, promoDelta)
+              ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, promoDelta, undefined, undefined, false)
               : edgeBody.recentlyAdded;
           edgeBody = {
             ...edgeBody,
@@ -1603,9 +1637,24 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       .then((res: any) => new Set<string>((res.results || []).map((r: any) => String(r.id).toLowerCase())))
       .catch(() => new Set<string>());
 
-    // Avoid scanning all historical package_daily_downloads rows on every catalog build;
-    // packages.luantihub_downloads already tracks all-time LuantiHub downloads, and velocityPromise covers the 7-day window.
-    lhDownloadsMapPromise = Promise.resolve(new Map<string, number>());
+    // Aggregate all-time LuantiHub downloads per package from `package_daily_downloads` so ContentDB-only
+    // packages and newly synced packages always reflect accurate `luantihub_downloads` in the catalog.
+    lhDownloadsMapPromise = env.DB.prepare(
+      `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
+       FROM package_daily_downloads
+       WHERE downloads_count > 0
+       GROUP BY LOWER(package_id)`
+    ).all()
+      .then((res: any) => {
+        const map = new Map<string, number>();
+        for (const r of (res.results || [])) {
+          if (r?.pkg_id && Number(r.total_dl) > 0) {
+            map.set(String(r.pkg_id).toLowerCase(), Number(r.total_dl));
+          }
+        }
+        return map;
+      })
+      .catch(() => new Map<string, number>());
 
     if (isBootBundle) {
       // Real Star Review Averages from Cloudflare D1 `reviews` table
@@ -2330,7 +2379,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const tags = Array.isArray(rawTags) && rawTags.length > 0 ? rawTags : DEFAULT_CONTENTDB_TAGS;
     const promoDelta = await syncActivePromotionRowPackages(activePromotions, env.DB, noCache).catch(() => null);
     const mergedWithPromoOverlay = promoDelta
-      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds)
+      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds, lhDownloadsMap)
       : merged;
     if (mergedWithPromoOverlay !== merged) {
       merged.length = 0;

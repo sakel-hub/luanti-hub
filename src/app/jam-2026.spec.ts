@@ -21,6 +21,7 @@ import {
   overlayPromotionRowDeltaOnCatalog,
   onRequestGet as getPackagesCatalog
 } from '../../functions/api/packages/index';
+import { onRequest as handlePackageDownload } from '../../functions/api/packages/[author]/[name]/download';
 import {
   isJam2026PromoTag,
   convertJam2026BrewToRawPackage,
@@ -606,5 +607,212 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(promoRows[0].packages.map((p: LuantiPackage) => p.id.toLowerCase())).toContain(
       'sztest/confspace'
     );
+  });
+
+  it('persists LuantiHub download counter across modal close, detail re-fetch, tile hydration, page refresh, and backend D1/Edge cache invalidation', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).edgeApiAvailable = true;
+
+    const confspacePkg: LuantiPackage = (pkgService as any).normalizePackage({
+      id: 'sztest/confspace',
+      author: 'sztest',
+      name: 'confspace',
+      title: 'confspace',
+      type: 'game',
+      short_desc: 'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+      score: 4.5,
+      downloads: 0,
+      contentdb_downloads: 0,
+      luantihub_downloads: 0,
+      license: 'MIT',
+      source: 'git',
+      sources: ['git'],
+      provider: 'codeberg',
+      repo_url: 'https://codeberg.org/sztest/confspace',
+      tags: ['git', 'jam_game_2026', 'gamejam'],
+      badge_tags: ['jam_game_2026'],
+      created_at: '2026-11-08T10:00:00.000Z'
+    });
+
+    (pkgService as any)._packages.set([confspacePkg]);
+    (pkgService as any)._serverRecentlyAdded.set([confspacePkg]);
+    (pkgService as any)._activePackage.set(confspacePkg);
+
+    // 1. User clicks Download button in package detail modal
+    pkgService.trackDownload(confspacePkg);
+
+    expect(pkgService.activePackage()?.luantihub_downloads).toBe(1);
+    expect(pkgService.activePackage()?.downloads).toBe(1);
+    expect(pkgService.packages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.packages()[0].downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].downloads).toBe(1);
+
+    // 2. Simulate closing modal & stale detail / hydrate responses returning luantihub_downloads: 0
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/api/packages/hydrate')) {
+        return new Response(
+          JSON.stringify({
+            hydrated: {
+              'sztest/confspace': {
+                id: 'sztest/confspace',
+                license: 'MIT',
+                contentdb_downloads: 0,
+                luantihub_downloads: 0,
+                downloads: 0,
+                tags: ['git', 'jam_game_2026']
+              }
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/sztest/confspace/')) {
+        return new Response(
+          JSON.stringify({
+            id: 'sztest/confspace',
+            author: 'sztest',
+            name: 'confspace',
+            title: 'confspace',
+            type: 'game',
+            license: 'MIT',
+            contentdb_downloads: 0,
+            luantihub_downloads: 0,
+            downloads: 0,
+            tags: ['git', 'jam_game_2026']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200 });
+    }) as any;
+
+    pkgService.closePackageModal();
+    await pkgService.loadPackageDetails(pkgService.packages()[0], true);
+    (pkgService as any).flushCatalogPatches();
+    await (pkgService as any).hydratePackageBatch([pkgService.packages()[0]]);
+    (pkgService as any).flushCatalogPatches();
+
+    // Counter must remain 1 (never reset to 0!)
+    expect(pkgService.packages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.packages()[0].downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].downloads).toBe(1);
+
+    // 3. Simulate page refresh / boot payload arriving with luantihub_downloads: 0
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          id: 'sztest/confspace',
+          author: 'sztest',
+          name: 'confspace',
+          title: 'confspace',
+          type: 'game',
+          source: 'git',
+          sources: ['git'],
+          provider: 'codeberg',
+          repo_url: 'https://codeberg.org/sztest/confspace',
+          tags: ['git', 'jam_game_2026', 'gamejam'],
+          contentdb_downloads: 0,
+          luantihub_downloads: 0,
+          downloads: 0,
+          license: 'MIT'
+        }
+      ],
+      recentlyAdded: [
+        {
+          id: 'sztest/confspace',
+          author: 'sztest',
+          name: 'confspace',
+          title: 'confspace',
+          type: 'game',
+          source: 'git',
+          sources: ['git'],
+          provider: 'codeberg',
+          repo_url: 'https://codeberg.org/sztest/confspace',
+          tags: ['git', 'jam_game_2026', 'gamejam'],
+          contentdb_downloads: 0,
+          luantihub_downloads: 0,
+          downloads: 0,
+          license: 'MIT'
+        }
+      ],
+      top10Today: [],
+      top10Week: []
+    });
+
+    expect(pkgService.packages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.packages()[0].downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].luantihub_downloads).toBe(1);
+    expect(pkgService.recentlyAddedPackages()[0].downloads).toBe(1);
+
+    // 4. Verify backend POST /api/packages/sztest/confspace/download reconciles D1 daily sum and invalidates boot + detail Edge caches
+    const deletedCacheUrls: string[] = [];
+    (globalThis as any).caches = {
+      default: {
+        match: vi.fn(async () => undefined),
+        put: vi.fn(async () => undefined),
+        delete: vi.fn(async (req: Request | string) => {
+          const url = typeof req === 'string' ? req : req.url;
+          deletedCacheUrls.push(url);
+          return true;
+        })
+      }
+    };
+
+    const executedSql: Array<{ sql: string; args: any[] }> = [];
+    const mockDb = {
+      prepare: vi.fn((sql: string) => ({
+        bind: vi.fn((...args: any[]) => ({
+          first: vi.fn(async () => {
+            if (sql.includes('FROM packages')) {
+              return {
+                id: 'sztest/confspace',
+                author_name: 'sztest',
+                name: 'confspace',
+                type: 'game',
+                status: 'active',
+                repo_url: 'https://codeberg.org/sztest/confspace',
+                provider: 'codeberg'
+              };
+            }
+            if (sql.includes('SUM(downloads_count)')) {
+              return { total_lh: 3 };
+            }
+            return null;
+          }),
+          run: vi.fn(async () => {
+            executedSql.push({ sql, args });
+            return {};
+          })
+        })),
+        run: vi.fn(async () => ({}))
+      }))
+    };
+
+    const dlRes = await handlePackageDownload({
+      params: { author: 'sztest', name: 'confspace' },
+      request: new Request('https://luantihub.org/api/packages/sztest/confspace/download?reason=web', {
+        method: 'POST',
+        headers: {
+          'CF-Connecting-IP': '203.0.113.55',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)'
+        }
+      }),
+      env: { DB: mockDb }
+    });
+    expect(dlRes.status).toBe(200);
+
+    const pkgUpdateCall = executedSql.find((c) => c.sql.includes('UPDATE packages'));
+    expect(pkgUpdateCall).toBeDefined();
+    expect(pkgUpdateCall?.args[0]).toBe(3);
+    expect(pkgUpdateCall?.args[1]).toBe(3);
+
+    expect(deletedCacheUrls.some((u) => u.includes('__api_boot_catalog_bundle'))).toBe(true);
+    expect(deletedCacheUrls.some((u) => u.includes('sztest/confspace'))).toBe(true);
   });
 });

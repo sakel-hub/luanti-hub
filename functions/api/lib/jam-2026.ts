@@ -13,6 +13,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
+  buildPackageCacheInvalidationKeys,
   rewriteRelativeMarkdownUrls,
   fetchWithAnubisSupport,
   ensureExtendedPackageColumns,
@@ -27,7 +28,7 @@ export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as c
 
 const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v1';
 const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v1';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v1';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v2';
 const JAM_2026_BREWS_TTL_SECONDS = 600; // 10 minutes Edge + Isolate cache
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
@@ -459,7 +460,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
               )
           );
 
-          // 2. If another D1 package already owns `b.repo_url` under a different `id`, stamp `jam_game_2026` & `gamejam` onto it
+          // 2. Ensure any existing D1 package matching either `b.id` (case-insensitively) or `b.repo_url` has `jam_game_2026` & `gamejam` stamped onto it
           stmts.push(
             db
               .prepare(`
@@ -469,9 +470,10 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                   WHEN INSTR(LOWER(tags), 'jam_game_2026') = 0 THEN json_insert(tags, '$[#]', 'jam_game_2026', '$[#]', 'gamejam')
                   ELSE tags
                 END
-                WHERE LOWER(repo_url) = LOWER(?) AND LOWER(id) != LOWER(?) AND INSTR(LOWER(COALESCE(tags, '')), 'jam_game_2026') = 0
+                WHERE (LOWER(id) = LOWER(?) OR LOWER(repo_url) = LOWER(?))
+                  AND INSTR(LOWER(COALESCE(tags, '')), 'jam_game_2026') = 0
               `)
-              .bind(b.repo_url, b.id)
+              .bind(b.id, b.repo_url)
           );
 
           // 3. Ensure pure-Git `ext_jam2026_` package has its pinned commit release in D1 `releases` for 1-click `.zip` downloads
@@ -534,8 +536,9 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
           const lowerId = b.id.toLowerCase();
           cacheKeysToInvalidate.push(
+            ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
             `/__api_hydrate_v9_${lowerId}`,
-            `/__api_pkg_detail_v2/${encodeURIComponent(b.author.toLowerCase())}/${encodeURIComponent(b.name.toLowerCase())}`
+            `/__api_hydrate_v10_${lowerId}`
           );
         }
         await Promise.all([

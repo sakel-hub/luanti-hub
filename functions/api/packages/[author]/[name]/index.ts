@@ -542,10 +542,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ) {
       const hasStoredGitShotLite =
         isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
-      const [revAvgFast, liteGitScan] = await Promise.all([
+      const [revAvgFast, dailyDlFast, liteGitScan] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
         ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
+        context.env.DB.prepare(
+          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+        ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
         (!d1Pkg.video_url || !hasStoredGitShotLite) && d1Pkg.repo_url
           ? scanGitRepoMetadataCached(
               d1Pkg.author_name || author,
@@ -614,7 +617,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         fastRevAvgVal
       );
       const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
-      const lhDl = Number(d1Pkg.luantihub_downloads || 0);
+      const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), Number(dailyDlFast?.total_lh || 0));
       const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
       const fastSources: Array<'official' | 'git'> = [];
       if (isOfficialFast) fastSources.push('official');
@@ -677,8 +680,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
           ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
           context.env.DB.prepare(
             `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
           ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))
@@ -705,8 +708,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             `SELECT * FROM releases WHERE package_id IN (?, ?) ORDER BY released_at DESC`
           ).bind(effectivePkgId, effectivePkgIdLower).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
           context.env.DB.prepare(
             `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
           ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))

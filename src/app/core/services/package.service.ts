@@ -31,7 +31,7 @@ import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.ser
 import { AuthService, ProfileDrawerTab, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 import { TranslationService } from '../i18n/translation.service';
-import { syncJam2026ClientRowTagIfNeeded } from './jam-2026-sync.helper';
+import { isJam2026PromoTag, syncJam2026ClientRowTagIfNeeded } from './jam-2026-sync.helper';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
@@ -1099,11 +1099,15 @@ export class PackageService {
 
     for (const tag of allRowTags.slice(0, 3)) {
       const lowerTag = tag.toLowerCase();
+      if (this.promoTagSyncInFlight.has(lowerTag)) {
+        continue;
+      }
+      const isJamTag = isJam2026PromoTag(lowerTag);
       // Check if current catalog already has packages stamped with this tag
       const alreadyStampedCount = currentPkgs.filter(p =>
         (p.tags || []).some(t => t.toLowerCase() === lowerTag)
       ).length;
-      if (alreadyStampedCount > 0 || this.promoTagSyncInFlight.has(lowerTag)) {
+      if (!isJamTag && alreadyStampedCount > 0) {
         continue;
       }
 
@@ -1111,7 +1115,7 @@ export class PackageService {
       this.syncedPromoTagsInSession.add(lowerTag);
       (async () => {
         try {
-          let stampedAny = false;
+          const stampedByLowerId = new Map<string, { tags: string[]; badgeTags: string[] }>();
           await syncJam2026ClientRowTagIfNeeded({
             tag,
             packagesSignal: this._packages,
@@ -1119,13 +1123,30 @@ export class PackageService {
             deduplicateCatalog: (pkgs) => this.deduplicateCatalog(pkgs),
             buildSearchBlob: (pkg) => this.buildSearchBlob(pkg),
             onPackageStamped: (lowerId, tags, badgeTags) => {
-              stampedAny = true;
+              stampedByLowerId.set(lowerId, { tags, badgeTags });
               this.persistPromotionalTagsForPackage(lowerId, tags, badgeTags);
             }
           });
-          if (stampedAny) {
+          if (stampedByLowerId.size > 0) {
+            this._serverRecentlyAdded.update(list =>
+              list.map(item => {
+                const entry = stampedByLowerId.get(item.id.toLowerCase());
+                if (!entry) return item;
+                const mergedTags = this.mergePackageTagsPreservingExisting(entry.tags, item.tags);
+                const mergedBadges = parseBadgeTagsArray([...entry.badgeTags, ...(item.badge_tags || [])]);
+                return {
+                  ...item,
+                  tags: mergedTags,
+                  ...(mergedBadges.length > 0 ? { badge_tags: mergedBadges } : {}),
+                  _searchBlob: this.buildSearchBlob({ ...item, tags: mergedTags, badge_tags: mergedBadges })
+                };
+              })
+            );
             this.scheduleHydratedMetaPersist();
             this.scheduleBootCachePersist();
+          }
+          if (alreadyStampedCount > 0) {
+            return;
           }
           const list = await this.fetchUpstreamWithMirrorFallback(
             `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
@@ -2195,6 +2216,7 @@ export class PackageService {
           }
         }
       }
+      const rawV14 = localStorage.getItem('lh_hydrated_meta_v14');
       const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
       const rawV12 = localStorage.getItem('lh_hydrated_meta_v12');
       const rawV11 = localStorage.getItem('lh_hydrated_meta_v11');
@@ -2212,9 +2234,12 @@ export class PackageService {
       if (rawV12) {
         localStorage.removeItem('lh_hydrated_meta_v12');
       }
-      const raw = rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      if (rawV13) {
+        localStorage.removeItem('lh_hydrated_meta_v13');
+      }
+      const raw = rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
       if (!raw) return;
-      const isMigratingLegacy = !rawV13 && Boolean(rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingLegacy = !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -2278,7 +2303,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v13', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v14', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -2404,7 +2429,9 @@ export class PackageService {
   private normalizePackage(item: any): LuantiPackage {
     const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
     const pkgId = item.id || `${resolvedAuthor}/${item.name}`;
-    const cachedMeta = this.hydratedMetaCache.get(String(pkgId).toLowerCase());
+    const lowerPkgId = String(pkgId).toLowerCase();
+    const cachedMeta = this.hydratedMetaCache.get(lowerPkgId);
+    const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerPkgId] || 0);
 
     const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
     const hasSplitDownloads = item?.contentdb_downloads !== undefined || item?.luantihub_downloads !== undefined;
@@ -2419,7 +2446,12 @@ export class PackageService {
       ) || 0
     );
     const contentdbDownloads = Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
-    const luantihubDownloads = Math.max(0, Number(item?.luantihub_downloads ?? 0) || 0);
+    const luantihubDownloads = Math.max(
+      0,
+      Number(item?.luantihub_downloads ?? 0) || 0,
+      Number(cachedMeta?.luantihub_downloads || 0),
+      localUserDlCount
+    );
     const downloads = hasSplitDownloads
       ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
       : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
@@ -3937,9 +3969,15 @@ export class PackageService {
       const mergedBadgeTags = prev?.badge_tags?.length
         ? parseBadgeTagsArray([...(norm.badge_tags || []), ...prev.badge_tags])
         : norm.badge_tags;
+      const mergedCdbDl = Math.max(norm.contentdb_downloads || 0, prev?.contentdb_downloads || 0);
+      const mergedLhDl = Math.max(norm.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
+      const mergedTotalDl = Math.max(norm.downloads || 0, prev?.downloads || 0, mergedCdbDl + mergedLhDl);
       return {
         ...norm,
         ...(revDepCount !== norm.reverse_dep_count ? { reverse_dep_count: revDepCount } : {}),
+        contentdb_downloads: mergedCdbDl,
+        luantihub_downloads: mergedLhDl,
+        downloads: mergedTotalDl,
         tags: mergedTags,
         ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
       };
@@ -3982,17 +4020,28 @@ export class PackageService {
       const mergedBadgeTags = prev?.badge_tags?.length
         ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...prev.badge_tags])
         : pkg.badge_tags;
+      const mergedCdbDl = Math.max(pkg.contentdb_downloads || 0, prev?.contentdb_downloads || 0);
+      const mergedLhDl = Math.max(pkg.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
+      const mergedTotalDl = Math.max(pkg.downloads || 0, prev?.downloads || 0, mergedCdbDl + mergedLhDl);
       const tagsChanged =
         mergedTags.length !== (pkg.tags?.length || 0) ||
         (mergedBadgeTags?.length || 0) !== (pkg.badge_tags?.length || 0);
+      const downloadsChanged =
+        mergedCdbDl !== (pkg.contentdb_downloads || 0) ||
+        mergedLhDl !== (pkg.luantihub_downloads || 0) ||
+        mergedTotalDl !== (pkg.downloads || 0);
       if (
         revDepCount !== pkg.reverse_dep_count ||
         (stampedCreatedAt && stampedCreatedAt !== pkg.created_at) ||
-        tagsChanged
+        tagsChanged ||
+        downloadsChanged
       ) {
         const nextPkg: LuantiPackage = {
           ...pkg,
           reverse_dep_count: revDepCount,
+          contentdb_downloads: mergedCdbDl,
+          luantihub_downloads: mergedLhDl,
+          downloads: mergedTotalDl,
           ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {}),
           tags: mergedTags,
           ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
@@ -4925,7 +4974,7 @@ export class PackageService {
       };
       let existingTs = this.lastCatalogSyncAt || Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v25');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -4998,7 +5047,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v24',
+          'lh_boot_cache_v25',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -5168,7 +5217,8 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v20') ||
               sessionStorage.getItem('lh_boot_cache_v21') ||
               sessionStorage.getItem('lh_boot_cache_v22') ||
-              sessionStorage.getItem('lh_boot_cache_v23')
+              sessionStorage.getItem('lh_boot_cache_v23') ||
+              sessionStorage.getItem('lh_boot_cache_v24')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -5181,8 +5231,9 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v21');
               sessionStorage.removeItem('lh_boot_cache_v22');
               sessionStorage.removeItem('lh_boot_cache_v23');
+              sessionStorage.removeItem('lh_boot_cache_v24');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v25');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -5229,8 +5280,11 @@ export class PackageService {
 
       let response: Response | null = null;
       try {
+        const isLocalBootEndpoint = apiUrl.includes('/api/packages/?boot=1');
         response = await fetch(apiUrl, {
-          headers: { 'Accept': 'application/json' },
+          headers: isLocalBootEndpoint
+            ? { 'Accept': 'application/json', 'ngsw-bypass': 'true' }
+            : { 'Accept': 'application/json' },
           ...(forceRefresh ? { cache: 'no-store' as RequestCache } : {})
         });
       } catch {
@@ -5451,9 +5505,28 @@ export class PackageService {
           ? (itemMs >= patchMs ? item.created_at : patch.created_at)
           : (item.created_at || patch.created_at);
     }
+    const resolvedCdbDl =
+      patch.contentdb_downloads !== undefined || item.contentdb_downloads !== undefined
+        ? Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0))
+        : undefined;
+    const resolvedLhDl =
+      patch.luantihub_downloads !== undefined || item.luantihub_downloads !== undefined
+        ? Math.max(Number(patch.luantihub_downloads || 0), Number(item.luantihub_downloads || 0))
+        : undefined;
+    const resolvedTotalDl =
+      patch.downloads !== undefined || item.downloads !== undefined || resolvedCdbDl !== undefined || resolvedLhDl !== undefined
+        ? Math.max(
+            Number(patch.downloads || 0),
+            Number(item.downloads || 0),
+            (resolvedCdbDl || 0) + (resolvedLhDl || 0)
+          )
+        : undefined;
     const merged: LuantiPackage = {
       ...item,
       ...patch,
+      ...(resolvedCdbDl !== undefined ? { contentdb_downloads: resolvedCdbDl } : {}),
+      ...(resolvedLhDl !== undefined ? { luantihub_downloads: resolvedLhDl } : {}),
+      ...(resolvedTotalDl !== undefined ? { downloads: resolvedTotalDl } : {}),
       ...(resolvedCreatedAt ? { created_at: resolvedCreatedAt } : {}),
       tags: mergedTags,
       ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
@@ -5513,9 +5586,24 @@ export class PackageService {
               ? patch.badge_tags
               : parseBadgeTagsArray([...(patch.badge_tags || []), ...(existing.badge_tags || [])]))
           : undefined;
+      const mergedCdbDl =
+        patch.contentdb_downloads !== undefined || existing.contentdb_downloads !== undefined
+          ? Math.max(Number(patch.contentdb_downloads || 0), Number(existing.contentdb_downloads || 0))
+          : undefined;
+      const mergedLhDl =
+        patch.luantihub_downloads !== undefined || existing.luantihub_downloads !== undefined
+          ? Math.max(Number(patch.luantihub_downloads || 0), Number(existing.luantihub_downloads || 0))
+          : undefined;
+      const mergedTotalDl =
+        patch.downloads !== undefined || existing.downloads !== undefined || mergedCdbDl !== undefined || mergedLhDl !== undefined
+          ? Math.max(Number(patch.downloads || 0), Number(existing.downloads || 0), (mergedCdbDl || 0) + (mergedLhDl || 0))
+          : undefined;
       this.pendingCatalogPatches.set(targetIdLower, {
         ...existing,
         ...patch,
+        ...(mergedCdbDl !== undefined ? { contentdb_downloads: mergedCdbDl } : {}),
+        ...(mergedLhDl !== undefined ? { luantihub_downloads: mergedLhDl } : {}),
+        ...(mergedTotalDl !== undefined ? { downloads: mergedTotalDl } : {}),
         ...(mergedTags !== undefined ? { tags: mergedTags } : {}),
         ...(mergedBadgeTags !== undefined ? { badge_tags: mergedBadgeTags } : {})
       });
@@ -5694,15 +5782,33 @@ export class PackageService {
             continue;
           }
 
-          const cdbDl = Math.max(Number(pkg.contentdb_downloads || 0), Number(h.contentdb_downloads || 0));
-          const lhDl = Math.max(Number(pkg.luantihub_downloads || 0), Number(h.luantihub_downloads || 0));
-          const totalDl = Math.max(Number(pkg.downloads || 0), Number(h.downloads || 0), cdbDl + lhDl);
-          const lic = h.license || h.media_license || pkg.license || '';
-          const mediaLic = h.media_license || h.license || pkg.media_license || '';
           const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
           const livePkgForHydrate = this._packages().find(
             p => (p.id || `${p.author}/${p.name}`).toLowerCase() === lowerKey
           );
+          const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerKey] || 0);
+          const cdbDl = Math.max(
+            Number(pkg.contentdb_downloads || 0),
+            Number(livePkgForHydrate?.contentdb_downloads || 0),
+            Number(prevMetaForHydrate?.contentdb_downloads || 0),
+            Number(h.contentdb_downloads || 0)
+          );
+          const lhDl = Math.max(
+            Number(pkg.luantihub_downloads || 0),
+            Number(livePkgForHydrate?.luantihub_downloads || 0),
+            Number(prevMetaForHydrate?.luantihub_downloads || 0),
+            Number(h.luantihub_downloads || 0),
+            localUserDlCount
+          );
+          const totalDl = Math.max(
+            Number(pkg.downloads || 0),
+            Number(livePkgForHydrate?.downloads || 0),
+            Number(prevMetaForHydrate?.downloads || 0),
+            Number(h.downloads || 0),
+            cdbDl + lhDl
+          );
+          const lic = h.license || h.media_license || pkg.license || '';
+          const mediaLic = h.media_license || h.license || pkg.media_license || '';
           const tags = this.mergePackageTagsPreservingExisting(
             Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : undefined,
             pkg.tags,
@@ -6623,23 +6729,97 @@ export class PackageService {
     this.settingsService.recordLocalDownload(pkg.id);
 
     const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    const nextSeq = ++this.mutationSeq;
+    this.recentlyMutatedPkgKeys.set(targetIdLower, { ts: Date.now(), seq: nextSeq });
+    this.deepHydratedIds.delete(targetIdLower);
+    this.inFlightDetailsCache.delete(targetIdLower);
+    this.inFlightDetailsCache.delete(`${targetIdLower}::deep`);
+    this.inFlightDetailsCache.delete(`${targetIdLower}::light`);
+
+    const localUserDlCount = Number(this.settingsService.downloadedPackages()[targetIdLower] || 0);
+    const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
+    const activeCurrent = this._activePackage();
+    const activeMatch =
+      activeCurrent &&
+      (activeCurrent.id || `${activeCurrent.author}/${activeCurrent.name}`).toLowerCase() === targetIdLower
+        ? activeCurrent
+        : null;
+    const catalogMatch = this._packages().find(
+      p => (p.id || `${p.author}/${p.name}`).toLowerCase() === targetIdLower
+    );
+    const baseLhDownloads = Math.max(
+      Number(pkg.luantihub_downloads || 0),
+      Number(activeMatch?.luantihub_downloads || 0),
+      Number(catalogMatch?.luantihub_downloads || 0),
+      Number(prevMeta.luantihub_downloads || 0)
+    );
+    const latestLhDownloads = Math.max(baseLhDownloads + 1, localUserDlCount);
+    const latestCdbDownloads = Math.max(
+      0,
+      Number(
+        pkg.contentdb_downloads ??
+          activeMatch?.contentdb_downloads ??
+          catalogMatch?.contentdb_downloads ??
+          prevMeta.contentdb_downloads ??
+          Math.max(0, (pkg.downloads || 0) - (pkg.luantihub_downloads || 0))
+      ) || 0
+    );
+    const latestTotalDownloads = Math.max(
+      Number(pkg.downloads || 0),
+      Number(activeMatch?.downloads || 0),
+      Number(catalogMatch?.downloads || 0),
+      Number(prevMeta.downloads || 0),
+      latestCdbDownloads + latestLhDownloads
+    );
+
     const bumpCounters = (item: LuantiPackage): LuantiPackage => {
-      const nextLh = (item.luantihub_downloads || 0) + 1;
-      const cdb = item.contentdb_downloads ?? Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0));
+      const cdb = Math.max(
+        latestCdbDownloads,
+        Number(
+          item.contentdb_downloads ??
+            Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0))
+        ) || 0
+      );
+      const total = Math.max(item.downloads || 0, latestTotalDownloads, cdb + latestLhDownloads);
       return {
         ...item,
         contentdb_downloads: cdb,
-        luantihub_downloads: nextLh,
-        downloads: cdb + nextLh
+        luantihub_downloads: latestLhDownloads,
+        downloads: total
       };
     };
 
+    const bumpList = (list: LuantiPackage[]) =>
+      list.map(item => ((item.id || `${item.author}/${item.name}`).toLowerCase() === targetIdLower ? bumpCounters(item) : item));
+
     this._activePackage.update(current =>
-      current && (current.id || '').toLowerCase() === targetIdLower ? bumpCounters(current) : current
+      current && (current.id || `${current.author}/${current.name}`).toLowerCase() === targetIdLower
+        ? bumpCounters(current)
+        : current
     );
-    this._packages.update(list =>
-      list.map(item => ((item.id || '').toLowerCase() === targetIdLower ? bumpCounters(item) : item))
-    );
+    this._packages.update(bumpList);
+    this._serverRecentlyAdded.update(bumpList);
+    this._serverTop10Today.update(bumpList);
+    this._serverTop10Week.update(bumpList);
+
+    const pendingPatch = this.pendingCatalogPatches.get(targetIdLower);
+    if (pendingPatch) {
+      this.pendingCatalogPatches.set(targetIdLower, {
+        ...pendingPatch,
+        contentdb_downloads: Math.max(Number(pendingPatch.contentdb_downloads || 0), latestCdbDownloads),
+        luantihub_downloads: Math.max(Number(pendingPatch.luantihub_downloads || 0), latestLhDownloads),
+        downloads: Math.max(Number(pendingPatch.downloads || 0), latestTotalDownloads)
+      });
+    }
+
+    this.hydratedMetaCache.set(targetIdLower, {
+      ...prevMeta,
+      contentdb_downloads: Math.max(Number(prevMeta.contentdb_downloads || 0), latestCdbDownloads),
+      luantihub_downloads: latestLhDownloads,
+      downloads: latestTotalDownloads
+    });
+    this.scheduleHydratedMetaPersist();
+    this.scheduleBootCachePersist();
 
     if (!this.edgeApiAvailable) return;
     const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?reason=web`;
@@ -8242,20 +8422,40 @@ export class PackageService {
           }
         }
 
+        const cachedMetaForDownloads = this.hydratedMetaCache.get(cacheKey);
+        const liveCatalogPkgForDownloads = this._packages().find(
+          p =>
+            (p.id || `${p.author}/${p.name}`).toLowerCase() === cacheKey ||
+            (p.author.toLowerCase() === (pkg.author || '').toLowerCase() &&
+              p.name.toLowerCase() === (pkg.name || '').toLowerCase())
+        );
         const hasSplitDownloads = data.contentdb_downloads !== undefined || data.luantihub_downloads !== undefined;
-        const resolvedCdbDownloads = hasSplitDownloads
-          ? Math.max(0, Number(data.contentdb_downloads || 0))
-          : (pkg.source !== 'git' || pkg.sources?.includes('official')
-              ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
-              : (pkg.contentdb_downloads || 0));
+        const resolvedCdbDownloads = Math.max(
+          hasSplitDownloads
+            ? Math.max(0, Number(data.contentdb_downloads || 0))
+            : (pkg.source !== 'git' || pkg.sources?.includes('official')
+                ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
+                : (pkg.contentdb_downloads || 0)),
+          Number(pkg.contentdb_downloads || 0),
+          Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
+          Number(cachedMetaForDownloads?.contentdb_downloads || 0)
+        );
         const localUserDlCount = Number(this.settingsService.downloadedPackages()[cacheKey] || 0);
-        const resolvedLhDownloads = data.luantihub_downloads !== undefined
-          ? Math.max(0, Number(data.luantihub_downloads) || 0)
-          : Math.max(Number(pkg.luantihub_downloads ?? 0) || 0, localUserDlCount);
-        const hasAuthoritativeDownloads = data.downloads !== undefined || data.downloads_count !== undefined || hasSplitDownloads;
-        const resolvedDownloads = hasAuthoritativeDownloads
-          ? Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
-          : Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(pkg.downloads || 0));
+        const resolvedLhDownloads = Math.max(
+          0,
+          Number(data.luantihub_downloads ?? 0) || 0,
+          Number(pkg.luantihub_downloads ?? 0) || 0,
+          Number(liveCatalogPkgForDownloads?.luantihub_downloads ?? 0) || 0,
+          Number(cachedMetaForDownloads?.luantihub_downloads ?? 0) || 0,
+          localUserDlCount
+        );
+        const resolvedDownloads = Math.max(
+          resolvedCdbDownloads + resolvedLhDownloads,
+          Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+          Number(pkg.downloads || 0),
+          Number(liveCatalogPkgForDownloads?.downloads || 0),
+          Number(cachedMetaForDownloads?.downloads || 0)
+        );
 
         const reviewThreadCounts =
           parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
@@ -8498,8 +8698,9 @@ export class PackageService {
             license: resolvedLicense || prevMeta.license,
             media_license: resolvedMediaLicense || prevMeta.media_license,
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
-            contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
-            downloads: resolvedDownloads || prevMeta.downloads,
+            contentdb_downloads: Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
+            luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
+            downloads: Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
             score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
             ...(reviewThreadCounts || prevMeta.review_thread_counts
               ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
@@ -8532,9 +8733,26 @@ export class PackageService {
               ((current.author || '').toLowerCase() === targetAuthorLower &&
                 (current.name || '').toLowerCase() === targetNameLower))
           ) {
+            const mergedCdbDl = Math.max(
+              Number(current.contentdb_downloads || 0),
+              Number(updatedFields.contentdb_downloads || 0)
+            );
+            const mergedLhDl = Math.max(
+              Number(current.luantihub_downloads || 0),
+              Number(updatedFields.luantihub_downloads || 0)
+            );
+            const mergedTotalDl = Math.max(
+              Number(current.downloads || 0),
+              Number(updatedFields.downloads || 0),
+              mergedCdbDl + mergedLhDl
+            );
             const merged = {
               ...current,
               ...updatedFields,
+              contentdb_downloads: mergedCdbDl,
+              luantihub_downloads: mergedLhDl,
+              downloads: mergedTotalDl,
+              tags: this.mergePackageTagsPreservingExisting(updatedFields.tags, current.tags),
               ...(readmeText ? { readme: readmeText } : {})
             };
             this.updateSeoMeta(merged);

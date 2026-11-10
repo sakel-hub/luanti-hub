@@ -58,7 +58,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v9_${encodeURIComponent(
+      ? `/__api_hydrate_v10_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -83,14 +83,31 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   if (rawIds.length > 0) {
     const missingIds = new Set<string>(rawIds.map(id => id.toLowerCase()));
     const d1ById = new Map<string, any>();
+    const dailyDlByLowerId = new Map<string, number>();
 
     if (env.DB) {
       try {
-        const exactAndLowerIds = Array.from(new Set([...rawIds, ...rawIds.map(id => id.toLowerCase())]));
+        const lowerIds = rawIds.map(id => id.toLowerCase());
+        const exactAndLowerIds = Array.from(new Set([...rawIds, ...lowerIds]));
         const placeholders = exactAndLowerIds.map(() => '?').join(', ');
-        const d1Res = await env.DB.prepare(
-          `SELECT * FROM packages WHERE id IN (${placeholders}) AND status = 'active'`
-        ).bind(...exactAndLowerIds).all();
+        const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
+        const [d1Res, dailyDlRes] = await Promise.all([
+          env.DB.prepare(
+            `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+          ).bind(...exactAndLowerIds, ...lowerIds).all(),
+          env.DB.prepare(
+            `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
+             FROM package_daily_downloads
+             WHERE LOWER(package_id) IN (${lowerPlaceholders})
+             GROUP BY LOWER(package_id)`
+          ).bind(...lowerIds).all().catch(() => ({ results: [] }))
+        ]);
+
+        for (const dlRow of (dailyDlRes?.results || [])) {
+          if (dlRow?.pkg_id && Number(dlRow.total_dl) > 0) {
+            dailyDlByLowerId.set(String(dlRow.pkg_id).toLowerCase(), Number(dlRow.total_dl));
+          }
+        }
 
         const d1RepoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
@@ -104,7 +121,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           );
           const parsedRowRevCounts = parseNonZeroReviewThreadCounts(row.review_thread_counts);
           const cdbDl = Number(row.contentdb_downloads || 0);
-          const lhDl = Number(row.luantihub_downloads || 0);
+          const lhDl = Math.max(Number(row.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
           const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
           const rowScore = computeStarRatingFromData({
@@ -355,7 +372,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             Number(detail?.downloads || 0),
             Number(scoreEntry?.downloads || 0)
           );
-          const lhDl = Number(existing.luantihub_downloads || 0);
+          const lhDl = Math.max(Number(existing.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
           const rawMinVer = detail?.min_minetest_version && typeof detail.min_minetest_version === 'object'
             ? detail.min_minetest_version.name

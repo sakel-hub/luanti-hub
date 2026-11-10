@@ -434,6 +434,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v21',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v22',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v23',
     'https://cache.luantihub.internal/__api_boot_recently_added_v1',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1'
@@ -514,11 +515,12 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     for (const k of Array.from(isolateJsonCache.keys())) {
       if (
         k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
+        k.startsWith('https://cache.luantihub.internal/__api_hydrate_v') ||
         k.startsWith('https://cache.luantihub.internal/__api_updates_v') ||
         k.startsWith('https://cache.luantihub.internal/__for_client_v') ||
         k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
         k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
-        k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v1_') ||
+        k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v') ||
         k.startsWith('https://cache.luantihub.internal/__unified_tags_v')
       ) {
         isolateJsonCache.delete(k);
@@ -5375,8 +5377,8 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v22';
-export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v21';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v23';
+export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v22';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
 
@@ -5436,6 +5438,8 @@ export function buildPackageCacheInvalidationKeys(
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'lite', 'en'),
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'full-readme', 'en'),
     buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
+    `/__api_hydrate_v9_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
+    `/__api_hydrate_v10_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `https://cache.luantihub.internal/__for_client_v5/${encA}/${encN}/en/%3Fformspec_version%3D8`
   ]);
 

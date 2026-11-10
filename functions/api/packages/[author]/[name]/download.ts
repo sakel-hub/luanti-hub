@@ -193,21 +193,29 @@ export async function onRequest(context: {
             reasonWeb
           ).run();
 
+          const dailySumRow = await env.DB.prepare(
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh
+             FROM package_daily_downloads
+             WHERE LOWER(package_id) IN (LOWER(?), LOWER(?))`
+          ).bind(effectivePkgId, packageId).first().catch(() => ({ total_lh: 1 }));
+          const authoritativeDailySum = Math.max(1, Number(dailySumRow?.total_lh || 1));
+
           await env.DB.prepare(`
             UPDATE packages
             SET
-              luantihub_downloads = COALESCE(luantihub_downloads, 0) + 1,
-              downloads_count = COALESCE(contentdb_downloads, 0) + COALESCE(luantihub_downloads, 0) + 1
-            WHERE LOWER(id) = LOWER(?)
-          `).bind(effectivePkgId).run();
+              luantihub_downloads = MAX(COALESCE(luantihub_downloads, 0) + 1, ?),
+              downloads_count = COALESCE(contentdb_downloads, 0) + MAX(COALESCE(luantihub_downloads, 0) + 1, ?)
+            WHERE LOWER(id) IN (LOWER(?), LOWER(?))
+          `).bind(authoritativeDailySum, authoritativeDailySum, effectivePkgId, packageId).run();
 
           const statsAuthor = pkgRecord?.author_name || author;
           const statsName = pkgRecord?.name || name;
           await invalidateEdgeCacheKeys(
-            [7, 30, 90, 365].flatMap((d) => [
-              buildPackageStatsEdgeCacheKey(statsAuthor, statsName, d),
-              buildAuthorStatsEdgeCacheKey(statsAuthor, d)
-            ])
+            buildPackageCacheInvalidationKeys(statsAuthor, statsName, {
+              includeBootCatalog: true,
+              includeAuthorProfile: true,
+              extraAuthors: author && author.toLowerCase() !== String(statsAuthor).toLowerCase() ? [author] : undefined
+            })
           ).catch(() => {});
 
           const cookies = parseCookies(request);

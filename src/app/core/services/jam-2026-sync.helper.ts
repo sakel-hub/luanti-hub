@@ -166,7 +166,14 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
       const fetcher =
         fetchJson ||
         (async (url: string) => {
-          const res = await fetch(url);
+          const bypassUrl = url.includes('?') ? `${url}&ngsw-bypass=true` : `${url}?ngsw-bypass=true`;
+          const res = await fetch(bypassUrl, {
+            cache: 'no-cache',
+            headers: {
+              Accept: 'application/json',
+              'ngsw-bypass': 'true'
+            }
+          });
           if (!res.ok) return null;
           return res.json();
         });
