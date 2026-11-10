@@ -80,7 +80,8 @@ interface PromoRowDelta {
 export async function syncActivePromotionRowPackages(
   activePromos: any[] | undefined | null,
   db?: any,
-  noCache = false
+  noCache = false,
+  upstreamCatalog?: any[]
 ): Promise<PromoRowDelta | null> {
   if (!Array.isArray(activePromos) || activePromos.length === 0) return null;
 
@@ -110,7 +111,7 @@ export async function syncActivePromotionRowPackages(
   if (uniqueTags.length === 0 && uniqueAuthors.length === 0) return null;
 
   const cacheSignature = `tags=${uniqueTags.map((t) => t.toLowerCase()).sort().join(',')}|authors=${uniqueAuthors.map((a) => a.toLowerCase()).sort().join(',')}`;
-  const syncCacheKey = `/__promo_row_sync_v2_${encodeURIComponent(cacheSignature)}`;
+  const syncCacheKey = `/__promo_row_sync_v3_${encodeURIComponent(cacheSignature)}`;
 
   if (!noCache) {
     const cachedDelta = await readEdgeCacheJson<PromoRowDelta>(syncCacheKey);
@@ -207,7 +208,8 @@ export async function syncActivePromotionRowPackages(
     queuedUpsertKeys,
     d1UpsertPairs,
     db,
-    noCache
+    noCache,
+    upstreamCatalog
   });
 
   if (db && d1UpsertPairs.length > 0) {
@@ -291,9 +293,16 @@ export function overlayPromotionRowDeltaOnCatalog(
     }
     if (currentTags) {
       if (!result) result = [...packagesList];
+      const existingBadgeTags: string[] = Array.isArray(existingPkg.badge_tags) ? existingPkg.badge_tags : [];
+      const hasJamTagStamped = currentTags.some((ct) => String(ct).toLowerCase() === 'jam_game_2026');
+      const nextBadgeTags =
+        hasJamTagStamped && !existingBadgeTags.some((bt) => String(bt).toLowerCase() === 'jam_game_2026')
+          ? [...existingBadgeTags, 'jam_game_2026']
+          : undefined;
       result[idx] = {
         ...existingPkg,
-        tags: currentTags
+        tags: currentTags,
+        ...(nextBadgeTags ? { badge_tags: nextBadgeTags } : {})
       };
     }
   }
@@ -301,7 +310,8 @@ export function overlayPromotionRowDeltaOnCatalog(
   // 1b. Stamp promotional tags onto existing catalog items matched by repository URL (e.g. Game Jam 2026 entries also on ContentDB)
   const { packages: repoOverlaidList, matchedRepoKeys } = applyJam2026RepoOverlayOnCatalog(
     result || packagesList,
-    delta.repoTagMap
+    delta.repoTagMap,
+    items
   );
 
   // 2. Inject brand-new ContentDB or Jam 2026 submissions that arrived after the 30-min catalog bundle was built
@@ -822,10 +832,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   ].some(Boolean)
     ? `&h=${normalizedHideSig}&tg=${tagFilterSig}&gm=${gameFilterSig}&ev=${effectiveEngineSig}&s=${sortFilterSig}&o=${orderFilterSig}&lm=${limitFilterSig}&lc=${licenseFilterSig}`
     : '';
-  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}${extraFilterSig}`;
+  const isWebClientQuery = url.searchParams.get('client') === 'web';
+  const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}&cw=${isWebClientQuery ? '1' : '0'}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v11_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal/__catalog_edge_v13_${encodeURIComponent(normalizedCatalogKey)}`;
 
   const lowerQ = q.toLowerCase();
   const lowerAuthor = author.toLowerCase();
@@ -890,6 +901,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
       return true;
     });
+
+    if (isWebClientQuery && requestedFmt !== 'keys') {
+      return filtered;
+    }
 
     const slimList = filtered.map((pkg: any) => {
       const item: Record<string, any> = {
@@ -1202,12 +1217,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         Number.isFinite(recentMs) && recentMs > (Number.isFinite(baseMs) ? baseMs : 0)
           ? recentMatch.created_at
           : pkg.created_at || recentMatch.created_at;
+      const mergedOverlayTags = Array.from(
+        new Set([...(Array.isArray(pkg.tags) ? pkg.tags : []), ...(Array.isArray(recentMatch.tags) ? recentMatch.tags : [])])
+      ).filter(Boolean);
+      const mergedOverlayBadgeTags = parseBadgeTagsArray([
+        ...(Array.isArray(pkg.badge_tags) ? pkg.badge_tags : []),
+        ...(Array.isArray(recentMatch.badge_tags) ? recentMatch.badge_tags : [])
+      ]);
+      const mergedOverlaySources = Array.from(
+        new Set([
+          ...(Array.isArray(pkg.sources) && pkg.sources.length > 0 ? pkg.sources : [pkg.source || 'official']),
+          ...(Array.isArray(recentMatch.sources) ? recentMatch.sources : [])
+        ])
+      );
       return {
         ...pkg,
         ...(newerCreatedAt ? { created_at: newerCreatedAt } : {}),
         ...(recentMatch.approved_at ? { approved_at: recentMatch.approved_at } : {}),
         ...(recentMatch.license && !pkg.license ? { license: recentMatch.license } : {}),
         ...(recentMatch.media_license && !pkg.media_license ? { media_license: recentMatch.media_license } : {}),
+        ...(recentMatch.repo_url && !pkg.repo_url ? { repo_url: recentMatch.repo_url } : {}),
+        ...(mergedOverlayTags.length > 0 ? { tags: mergedOverlayTags } : {}),
+        ...(mergedOverlayBadgeTags.length > 0 ? { badge_tags: mergedOverlayBadgeTags } : {}),
+        ...(mergedOverlaySources.length > 0 ? { sources: mergedOverlaySources } : {}),
         ...(recentMatch.banner && (!pkg.banner || pkg.banner === 'logo.svg') ? { banner: recentMatch.banner } : {}),
         ...(recentMatch.thumbnail && (!pkg.thumbnail || pkg.thumbnail === 'logo.svg')
           ? { thumbnail: recentMatch.thumbnail }
@@ -1225,7 +1257,61 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         missingNewPackages.push(item);
       }
     }
-    return missingNewPackages.length > 0 ? [...missingNewPackages, ...updatedBase] : updatedBase;
+    const deduplicateSameRepoCatalogTwins = (list: any[]): any[] => {
+      if (!Array.isArray(list) || list.length < 2) return list;
+      const officialIdxByRepo = new Map<string, number>();
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i];
+        const isOff = p?.source === 'official' || (Array.isArray(p?.sources) && p.sources.includes('official'));
+        if (!isOff) continue;
+        const rk = normalizeRepoKey(p?.repo_url || p?.repo);
+        if (rk && !officialIdxByRepo.has(rk)) {
+          officialIdxByRepo.set(rk, i);
+        }
+      }
+      if (officialIdxByRepo.size === 0) return list;
+      let cloned: any[] | null = null;
+      const dropIndices = new Set<number>();
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i];
+        const isPureGit =
+          p?.source === 'git' && (!Array.isArray(p?.sources) || !p.sources.includes('official'));
+        if (!isPureGit) continue;
+        const rk = normalizeRepoKey(p?.repo_url || p?.repo);
+        if (!rk) continue;
+        const offIdx = officialIdxByRepo.get(rk);
+        if (offIdx === undefined || offIdx === i) continue;
+        if (!cloned) cloned = [...list];
+        const offPkg = cloned[offIdx];
+        const mergedTags = Array.from(
+          new Set([...(Array.isArray(offPkg.tags) ? offPkg.tags : []), ...(Array.isArray(p.tags) ? p.tags : [])])
+        ).filter(Boolean);
+        const mergedBadges = parseBadgeTagsArray([
+          ...(Array.isArray(offPkg.badge_tags) ? offPkg.badge_tags : []),
+          ...(Array.isArray(p.badge_tags) ? p.badge_tags : [])
+        ]);
+        const mergedSources = Array.from(
+          new Set([...(Array.isArray(offPkg.sources) ? offPkg.sources : ['official']), 'git'])
+        );
+        const mergedLhDl = Math.max(Number(offPkg.luantihub_downloads || 0), Number(p.luantihub_downloads || 0));
+        const mergedCdbDl = Number(offPkg.contentdb_downloads ?? offPkg.downloads ?? 0);
+        cloned[offIdx] = {
+          ...offPkg,
+          tags: mergedTags,
+          ...(mergedBadges.length > 0 ? { badge_tags: mergedBadges } : {}),
+          sources: mergedSources,
+          luantihub_downloads: mergedLhDl,
+          downloads: Math.max(Number(offPkg.downloads || 0), mergedCdbDl + mergedLhDl)
+        };
+        dropIndices.add(i);
+      }
+      if (!cloned || dropIndices.size === 0) return list;
+      return cloned.filter((_, idx) => !dropIndices.has(idx));
+    };
+
+    return deduplicateSameRepoCatalogTwins(
+      missingNewPackages.length > 0 ? [...missingNewPackages, ...updatedBase] : updatedBase
+    );
   };
 
   const fetchLiveRecentlyAddedOverlay = async (
@@ -1233,7 +1319,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     useCache = true
   ): Promise<any[] | null> => {
     if (useCache) {
-      const cachedRecent = await readEdgeCacheJson<any[]>('/__api_boot_recently_added_v1');
+      const cachedRecent = await readEdgeCacheJson<any[]>('/__api_boot_recently_added_v2');
       if (Array.isArray(cachedRecent) && cachedRecent.length > 0) {
         return cachedRecent;
       }
@@ -1297,8 +1383,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const toHydrate = recentItems
       .slice(0, 12)
-      .filter(it => !it.created_at || !it.license || !it.banner || isContentDbThumbnailUrl(it.banner));
+      .filter(
+        it =>
+          !it.created_at ||
+          !it.license ||
+          !it.repo_url ||
+          !it.banner ||
+          isContentDbThumbnailUrl(it.banner)
+      );
     if (toHydrate.length > 0) {
+      let recentJamScanBudget = 4;
+      const recentPromoTagPairs: Array<{ tag: string; pkgId: string }> = [];
       await Promise.all(
         toHydrate.map(async pkg => {
           const detail = await fetchUpstreamJsonCached<any>(
@@ -1309,6 +1404,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           if (detail.license || detail.media_license) {
             pkg.license = detail.license || detail.media_license || pkg.license || '';
             pkg.media_license = detail.media_license || detail.license || pkg.media_license || '';
+          }
+          const detailRepo = detail.repo || detail.repo_url || '';
+          if (detailRepo && !pkg.repo_url) {
+            pkg.repo_url = detailRepo;
+          }
+          const rawDetailTags = Array.isArray(detail.tags)
+            ? detail.tags
+                .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
+                .filter(Boolean)
+            : [];
+          if (rawDetailTags.length > 0) {
+            pkg.tags = Array.from(new Set([...(Array.isArray(pkg.tags) ? pkg.tags : []), ...rawDetailTags])).filter(
+              Boolean
+            );
           }
           if (detail.created_at || detail.approved_at) {
             const normExisting = pkg.created_at ? normalizeUtcIsoTimestamp(pkg.created_at) : '';
@@ -1339,8 +1448,55 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             pkg.contentdb_downloads = detail.downloads;
             pkg.downloads = detail.downloads + Number(pkg.luantihub_downloads || 0);
           }
+          const hasJamTagAlready = Array.isArray(pkg.tags) && pkg.tags.some((t: string) => String(t).toLowerCase() === 'jam_game_2026');
+          if (
+            String(pkg.type || '').toLowerCase() === 'game' &&
+            pkg.repo_url &&
+            !hasJamTagAlready &&
+            recentJamScanBudget > 0
+          ) {
+            recentJamScanBudget--;
+            const gitScan = await scanGitRepoMetadataCached(
+              pkg.author,
+              pkg.name,
+              'game',
+              pkg.repo_url,
+              21600
+            ).catch(() => null);
+            if (gitScan?.jam2026Tags && gitScan.jam2026Tags.length > 0) {
+              pkg.tags = Array.from(
+                new Set([...(Array.isArray(pkg.tags) ? pkg.tags : []), ...gitScan.jam2026Tags])
+              ).filter(Boolean);
+              pkg.badge_tags = parseBadgeTagsArray([...(Array.isArray(pkg.badge_tags) ? pkg.badge_tags : []), 'jam_game_2026']);
+              pkg.sources = Array.from(new Set([...(Array.isArray(pkg.sources) ? pkg.sources : ['official']), 'git']));
+              const canonicalId = pkg.id || `${pkg.author}/${pkg.name}`;
+              for (const jt of gitScan.jam2026Tags) {
+                recentPromoTagPairs.push({ tag: jt, pkgId: canonicalId });
+              }
+            }
+          }
         })
       );
+      if (env.DB && recentPromoTagPairs.length > 0) {
+        try {
+          const stmts = recentPromoTagPairs.map(pair =>
+            env.DB.prepare(`
+              INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+              VALUES (?, ?, CURRENT_TIMESTAMP)
+              ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            `).bind(pair.tag, pair.pkgId)
+          );
+          if (typeof env.DB.batch === 'function') {
+            await env.DB.batch(stmts).catch(() => {});
+          } else {
+            for (const s of stmts) {
+              await s.run().catch(() => {});
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
     }
 
     const builtRecentlyAdded = await applyApprovalTrackingAndBuildRecentlyAdded(
@@ -1350,7 +1506,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       useCache
     );
     if (useCache && builtRecentlyAdded.length > 0) {
-      await writeEdgeCacheJson('/__api_boot_recently_added_v1', builtRecentlyAdded, 300).catch(() => {});
+      await writeEdgeCacheJson('/__api_boot_recently_added_v2', builtRecentlyAdded, 300).catch(() => {});
     }
     return builtRecentlyAdded;
   };
@@ -1429,14 +1585,22 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const validEdgePromos = rawPromos
             .filter((r: any) => isValidActivePromotionRow(r, nowMs))
             .map((r: any) => normalizePromotionRow(r));
-          const promoDelta = await syncActivePromotionRowPackages(validEdgePromos, env.DB, false);
+          const promoDelta = await syncActivePromotionRowPackages(
+            validEdgePromos,
+            env.DB,
+            false,
+            overlaidPackages
+          );
           if (promoDelta && overlaidPackages.length > 0) {
             overlaidPackages = overlayPromotionRowDeltaOnCatalog(overlaidPackages, promoDelta);
           }
-          const overlaidRecent =
+          const overlaidRecentRaw =
             promoDelta && Array.isArray(edgeBody.recentlyAdded) && edgeBody.recentlyAdded.length > 0
               ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, promoDelta, undefined, undefined, false)
               : edgeBody.recentlyAdded;
+          const overlaidRecent = Array.isArray(overlaidRecentRaw)
+            ? overlayRecentlyAddedOnPackages(overlaidRecentRaw, []).slice(0, 24)
+            : overlaidRecentRaw;
           edgeBody = {
             ...edgeBody,
             packages: overlaidPackages,
@@ -1923,9 +2087,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const upstreamByNameTitle = new Map<string, any>();
   const upstreamByNameTypeCount = new Map<string, number>();
   const upstreamByNameType = new Map<string, any>();
+  const upstreamByGlobalNameTypeCount = new Map<string, number>();
+  const upstreamByGlobalNameType = new Map<string, any>();
   const upstreamCasingByBaseAuthor = new Map<string, string>();
   const normalizeBaseAuthor = (a: string) =>
     String(a || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+  const normalizeIdentityText = (s: unknown) =>
+    typeof s === 'string' ? s.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 
   for (const item of upstreamList) {
     if (!item || !item.author || !item.name) continue;
@@ -1942,6 +2110,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const nameTypeKey = `${baseAuthor}::${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
     upstreamByNameTypeCount.set(nameTypeKey, (upstreamByNameTypeCount.get(nameTypeKey) || 0) + 1);
     upstreamByNameType.set(nameTypeKey, item);
+    const globalNameTypeKey = `${String(item.name).toLowerCase()}::${String(item.type || 'mod').toLowerCase()}`;
+    upstreamByGlobalNameTypeCount.set(globalNameTypeKey, (upstreamByGlobalNameTypeCount.get(globalNameTypeKey) || 0) + 1);
+    upstreamByGlobalNameType.set(globalNameTypeKey, item);
   }
 
   const resolveAuthorMeta = (rawAuthorId: unknown, ...handles: Array<string | undefined | null>) => {
@@ -1997,13 +2168,37 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     const pRepoKey = normalizeRepoKey(p.repo_url);
     const pBaseAuthor = normalizeBaseAuthor(p.author_name);
-    const pNameTitleKey = `${pBaseAuthor}::${String(p.name || '').toLowerCase()}::${String(p.title || '').trim().toLowerCase()}`;
-    const pNameTypeKey = `${pBaseAuthor}::${String(p.name || '').toLowerCase()}::${String(p.type || 'mod').toLowerCase()}`;
+    const lowerPName = String(p.name || '').toLowerCase();
+    const lowerPType = String(p.type || 'mod').toLowerCase();
+    const pNameTitleKey = `${pBaseAuthor}::${lowerPName}::${String(p.title || '').trim().toLowerCase()}`;
+    const pNameTypeKey = `${pBaseAuthor}::${lowerPName}::${lowerPType}`;
+    const pGlobalNameTypeKey = `${lowerPName}::${lowerPType}`;
+    const globalCandidate =
+      upstreamByGlobalNameTypeCount.get(pGlobalNameTypeKey) === 1
+        ? upstreamByGlobalNameType.get(pGlobalNameTypeKey)
+        : undefined;
+    const crossAuthorExactMatch = (() => {
+      if (!globalCandidate) return undefined;
+      const candRepoKey = normalizeRepoKey(globalCandidate.repo || globalCandidate.repo_url);
+      if (candRepoKey && pRepoKey && candRepoKey !== pRepoKey) return undefined;
+      const pTitleNorm = normalizeIdentityText(p.title);
+      const uTitleNorm = normalizeIdentityText(globalCandidate.title);
+      const pDescNorm = normalizeIdentityText(p.short_desc);
+      const uDescNorm = normalizeIdentityText(globalCandidate.short_desc || globalCandidate.short_description);
+      if (pTitleNorm && pTitleNorm !== lowerPName && pTitleNorm === uTitleNorm) {
+        return globalCandidate;
+      }
+      if (pDescNorm.length >= 15 && pDescNorm === uDescNorm) {
+        return globalCandidate;
+      }
+      return undefined;
+    })();
     const matchedUpstream =
       upstreamById.get(d1Key) ||
       (pRepoKey ? upstreamByRepo.get(pRepoKey) : undefined) ||
       upstreamByNameTitle.get(pNameTitleKey) ||
-      (upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined);
+      (upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined) ||
+      crossAuthorExactMatch;
 
     let canonicalAuthor = matchedUpstream?.author || p.author_name;
     let canonicalName = matchedUpstream?.name || p.name;
@@ -2304,9 +2499,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       contentdbScoreDownloads: Number(item.score_downloads || 0),
       contentdbScoreReviews: Number(item.score_reviews || 0)
     });
+    const upstreamItemTags = Array.from(
+      new Set([
+        ...parseJsonArray(item.tags),
+        ...(requestedTagFilters.length > 0 && upstreamPath.includes('tag=') ? requestedTagFilters : [])
+      ])
+    ).filter(Boolean);
     merged.push({
       ...item,
       id: `${item.author}/${item.name}`,
+      ...(upstreamItemTags.length > 0 ? { tags: upstreamItemTags } : {}),
       ...(upstreamAuthorMeta.author_display_name
         ? { author_display_name: upstreamAuthorMeta.author_display_name }
         : {}),
@@ -2377,13 +2579,18 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let responsePayload: any = merged;
   if (isBootBundle) {
     const tags = Array.isArray(rawTags) && rawTags.length > 0 ? rawTags : DEFAULT_CONTENTDB_TAGS;
-    const promoDelta = await syncActivePromotionRowPackages(activePromotions, env.DB, noCache).catch(() => null);
-    const mergedWithPromoOverlay = promoDelta
-      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds, lhDownloadsMap)
+    const promoDelta = await syncActivePromotionRowPackages(
+      activePromotions,
+      env.DB,
+      noCache,
+      combinedUpstreamList
+    ).catch(() => null);
+    const mergedWithInitialPromoStamps = promoDelta
+      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds, lhDownloadsMap, false)
       : merged;
-    if (mergedWithPromoOverlay !== merged) {
+    if (mergedWithInitialPromoStamps !== merged) {
       merged.length = 0;
-      merged.push(...mergedWithPromoOverlay);
+      merged.push(...mergedWithInitialPromoStamps);
     }
 
     // Pre-hydrate licenses, tags, Git screenshots & ContentDB downloads on the server for top carousel & Git Community packages (cached in Cloudflare Edge Cache)
@@ -2600,7 +2807,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const isGitPkg = Boolean(pkg.sources?.includes('git'));
           const needsGitAssetCheck =
             isGitPkg && (!pkg.banner || pkg.banner === 'logo.svg' || !isGitRepositoryAssetUrl(pkg.banner));
-          if ((!rawVideoUrl || needsGitAssetCheck) && candidateRepo && bootRepoScanBudget > 0) {
+          const needsGameJam2026Scan =
+            String(pkg.type || '').toLowerCase() === 'game' &&
+            Boolean(candidateRepo) &&
+            !(Array.isArray(pkg.tags) && pkg.tags.some((t: string) => String(t).toLowerCase() === 'jam_game_2026'));
+          if ((!rawVideoUrl || needsGitAssetCheck || needsGameJam2026Scan) && candidateRepo && bootRepoScanBudget > 0) {
             bootRepoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(
               pkg.author,
@@ -2611,6 +2822,30 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             ).catch(() => null);
             if (gitScan?.cdbMeta?.video_url) {
               rawVideoUrl = gitScan.cdbMeta.video_url;
+            }
+            if (gitScan?.jam2026Tags && gitScan.jam2026Tags.length > 0) {
+              pkg.tags = Array.from(
+                new Set([...(Array.isArray(pkg.tags) ? pkg.tags : []), ...gitScan.jam2026Tags])
+              ).filter(Boolean);
+              pkg.badge_tags = parseBadgeTagsArray([
+                ...(Array.isArray(pkg.badge_tags) ? pkg.badge_tags : []),
+                'jam_game_2026'
+              ]);
+              pkg.sources = Array.from(
+                new Set([...(Array.isArray(pkg.sources) ? pkg.sources : ['official']), 'git'])
+              );
+              if (env.DB) {
+                const canonicalPkgId = pkg.id || `${pkg.author}/${pkg.name}`;
+                for (const jt of gitScan.jam2026Tags) {
+                  bootHydrateStmts.push(
+                    env.DB.prepare(`
+                      INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+                      VALUES (?, ?, CURRENT_TIMESTAMP)
+                      ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                    `).bind(jt, canonicalPkgId)
+                  );
+                }
+              }
             }
             if (gitScan?.screenshotUrl || (gitScan?.screenshots && gitScan.screenshots.length > 0)) {
               const mergedShots = mergeScreenshotsPreferringGit(
@@ -2742,16 +2977,45 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       top10Week = syncPreHydratedToTop10(top10Week);
     }
 
+    // Re-apply promotional & Jam 2026 delta AFTER `batchToHydrate` populated `repo_url` and `detailTags` on `carouselPool`
+    if (promoDelta) {
+      const mergedPostHydratePromo = overlayPromotionRowDeltaOnCatalog(
+        merged,
+        promoDelta,
+        blockedIds,
+        lhDownloadsMap,
+        true
+      );
+      if (mergedPostHydratePromo !== merged) {
+        merged.length = 0;
+        merged.push(...mergedPostHydratePromo);
+      }
+      const recentPostHydratePromo = overlayPromotionRowDeltaOnCatalog(
+        recentUpstreamMerged,
+        promoDelta,
+        blockedIds,
+        lhDownloadsMap,
+        false
+      );
+      if (recentPostHydratePromo !== recentUpstreamMerged) {
+        recentUpstreamMerged.length = 0;
+        recentUpstreamMerged.push(...recentPostHydratePromo);
+      }
+    }
+
     // Build Recently Added list (up to 24 active non-deprecated packages across Git + ContentDB) with live approval timestamp tracking.
-    const recentlyAdded = await applyApprovalTrackingAndBuildRecentlyAdded(
+    const rawRecentlyAdded = await applyApprovalTrackingAndBuildRecentlyAdded(
       recentUpstreamMerged,
       merged,
       recentUpstreamRankById,
       !noCache
     );
+    const recentlyAdded = promoDelta
+      ? overlayPromotionRowDeltaOnCatalog(rawRecentlyAdded, promoDelta, blockedIds, lhDownloadsMap, false)
+      : rawRecentlyAdded;
     const finalMergedPackages = overlayRecentlyAddedOnPackages(merged, recentlyAdded);
     if (!noCache && !q && types.length === 0 && !author && recentlyAdded.length > 0) {
-      await writeEdgeCacheJson('/__api_boot_recently_added_v1', recentlyAdded, 300).catch(() => {});
+      await writeEdgeCacheJson('/__api_boot_recently_added_v2', recentlyAdded, 300).catch(() => {});
     }
 
     responsePayload = {
@@ -2772,6 +3036,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 1800);
     }
   } else {
+    if (requestedTagFilters.length > 0) {
+      const tagSyncDelta = await syncActivePromotionRowPackages(
+        requestedTagFilters.map(t => ({ row_enabled: true, row_filter_tags: [t] })),
+        env.DB,
+        noCache,
+        combinedUpstreamList
+      ).catch(() => null);
+      if (tagSyncDelta) {
+        const mergedWithTagDelta = overlayPromotionRowDeltaOnCatalog(
+          merged,
+          tagSyncDelta,
+          blockedIds,
+          lhDownloadsMap,
+          true
+        );
+        if (mergedWithTagDelta !== merged) {
+          merged.length = 0;
+          merged.push(...mergedWithTagDelta);
+        }
+      }
+    }
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
     responsePayload = buildInGameClientCatalogResponse(merged);
   }

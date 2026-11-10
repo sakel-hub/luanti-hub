@@ -21,11 +21,13 @@ import {
   overlayPromotionRowDeltaOnCatalog,
   onRequestGet as getPackagesCatalog
 } from '../../functions/api/packages/index';
+import { onRequestPost as postPackagesHydrate } from '../../functions/api/packages/hydrate';
 import { onRequest as handlePackageDownload } from '../../functions/api/packages/[author]/[name]/download';
 import {
   isJam2026PromoTag,
   convertJam2026BrewToRawPackage,
-  syncJam2026ClientRowTagIfNeeded
+  syncJam2026ClientRowTagIfNeeded,
+  resetJam2026ClientCacheForTests
 } from './core/services/jam-2026-sync.helper';
 import { PackageService } from './core/services/package.service';
 import { LuantiPackage } from './core/models/package.model';
@@ -36,12 +38,14 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
 
   beforeEach(() => {
     resetJam2026IsolateCacheForTests();
+    resetJam2026ClientCacheForTests();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     (globalThis as any).caches = originalCaches;
     resetJam2026IsolateCacheForTests();
+    resetJam2026ClientCacheForTests();
     vi.restoreAllMocks();
   });
 
@@ -846,5 +850,721 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     // 6. Verify clicking a package tile (openPackageModal) opens the package modal cleanly
     pkgService.openPackageModal(pkgService.packages()[0], false);
     expect(pkgService.activePackage()?.id.toLowerCase()).toBe('sztest/confspace');
+  });
+
+  it('resolves cross-author ContentDB + Jam 2026 submissions (Warr1024/confspace vs sztest/confspace "Configuration Space") on cold mobile PWA boot without empty Game Jam row or duplicate cards', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).edgeApiAvailable = true;
+    (pkgService as any).__allowPromoTagSyncInTests = true;
+
+    const jamBrewConfspace: Jam2026BrewEntry = {
+      id: 'confspace-brew-2026',
+      repository: 'https://gitlab.com/sztest/confspace',
+      commit: 'a1b2c3d4e5f6',
+      title: 'Configuration Space',
+      description:
+        'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+      commitUrl: 'https://gitlab.com/sztest/confspace/-/commit/a1b2c3d4e5f6',
+      hasScreenshot: true,
+      publishedAt: '2026-11-09T18:00:00.000Z'
+    };
+
+    // 1. Verify Server-side cross-author ContentDB resolution in syncActivePromotionRowPackages + overlayPromotionRowDeltaOnCatalog
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(JSON.stringify([jamBrewConfspace]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/packages/Warr1024/confspace/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Warr1024',
+            name: 'confspace',
+            title: 'Configuration Space',
+            type: 'game',
+            repo: 'https://gitlab.com/sztest/confspace.git',
+            tags: ['oneofakind__original', 'puzzle', 'singleplayer']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/jam-2026')) {
+        return new Response(JSON.stringify({ brews: [jamBrewConfspace] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/packages/?tag=jam_game_2026')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    const unhydratedUpstreamCatalog = [
+      {
+        id: 'Warr1024/confspace',
+        author: 'Warr1024',
+        name: 'confspace',
+        title: 'Configuration Space',
+        type: 'game',
+        short_desc:
+          'A plain stone room, a small pit in the floor, and a space far larger than it looks.',
+        tags: ['oneofakind__original', 'puzzle', 'singleplayer'],
+        source: 'official',
+        sources: ['official'],
+        provider: 'contentdb',
+        downloads: 42,
+        created_at: '2026-11-10T09:00:00.000Z'
+      }
+    ];
+
+    const jamPromo = {
+      id: 'promo-jam-2026',
+      title: 'Luanti Game Jam 2026',
+      subtitle: 'Play the submissions',
+      cta_label: 'Explore',
+      cta_url: 'https://jam.luanti.org',
+      is_active: true,
+      priority: 100,
+      show_in_hero: false,
+      expires_at: new Date(Date.now() + 86400000).toISOString(),
+      row_enabled: true,
+      row_title: 'Luanti Game Jam 2026 Submissions',
+      row_badge: 'GAME JAM 2026',
+      row_icon: 'trophy',
+      row_filter_tags: ['jam_game_2026'],
+      row_sort: 'newest'
+    };
+
+    const serverDelta = await syncActivePromotionRowPackages(
+      [jamPromo],
+      undefined,
+      true,
+      unhydratedUpstreamCatalog
+    );
+    expect(serverDelta?.tagMap['warr1024/confspace']).toContain('jam_game_2026');
+    const serverOverlaid = overlayPromotionRowDeltaOnCatalog(
+      unhydratedUpstreamCatalog,
+      serverDelta
+    );
+    expect(serverOverlaid).toHaveLength(1);
+    expect(serverOverlaid[0].id).toBe('Warr1024/confspace');
+    expect(serverOverlaid[0].tags).toContain('jam_game_2026');
+    expect(serverOverlaid[0].badge_tags).toContain('jam_game_2026');
+
+    // 2. Simulate Cold Mobile Client Boot where Warr1024/confspace arrives unhydrated (NO repo_url, NO jam_game_2026 tag yet)
+    (pkgService as any).applyBootPayload({
+      packages: unhydratedUpstreamCatalog,
+      recentlyAdded: unhydratedUpstreamCatalog,
+      promotions: [jamPromo],
+      top10Today: [],
+      top10Week: []
+    });
+
+    // Wait for async syncClientPromotionRowTags('/api/jam-2026') to complete
+    await new Promise((r) => setTimeout(r, 30));
+
+    const catalogAfterSync = pkgService.packages();
+    expect(catalogAfterSync).toHaveLength(1);
+    expect(catalogAfterSync[0].id).toBe('Warr1024/confspace');
+    expect(catalogAfterSync[0].tags).toContain('jam_game_2026');
+    expect(catalogAfterSync[0].tags).toContain('gamejam');
+    expect(catalogAfterSync[0].badge_tags).toContain('jam_game_2026');
+    expect(catalogAfterSync[0].repo_url).toBe('https://gitlab.com/sztest/confspace');
+    expect(catalogAfterSync[0].sources).toContain('official');
+    expect(catalogAfterSync[0].sources).toContain('git');
+
+    const promoRows = pkgService.activePromotionalRows();
+    expect(promoRows).toHaveLength(1);
+    expect(promoRows[0].packages).toHaveLength(1);
+    expect(promoRows[0].packages[0].id).toBe('Warr1024/confspace');
+
+    const recentRows = pkgService.recentlyAddedPackages();
+    expect(recentRows).toHaveLength(1);
+    expect(recentRows[0].id).toBe('Warr1024/confspace');
+    expect(recentRows[0].tags).toContain('jam_game_2026');
+  });
+
+  it('stamps Jam 2026 tags post-hydration when repo_url is discovered later and handles mid-flight applyBootPayload sync races', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).edgeApiAvailable = true;
+    (pkgService as any).__allowPromoTagSyncInTests = true;
+
+    let resolveFirstJamFetch!: (res: Response) => void;
+    let jamFetchCount = 0;
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/api/jam-2026')) {
+        jamFetchCount++;
+        const payload = {
+          brews: [
+            {
+              id: 'confspace-brew-diff-title',
+              repository: 'https://gitlab.com/sztest/confspace',
+              commit: 'deadbeef1234',
+              title: 'confspace_jam_prototype',
+              description: 'Prototype build',
+              commitUrl: 'https://gitlab.com/sztest/confspace/-/commit/deadbeef1234',
+              hasScreenshot: false,
+              publishedAt: '2026-11-09T18:00:00.000Z'
+            }
+          ]
+        };
+        if (jamFetchCount === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstJamFetch = resolve;
+          });
+        }
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('/api/packages/hydrate')) {
+        return new Response(
+          JSON.stringify({
+            hydrated: {
+              'warr1024/confspace': {
+                id: 'Warr1024/confspace',
+                license: 'MIT',
+                repo_url: 'https://gitlab.com/sztest/confspace',
+                tags: ['oneofakind__original', 'puzzle', 'singleplayer'],
+                contentdb_downloads: 55,
+                downloads: 55
+              }
+            }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/?tag=jam_game_2026')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('{}', { status: 200 });
+    }) as any;
+
+    const jamPromo = {
+      id: 'promo-jam-2026',
+      title: 'Luanti Game Jam 2026',
+      subtitle: 'Play the submissions',
+      cta_label: 'Explore',
+      cta_url: 'https://jam.luanti.org',
+      is_active: true,
+      priority: 100,
+      show_in_hero: false,
+      expires_at: new Date(Date.now() + 86400000).toISOString(),
+      row_enabled: true,
+      row_title: 'Luanti Game Jam 2026 Submissions',
+      row_badge: 'GAME JAM 2026',
+      row_icon: 'trophy',
+      row_filter_tags: ['jam_game_2026'],
+      row_sort: 'newest'
+    };
+
+    // Initial cached boot payload starts in-flight Jam sync
+    (pkgService as any).applyBootPayload(
+      {
+        packages: [
+          {
+            id: 'SomeAuthor/unrelated_mod',
+            author: 'SomeAuthor',
+            name: 'unrelated_mod',
+            title: 'Unrelated Mod',
+            type: 'mod',
+            short_desc: 'Unrelated mod entry',
+            tags: ['utility'],
+            source: 'official',
+            sources: ['official'],
+            provider: 'contentdb'
+          }
+        ],
+        recentlyAdded: [],
+        promotions: [jamPromo],
+        top10Today: [],
+        top10Week: []
+      },
+      { fromCache: true }
+    );
+
+    // Live boot payload arrives WHILE first /api/jam-2026 sync is still in-flight (with completely different title/desc and no repo_url yet)
+    const warrConfspaceRaw = {
+      id: 'Warr1024/confspace',
+      author: 'Warr1024',
+      name: 'confspace',
+      title: 'Configuration Space Official Edition',
+      type: 'game',
+      short_desc: 'Completely rewritten official ContentDB description.',
+      tags: ['oneofakind__original', 'puzzle', 'singleplayer'],
+      source: 'official',
+      sources: ['official'],
+      provider: 'contentdb',
+      downloads: 55
+    };
+    (pkgService as any).applyBootPayload({
+      packages: [warrConfspaceRaw],
+      recentlyAdded: [warrConfspaceRaw],
+      promotions: [jamPromo],
+      top10Today: [],
+      top10Week: []
+    });
+
+    // Resolve first in-flight Jam fetch -> triggers queued pendingPromoTagResync automatically
+    resolveFirstJamFetch(
+      new Response(
+        JSON.stringify({
+          brews: [
+            {
+              id: 'confspace-brew-diff-title',
+              repository: 'https://gitlab.com/sztest/confspace',
+              commit: 'deadbeef1234',
+              title: 'confspace_jam_prototype',
+              description: 'Prototype build',
+              commitUrl: 'https://gitlab.com/sztest/confspace/-/commit/deadbeef1234',
+              hasScreenshot: false,
+              publishedAt: '2026-11-09T18:00:00.000Z'
+            }
+          ]
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Now simulate /api/packages/hydrate discovering repo_url for Warr1024/confspace!
+    const unhydratedWarr = pkgService
+      .packages()
+      .find((p) => p.id === 'Warr1024/confspace')!;
+    expect(unhydratedWarr).toBeDefined();
+    await (pkgService as any).hydratePackageBatch([unhydratedWarr]);
+    (pkgService as any).flushCatalogPatches();
+
+    // Post-hydration repo matching merges sztest/confspace into Warr1024/confspace with jam_game_2026!
+    const confspaceCards = pkgService
+      .packages()
+      .filter((p) => p.name.toLowerCase() === 'confspace');
+    expect(confspaceCards).toHaveLength(1);
+    expect(confspaceCards[0].id).toBe('Warr1024/confspace');
+    expect(confspaceCards[0].tags).toContain('jam_game_2026');
+    expect(confspaceCards[0].tags).toContain('gamejam');
+    expect(confspaceCards[0].badge_tags).toContain('jam_game_2026');
+    expect(confspaceCards[0].sources).toContain('official');
+    expect(confspaceCards[0].sources).toContain('git');
+
+    const promoRowPkgs = pkgService.activePromotionalRows()[0].packages;
+    expect(promoRowPkgs).toHaveLength(1);
+    expect(promoRowPkgs[0].id).toBe('Warr1024/confspace');
+  });
+
+  it('unions D1 tags losslessly in POST /api/packages/hydrate without overwriting jam_game_2026 and auto-detects JAM2026.md on game repos', async () => {
+    (globalThis as any).caches = {
+      default: {
+        match: vi.fn(async () => undefined),
+        put: vi.fn(async () => undefined),
+        delete: vi.fn(async () => true)
+      }
+    };
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/packages/Warr1024/confspace/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Warr1024',
+            name: 'confspace',
+            title: 'Configuration Space',
+            type: 'game',
+            license: 'MIT',
+            media_license: 'MIT',
+            downloads: 64,
+            repo: 'https://gitlab.com/sztest/confspace',
+            tags: ['oneofakind__original', 'puzzle', 'singleplayer']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/JAM2026.md')) {
+        return new Response('# Configuration Space - Luanti Game Jam 2026 Entry\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      if (url.endsWith('/game.conf')) {
+        return new Response('title = Configuration Space\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      if (url.includes('/scores/')) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const batchedStatements: Array<{ sql: string; args: any[] }> = [];
+    const mockDb = {
+      prepare: vi.fn((sql: string) => ({
+        bind: vi.fn((...args: any[]) => ({
+          all: vi.fn(async () => {
+            if (sql.includes('FROM packages')) {
+              return {
+                results: [
+                  {
+                    id: 'Warr1024/confspace',
+                    author_name: 'Warr1024',
+                    name: 'confspace',
+                    title: 'Configuration Space',
+                    type: 'game',
+                    status: 'active',
+                    provider: 'contentdb',
+                    license: '',
+                    tags: JSON.stringify(['jam_game_2026', 'gamejam']),
+                    badge_tags: JSON.stringify(['jam_game_2026'])
+                  }
+                ]
+              };
+            }
+            return { results: [] };
+          }),
+          run: vi.fn(async () => ({})),
+          __sql: sql,
+          __args: args
+        })),
+        all: vi.fn(async () => ({ results: [] })),
+        run: vi.fn(async () => ({}))
+      })),
+      batch: vi.fn(async (stmts: any[]) => {
+        for (const s of stmts) {
+          if (s?.__sql) {
+            batchedStatements.push({ sql: s.__sql, args: s.__args });
+          }
+        }
+        return [];
+      })
+    };
+
+    const res = await postPackagesHydrate({
+      request: new Request('https://luantihub.org/api/packages/hydrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['Warr1024/confspace'] })
+      }),
+      env: { DB: mockDb }
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    const hydratedEntry = json.hydrated['warr1024/confspace'];
+    expect(hydratedEntry).toBeDefined();
+    expect(hydratedEntry.repo_url).toBe('https://gitlab.com/sztest/confspace');
+    expect(hydratedEntry.tags).toContain('jam_game_2026');
+    expect(hydratedEntry.tags).toContain('gamejam');
+    expect(hydratedEntry.tags).toContain('oneofakind__original');
+    expect(hydratedEntry.tags).toContain('puzzle');
+    expect(hydratedEntry.badge_tags).toContain('jam_game_2026');
+
+    // Verify D1 UPDATE packages never overwrites jam_game_2026/gamejam with only the 3 ContentDB tags
+    const updatePkgStmt = batchedStatements.find((s) => s.sql.includes('UPDATE packages'));
+    expect(updatePkgStmt).toBeDefined();
+    const persistedTagsJson = updatePkgStmt!.args[updatePkgStmt!.args.length - 2];
+    const persistedTags = JSON.parse(persistedTagsJson);
+    expect(persistedTags).toContain('jam_game_2026');
+    expect(persistedTags).toContain('gamejam');
+    expect(persistedTags).toContain('oneofakind__original');
+    expect(persistedTags).toContain('puzzle');
+    expect(persistedTags).toContain('singleplayer');
+  });
+
+  it('routes production fetchUpstreamWithMirrorFallback("/packages/?tag=jam_game_2026&fmt=vcs") to /api/packages/?...&client=web and returns full web items', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).edgeApiAvailable = true;
+
+    const requestedUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      requestedUrls.push(url);
+      if (url.startsWith('/api/packages/?')) {
+        return getPackagesCatalog({
+          request: new Request(`https://luantihub.org${url}`),
+          env: {}
+        });
+      }
+      if (url.includes('/packages/?tag=jam_game_2026')) {
+        // Simulate ContentDB fmt=vcs response (note: fmt=vcs omits per-item `tags` array!)
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Warr1024',
+              name: 'confspace',
+              title: 'Configuration Space',
+              type: 'game',
+              short_description: 'Puzzle space game',
+              repo: 'https://gitlab.com/sztest/confspace',
+              release: 99123
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }) as any;
+
+    const list = await (pkgService as any).fetchUpstreamWithMirrorFallback(
+      '/packages/?tag=jam_game_2026&fmt=vcs'
+    );
+
+    expect(
+      requestedUrls.some(
+        (u) =>
+          u.startsWith('/api/packages/?tag=jam_game_2026&fmt=vcs') &&
+          u.includes('client=web') &&
+          u.includes('ngsw-bypass=true')
+      )
+    ).toBe(true);
+    expect(Array.isArray(list)).toBe(true);
+    expect(list).toHaveLength(1);
+    expect(list[0].author).toBe('Warr1024');
+    expect(list[0].name).toBe('confspace');
+    expect(list[0].tags).toContain('jam_game_2026');
+  });
+
+  it('does not trigger repeated network fetches or reactive loops when an active promotional row has 0 matching packages and _packages updates during hydration', async () => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting(), PackageService]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).__allowPromoTagSyncInTests = true;
+    (pkgService as any).edgeApiAvailable = true;
+
+    let jamFetchCount = 0;
+    let tagFetchCount = 0;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.startsWith('/api/jam-2026')) {
+        jamFetchCount++;
+        return new Response(JSON.stringify({ brews: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.startsWith('/api/packages/?tag=jam_game_2026')) {
+        tagFetchCount++;
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }) as any;
+
+    const jamPromo = {
+      id: 'luanti-jam-2026-empty',
+      title: 'Luanti Game Jam 2026',
+      subtitle: 'Play & review community entries!',
+      banner_url: '/promo/jam.png',
+      cta_label: 'Explore Entries',
+      cta_url: '/?tag=jam_game_2026',
+      priority: 100,
+      is_active: true,
+      expires_at: new Date(Date.now() + 86400000).toISOString(),
+      row_enabled: true,
+      row_title: 'Luanti Game Jam 2026 Submissions',
+      row_filter_tags: ['jam_game_2026']
+    };
+
+    (pkgService as any).applyBootPayload({
+      packages: [
+        {
+          id: 'Minetest/minetest_game',
+          author: 'Minetest',
+          name: 'minetest_game',
+          title: 'Minetest Game',
+          type: 'game',
+          short_desc: 'Base game',
+          source: 'official',
+          sources: ['official'],
+          tags: ['game'],
+          downloads: 500000
+        }
+      ],
+      recentlyAdded: [],
+      promotions: [jamPromo],
+      top10Today: [],
+      top10Week: []
+    });
+
+    TestBed.flushEffects();
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(jamFetchCount).toBe(1);
+    expect(tagFetchCount).toBe(1);
+
+    // Simulate multiple background catalog hydration mutations + promo clock ticks within the 60s window
+    for (let i = 0; i < 4; i++) {
+      (pkgService as any)._packages.update((list: any[]) =>
+        list.map((p) => ({ ...p, downloads: p.downloads + 1 }))
+      );
+      pkgService.refreshPromoClock();
+      TestBed.flushEffects();
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    // Must NOT re-fetch either endpoint while within the same boot generation & cooldown window!
+    expect(jamFetchCount).toBe(1);
+    expect(tagFetchCount).toBe(1);
+  });
+
+  it('scans JAM2026.md in POST /api/packages/hydrate even when a 2026 game is already fully populated in D1 (fast-skip path), while skipping pre-2026 games', async () => {
+    (globalThis as any).caches = {
+      default: {
+        match: vi.fn(async () => undefined),
+        put: vi.fn(async () => undefined),
+        delete: vi.fn(async () => true)
+      }
+    };
+
+    const probedJamUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.endsWith('/JAM2026.md')) {
+        probedJamUrls.push(url);
+        if (url.includes('sztest/confspace')) {
+          return new Response('# Confspace Jam 2026\n', {
+            status: 200,
+            headers: { 'Content-Type': 'text/plain' }
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      }
+      if (url.endsWith('/game.conf')) {
+        return new Response('title = Configuration Space\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const batchedStatements: Array<{ sql: string; args: any[] }> = [];
+    const mockDb = {
+      prepare: vi.fn((sql: string) => ({
+        bind: vi.fn((...args: any[]) => ({
+          all: vi.fn(async () => {
+            if (sql.includes('FROM packages')) {
+              return {
+                results: [
+                  {
+                    id: 'Warr1024/confspace',
+                    author_name: 'Warr1024',
+                    name: 'confspace',
+                    title: 'Configuration Space',
+                    type: 'game',
+                    status: 'active',
+                    provider: 'contentdb',
+                    license: 'MIT',
+                    contentdb_downloads: 120,
+                    created_at: '2026-11-10T05:00:00Z',
+                    repo_url: 'https://gitlab.com/sztest/confspace',
+                    thumbnail_url: 'https://content.luanti.org/uploads/confspace_full.png',
+                    banner_url: 'https://content.luanti.org/uploads/confspace_full.png',
+                    screenshots: JSON.stringify(['https://content.luanti.org/uploads/confspace_full.png']),
+                    review_thread_counts: JSON.stringify({ positive: 1, neutral: 0, negative: 0 }),
+                    tags: JSON.stringify(['game', 'puzzle']),
+                    badge_tags: JSON.stringify([])
+                  },
+                  {
+                    id: 'Minetest/minetest_game',
+                    author_name: 'Minetest',
+                    name: 'minetest_game',
+                    title: 'Minetest Game',
+                    type: 'game',
+                    status: 'active',
+                    provider: 'contentdb',
+                    license: 'LGPL-2.1-only',
+                    contentdb_downloads: 900000,
+                    created_at: '2018-05-20T00:00:00Z',
+                    repo_url: 'https://github.com/luanti-org/minetest_game',
+                    thumbnail_url: 'https://content.luanti.org/uploads/mtg_full.png',
+                    banner_url: 'https://content.luanti.org/uploads/mtg_full.png',
+                    screenshots: JSON.stringify(['https://content.luanti.org/uploads/mtg_full.png']),
+                    review_thread_counts: JSON.stringify({ positive: 50, neutral: 5, negative: 2 }),
+                    tags: JSON.stringify(['game', 'survival']),
+                    badge_tags: JSON.stringify([])
+                  }
+                ]
+              };
+            }
+            return { results: [] };
+          }),
+          run: vi.fn(async () => ({})),
+          __sql: sql,
+          __args: args
+        })),
+        all: vi.fn(async () => ({ results: [] })),
+        run: vi.fn(async () => ({}))
+      })),
+      batch: vi.fn(async (stmts: any[]) => {
+        for (const s of stmts) {
+          if (s?.__sql) {
+            batchedStatements.push({ sql: s.__sql, args: s.__args });
+          }
+        }
+        return [];
+      })
+    };
+
+    const res = await postPackagesHydrate({
+      request: new Request('https://luantihub.org/api/packages/hydrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['Warr1024/confspace', 'Minetest/minetest_game'] })
+      }),
+      env: { DB: mockDb }
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+
+    expect(json.hydrated['warr1024/confspace'].tags).toContain('jam_game_2026');
+    expect(json.hydrated['warr1024/confspace'].tags).toContain('gamejam');
+    expect(json.hydrated['warr1024/confspace'].badge_tags).toContain('jam_game_2026');
+    expect(
+      batchedStatements.some((s) => s.sql.includes('INSERT INTO promo_tag_packages'))
+    ).toBe(true);
+
+    // Pre-2026 game must NOT have wasted subrequests probing JAM2026.md
+    expect(probedJamUrls.some((u) => u.includes('minetest_game'))).toBe(false);
+    expect(probedJamUrls.some((u) => u.includes('confspace'))).toBe(true);
   });
 });

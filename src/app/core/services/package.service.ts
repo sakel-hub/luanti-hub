@@ -1,4 +1,4 @@
-import { Injectable, computed, signal, inject, effect } from '@angular/core';
+import { Injectable, computed, signal, inject, effect, untracked } from '@angular/core';
 import { Router, NavigationEnd } from '@angular/router';
 import { Title, Meta } from '@angular/platform-browser';
 import { filter } from 'rxjs/operators';
@@ -27,11 +27,20 @@ import {
   enrichLuantiBlogPostFromArticleHtml
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
-import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
+import {
+  PwaService,
+  BOOT_SYNC_CACHE_NAME,
+  BOOT_SYNC_CACHE_URL,
+  LEGACY_BOOT_SYNC_CACHE_NAMES
+} from './pwa.service';
 import { AuthService, ProfileDrawerTab, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 import { TranslationService } from '../i18n/translation.service';
-import { isJam2026PromoTag, syncJam2026ClientRowTagIfNeeded } from './jam-2026-sync.helper';
+import {
+  isJam2026PromoTag,
+  syncJam2026ClientRowTagIfNeeded,
+  getJam2026TagsForRepoUrl
+} from './jam-2026-sync.helper';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
@@ -1027,13 +1036,63 @@ export class PackageService {
     this.syncQueryParamsToUrl(false, true);
   }
 
+  private promoSyncGeneration = 0;
   private readonly promoTagSyncInFlight = new Set<string>();
+  private readonly promoTagSyncInFlightGen = new Map<string, number>();
+  private readonly pendingPromoTagResync = new Set<string>();
   private readonly lastPromoTagSyncAt = new Map<string, number>();
+  private readonly lastPromoTagSyncGen = new Map<string, number>();
+  private readonly hasCatalogPackages = computed(() => this._packages().length > 0);
+
+  private resolveJam2026OverlayForHydratedRepo(
+    repoUrl?: string,
+    existingTags?: string[],
+    existingBadgeTags?: string[],
+    existingSources?: PackageSource[]
+  ): {
+    tags: string[];
+    badgeTags?: string[];
+    sources?: PackageSource[];
+    matchedJam: boolean;
+  } {
+    const jamTagsFromRepo = getJam2026TagsForRepoUrl(repoUrl);
+    const hasJamTagAlready = Boolean(
+      (existingTags || []).some(t => isJam2026PromoTag(t)) ||
+        (existingBadgeTags || []).some(bt => bt.toLowerCase() === 'jam_game_2026')
+    );
+    if (jamTagsFromRepo.length === 0 && !hasJamTagAlready) {
+      return {
+        tags: existingTags || [],
+        badgeTags: existingBadgeTags && existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
+        sources: existingSources,
+        matchedJam: false
+      };
+    }
+    const mergedTags = this.mergePackageTagsPreservingExisting(
+      existingTags,
+      jamTagsFromRepo.length > 0 ? jamTagsFromRepo : ['jam_game_2026', 'gamejam']
+    );
+    const mergedBadges = parseBadgeTagsArray([
+      ...(existingBadgeTags || []),
+      'jam_game_2026'
+    ]);
+    const baseSources = existingSources && existingSources.length > 0 ? existingSources : (['official'] as PackageSource[]);
+    const mergedSources: PackageSource[] = repoUrl
+      ? Array.from(new Set<PackageSource>([...baseSources, 'git']))
+      : baseSources;
+    return {
+      tags: mergedTags,
+      badgeTags: mergedBadges.length > 0 ? mergedBadges : undefined,
+      sources: mergedSources,
+      matchedJam: true
+    };
+  }
 
   private persistPromotionalTagsForPackage(
     lowerId: string,
     tags: string[],
-    badgeTags?: string[]
+    badgeTags?: string[],
+    extra?: { repoUrl?: string; sources?: PackageSource[] }
   ): boolean {
     if (!lowerId) return false;
     const prevMeta = this.hydratedMetaCache.get(lowerId) || {};
@@ -1041,15 +1100,27 @@ export class PackageService {
     const prevMetaBadges = Array.isArray(prevMeta.badge_tags) ? prevMeta.badge_tags : [];
     const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMetaTags);
     const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...prevMetaBadges]);
+    const nextRepoUrl = extra?.repoUrl || prevMeta.repo_url;
+    const nextSources = extra?.sources?.length
+      ? Array.from(new Set<PackageSource>([...(prevMeta.sources || []), ...extra.sources]))
+      : prevMeta.sources;
+    const prevLowerSet = new Set(prevMetaTags.map(t => t.toLowerCase()));
+    const prevBadgeSet = new Set(prevMetaBadges.map(t => t.toLowerCase()));
+    const prevSourceSet = new Set<PackageSource>(prevMeta.sources || []);
     const metaChanged =
       mergedTags.length !== prevMetaTags.length ||
+      mergedTags.some(t => !prevLowerSet.has(t.toLowerCase())) ||
       mergedBadgeTags.length !== prevMetaBadges.length ||
-      mergedTags.some((t, i) => t !== prevMetaTags[i]);
+      mergedBadgeTags.some(t => !prevBadgeSet.has(t.toLowerCase())) ||
+      (Boolean(nextRepoUrl) && nextRepoUrl !== prevMeta.repo_url) ||
+      Boolean(nextSources?.some(s => !prevSourceSet.has(s)));
     if (metaChanged) {
       this.hydratedMetaCache.set(lowerId, {
         ...prevMeta,
         tags: mergedTags,
-        ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+        ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {}),
+        ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
+        ...(nextSources && nextSources.length > 0 ? { sources: nextSources } : {})
       });
     }
     this._serverRecentlyAdded.update(list => {
@@ -1061,18 +1132,33 @@ export class PackageService {
           ...mergedBadgeTags,
           ...(item.badge_tags || [])
         ]);
-        const itemTagsChanged =
-          nextItemTags.length !== (item.tags?.length || 0) ||
-          nextItemBadgeTags.length !== (item.badge_tags?.length || 0);
-        if (!itemTagsChanged) return item;
+        const itemRepoUrl = extra?.repoUrl || item.repo_url;
+        const itemSources = extra?.sources?.length
+          ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...extra.sources]))
+          : item.sources;
+        const itemTagSet = new Set((item.tags || []).map(t => t.toLowerCase()));
+        const itemBadgeSet = new Set((item.badge_tags || []).map(t => t.toLowerCase()));
+        const itemSourceSet = new Set<PackageSource>(
+          item.sources && item.sources.length > 0 ? item.sources : [item.source]
+        );
+        const itemChanged =
+          nextItemTags.some(t => !itemTagSet.has(t.toLowerCase())) ||
+          nextItemBadgeTags.some(t => !itemBadgeSet.has(t.toLowerCase())) ||
+          (Boolean(itemRepoUrl) && itemRepoUrl !== item.repo_url) ||
+          Boolean(itemSources?.some(s => !itemSourceSet.has(s)));
+        if (!itemChanged) return item;
         listChanged = true;
         return {
           ...item,
+          ...(itemRepoUrl ? { repo_url: itemRepoUrl } : {}),
+          ...(itemSources && itemSources.length > 0
+            ? { sources: itemSources, source: itemSources.includes('git') ? 'git' : item.source }
+            : {}),
           tags: nextItemTags,
           ...(nextItemBadgeTags.length > 0 ? { badge_tags: nextItemBadgeTags } : {})
         };
       });
-      return listChanged ? nextList : list;
+      return listChanged ? this.deduplicateCatalog(nextList) : list;
     });
     return metaChanged;
   }
@@ -1109,7 +1195,12 @@ export class PackageService {
           this.syncedPromoTagsInSession.add(lowerTag);
         }
         for (const sp of stampedPkgs) {
-          if (this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags)) {
+          if (
+            this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags, {
+              repoUrl: sp.repo_url,
+              sources: sp.sources
+            })
+          ) {
             cachedMetaUpdated = true;
           }
         }
@@ -1121,12 +1212,16 @@ export class PackageService {
 
     const isUnitTestEnv =
       typeof (globalThis as any).describe === 'function' &&
-      typeof (globalThis as any).it === 'function';
+      typeof (globalThis as any).it === 'function' &&
+      !(this as any).__allowPromoTagSyncInTests;
     if (isUnitTestEnv || typeof fetch !== 'function') return;
 
     for (const tag of allRowTags.slice(0, 3)) {
       const lowerTag = tag.toLowerCase();
       if (this.promoTagSyncInFlight.has(lowerTag)) {
+        if (this.promoTagSyncInFlightGen.get(lowerTag) !== this.promoSyncGeneration) {
+          this.pendingPromoTagResync.add(lowerTag);
+        }
         continue;
       }
       const isJamTag = isJam2026PromoTag(lowerTag);
@@ -1136,62 +1231,103 @@ export class PackageService {
       ).length;
       if (!isJamTag && alreadyStampedCount > 0) {
         this.syncedPromoTagsInSession.add(lowerTag);
+        this.lastPromoTagSyncGen.set(lowerTag, this.promoSyncGeneration);
         continue;
       }
       const lastSyncAt = this.lastPromoTagSyncAt.get(lowerTag) || 0;
-      if (
-        this.syncedPromoTagsInSession.has(lowerTag) &&
-        (alreadyStampedCount > 0 || Date.now() - lastSyncAt < 60_000)
-      ) {
-        continue;
+      const lastSyncGen = this.lastPromoTagSyncGen.get(lowerTag);
+      const nowMs = Date.now();
+      if (this.syncedPromoTagsInSession.has(lowerTag)) {
+        if (alreadyStampedCount > 0 && nowMs - lastSyncAt < 60_000) {
+          continue;
+        }
+        if (
+          alreadyStampedCount === 0 &&
+          lastSyncGen === this.promoSyncGeneration &&
+          nowMs - lastSyncAt < 60_000
+        ) {
+          continue;
+        }
       }
 
+      const startGen = this.promoSyncGeneration;
       this.promoTagSyncInFlight.add(lowerTag);
-      this.syncedPromoTagsInSession.add(lowerTag);
-      this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+      this.promoTagSyncInFlightGen.set(lowerTag, startGen);
       (async () => {
         try {
-          const stampedByLowerId = new Map<string, { tags: string[]; badgeTags: string[] }>();
+          const stampedByLowerId = new Map<
+            string,
+            { tags: string[]; badgeTags: string[]; repoUrl?: string; sources?: PackageSource[] }
+          >();
           await syncJam2026ClientRowTagIfNeeded({
             tag,
             packagesSignal: this._packages,
             normalizePackage: (raw) => this.normalizePackage(raw),
             deduplicateCatalog: (pkgs) => this.deduplicateCatalog(pkgs),
             buildSearchBlob: (pkg) => this.buildSearchBlob(pkg),
-            onPackageStamped: (lowerId, tags, badgeTags) => {
-              stampedByLowerId.set(lowerId, { tags, badgeTags });
-              this.persistPromotionalTagsForPackage(lowerId, tags, badgeTags);
+            onPackageStamped: (lowerId, tags, badgeTags, extra) => {
+              stampedByLowerId.set(lowerId, {
+                tags,
+                badgeTags,
+                repoUrl: extra?.repoUrl,
+                sources: extra?.sources
+              });
+              this.persistPromotionalTagsForPackage(lowerId, tags, badgeTags, extra);
             }
           });
           if (stampedByLowerId.size > 0) {
             this._serverRecentlyAdded.update(list =>
-              list.map(item => {
-                const entry = stampedByLowerId.get(item.id.toLowerCase());
-                if (!entry) return item;
-                const mergedTags = this.mergePackageTagsPreservingExisting(entry.tags, item.tags);
-                const mergedBadges = parseBadgeTagsArray([...entry.badgeTags, ...(item.badge_tags || [])]);
-                return {
-                  ...item,
-                  tags: mergedTags,
-                  ...(mergedBadges.length > 0 ? { badge_tags: mergedBadges } : {}),
-                  _searchBlob: this.buildSearchBlob({ ...item, tags: mergedTags, badge_tags: mergedBadges })
-                };
-              })
+              this.deduplicateCatalog(
+                list.map(item => {
+                  const entry = stampedByLowerId.get(item.id.toLowerCase());
+                  if (!entry) return item;
+                  const mergedTags = this.mergePackageTagsPreservingExisting(entry.tags, item.tags);
+                  const mergedBadges = parseBadgeTagsArray([...entry.badgeTags, ...(item.badge_tags || [])]);
+                  const nextRepoUrl = entry.repoUrl || item.repo_url;
+                  const nextSources = entry.sources?.length
+                    ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...entry.sources]))
+                    : item.sources;
+                  return {
+                    ...item,
+                    ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
+                    ...(nextSources && nextSources.length > 0
+                      ? { sources: nextSources, source: nextSources.includes('git') ? 'git' : item.source }
+                      : {}),
+                    tags: mergedTags,
+                    ...(mergedBadges.length > 0 ? { badge_tags: mergedBadges } : {}),
+                    _searchBlob: this.buildSearchBlob({ ...item, tags: mergedTags, badge_tags: mergedBadges })
+                  };
+                })
+              )
             );
             this.scheduleHydratedMetaPersist();
             this.scheduleBootCachePersist();
           }
-          if (alreadyStampedCount > 0) {
+
+          const postJamStampedCount = this._packages().filter(p =>
+            (p.tags || []).some(t => t.toLowerCase() === lowerTag)
+          ).length;
+
+          if ((postJamStampedCount > 0 && isJamTag) || alreadyStampedCount > 0) {
+            this.syncedPromoTagsInSession.add(lowerTag);
+            this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+            this.lastPromoTagSyncGen.set(lowerTag, startGen);
             return;
           }
           const list = await this.fetchUpstreamWithMirrorFallback(
             `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
           );
-          if (!Array.isArray(list) || list.length === 0) return;
+          if (!Array.isArray(list) || list.length === 0) {
+            this.syncedPromoTagsInSession.add(lowerTag);
+            this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+            this.lastPromoTagSyncGen.set(lowerTag, startGen);
+            return;
+          }
 
           const matchedLowerIds = new Set<string>();
           const newRawItems: any[] = [];
           const existingLowerIds = new Set(this._packages().map(p => p.id.toLowerCase()));
+          const extraBadgeTags = isJamTag ? ['jam_game_2026'] : undefined;
 
           for (const item of list) {
             if (!item?.author || !item?.name) continue;
@@ -1200,7 +1336,14 @@ export class PackageService {
             if (!existingLowerIds.has(lowerId)) {
               newRawItems.push({
                 ...item,
-                tags: Array.from(new Set([...(Array.isArray(item.tags) ? item.tags : []), tag]))
+                tags: Array.from(new Set([...(Array.isArray(item.tags) ? item.tags : []), tag])),
+                ...(extraBadgeTags
+                  ? {
+                      badge_tags: Array.from(
+                        new Set([...(Array.isArray(item.badge_tags) ? item.badge_tags : []), ...extraBadgeTags])
+                      )
+                    }
+                  : {})
               });
             }
           }
@@ -1210,33 +1353,59 @@ export class PackageService {
             const updated = pkgs.map(pkg => {
               const lowerId = pkg.id.toLowerCase();
               if (!matchedLowerIds.has(lowerId)) return pkg;
-              if ((pkg.tags || []).some(t => t.toLowerCase() === lowerTag)) return pkg;
+              const alreadyHasTag = (pkg.tags || []).some(t => t.toLowerCase() === lowerTag);
+              const nextBadgeTags = extraBadgeTags
+                ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...extraBadgeTags])
+                : pkg.badge_tags;
+              if (alreadyHasTag && (nextBadgeTags?.length || 0) === (pkg.badge_tags?.length || 0)) {
+                return pkg;
+              }
               anyModified = true;
-              const nextTags = [...(pkg.tags || []), tag];
-              this.persistPromotionalTagsForPackage(lowerId, nextTags, pkg.badge_tags);
+              const nextTags = alreadyHasTag ? pkg.tags : [...(pkg.tags || []), tag];
+              this.persistPromotionalTagsForPackage(lowerId, nextTags, nextBadgeTags, {
+                repoUrl: pkg.repo_url,
+                sources: pkg.sources
+              });
               return {
                 ...pkg,
                 tags: nextTags,
-                _searchBlob: this.buildSearchBlob({ ...pkg, tags: nextTags })
+                ...(nextBadgeTags && nextBadgeTags.length > 0 ? { badge_tags: nextBadgeTags } : {}),
+                _searchBlob: this.buildSearchBlob({ ...pkg, tags: nextTags, badge_tags: nextBadgeTags })
               };
             });
             const normalizedNew = newRawItems.map(it => this.normalizePackage(it));
             for (const np of normalizedNew) {
-              this.persistPromotionalTagsForPackage(np.id.toLowerCase(), np.tags, np.badge_tags);
+              this.persistPromotionalTagsForPackage(np.id.toLowerCase(), np.tags, np.badge_tags, {
+                repoUrl: np.repo_url,
+                sources: np.sources
+              });
             }
             if (!anyModified && normalizedNew.length === 0) {
               return pkgs;
             }
             return normalizedNew.length > 0
               ? this.deduplicateCatalog([...normalizedNew, ...updated])
-              : updated;
+              : this.deduplicateCatalog(updated);
           });
+          this.syncedPromoTagsInSession.add(lowerTag);
+          this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+          this.lastPromoTagSyncGen.set(lowerTag, startGen);
           this.scheduleHydratedMetaPersist();
           this.scheduleBootCachePersist();
         } catch {
-          // Non-fatal fallback
+          this.syncedPromoTagsInSession.add(lowerTag);
+          this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+          this.lastPromoTagSyncGen.set(lowerTag, startGen);
         } finally {
           this.promoTagSyncInFlight.delete(lowerTag);
+          this.promoTagSyncInFlightGen.delete(lowerTag);
+          if (this.pendingPromoTagResync.has(lowerTag)) {
+            this.pendingPromoTagResync.delete(lowerTag);
+            this.lastPromoTagSyncAt.delete(lowerTag);
+            queueMicrotask(() => {
+              this.syncClientPromotionRowTags(this.activePromotions());
+            });
+          }
         }
       })();
     }
@@ -1268,6 +1437,7 @@ export class PackageService {
 
   setPromotions(promotions: HeroPromotion[]): void {
     const validList = Array.isArray(promotions) ? promotions : [];
+    this.promoSyncGeneration++;
     this._promotions.set(validList);
     this.persistActivePromotionsCache(validList);
     this.refreshPromoClock();
@@ -2213,9 +2383,11 @@ export class PackageService {
     // Ensure tags configured on active Promotional Package Rows are mirrored into availableTags and synced with ContentDB
     effect(() => {
       const promos = this.activePromotions();
-      const pkgsCount = this._packages().length;
-      if (promos.length > 0 && pkgsCount >= 0) {
-        this.syncClientPromotionRowTags(promos);
+      const hasPkgs = this.hasCatalogPackages();
+      if (promos.length > 0 && hasPkgs) {
+        untracked(() => {
+          this.syncClientPromotionRowTags(promos);
+        });
       }
     });
   }
@@ -2873,7 +3045,8 @@ export class PackageService {
       new Set([
         ...parseBadgeTagsArray(primary.badge_tags),
         ...parseBadgeTagsArray(secondary.badge_tags),
-        ...(mergedTags.some(t => t.toLowerCase() === ORGANIC_CODE_TAG) ? [ORGANIC_CODE_TAG] : [])
+        ...(mergedTags.some(t => t.toLowerCase() === ORGANIC_CODE_TAG) ? [ORGANIC_CODE_TAG] : []),
+        ...(mergedTags.some(t => isJam2026PromoTag(t)) ? ['jam_game_2026'] : [])
       ])
     );
     const mergedDeps = Array.from(new Set([...(primary.dependencies || []), ...(secondary.dependencies || [])]));
@@ -3023,7 +3196,8 @@ export class PackageService {
 
   /**
    * Deduplicates a catalog list by case-insensitive ID, normalized Git repo URL,
-   * identical technical `name` + `title`, or unambiguous `name` + `type`, merging dual-source packages cleanly.
+   * identical technical `name` + `title`, unambiguous `name` + `type`, or cross-author
+   * dual-source (`official` + `git`) twins sharing `(name, type)` plus non-slug `title` or >=15-char `short_desc`.
    */
   private deduplicateCatalog(list: LuantiPackage[]): LuantiPackage[] {
     const result: LuantiPackage[] = [];
@@ -3031,27 +3205,68 @@ export class PackageService {
     const byRepo = new Map<string, number>();
     const byNameTitle = new Map<string, number>();
     const byNameType = new Map<string, number>();
+    const byCrossAuthorNameTypeTitle = new Map<string, number>();
+    const byCrossAuthorNameTypeDesc = new Map<string, number>();
     const nameTypeCounts = new Map<string, number>();
+    const crossAuthorNameTypeCounts = new Map<string, number>();
     const normalizeBaseAuthor = (author: string) =>
       String(author || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const normalizeComparableText = (val: unknown) =>
+      String(val || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
     for (const pkg of list) {
-      const ntKey = `${normalizeBaseAuthor(pkg.author)}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const nameLower = pkg.name.toLowerCase();
+      const typeLower = (pkg.type || 'mod').toLowerCase();
+      const ntKey = `${normalizeBaseAuthor(pkg.author)}::${nameLower}::${typeLower}`;
       nameTypeCounts.set(ntKey, (nameTypeCounts.get(ntKey) || 0) + 1);
+      const crossKey = `${nameLower}::${typeLower}`;
+      crossAuthorNameTypeCounts.set(crossKey, (crossAuthorNameTypeCounts.get(crossKey) || 0) + 1);
     }
+
+    const canCrossAuthorMerge = (candidateIdx: number | undefined, incoming: LuantiPackage): number | undefined => {
+      if (candidateIdx === undefined) return undefined;
+      const existing = result[candidateIdx];
+      if (!existing) return undefined;
+      const existingRepo = this.normalizeRepoComparisonKey(existing.repo_url);
+      const incomingRepo = this.normalizeRepoComparisonKey(incoming.repo_url);
+      if (existingRepo && incomingRepo && existingRepo !== incomingRepo) {
+        return undefined;
+      }
+      const existingSrcs = existing.sources || [existing.source];
+      const incomingSrcs = incoming.sources || [incoming.source];
+      const oneOfficialOneGit =
+        (existingSrcs.includes('official') && incomingSrcs.includes('git')) ||
+        (incomingSrcs.includes('official') && existingSrcs.includes('git'));
+      return oneOfficialOneGit ? candidateIdx : undefined;
+    };
 
     for (const pkg of list) {
       const idKey = pkg.id.toLowerCase();
       const repoKey = this.normalizeRepoComparisonKey(pkg.repo_url);
       const baseAuthor = normalizeBaseAuthor(pkg.author);
-      const nameTitleKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.title || '').trim().toLowerCase()}`;
-      const nameTypeKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const nameLower = pkg.name.toLowerCase();
+      const typeLower = (pkg.type || 'mod').toLowerCase();
+      const titleNorm = normalizeComparableText(pkg.title);
+      const descNorm = normalizeComparableText(pkg.short_desc);
+      const nameTitleKey = `${baseAuthor}::${nameLower}::${titleNorm}`;
+      const nameTypeKey = `${baseAuthor}::${nameLower}::${typeLower}`;
+      const crossKey = `${nameLower}::${typeLower}`;
+      const allowCrossAuthor = (crossAuthorNameTypeCounts.get(crossKey) || 0) <= 2;
+      const crossTitleKey =
+        titleNorm && titleNorm !== nameLower ? `${crossKey}::${titleNorm}` : '';
+      const crossDescKey = descNorm.length >= 15 ? `${crossKey}::${descNorm}` : '';
 
       const matchIdx =
         byId.get(idKey) ??
         (repoKey ? byRepo.get(repoKey) : undefined) ??
         byNameTitle.get(nameTitleKey) ??
-        ((nameTypeCounts.get(nameTypeKey) || 0) <= 2 ? byNameType.get(nameTypeKey) : undefined);
+        ((nameTypeCounts.get(nameTypeKey) || 0) <= 2 ? byNameType.get(nameTypeKey) : undefined) ??
+        (allowCrossAuthor && crossTitleKey
+          ? canCrossAuthorMerge(byCrossAuthorNameTypeTitle.get(crossTitleKey), pkg)
+          : undefined) ??
+        (allowCrossAuthor && crossDescKey
+          ? canCrossAuthorMerge(byCrossAuthorNameTypeDesc.get(crossDescKey), pkg)
+          : undefined);
 
       if (matchIdx !== undefined) {
         const merged = this.mergeDualSourcePackage(result[matchIdx], pkg);
@@ -3061,8 +3276,18 @@ export class PackageService {
         const mergedRepoKey = this.normalizeRepoComparisonKey(merged.repo_url);
         if (mergedRepoKey) byRepo.set(mergedRepoKey, matchIdx);
         const mergedBaseAuthor = normalizeBaseAuthor(merged.author);
-        byNameTitle.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.title || '').trim().toLowerCase()}`, matchIdx);
-        byNameType.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.type || 'mod').toLowerCase()}`, matchIdx);
+        const mergedNameLower = merged.name.toLowerCase();
+        const mergedTypeLower = (merged.type || 'mod').toLowerCase();
+        const mergedTitleNorm = normalizeComparableText(merged.title);
+        const mergedDescNorm = normalizeComparableText(merged.short_desc);
+        byNameTitle.set(`${mergedBaseAuthor}::${mergedNameLower}::${mergedTitleNorm}`, matchIdx);
+        byNameType.set(`${mergedBaseAuthor}::${mergedNameLower}::${mergedTypeLower}`, matchIdx);
+        if (mergedTitleNorm && mergedTitleNorm !== mergedNameLower) {
+          byCrossAuthorNameTypeTitle.set(`${mergedNameLower}::${mergedTypeLower}::${mergedTitleNorm}`, matchIdx);
+        }
+        if (mergedDescNorm.length >= 15) {
+          byCrossAuthorNameTypeDesc.set(`${mergedNameLower}::${mergedTypeLower}::${mergedDescNorm}`, matchIdx);
+        }
       } else {
         const idx = result.length;
         result.push(pkg);
@@ -3070,6 +3295,8 @@ export class PackageService {
         if (repoKey) byRepo.set(repoKey, idx);
         byNameTitle.set(nameTitleKey, idx);
         byNameType.set(nameTypeKey, idx);
+        if (crossTitleKey) byCrossAuthorNameTypeTitle.set(crossTitleKey, idx);
+        if (crossDescKey) byCrossAuthorNameTypeDesc.set(crossDescKey, idx);
       }
     }
 
@@ -3910,12 +4137,16 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v23');
         sessionStorage.removeItem('lh_boot_cache_v24');
         sessionStorage.removeItem('lh_boot_cache_v25');
+        sessionStorage.removeItem('lh_boot_cache_v26');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
       }
       if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
         caches.delete(BOOT_SYNC_CACHE_NAME).catch(() => {});
+        for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+          caches.delete(legacyName).catch(() => {});
+        }
       }
     } catch {
       // Ignore storage errors
@@ -4039,11 +4270,12 @@ export class PackageService {
     let normalizedRecent: LuantiPackage[] = [];
     const recentCreatedById = new Map<string, string>();
     if (rawRecentlyAdded.length > 0) {
-      normalizedRecent = rawRecentlyAdded.map((item: any) => {
-        const norm = normalizeTop10Entry(item);
-        return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
-      });
-      this._serverRecentlyAdded.set(normalizedRecent);
+      normalizedRecent = this.deduplicateCatalog(
+        rawRecentlyAdded.map((item: any) => {
+          const norm = normalizeTop10Entry(item);
+          return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
+        })
+      );
       for (const r of normalizedRecent) {
         if (r.id && r.created_at) {
           recentCreatedById.set(r.id.toLowerCase(), r.created_at);
@@ -4107,6 +4339,30 @@ export class PackageService {
       return pkg;
     });
 
+    if (normalizedRecent.length > 0) {
+      const normalizedByLowerId = new Map<string, LuantiPackage>();
+      const normalizedByRepoKey = new Map<string, LuantiPackage>();
+      for (const p of normalized) {
+        normalizedByLowerId.set(p.id.toLowerCase(), p);
+        const rk = this.normalizeRepoComparisonKey(p.repo_url);
+        if (rk) normalizedByRepoKey.set(rk, p);
+      }
+      normalizedRecent = this.deduplicateCatalog(
+        normalizedRecent.map(r => {
+          const rRepo = this.normalizeRepoComparisonKey(r.repo_url);
+          const catalogMatch =
+            normalizedByLowerId.get(r.id.toLowerCase()) ||
+            (rRepo ? normalizedByRepoKey.get(rRepo) : undefined);
+          if (!catalogMatch) return r;
+          const merged = this.mergeDualSourcePackage(catalogMatch, r);
+          const preservedCreated = pickNewerCreatedIso(r.created_at, merged.created_at);
+          return preservedCreated ? { ...merged, created_at: preservedCreated } : merged;
+        })
+      );
+      this._serverRecentlyAdded.set(normalizedRecent);
+    }
+
+    this.promoSyncGeneration++;
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
     const notifCandidates =
@@ -5027,7 +5283,7 @@ export class PackageService {
       };
       let existingTs = this.lastCatalogSyncAt || Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v25');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v26');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -5039,7 +5295,7 @@ export class PackageService {
   }
 
   /**
-   * Reads the persistent Service Worker CacheStorage (`lh-boot-sync-v1`) populated by
+   * Reads the persistent Service Worker CacheStorage (`lh-boot-sync-v2`) populated by
    * Periodic Background Sync (`periodicsync`), One-Off Background Sync (`sync`), or previous sessions.
    */
   private async readWarmBootCache(): Promise<{ ts: number; edge: boolean; payload: any } | null> {
@@ -5047,6 +5303,11 @@ export class PackageService {
       return null;
     }
     try {
+      if (typeof caches.delete === 'function') {
+        for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+          caches.delete(legacyName).catch(() => {});
+        }
+      }
       const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
       if (this.hadLegacyBootCache) {
         this.hadLegacyBootCache = false;
@@ -5100,7 +5361,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v25',
+          'lh_boot_cache_v26',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -5271,7 +5532,8 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v21') ||
               sessionStorage.getItem('lh_boot_cache_v22') ||
               sessionStorage.getItem('lh_boot_cache_v23') ||
-              sessionStorage.getItem('lh_boot_cache_v24')
+              sessionStorage.getItem('lh_boot_cache_v24') ||
+              sessionStorage.getItem('lh_boot_cache_v25')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -5285,8 +5547,9 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v22');
               sessionStorage.removeItem('lh_boot_cache_v23');
               sessionStorage.removeItem('lh_boot_cache_v24');
+              sessionStorage.removeItem('lh_boot_cache_v25');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v25');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v26');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -5597,14 +5860,23 @@ export class PackageService {
     const batch = new Map(this.pendingCatalogPatches);
     this.pendingCatalogPatches.clear();
 
-    this._packages.update(list =>
-      list.map(item => {
+    let anyRepoPatched = false;
+    for (const p of batch.values()) {
+      if (p.repo_url) {
+        anyRepoPatched = true;
+        break;
+      }
+    }
+
+    this._packages.update(list => {
+      const mapped = list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
         if (!patch) return item;
         return this.applyCatalogPatchToPackageItem(item, patch, false);
-      })
-    );
+      });
+      return anyRepoPatched ? this.deduplicateCatalog(mapped) : mapped;
+    });
 
     const syncTop10 = (list: LuantiPackage[]) =>
       list.map(item => {
@@ -5612,12 +5884,14 @@ export class PackageService {
         const patch = batch.get(key);
         return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
       });
-    const syncRecentlyAdded = (list: LuantiPackage[]) =>
-      list.map(item => {
+    const syncRecentlyAdded = (list: LuantiPackage[]) => {
+      const mapped = list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
         return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
       });
+      return anyRepoPatched ? this.deduplicateCatalog(mapped) : mapped;
+    };
     this._serverTop10Today.update(syncTop10);
     this._serverTop10Week.update(syncTop10);
     this._serverRecentlyAdded.update(syncRecentlyAdded);
@@ -5862,7 +6136,7 @@ export class PackageService {
           );
           const lic = h.license || h.media_license || pkg.license || '';
           const mediaLic = h.media_license || h.license || pkg.media_license || '';
-          const tags = this.mergePackageTagsPreservingExisting(
+          const baseTags = this.mergePackageTagsPreservingExisting(
             Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : undefined,
             pkg.tags,
             livePkgForHydrate?.tags,
@@ -5874,7 +6148,6 @@ export class PackageService {
             ...(livePkgForHydrate?.badge_tags || []),
             ...(prevMetaForHydrate?.badge_tags || [])
           ]);
-          const badgeTags = mergedBadgeTags.length > 0 ? mergedBadgeTags : undefined;
           const minVer = h.min_minetest_version || pkg.min_minetest_version || '5.0.0';
           const sizeFormatted = h.file_size || this.formatDownloadSize(h.download_size) || pkg.file_size;
           const resolvedVideo = this.extractEmbeddedVideo(
@@ -5884,6 +6157,20 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
+          const jamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+            repoUrl,
+            baseTags,
+            mergedBadgeTags,
+            pkg.sources || [pkg.source]
+          );
+          const tags = jamOverlay.tags;
+          const badgeTags = jamOverlay.badgeTags;
+          if (jamOverlay.matchedJam) {
+            this.persistPromotionalTagsForPackage(lowerKey, tags, badgeTags, {
+              repoUrl,
+              sources: jamOverlay.sources
+            });
+          }
           const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail]
             .map(u => sanitizePackageImageUrl(u))
             .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
@@ -5965,6 +6252,12 @@ export class PackageService {
             ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
             tags,
             ...(badgeTags && badgeTags.length > 0 ? { badge_tags: badgeTags } : {}),
+            ...(jamOverlay.matchedJam && jamOverlay.sources?.length
+              ? {
+                  sources: jamOverlay.sources,
+                  source: jamOverlay.sources.includes('git') ? 'git' : pkg.source
+                }
+              : {}),
             min_minetest_version: minVer,
             file_size: sizeFormatted,
             video_url: resolvedVideo.video_url,
@@ -6019,26 +6312,30 @@ export class PackageService {
             typeof (globalThis as any).vi !== 'undefined' ||
             typeof (globalThis as any).__vitest_worker__ !== 'undefined';
           if (isUnitTestEnv) {
-            this._packages.update(list =>
-              list.map(item => {
+            const hasHydratedRepoPatch = Array.from(updatesByLowerId.values()).some(p => Boolean(p.repo_url));
+            this._packages.update(list => {
+              const mapped = list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
                 if (!patch) return item;
                 return this.applyCatalogPatchToPackageItem(item, patch, false);
-              })
-            );
+              });
+              return hasHydratedRepoPatch ? this.deduplicateCatalog(mapped) : mapped;
+            });
             const patchTopList = (list: LuantiPackage[]) =>
               list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
                 return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
               });
-            const patchRecentlyAddedList = (list: LuantiPackage[]) =>
-              list.map(item => {
+            const patchRecentlyAddedList = (list: LuantiPackage[]) => {
+              const mapped = list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
                 return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
               });
+              return hasHydratedRepoPatch ? this.deduplicateCatalog(mapped) : mapped;
+            };
             this._serverTop10Today.update(patchTopList);
             this._serverTop10Week.update(patchTopList);
             this._serverRecentlyAdded.update(patchRecentlyAddedList);
@@ -7338,6 +7635,7 @@ export class PackageService {
       let unwrapAuthor = false;
       const pkgDetailMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(?:for-client\/.*)?$/);
       const pkgSubMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(dependencies|releases|reviews)\/?$/);
+      const pkgListQueryMatch = cleanPath.match(/^\/packages\/?\?(.+)$/);
       const userMatch = cleanPath.match(/^\/users\/([^/?#]+)\/?$/);
 
       if (pkgDetailMatch) {
@@ -7345,6 +7643,15 @@ export class PackageService {
       } else if (pkgSubMatch) {
         const sub = pkgSubMatch[3];
         edgeRoute = `/api/packages/${pkgSubMatch[1]}/${pkgSubMatch[2]}/${sub}${sub === 'dependencies' ? '/' : ''}`;
+      } else if (pkgListQueryMatch) {
+        let queryParams = pkgListQueryMatch[1];
+        if (!queryParams.includes('client=')) {
+          queryParams += '&client=web';
+        }
+        if (!queryParams.includes('ngsw-bypass=')) {
+          queryParams += '&ngsw-bypass=true';
+        }
+        edgeRoute = `/api/packages/?${queryParams}`;
       } else if (userMatch) {
         edgeRoute = `/api/authors/${userMatch[1]}`;
         unwrapAuthor = true;
@@ -7356,7 +7663,12 @@ export class PackageService {
         return null;
       }
       try {
-        const res = await fetch(edgeRoute, { headers: { Accept: 'application/json' } });
+        const res = await fetch(edgeRoute, {
+          headers: {
+            Accept: 'application/json',
+            ...(pkgListQueryMatch ? { 'ngsw-bypass': 'true' } : {})
+          }
+        });
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
           const json = await res.json();
           return unwrapAuthor ? (json?.author || json) : json;
@@ -8600,7 +8912,7 @@ export class PackageService {
         const dataSources: PackageSource[] = Array.isArray(data.sources)
           ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
           : [];
-        const mergedSources = Array.from(
+        let mergedSources = Array.from(
           new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources])
         );
 
@@ -8646,7 +8958,7 @@ export class PackageService {
           : undefined;
         const pkgBadgeTags = parseBadgeTagsArray(pkg.badge_tags ?? liveCatalogPkg?.badge_tags);
         const dataBadgeTags = data.badge_tags !== undefined ? parseBadgeTagsArray(data.badge_tags) : undefined;
-        const badgeTags =
+        const baseDetailBadgeTags =
           isRecentlyMutated && cachedMetaBadgeTags !== undefined
             ? cachedMetaBadgeTags
             : parseBadgeTagsArray([
@@ -8654,7 +8966,7 @@ export class PackageService {
                 ...pkgBadgeTags,
                 ...(cachedMetaBadgeTags || [])
               ]);
-        const mergedDetailTags =
+        const baseDetailTags =
           isRecentlyMutated && Array.isArray(cachedMetaEntry?.tags) && cachedMetaEntry.tags.length > 0
             ? cachedMetaEntry.tags
             : this.mergePackageTagsPreservingExisting(
@@ -8663,6 +8975,23 @@ export class PackageService {
                 liveCatalogPkg?.tags,
                 cachedMetaEntry?.tags
               );
+        const detailJamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+          repoUrl,
+          baseDetailTags,
+          baseDetailBadgeTags,
+          mergedSources
+        );
+        const mergedDetailTags = detailJamOverlay.tags;
+        const badgeTags = detailJamOverlay.badgeTags || [];
+        if (detailJamOverlay.matchedJam && detailJamOverlay.sources?.length) {
+          mergedSources = detailJamOverlay.sources;
+          this.persistPromotionalTagsForPackage(
+            (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase(),
+            mergedDetailTags,
+            badgeTags,
+            { repoUrl, sources: mergedSources }
+          );
+        }
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -11972,6 +12301,7 @@ export class PackageService {
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const data = await res.json();
         const allPromos: HeroPromotion[] = Array.isArray(data?.promotions) ? data.promotions : [];
+        this.promoSyncGeneration++;
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         if (Array.isArray(draft.row_filter_tags) && draft.row_filter_tags.length > 0) {
@@ -12019,6 +12349,7 @@ export class PackageService {
         const allPromos: HeroPromotion[] = Array.isArray(data?.promotions)
           ? data.promotions
           : this._adminPromotions().filter(p => p.id !== cleanId);
+        this.promoSyncGeneration++;
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         this.refreshPromoClock();

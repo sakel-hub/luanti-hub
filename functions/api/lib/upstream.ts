@@ -435,7 +435,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v21',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v22',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v23',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v24',
     'https://cache.luantihub.internal/__api_boot_recently_added_v1',
+    'https://cache.luantihub.internal/__api_boot_recently_added_v2',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1'
   ]);
@@ -3550,6 +3552,7 @@ export interface GitRepoScanResult {
   cdbMeta?: CdbJsonMetadata | null;
   screenshotUrl?: string;
   screenshots?: string[];
+  jam2026Tags?: string[];
 }
 
 export function normalizeGitRepoInputUrl(rawUrl?: string): string | undefined {
@@ -3685,7 +3688,7 @@ export async function scanGitRepoMetadataCached(
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v11/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
+  const cacheKey = `/__git_repo_scan_v12/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
   const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
   if (cached && cached.gitRepoStatus) {
     return cached;
@@ -3725,6 +3728,19 @@ export async function scanGitRepoMetadataCached(
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = 'unverified';
   let sawExplicit404 = false;
   let cdbMeta: CdbJsonMetadata | null = null;
+  let jam2026Tags: string[] | undefined;
+  const shouldProbeJam2026Md = pkgType === 'game';
+
+  const isValidJam2026MdResponse = async (jamRes: Response | null): Promise<boolean> => {
+    if (!jamRes || !jamRes.ok) return false;
+    const ct = (jamRes.headers?.get('content-type') || '').toLowerCase();
+    if (ct.includes('text/html')) return false;
+    const text = await jamRes.text().catch(() => '');
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith('<!DOCTYPE') || trimmed.toLowerCase().startsWith('<html')) return false;
+    return true;
+  };
 
   const cleanDep = (s: string): string =>
     s
@@ -3789,12 +3805,19 @@ export async function scanGitRepoMetadataCached(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1600);
       try {
-        const [res, cdbRes, probedScreenshotUrl] = await Promise.all([
+        const [res, cdbRes, probedScreenshotUrl, jam2026Res] = await Promise.all([
           fetchWithAnubisSupport(`${cand.base}/${confFile}`, { signal: controller.signal }),
           fetchWithAnubisSupport(`${cand.base}/.cdb.json`, { signal: controller.signal }).catch(() => null),
-          probeRawScreenshotUrl(cand.base, controller.signal)
+          probeRawScreenshotUrl(cand.base, controller.signal),
+          shouldProbeJam2026Md
+            ? fetchWithAnubisSupport(`${cand.base}/JAM2026.md`, { signal: controller.signal }).catch(() => null)
+            : Promise.resolve(null)
         ]);
         clearTimeout(timer);
+
+        if (shouldProbeJam2026Md && !jam2026Tags && (await isValidJam2026MdResponse(jam2026Res))) {
+          jam2026Tags = ['jam_game_2026', 'gamejam'];
+        }
 
         const hasCandidateScreenshot = Boolean(probedScreenshotUrl);
 
@@ -4117,7 +4140,8 @@ export async function scanGitRepoMetadataCached(
     unsupportedGames,
     cdbMeta,
     screenshotUrl: proxiedScreenshotUrl || mergedGitScreenshots[0],
-    screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined
+    screenshots: mergedGitScreenshots.length > 0 ? mergedGitScreenshots : undefined,
+    ...(jam2026Tags && jam2026Tags.length > 0 ? { jam2026Tags } : {})
   };
 
   if (ttlSeconds > 0 && scanResult.gitRepoStatus !== 'unverified') {
@@ -5383,10 +5407,28 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v23';
-export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v22';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v24';
+export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v23';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
+
+export function isCreatedIn2026OrUnknown(createdAt: unknown): boolean {
+  if (createdAt === null || createdAt === undefined || createdAt === '') return true;
+  if (typeof createdAt === 'number') {
+    const ms = createdAt < 1e12 ? createdAt * 1000 : createdAt;
+    const yr = new Date(ms).getUTCFullYear();
+    return !Number.isFinite(yr) || yr >= 2026;
+  }
+  const str = String(createdAt).trim();
+  if (!str) return true;
+  if (/^\d{4}/.test(str)) {
+    const yr = Number(str.slice(0, 4));
+    return !Number.isFinite(yr) || yr >= 2026;
+  }
+  const parsed = Date.parse(str);
+  if (!Number.isFinite(parsed)) return true;
+  return new Date(parsed).getUTCFullYear() >= 2026;
+}
 
 export function buildPackageDetailEdgeCacheKey(
   author: string,
@@ -5446,6 +5488,7 @@ export function buildPackageCacheInvalidationKeys(
     buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
     `/__api_hydrate_v9_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v10_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
+    `/__api_hydrate_v11_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `https://cache.luantihub.internal/__for_client_v5/${encA}/${encN}/en/%3Fformspec_version%3D8`
   ]);
 
@@ -5480,6 +5523,7 @@ export function buildPackageCacheInvalidationKeys(
 
   if (options?.includeGitRepoScan) {
     keys.add(`/__git_repo_scan_v11/${encA}/${encN}`);
+    keys.add(`/__git_repo_scan_v12/${encA}/${encN}`);
   }
 
   return Array.from(keys);

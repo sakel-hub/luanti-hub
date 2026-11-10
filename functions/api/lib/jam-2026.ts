@@ -16,6 +16,7 @@ import {
   buildPackageCacheInvalidationKeys,
   rewriteRelativeMarkdownUrls,
   fetchWithAnubisSupport,
+  fetchUpstreamJsonCached,
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables
 } from './upstream';
@@ -340,6 +341,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
   d1UpsertPairs: Array<{ tag: string; pkgId: string }>;
   db?: any;
   noCache?: boolean;
+  upstreamCatalog?: any[];
 }): Promise<Record<string, string[]> | undefined> {
   const {
     uniqueTags,
@@ -349,7 +351,8 @@ export async function syncJam2026IntoPromoRowDelta(params: {
     queuedUpsertKeys,
     d1UpsertPairs,
     db,
-    noCache = false
+    noCache = false,
+    upstreamCatalog
   } = params;
 
   if (!isJam2026TagList(uniqueTags)) {
@@ -389,6 +392,63 @@ export async function syncJam2026IntoPromoRowDelta(params: {
       discoveredByKey.set(lowerId, brew);
     }
   }
+
+  // Cross-author ContentDB canonical resolution (e.g. Git owner `sztest/confspace` -> ContentDB `Warr1024/confspace`):
+  // Bulk ContentDB `/packages/?fmt=vcs` omits `repo`, so when a Jam 2026 game is published on ContentDB under a different
+  // username with the same technical `name`, verify its ContentDB `detail.repo` (1h Edge-cached) and stamp the canonical ID.
+  await Promise.all(
+    brews.slice(0, 30).map(async (brew) => {
+      const rKey = normalizeRepoKey(brew.repo_url);
+      if (!rKey) return;
+      const lowerBrewName = brew.name.toLowerCase();
+      const lowerBrewAuthor = brew.author.toLowerCase();
+
+      let candidates: any[] = [];
+      if (Array.isArray(upstreamCatalog) && upstreamCatalog.length > 0) {
+        candidates = upstreamCatalog.filter(
+          (c) =>
+            c &&
+            String(c.type || 'mod').toLowerCase() === 'game' &&
+            String(c.name || '').toLowerCase() === lowerBrewName &&
+            String(c.author || '').toLowerCase() !== lowerBrewAuthor
+        );
+      } else {
+        const searchList = await fetchUpstreamJsonCached<any[]>(
+          `/packages/?q=${encodeURIComponent(brew.name)}&type=game&fmt=vcs`,
+          1800
+        ).catch(() => null);
+        if (Array.isArray(searchList)) {
+          candidates = searchList.filter(
+            (c) =>
+              c &&
+              String(c.type || 'mod').toLowerCase() === 'game' &&
+              String(c.name || '').toLowerCase() === lowerBrewName &&
+              String(c.author || '').toLowerCase() !== lowerBrewAuthor
+          );
+        }
+      }
+
+      for (const cand of candidates.slice(0, 2)) {
+        const detail = await fetchUpstreamJsonCached<any>(
+          `/packages/${encodeURIComponent(cand.author)}/${encodeURIComponent(cand.name)}/`,
+          3600
+        ).catch(() => null);
+        const detailRepoKey = normalizeRepoKey(detail?.repo || detail?.repo_url || cand.repo_url || cand.repo);
+        if (detailRepoKey && detailRepoKey === rKey) {
+          const canonicalId = `${detail?.author || cand.author}/${detail?.name || cand.name}`;
+          const canonicalLowerId = canonicalId.toLowerCase();
+          for (const tag of jamTagsToStamp) {
+            addTagStamp(canonicalLowerId, tag);
+            const pairKey = `${tag.toLowerCase()}::${canonicalLowerId}`;
+            if (!existingD1Pairs.has(pairKey) && !queuedUpsertKeys.has(pairKey)) {
+              queuedUpsertKeys.add(pairKey);
+              d1UpsertPairs.push({ tag, pkgId: canonicalId });
+            }
+          }
+        }
+      }
+    })
+  );
 
   // Quota-Optimized D1 Package Persistence:
   // Only write to D1 `packages` for jam entries whose `jam_entry_id:latest_commit_sha` has not been synced yet.
@@ -538,7 +598,8 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           cacheKeysToInvalidate.push(
             ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
             `/__api_hydrate_v9_${lowerId}`,
-            `/__api_hydrate_v10_${lowerId}`
+            `/__api_hydrate_v10_${lowerId}`,
+            `/__api_hydrate_v11_${lowerId}`
           );
         }
         await Promise.all([
@@ -563,17 +624,65 @@ export async function syncJam2026IntoPromoRowDelta(params: {
  */
 export function applyJam2026RepoOverlayOnCatalog(
   packagesList: any[],
-  repoTagMap?: Record<string, string[]> | null
+  repoTagMap?: Record<string, string[]> | null,
+  discoveredItems?: any[] | null
 ): { packages: any[]; matchedRepoKeys: Set<string> } {
   const matchedRepoKeys = new Set<string>();
   if (!Array.isArray(packagesList) || !repoTagMap || Object.keys(repoTagMap).length === 0) {
     return { packages: packagesList, matchedRepoKeys };
   }
 
+  const normalizeText = (val: any): string =>
+    typeof val === 'string' ? val.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+
+  const discoveredJamByLowerName = new Map<string, any[]>();
+  if (Array.isArray(discoveredItems)) {
+    for (const d of discoveredItems) {
+      if (!d || String(d.type || '').toLowerCase() !== 'game') continue;
+      const dRepoKey = normalizeRepoKey(d.repo_url || d.repo);
+      if (!dRepoKey || !repoTagMap[dRepoKey]) continue;
+      const dName = normalizeText(d.name);
+      if (!dName) continue;
+      const bucket = discoveredJamByLowerName.get(dName);
+      if (bucket) {
+        bucket.push(d);
+      } else {
+        discoveredJamByLowerName.set(dName, [d]);
+      }
+    }
+  }
+
   let clonedList: any[] | null = null;
   for (let i = 0; i < packagesList.length; i++) {
     const pkg = packagesList[i];
-    const rKey = normalizeRepoKey(pkg?.repo_url || pkg?.repo);
+    if (!pkg) continue;
+    let rKey = normalizeRepoKey(pkg?.repo_url || pkg?.repo);
+    let matchedDiscoveredRepoUrl: string | undefined;
+
+    // Fallback for unhydrated ContentDB games whose author handle differs from their Git namespace (e.g. Warr1024/confspace vs sztest/confspace)
+    if (!rKey && String(pkg.type || '').toLowerCase() === 'game' && discoveredJamByLowerName.size > 0) {
+      const lowerPkgName = normalizeText(pkg.name);
+      const jamCandidates = lowerPkgName ? discoveredJamByLowerName.get(lowerPkgName) : undefined;
+      if (jamCandidates && jamCandidates.length > 0) {
+        const normPkgTitle = normalizeText(pkg.title);
+        const normPkgDesc = normalizeText(pkg.short_desc || pkg.short_description);
+        const matchedDisc = jamCandidates.find((d) => {
+          const normDiscTitle = normalizeText(d.title);
+          const normDiscDesc = normalizeText(d.short_desc || d.short_description);
+          const titleMatches =
+            normPkgTitle.length > 0 &&
+            normPkgTitle !== lowerPkgName &&
+            normPkgTitle === normDiscTitle;
+          const descMatches = normPkgDesc.length >= 15 && normPkgDesc === normDiscDesc;
+          return titleMatches || descMatches;
+        });
+        if (matchedDisc) {
+          rKey = normalizeRepoKey(matchedDisc.repo_url || matchedDisc.repo);
+          matchedDiscoveredRepoUrl = matchedDisc.repo_url || matchedDisc.repo;
+        }
+      }
+    }
+
     if (!rKey) continue;
     const tagsToAdd = repoTagMap[rKey];
     if (!Array.isArray(tagsToAdd) || tagsToAdd.length === 0) continue;
@@ -589,11 +698,31 @@ export function applyJam2026RepoOverlayOnCatalog(
         }
       }
     }
-    if (nextTags) {
+
+    const existingBadgeTags: string[] = Array.isArray(pkg.badge_tags) ? pkg.badge_tags : [];
+    const needsJamBadge = !existingBadgeTags.some(
+      (bt) => String(bt).toLowerCase() === JAM_2026_PRIMARY_TAG
+    );
+    const nextBadgeTags = needsJamBadge
+      ? [...existingBadgeTags, JAM_2026_PRIMARY_TAG]
+      : existingBadgeTags;
+
+    const baseSources: string[] = Array.isArray(pkg.sources) && pkg.sources.length > 0
+      ? pkg.sources
+      : [pkg.source || 'official'];
+    const needsGitSource = !baseSources.includes('git');
+    const nextSources = needsGitSource ? [...baseSources, 'git'] : baseSources;
+
+    const needsRepoBackfill = Boolean(!pkg.repo_url && matchedDiscoveredRepoUrl);
+
+    if (nextTags || needsJamBadge || needsGitSource || needsRepoBackfill) {
       if (!clonedList) clonedList = [...packagesList];
       clonedList[i] = {
         ...pkg,
-        tags: nextTags
+        ...(nextTags ? { tags: nextTags } : {}),
+        ...(needsJamBadge ? { badge_tags: nextBadgeTags } : {}),
+        ...(needsGitSource ? { sources: nextSources } : {}),
+        ...(needsRepoBackfill ? { repo_url: matchedDiscoveredRepoUrl } : {})
       };
     }
   }

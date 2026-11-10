@@ -61,7 +61,8 @@ import {
   parseScreenshotMetaArray,
   buildPackageDetailEdgeCacheKey,
   buildPackageCacheInvalidationKeys,
-  BOOT_CATALOG_EDGE_CACHE_KEY
+  BOOT_CATALOG_EDGE_CACHE_KEY,
+  isCreatedIn2026OrUnknown
 } from '../../../lib/upstream';
 import { fetchJam2026FallbackReadme } from '../../../lib/jam-2026';
 import {
@@ -481,10 +482,33 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1Reviews: any[] = [];
   let d1DailyDownloadsSum = 0;
   let d1FavoritesCount = 0;
+  let d1PromoTags: string[] = [];
   if (context.env.DB) {
-    d1Pkg = await context.env.DB.prepare(
-      `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, pkgId.toLowerCase(), author, name).first();
+    const [fetchedD1Pkg, promoTagRows] = await Promise.all([
+      context.env.DB.prepare(
+        `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+      ).bind(pkgId, pkgId.toLowerCase(), author, name).first(),
+      context.env.DB.prepare(
+        `SELECT tag_name FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(pkgId).all().catch(() => ({ results: [] }))
+    ]);
+    d1Pkg = fetchedD1Pkg;
+    d1PromoTags = Array.from(
+      new Set(
+        (promoTagRows?.results || [])
+          .map((r: any) => String(r?.tag_name || '').trim())
+          .filter(Boolean)
+      )
+    );
+    if (d1Pkg?.id && String(d1Pkg.id).toLowerCase() !== pkgId.toLowerCase()) {
+      const altPromoRows = await context.env.DB.prepare(
+        `SELECT tag_name FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(String(d1Pkg.id)).all().catch(() => ({ results: [] }));
+      for (const r of (altPromoRows?.results || [])) {
+        const t = String(r?.tag_name || '').trim();
+        if (t && !d1PromoTags.includes(t)) d1PromoTags.push(t);
+      }
+    }
 
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({
@@ -514,7 +538,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const effectivePkgIdLower = String(effectivePkgId).toLowerCase();
 
     // Fast path for ?lite=1 when D1 already holds hydrated ContentDB downloads & license
-    const d1TagsFast = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const d1TagsFast = Array.from(
+      new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
+    ).filter(Boolean);
     const isGitFast = Boolean(d1Pkg && (d1Pkg.provider !== 'contentdb' || d1TagsFast.includes('git')));
     const isOfficialFast = Boolean(
       d1Pkg && (d1Pkg.provider === 'contentdb' || Number(d1Pkg.contentdb_downloads || 0) > 0 || d1TagsFast.includes('contentdb'))
@@ -624,6 +650,17 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       if (isGitFast) fastSources.push('git');
       if (fastSources.length === 0) fastSources.push('official');
 
+      const fastLiteTags = Array.from(
+        new Set([...d1TagsFast, ...(liteGitScan?.jam2026Tags || [])])
+      ).filter(Boolean);
+      const fastLiteBadgeTags = parseBadgeTagsArray(d1Pkg.badge_tags);
+      if (
+        (fastLiteTags.includes('jam_game_2026') || fastLiteTags.includes('gamejam')) &&
+        !fastLiteBadgeTags.includes('jam_game_2026')
+      ) {
+        fastLiteBadgeTags.push('jam_game_2026');
+      }
+
       const fastLitePayload = {
         id: d1Pkg.id,
         author: d1Pkg.author_name || author,
@@ -657,8 +694,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size),
         video_url: liteVideo.video_url || undefined,
         video_thumbnail_url: liteVideo.video_thumbnail_url || undefined,
-        tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
-        badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
+        tags: fastLiteTags.length > 0 ? fastLiteTags : [d1Pkg.type || 'mod'],
+        badge_tags: fastLiteBadgeTags,
         source: isGitFast ? 'git' : 'official',
         sources: fastSources,
         git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified'
@@ -981,7 +1018,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                 .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
                 .filter(Boolean)
             : [];
-          const fastCombinedTags = Array.from(new Set([...d1TagsFast, ...fastDetailTags])).filter(Boolean);
+          const fastCombinedTags = Array.from(
+            new Set([...d1TagsFast, ...fastDetailTags, ...(fastGitScan?.jam2026Tags || [])])
+          ).filter(Boolean);
+          const fastFullBadgeTags = parseBadgeTagsArray(d1Pkg.badge_tags);
+          if (
+            (fastCombinedTags.includes('jam_game_2026') || fastCombinedTags.includes('gamejam')) &&
+            !fastFullBadgeTags.includes('jam_game_2026')
+          ) {
+            fastFullBadgeTags.push('jam_game_2026');
+          }
           const fastLongDesc =
             d1Pkg.long_desc ||
             extractLongDescriptionText(fastCdbDetail?.long_description) ||
@@ -1061,7 +1107,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
             tags: fastCombinedTags.length > 0 ? fastCombinedTags : [d1Pkg.type || 'mod'],
-            badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
+            badge_tags: fastFullBadgeTags,
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
@@ -1334,7 +1380,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   // 3. Agnostic Resolution (Pure Git package OR when both ContentDB & Mirror APIs are offline):
   // Resolve directly from D1 + Server-side Git Repository Scanner (.conf + .cdb.json + README + Git Releases)
   if (!upstreamData) {
-    const d1Tags = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const d1Tags = Array.from(
+      new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
+    ).filter(Boolean);
     const d1HardDeps = d1Pkg ? parseJsonArray(d1Pkg.dependencies) : [];
     const d1SoftDeps = d1Pkg ? parseJsonArray(d1Pkg.optional_dependencies) : [];
     const hasStoredGitShotPure =
@@ -1476,12 +1524,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         new Set([
           ...d1Tags,
           ...(gitScan?.cdbMeta?.tags || []),
-          ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) ? [resolvedType, 'git'] : [])
+          ...(gitScan?.jam2026Tags || []),
+          ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) && !(gitScan?.jam2026Tags?.length) ? [resolvedType, 'git'] : [])
         ])
       ).filter(Boolean);
       const pureGitBadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
       if (mergedTags.includes(ORGANIC_CODE_TAG) && !pureGitBadgeTags.includes(ORGANIC_CODE_TAG)) {
         pureGitBadgeTags.push(ORGANIC_CODE_TAG);
+      }
+      if (
+        (mergedTags.includes('jam_game_2026') || mergedTags.includes('gamejam')) &&
+        !pureGitBadgeTags.includes('jam_game_2026')
+      ) {
+        pureGitBadgeTags.push('jam_game_2026');
       }
       const mergedHardDeps = d1HardDeps.length > 0 ? d1HardDeps : (gitScan?.hardDeps || []);
       const mergedSoftDeps = d1SoftDeps.length > 0 ? d1SoftDeps : (gitScan?.softDeps || []);
@@ -1696,7 +1751,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const hasResolvedVideo = Boolean(upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url);
   const hasStoredGitScreenshot =
     isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg?.banner_url);
-  const needsGitProbe = Boolean(repoUrl) && (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot);
+  const needsJam2026DetailProbe =
+    (upstreamData.type === 'game' || d1Pkg?.type === 'game') &&
+    isCreatedIn2026OrUnknown(upstreamData.created_at || d1Pkg?.created_at) &&
+    !d1PromoTags.includes('jam_game_2026');
+  const needsGitProbe =
+    Boolean(repoUrl) &&
+    (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot || needsJam2026DetailProbe);
   if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
@@ -1774,6 +1835,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       : (cdbTags.length > 0 ? cdbTags : [upstreamData.type || 'mod']);
   } else if (probedCdbMeta?.tags && probedCdbMeta.tags.length > 0) {
     normalizedTags = Array.from(new Set([...normalizedTags, ...probedCdbMeta.tags]));
+  }
+  if (gitProbeScan?.jam2026Tags?.length) {
+    normalizedTags = Array.from(new Set([...normalizedTags, ...gitProbeScan.jam2026Tags]));
+    if (context.env.DB) {
+      for (const jt of gitProbeScan.jam2026Tags) {
+        context.env.DB.prepare(
+          `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+        ).bind(jt, canonicalId).run().catch(() => {});
+      }
+    }
   }
 
   // Normalize & merge screenshots array (preferring Git repository screenshot.png / .cdb.json first, followed by ContentDB gallery)
@@ -1854,11 +1927,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     (!isLite && wantsReadme) ? fetchRepoReadmeCached(repoUrl) : Promise.resolve<string | undefined>(undefined)
   ]);
 
-  const d1Tags = parseJsonArray(d1Pkg?.tags);
+  const d1Tags = Array.from(new Set([...parseJsonArray(d1Pkg?.tags), ...d1PromoTags])).filter(Boolean);
   const d1HardDeps = parseJsonArray(d1Pkg?.dependencies);
   const d1SoftDeps = parseJsonArray(d1Pkg?.optional_dependencies);
   const isRegisteredInGitCommunity = Boolean(
-    d1Pkg && (d1Pkg.provider !== 'contentdb' || d1Tags.includes('git'))
+    (d1Pkg && (d1Pkg.provider !== 'contentdb' || d1Tags.includes('git'))) ||
+    (Boolean(repoUrl) && (normalizedTags.includes('jam_game_2026') || d1Tags.includes('jam_game_2026')))
   );
   const sources: Array<'official' | 'git'> = isRegisteredInGitCommunity ? ['official', 'git'] : ['official'];
 
@@ -2031,12 +2105,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     normalizedLang
   );
 
-  const mergedTags = d1Tags.length > 0
-    ? Array.from(new Set([...d1Tags]))
-    : Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
+  const mergedTags = Array.from(new Set([...d1Tags, ...normalizedTags])).filter(Boolean);
   const d1BadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
   if (mergedTags.includes(ORGANIC_CODE_TAG) && !d1BadgeTags.includes(ORGANIC_CODE_TAG)) {
     d1BadgeTags.push(ORGANIC_CODE_TAG);
+  }
+  if (
+    (mergedTags.includes('jam_game_2026') || mergedTags.includes('gamejam')) &&
+    !d1BadgeTags.includes('jam_game_2026')
+  ) {
+    d1BadgeTags.push('jam_game_2026');
   }
   const resolvedScore = computeStarRating(
     { ...upstreamData, review_thread_counts: reviewThreadCounts, reviews_list: bundledReviews },
@@ -2055,7 +2133,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         : !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
           ? resolvedScore
           : null;
-    const newTagsJson = d1Tags.length === 0 && mergedTags.length > 0 ? JSON.stringify(mergedTags) : null;
+    const rawExistingD1TagsOnly = parseJsonArray(d1Pkg.tags);
+    const newTagsJson =
+      mergedTags.length > rawExistingD1TagsOnly.length ? JSON.stringify(mergedTags) : null;
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||

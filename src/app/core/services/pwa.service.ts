@@ -84,7 +84,8 @@ export const JUST_AUTO_UPDATED_STORAGE_KEY = 'lh_pwa_just_auto_updated';
 const AUTO_RELOAD_INACTIVITY_MS = 45 * 1000;
 const MAX_SEEN_TAGS = 100;
 
-export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
+export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v2';
+export const LEGACY_BOOT_SYNC_CACHE_NAMES = ['lh-boot-sync-v1'];
 export const BOOT_SYNC_CACHE_URL = '/api/packages/?boot=1';
 export const PERIODIC_SYNC_TAG = 'lh-periodic-catalog-sync';
 export const PERIODIC_SYNC_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours suggested interval

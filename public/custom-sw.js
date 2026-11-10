@@ -12,8 +12,15 @@
   }
   self.__lhCustomSwSyncInstalled = true;
 
-  const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
+  const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v2';
+  const LEGACY_BOOT_SYNC_CACHE_NAMES = ['lh-boot-sync-v1'];
   const BOOT_SYNC_CACHE_URL = '/api/packages/?boot=1';
+
+  if (typeof caches !== 'undefined' && caches && typeof caches.delete === 'function') {
+    for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+      caches.delete(legacyName).catch(() => {});
+    }
+  }
   const OUTBOX_DB_NAME = 'lh_sync_outbox_db';
   const OUTBOX_STORE_NAME = 'outbox';
   const NOTIF_STATE_DB_NAME = 'lh_pwa_notif_state_db';

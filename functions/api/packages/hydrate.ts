@@ -22,7 +22,8 @@ import {
   readSharedEdgeRatingsMap,
   mergeSharedEdgeRatingsMap,
   SharedEdgeRatingEntry,
-  normalizeUtcIsoTimestamp
+  normalizeUtcIsoTimestamp,
+  isCreatedIn2026OrUnknown
 } from '../lib/upstream';
 
 interface Env {
@@ -58,7 +59,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v10_${encodeURIComponent(
+      ? `/__api_hydrate_v11_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -84,6 +85,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const missingIds = new Set<string>(rawIds.map(id => id.toLowerCase()));
     const d1ById = new Map<string, any>();
     const dailyDlByLowerId = new Map<string, number>();
+    const promoTagsByLowerId = new Map<string, string[]>();
 
     if (env.DB) {
       try {
@@ -91,7 +93,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         const exactAndLowerIds = Array.from(new Set([...rawIds, ...lowerIds]));
         const placeholders = exactAndLowerIds.map(() => '?').join(', ');
         const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
-        const [d1Res, dailyDlRes] = await Promise.all([
+        const [d1Res, dailyDlRes, promoTagsRes] = await Promise.all([
           env.DB.prepare(
             `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
           ).bind(...exactAndLowerIds, ...lowerIds).all(),
@@ -100,6 +102,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
              FROM package_daily_downloads
              WHERE LOWER(package_id) IN (${lowerPlaceholders})
              GROUP BY LOWER(package_id)`
+          ).bind(...lowerIds).all().catch(() => ({ results: [] })),
+          env.DB.prepare(
+            `SELECT LOWER(package_id) as pkg_id, tag_name
+             FROM promo_tag_packages
+             WHERE LOWER(package_id) IN (${lowerPlaceholders})`
           ).bind(...lowerIds).all().catch(() => ({ results: [] }))
         ]);
 
@@ -109,13 +116,29 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           }
         }
 
+        for (const pRow of (promoTagsRes?.results || [])) {
+          const pKey = String(pRow?.pkg_id || '').toLowerCase();
+          const tName = String(pRow?.tag_name || '').trim();
+          if (!pKey || !tName) continue;
+          const arr = promoTagsByLowerId.get(pKey) || [];
+          if (!arr.includes(tName)) arr.push(tName);
+          promoTagsByLowerId.set(pKey, arr);
+        }
+
         const d1RepoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
           if (!row?.id) continue;
           const lowerKey = String(row.id).toLowerCase();
           d1ById.set(lowerKey, row);
-          const parsedTags = parseJsonArray(row.tags);
+          const d1PromoTags = promoTagsByLowerId.get(lowerKey) || [];
+          const parsedTags = Array.from(new Set([...parseJsonArray(row.tags), ...d1PromoTags])).filter(Boolean);
           const parsedBadgeTags = parseBadgeTagsArray(row.badge_tags);
+          if (
+            (parsedTags.includes('jam_game_2026') || parsedTags.includes('gamejam')) &&
+            !parsedBadgeTags.includes('jam_game_2026')
+          ) {
+            parsedBadgeTags.push('jam_game_2026');
+          }
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
@@ -186,9 +209,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             (!isOfficialD1Row || Boolean(parsedRowRevCounts))
           ) {
             missingIds.delete(lowerKey);
+            const needsD1Jam2026GameScan =
+              row.type === 'game' &&
+              isCreatedIn2026OrUnknown(row.created_at) &&
+              !parsedTags.includes('jam_game_2026');
             if (
-              row.provider !== 'contentdb' &&
-              (!row.video_url || !gitShotD1) &&
+              ((row.provider !== 'contentdb' && (!row.video_url || !gitShotD1)) ||
+                needsD1Jam2026GameScan) &&
               row.repo_url &&
               d1RepoScanRows.length < 6
             ) {
@@ -240,6 +267,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 }
                 if (mergedRowShots.length > 0) {
                   hydratedMap[lowerKey].screenshots = mergedRowShots;
+                }
+                if (gitScan?.jam2026Tags?.length) {
+                  hydratedMap[lowerKey].tags = Array.from(
+                    new Set([...(hydratedMap[lowerKey].tags || []), ...gitScan.jam2026Tags])
+                  );
+                  hydratedMap[lowerKey].badge_tags = Array.from(
+                    new Set([...(hydratedMap[lowerKey].badge_tags || []), 'jam_game_2026'])
+                  );
+                  for (const jt of gitScan.jam2026Tags) {
+                    repoUpdateStmts.push(
+                      env.DB.prepare(
+                        `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+                         VALUES (?, ?, CURRENT_TIMESTAMP)
+                         ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+                      ).bind(jt, row.id)
+                    );
+                  }
                 }
               }
 
@@ -330,7 +374,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const rawUpstreamTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
-          let detailTags = Array.from(new Set([...(existing.tags || []), ...rawUpstreamTags])).filter(Boolean);
+          const d1PromoTagsForHydrate = promoTagsByLowerId.get(lowerKey) || [];
+          let detailTags = Array.from(
+            new Set([...(existing.tags || []), ...d1PromoTagsForHydrate, ...rawUpstreamTags])
+          ).filter(Boolean);
           let detailRevCounts =
             parseNonZeroReviewThreadCounts(detail?.reviews) ||
             parseNonZeroReviewThreadCounts(scoreEntry?.reviews) ||
@@ -386,13 +433,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           let devState = detail?.dev_state || existing.dev_state || undefined;
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
-          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png)
-          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages or packages missing metadata.
+          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png + JAM2026.md)
+          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages, packages missing metadata,
+          // or 2026 games whose Git repository has not yet been checked for JAM2026.md.
           let gitScanShot: string | undefined;
           let gitScanCdbShots: string[] = [];
+          let discoveredJam2026Tags: string[] = [];
           const isNativeGitPkg = Boolean(existingD1Row && existingD1Row.provider !== 'contentdb');
           const hasExistingBanner = Boolean(existing.banner && existing.banner !== 'logo.svg');
-          if ((!detail || !lic || (isNativeGitPkg && !hasExistingBanner)) && repoUrl && repoScanBudget > 0) {
+          const needsJam2026GameScan =
+            pkgType === 'game' &&
+            isCreatedIn2026OrUnknown(detail?.created_at || existingD1Row?.created_at) &&
+            !detailTags.includes('jam_game_2026');
+          if (
+            (!detail || !lic || (isNativeGitPkg && !hasExistingBanner) || needsJam2026GameScan) &&
+            repoUrl &&
+            repoScanBudget > 0
+          ) {
             repoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
             if (gitScan && gitScan.gitRepoStatus === 'verified') {
@@ -411,6 +468,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               if (gitScan.cdbMeta?.tags?.length) {
                 detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
               }
+              if (gitScan.jam2026Tags?.length) {
+                discoveredJam2026Tags = gitScan.jam2026Tags;
+                detailTags = Array.from(new Set([...detailTags, ...gitScan.jam2026Tags]));
+              }
               if (!videoUrl && gitScan.cdbMeta?.video_url) {
                 const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
                 videoUrl = extractedVid.video_url;
@@ -422,6 +483,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
           const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
+          if (env.DB && discoveredJam2026Tags.length > 0) {
+            for (const jt of discoveredJam2026Tags) {
+              persistStatements.push(
+                env.DB.prepare(
+                  `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+                   VALUES (?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+                ).bind(jt, canonicalId)
+              );
+            }
+          }
           const sanitizedDetailThumb = upgradeContentDbThumbnailUrl(detail?.thumbnail);
           const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
             [gitScanShot, existing.banner, existing.thumbnail, sanitizedDetailThumb],
@@ -465,6 +537,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               ? (detailApprovedMs >= detailCreatedMs ? normDetailApproved : normDetailCreated)
               : (normDetailApproved || normDetailCreated || undefined);
           const existingBadgeTags = parseBadgeTagsArray(existingD1Row?.badge_tags);
+          if (
+            (detailTags.includes('jam_game_2026') || detailTags.includes('gamejam')) &&
+            !existingBadgeTags.includes('jam_game_2026')
+          ) {
+            existingBadgeTags.push('jam_game_2026');
+          }
           hydratedMap[lowerKey] = {
             id: canonicalId,
             license: lic,
@@ -504,8 +582,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 ? resolvedScore
                 : null;
             const existingD1Tags = parseJsonArray(existingD1Row.tags);
+            const mergedD1Tags = Array.from(new Set([...existingD1Tags, ...detailTags])).filter(Boolean);
             const newTagsJson =
-              detailTags.length > existingD1Tags.length ? JSON.stringify(detailTags) : null;
+              mergedD1Tags.length > existingD1Tags.length ? JSON.stringify(mergedD1Tags) : null;
             const newThumb =
               (!sanitizePackageImageUrl(existingD1Row.thumbnail_url) ||
                 String(existingD1Row.thumbnail_url || '').includes('/thumbnails/')) &&

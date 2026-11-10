@@ -124,7 +124,26 @@ export function convertJam2026BrewToRawPackage(
 }
 
 let cachedJam2026RawPackages: { ts: number; items: Record<string, any>[] } | null = null;
+const cachedJam2026RepoKeys = new Set<string>();
 const JAM_2026_CLIENT_CACHE_TTL_MS = 2 * 60 * 1000;
+
+export function resetJam2026ClientCacheForTests(): void {
+  cachedJam2026RawPackages = null;
+  cachedJam2026RepoKeys.clear();
+}
+
+export function getJam2026TagsForRepoUrl(repoUrl?: string | null): string[] {
+  const rk = normalizeRepoComparisonKey(repoUrl || undefined);
+  if (!rk || !cachedJam2026RepoKeys.has(rk)) return [];
+  return ['jam_game_2026', 'gamejam'];
+}
+
+function normalizeComparableGameText(val: unknown): string {
+  return String(val || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
 
 /**
  * Syncs `jam.luanti.org` submissions into the client catalog when Promotional Package Row #1
@@ -136,7 +155,12 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
   normalizePackage: (raw: any) => LuantiPackage;
   deduplicateCatalog: (pkgs: LuantiPackage[]) => LuantiPackage[];
   buildSearchBlob: (pkg: Partial<LuantiPackage>) => string;
-  onPackageStamped?: (lowerId: string, tags: string[], badgeTags: string[]) => void;
+  onPackageStamped?: (
+    lowerId: string,
+    tags: string[],
+    badgeTags: string[],
+    extra?: { repoUrl?: string; sources?: Array<'official' | 'git'> }
+  ) => void;
   fetchJson?: (url: string) => Promise<any>;
 }): Promise<void> {
   const {
@@ -198,15 +222,31 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
 
     const jamTagsToStamp = ['jam_game_2026', 'gamejam', tag];
     const matchedLowerIds = new Set<string>();
-    const matchedRepoKeys = new Set<string>();
+    const rawByRepoKey = new Map<string, Record<string, any>>();
+    const gameBrewsByNameLower = new Map<string, Record<string, any>[]>();
 
     for (const raw of rawPackages) {
       matchedLowerIds.add(String(raw['id']).toLowerCase());
       const rk = normalizeRepoComparisonKey(raw['repo_url']);
-      if (rk) matchedRepoKeys.add(rk);
+      if (rk) {
+        cachedJam2026RepoKeys.add(rk);
+        rawByRepoKey.set(rk, raw);
+      }
+      const rawNameLower = String(raw['name'] || '').trim().toLowerCase();
+      if (rawNameLower) {
+        const arr = gameBrewsByNameLower.get(rawNameLower) || [];
+        arr.push(raw);
+        gameBrewsByNameLower.set(rawNameLower, arr);
+      }
     }
 
-    const stampedPackages: Array<{ lowerId: string; tags: string[]; badgeTags: string[] }> = [];
+    const stampedPackages: Array<{
+      lowerId: string;
+      tags: string[];
+      badgeTags: string[];
+      repoUrl?: string;
+      sources?: Array<'official' | 'git'>;
+    }> = [];
 
     packagesSignal.update((currentPkgs) => {
       const existingLowerIds = new Set<string>();
@@ -219,9 +259,48 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
         existingLowerIds.add(lowerId);
         if (repoKey) existingRepoKeys.add(repoKey);
 
-        const isMatched =
-          matchedLowerIds.has(lowerId) || Boolean(repoKey && matchedRepoKeys.has(repoKey));
+        let matchedRaw: Record<string, any> | undefined = repoKey
+          ? rawByRepoKey.get(repoKey)
+          : undefined;
+        let isMatched = matchedLowerIds.has(lowerId) || Boolean(matchedRaw);
+
+        // Unhydrated ContentDB game match (e.g. `Warr1024/confspace` before `/api/packages/hydrate` populates `repo_url`
+        // while the Jam 2026 Git repo is hosted under `sztest/confspace`): match when technical `name` is identical
+        // AND either non-slug `title` or >=15-char `short_desc` matches.
+        if (!isMatched && !repoKey && pkg.type === 'game') {
+          const pkgNameLower = String(pkg.name || '').trim().toLowerCase();
+          const candidates = pkgNameLower ? gameBrewsByNameLower.get(pkgNameLower) : undefined;
+          if (candidates && candidates.length > 0) {
+            const pkgTitleNorm = normalizeComparableGameText(pkg.title);
+            const pkgDescNorm = normalizeComparableGameText(pkg.short_desc);
+            matchedRaw = candidates.find((cand) => {
+              const candTitleNorm = normalizeComparableGameText(cand['title']);
+              const candDescNorm = normalizeComparableGameText(
+                cand['short_desc'] || cand['short_description']
+              );
+              const titleMatches =
+                Boolean(pkgTitleNorm) &&
+                pkgTitleNorm !== pkgNameLower &&
+                pkgTitleNorm === candTitleNorm;
+              const descMatches = pkgDescNorm.length >= 15 && pkgDescNorm === candDescNorm;
+              return titleMatches || descMatches;
+            });
+            if (matchedRaw) {
+              isMatched = true;
+            }
+          }
+        }
+
         if (!isMatched) return pkg;
+
+        const matchedBrewRepoUrl =
+          typeof matchedRaw?.['repo_url'] === 'string' && matchedRaw['repo_url'].trim()
+            ? matchedRaw['repo_url'].trim()
+            : undefined;
+        const matchedBrewRepoKey = normalizeRepoComparisonKey(matchedBrewRepoUrl);
+        if (matchedBrewRepoKey) {
+          existingRepoKeys.add(matchedBrewRepoKey);
+        }
 
         const existingTags = pkg.tags || [];
         const nextTags = [...existingTags];
@@ -238,16 +317,37 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
           nextBadgeTags.push('jam_game_2026');
           changed = true;
         }
+        const nextRepoUrl = pkg.repo_url || matchedBrewRepoUrl;
+        if (!pkg.repo_url && nextRepoUrl) {
+          changed = true;
+        }
+        const existingSources = (pkg.sources && pkg.sources.length > 0 ? pkg.sources : [pkg.source]) as Array<'official' | 'git'>;
+        const nextSources: Array<'official' | 'git'> = existingSources.includes('git')
+          ? existingSources
+          : [...existingSources, 'git'];
+        if (nextSources.length !== existingSources.length) {
+          changed = true;
+        }
         if (!changed) return pkg;
 
         anyMutated = true;
-        stampedPackages.push({ lowerId, tags: nextTags, badgeTags: nextBadgeTags });
-        return {
+        stampedPackages.push({
+          lowerId,
+          tags: nextTags,
+          badgeTags: nextBadgeTags,
+          repoUrl: nextRepoUrl,
+          sources: nextSources
+        });
+        const nextPkg: LuantiPackage = {
           ...pkg,
+          ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
           tags: nextTags,
           badge_tags: nextBadgeTags,
-          _searchBlob: buildSearchBlob({ ...pkg, tags: nextTags, badge_tags: nextBadgeTags })
+          sources: nextSources,
+          source: 'git'
         };
+        nextPkg._searchBlob = buildSearchBlob(nextPkg);
+        return nextPkg;
       });
 
       const newNormalized: LuantiPackage[] = [];
@@ -263,7 +363,9 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
         stampedPackages.push({
           lowerId: norm.id.toLowerCase(),
           tags: norm.tags || [],
-          badgeTags: norm.badge_tags || ['jam_game_2026']
+          badgeTags: norm.badge_tags || ['jam_game_2026'],
+          repoUrl: norm.repo_url,
+          sources: norm.sources as Array<'official' | 'git'>
         });
         newNormalized.push(norm);
       }
@@ -274,12 +376,15 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
 
       return newNormalized.length > 0
         ? deduplicateCatalog([...newNormalized, ...updated])
-        : updated;
+        : deduplicateCatalog(updated);
     });
 
     if (onPackageStamped) {
       for (const item of stampedPackages) {
-        onPackageStamped(item.lowerId, item.tags, item.badgeTags);
+        onPackageStamped(item.lowerId, item.tags, item.badgeTags, {
+          repoUrl: item.repoUrl,
+          sources: item.sources
+        });
       }
     }
   } catch {
