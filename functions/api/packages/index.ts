@@ -48,11 +48,14 @@ import {
   parsePackageTranslations,
   parseBadgeTagsArray,
   ORGANIC_CODE_TAG,
-  BOOT_CATALOG_EDGE_CACHE_KEY
+  BOOT_CATALOG_EDGE_CACHE_KEY,
+  readResponseBytesBounded,
+  isUntrustedTunnelOrPrivateHost
 } from '../lib/upstream';
 import { normalizePromotionRow } from '../promotions/index';
 import {
   isJam2026AllowedImageHost,
+  isJam2026Tag,
   syncJam2026IntoPromoRowDelta,
   applyJam2026RepoOverlayOnCatalog
 } from '../lib/jam-2026';
@@ -594,26 +597,60 @@ function buildTop10FromCatalog(
 
 const ALLOWED_IMAGE_PROXY_HOSTS = new Set([
   'content.luanti.org',
+  'cdn.content.luanti.org',
   'contentdb.milcho.org',
   'blog.luanti.org',
+  'github.com',
   'raw.githubusercontent.com',
   'avatars.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'private-user-images.githubusercontent.com',
+  'media.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'objects.githubusercontent.com',
   'codeberg.org',
   'gitlab.com',
+  'framagit.org',
+  'salsa.debian.org',
+  'secure.gravatar.com',
   'git.minetest.land',
   'mese.hub',
   'bitbucket.org',
   'api.bitbucket.org'
 ]);
 
-const TRANSPARENT_FALLBACK_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1"/>';
+const MAX_PROXY_IMAGE_BYTES = 10 * 1024 * 1024;
 
-function detectImageMimeType(contentTypeHeader: string, bytes: Uint8Array): string | null {
+export function detectImageMimeType(contentTypeHeader: string, bytes: Uint8Array): string | null {
   const ct = (contentTypeHeader || '').split(';')[0].trim().toLowerCase();
-  if (ct.startsWith('text/html') || ct.startsWith('application/json') || ct.startsWith('text/plain')) {
+  if (
+    ct.includes('svg') ||
+    ct.includes('xml') ||
+    ct.startsWith('text/html') ||
+    ct.startsWith('application/json') ||
+    ct.startsWith('text/plain')
+  ) {
     return null;
   }
+
+  // Strip optional UTF-8 BOM + ASCII whitespace and reject any XML/SVG/HTML payload starting with `<` (0x3c)
+  let nonWsIdx = 0;
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    nonWsIdx = 3;
+  }
+  while (
+    nonWsIdx < bytes.length &&
+    (bytes[nonWsIdx] === 0x20 ||
+      bytes[nonWsIdx] === 0x09 ||
+      bytes[nonWsIdx] === 0x0a ||
+      bytes[nonWsIdx] === 0x0d)
+  ) {
+    nonWsIdx++;
+  }
+  if (nonWsIdx < bytes.length && bytes[nonWsIdx] === 0x3c) {
+    return null;
+  }
+
   if (bytes.length >= 4) {
     // PNG: 89 50 4E 47
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
@@ -641,13 +678,28 @@ function detectImageMimeType(contentTypeHeader: string, bytes: Uint8Array): stri
     ) {
       return 'image/webp';
     }
-    // Reject HTML documents masquerading as binary/image
-    if (bytes[0] === 0x3c && ct !== 'image/svg+xml') {
-      return null;
+    // AVIF: .... 66 74 79 70 61 76 69 (66 | 73) ('ftypavif' / 'ftypavis')
+    if (
+      bytes.length >= 12 &&
+      bytes[4] === 0x66 &&
+      bytes[5] === 0x74 &&
+      bytes[6] === 0x79 &&
+      bytes[7] === 0x70 &&
+      bytes[8] === 0x61 &&
+      bytes[9] === 0x76 &&
+      bytes[10] === 0x69 &&
+      (bytes[11] === 0x66 || bytes[11] === 0x73)
+    ) {
+      return 'image/avif';
     }
-  }
-  if (ct.startsWith('image/')) {
-    return ct;
+    // BMP: 42 4D ('BM')
+    if (bytes.length >= 14 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
+      return 'image/bmp';
+    }
+    // ICO: 00 00 01 00
+    if (bytes.length >= 6 && bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01 && bytes[3] === 0x00) {
+      return 'image/x-icon';
+    }
   }
   return null;
 }
@@ -660,14 +712,42 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   if (proxyImageRaw) {
     try {
       const targetUrl = new URL(proxyImageRaw);
-      if (
-        targetUrl.protocol !== 'https:' ||
-        (!ALLOWED_IMAGE_PROXY_HOSTS.has(targetUrl.hostname.toLowerCase()) &&
-          !isJam2026AllowedImageHost(targetUrl.hostname))
-      ) {
+      const targetHost = targetUrl.hostname.toLowerCase();
+      if (targetUrl.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(targetUrl.toString())) {
         return new Response('Forbidden image host', { status: 403 });
       }
-      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v4/${encodeURIComponent(targetUrl.toString())}`;
+
+      let isAllowedCustomRepoHost = false;
+      const isStaticAllowedHost = (h: string): boolean =>
+        ALLOWED_IMAGE_PROXY_HOSTS.has(h) || isJam2026AllowedImageHost(h);
+
+      if (!isStaticAllowedHost(targetHost) && env.DB && /^[a-z0-9.-]+$/.test(targetHost)) {
+        try {
+          const lowerPrefix = `https://${targetHost}/`;
+          const upperPrefix = `https://${targetHost}0`;
+          const customHostMatch = await env.DB.prepare(
+            `SELECT id FROM packages WHERE status = 'active' AND LOWER(TRIM(repo_url)) >= ? AND LOWER(TRIM(repo_url)) < ? LIMIT 1`
+          )
+            .bind(lowerPrefix, upperPrefix)
+            .first();
+          isAllowedCustomRepoHost = Boolean(customHostMatch?.id);
+        } catch {
+          isAllowedCustomRepoHost = false;
+        }
+      }
+
+      if (!isStaticAllowedHost(targetHost) && !isAllowedCustomRepoHost) {
+        return new Response('Forbidden image host', { status: 403 });
+      }
+
+      const allowProxyRedirectHost = (nextHost: string, nextUrlStr: string): boolean => {
+        if (!nextUrlStr.startsWith('https://') || isUntrustedTunnelOrPrivateHost(nextUrlStr)) {
+          return false;
+        }
+        return isStaticAllowedHost(nextHost) || (isAllowedCustomRepoHost && nextHost === targetHost);
+      };
+
+      const proxyCacheKey = `https://cache.luantihub.internal/__proxy_git_img_v5/${encodeURIComponent(targetUrl.toString())}`;
       const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
       const proxyCacheReq = edgeCache ? new Request(proxyCacheKey, { method: 'GET' }) : null;
       if (edgeCache && proxyCacheReq) {
@@ -705,25 +785,38 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
 
       for (const candUrl of candidateUrls) {
-        const upstreamRes = await fetchWithAnubisSupport(candUrl, {
-          headers: {
-            'Accept': 'image/png,image/jpeg,image/webp,image/*;q=0.8',
-            'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
-          }
-        });
+        const upstreamRes = await fetchWithAnubisSupport(
+          candUrl,
+          {
+            headers: {
+              'Accept': 'image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.5',
+              'User-Agent': 'LuantiHub-NotificationImageProxy/1.0 (+https://luantihub.org)'
+            }
+          },
+          { allowHost: allowProxyRedirectHost }
+        );
         if (!upstreamRes.ok) {
           continue;
         }
         const rawContentType = upstreamRes.headers.get('content-type') || '';
-        const body = await upstreamRes.arrayBuffer();
-        const resolvedMime = detectImageMimeType(rawContentType, new Uint8Array(body));
+        const boundedBytes = await readResponseBytesBounded(upstreamRes, MAX_PROXY_IMAGE_BYTES);
+        if (!boundedBytes) {
+          continue;
+        }
+        const resolvedMime = detectImageMimeType(rawContentType, boundedBytes);
         if (!resolvedMime) {
           continue;
         }
-        const okRes = new Response(body, {
+        const safeBodyBuffer = boundedBytes.buffer.slice(
+          boundedBytes.byteOffset,
+          boundedBytes.byteOffset + boundedBytes.byteLength
+        ) as ArrayBuffer;
+        const okRes = new Response(safeBodyBuffer, {
           status: 200,
           headers: {
             'Content-Type': resolvedMime,
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'X-Content-Type-Options': 'nosniff',
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'public, max-age=86400, s-maxage=604800'
           }
@@ -1713,49 +1806,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   });
 
   if (env.DB) {
-    // One-time automatic purge of legacy unowned mirrored ContentDB rows & dead mirror screenshot/review artifacts
-    const cleanupKey = 'https://cache.luantihub.internal/__d1_contentdb_mirror_cleanup_v2';
-    readEdgeCacheJson<boolean>(cleanupKey)
-      .then(async (done) => {
-        if (done) return;
-        await writeEdgeCacheJson(cleanupKey, true, 86400 * 30);
-        await env.DB.prepare(
-          `DELETE FROM packages WHERE provider = 'contentdb' AND author_id IS NULL AND COALESCE(luantihub_downloads, 0) = 0 AND (tags IS NULL OR tags = '' OR tags = '[]') AND (badge_tags IS NULL OR badge_tags = '' OR badge_tags = '[]') AND (dev_state IS NULL OR dev_state = '') AND (translations IS NULL OR translations = '' OR translations = '{}') AND status = 'active'`
-        ).run().catch(() => {});
-        await env.DB.prepare(
-          `DELETE FROM releases WHERE package_id NOT IN (SELECT id FROM packages)`
-        ).run().catch(() => {});
-        await env.DB.prepare(`
-          UPDATE packages
-          SET thumbnail_url = CASE
-                WHEN thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN NULL
-                ELSE thumbnail_url
-              END,
-              banner_url = CASE
-                WHEN banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN NULL
-                ELSE banner_url
-              END,
-              screenshots = CASE
-                WHEN screenshots LIKE '%/storage/screenshots/%' THEN NULL
-                ELSE screenshots
-              END,
-              review_thread_counts = CASE
-                WHEN review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN NULL
-                ELSE review_thread_counts
-              END
-          WHERE thumbnail_url LIKE '%/storage/screenshots/%'
-             OR thumbnail_url LIKE '%/shot-0.png'
-             OR banner_url LIKE '%/storage/screenshots/%'
-             OR banner_url LIKE '%/shot-0.png'
-             OR screenshots LIKE '%/storage/screenshots/%'
-             OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}'
-        `).run().catch(() => {});
-      })
-      .catch(() => {});
-
-    const selectCols = isBootBundle
-      ? '*'
-      : 'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, badge_tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, translations, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha';
+    const selectCols =
+      'id, author_id, author_name, name, title, type, short_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, updated_at, created_at, dev_state, tags, badge_tags, content_warnings, dependencies, optional_dependencies, game_support, supports_all_games, translations, license, media_license, min_minetest_version, max_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, latest_commit_sha, video_url, video_thumbnail_url, download_size, file_size';
     let whereClause = `WHERE status = 'active' AND (provider != 'contentdb' OR author_id IS NOT NULL OR COALESCE(luantihub_downloads, 0) > 0 OR (tags IS NOT NULL AND tags != '' AND tags != '[]') OR (badge_tags IS NOT NULL AND badge_tags != '' AND badge_tags != '[]') OR (dev_state IS NOT NULL AND dev_state != '') OR (translations IS NOT NULL AND translations != '' AND translations != '{}'))`;
     const params: any[] = [];
 
@@ -1801,24 +1853,40 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       .then((res: any) => new Set<string>((res.results || []).map((r: any) => String(r.id).toLowerCase())))
       .catch(() => new Set<string>());
 
-    // Aggregate all-time LuantiHub downloads per package from `package_daily_downloads` so ContentDB-only
-    // packages and newly synced packages always reflect accurate `luantihub_downloads` in the catalog.
-    lhDownloadsMapPromise = env.DB.prepare(
-      `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
-       FROM package_daily_downloads
-       WHERE downloads_count > 0
-       GROUP BY LOWER(package_id)`
-    ).all()
-      .then((res: any) => {
+    // Aggregate all-time LuantiHub downloads per package from `package_daily_downloads` (cached in Edge Cache for 300s).
+    const lhDownloadsSumCacheKey = 'https://edge-cache.luantihub.local/__pkg_daily_dl_sum_v1';
+    lhDownloadsMapPromise = (async () => {
+      if (!noCache) {
+        const cachedSums = await readEdgeCacheJson<Record<string, number>>(lhDownloadsSumCacheKey);
+        if (cachedSums && typeof cachedSums === 'object') {
+          return new Map<string, number>(
+            Object.entries(cachedSums).map(([k, v]) => [k, Number(v) || 0])
+          );
+        }
+      }
+      try {
+        const res: any = await env.DB.prepare(
+          `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
+           FROM package_daily_downloads
+           WHERE downloads_count > 0
+           GROUP BY LOWER(package_id)`
+        ).all();
         const map = new Map<string, number>();
-        for (const r of (res.results || [])) {
+        const plainObj: Record<string, number> = {};
+        for (const r of res?.results || []) {
           if (r?.pkg_id && Number(r.total_dl) > 0) {
-            map.set(String(r.pkg_id).toLowerCase(), Number(r.total_dl));
+            const key = String(r.pkg_id).toLowerCase();
+            const count = Number(r.total_dl);
+            map.set(key, count);
+            plainObj[key] = count;
           }
         }
+        await writeEdgeCacheJson(lhDownloadsSumCacheKey, plainObj, 300).catch(() => {});
         return map;
-      })
-      .catch(() => new Map<string, number>());
+      } catch {
+        return new Map<string, number>();
+      }
+    })();
 
     if (isBootBundle) {
       // Real Star Review Averages from Cloudflare D1 `reviews` table
@@ -3037,12 +3105,33 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
   } else {
     if (requestedTagFilters.length > 0) {
-      const tagSyncDelta = await syncActivePromotionRowPackages(
-        requestedTagFilters.map(t => ({ row_enabled: true, row_filter_tags: [t] })),
-        env.DB,
-        noCache,
-        combinedUpstreamList
-      ).catch(() => null);
+      const VALID_PROMO_TAG_SLUG = /^[a-z0-9_-]{1,32}$/i;
+      const knownPromoTags = new Set<string>();
+      const cachedActivePromos =
+        getLastKnownActivePromotions() ||
+        (await readEdgeCacheJson<any[]>('/__active_promotions_v1').catch(() => null)) ||
+        [];
+      for (const promo of cachedActivePromos) {
+        const pTags = Array.isArray(promo?.row_filter_tags)
+          ? promo.row_filter_tags
+          : parseJsonArray(promo?.row_filter_tags);
+        for (const pt of pTags) {
+          if (pt) knownPromoTags.add(String(pt).trim().toLowerCase());
+        }
+      }
+      const eligibleSyncTags = requestedTagFilters.filter((t) => {
+        const lower = String(t || '').trim().toLowerCase();
+        return VALID_PROMO_TAG_SLUG.test(lower) && (isJam2026Tag(lower) || knownPromoTags.has(lower));
+      });
+      const tagSyncDelta =
+        eligibleSyncTags.length > 0
+          ? await syncActivePromotionRowPackages(
+              eligibleSyncTags.map((t) => ({ row_enabled: true, row_filter_tags: [t] })),
+              env.DB,
+              noCache,
+              combinedUpstreamList
+            ).catch(() => null)
+          : null;
       if (tagSyncDelta) {
         const mergedWithTagDelta = overlayPromotionRowDeltaOnCatalog(
           merged,

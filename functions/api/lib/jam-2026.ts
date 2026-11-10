@@ -20,6 +20,7 @@ import {
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables
 } from './upstream';
+import { isUntrustedTunnelOrPrivateHost } from '../../../src/app/core/config/git-providers.config';
 
 export const JAM_2026_API_ORIGIN = 'https://jam.greenxenith.com';
 export const JAM_2026_BREWS_URL = `${JAM_2026_API_ORIGIN}/api/brews`;
@@ -126,7 +127,9 @@ export function parseJam2026RepositoryUrl(rawRepoUrl: string): {
   try {
     const u = new URL(rawRepoUrl.trim());
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (isUntrustedTunnelOrPrivateHost(u.toString())) return null;
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (isUntrustedTunnelOrPrivateHost(host)) return null;
     const cleanedPath = u.pathname
       .replace(/\/+$/, '')
       .replace(/\.git$/i, '')
@@ -219,7 +222,9 @@ export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | 
   }
 
   const commitUrl =
-    typeof raw.commitUrl === 'string' && raw.commitUrl.startsWith('https://')
+    typeof raw.commitUrl === 'string' &&
+    raw.commitUrl.startsWith('https://') &&
+    !isUntrustedTunnelOrPrivateHost(raw.commitUrl)
       ? raw.commitUrl.trim()
       : `${repoInfo.canonicalRepoUrl}/tree/${commit}`;
 
@@ -746,6 +751,36 @@ export function detectJam2026RootParticipationTags(
     return typeof rawName === 'string' && /^jam2026\.md$/i.test(rawName.trim());
   });
   return hasJam2026File ? [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] : [];
+}
+
+/**
+ * Resolves a verified Game Jam 2026 repository URL for `author/name` (or normalized underscore/hyphen alias)
+ * from the cached `jam.greenxenith.com` brew list.
+ */
+export async function findJam2026BrewRepoBySlug(
+  author: string,
+  name: string
+): Promise<string | undefined> {
+  if (!author || !name) return undefined;
+  const targetSlug = `${author}/${name}`.toLowerCase();
+  const targetAuthorLower = author.toLowerCase();
+  const targetNormName = name.toLowerCase().replace(/-/g, '_');
+  const brews = await fetchJam2026BrewsCached(false);
+  for (const brew of brews) {
+    if (brew.id.toLowerCase() === targetSlug) {
+      return brew.repo_url;
+    }
+    if (brew.aliases?.some((alias) => alias.toLowerCase() === targetSlug)) {
+      return brew.repo_url;
+    }
+    if (
+      brew.author.toLowerCase() === targetAuthorLower &&
+      brew.name.toLowerCase().replace(/-/g, '_') === targetNormName
+    ) {
+      return brew.repo_url;
+    }
+  }
+  return undefined;
 }
 
 /**

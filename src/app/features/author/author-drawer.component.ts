@@ -15,6 +15,7 @@ import { AuthService } from '../../core/services/auth.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
 import { LuantiPackage, SortOption, UserIdentity } from '../../core/models/package.model';
+import { isEligibleGitRepoUrl as checkEligibleGitRepoUrl } from '../../core/config/git-providers.config';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
@@ -553,7 +554,7 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
                     <div class="flex items-center gap-1.5 flex-shrink-0">
                       <button
                         type="button"
-                        (click)="settingsService.toggleFavorite(pkg.id)"
+                        (click)="packageService.togglePackageFavorite(pkg)"
                         [attr.aria-label]="settingsService.isFavorite(pkg.id) ? ('card.unfavoriteTooltip' | translate) : ('card.favoriteTooltip' | translate)"
                         class="p-2 rounded-xl glass-icon-btn text-white transition cursor-pointer">
                         <svg
@@ -687,35 +688,7 @@ export class AuthorDrawerComponent {
   });
 
   isEligibleGitRepoUrl(rawUrl?: string): boolean {
-    const trimmed = String(rawUrl || '').trim();
-    if (!trimmed || !/^https?:\/\//i.test(trimmed)) return false;
-    try {
-      const parsed = new URL(trimmed);
-      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-      const supportedHosts = [
-        'github.com',
-        'codeberg.org',
-        'gitlab.com',
-        'git.minetest.land',
-        'mese.hub',
-        'bitbucket.org',
-        'notabug.org',
-        'framagit.org',
-        'salsa.debian.org'
-      ];
-      const isSupportedForge =
-        supportedHosts.includes(host) ||
-        host.includes('gitlab') ||
-        host.includes('codeberg') ||
-        host.includes('gitea') ||
-        host.includes('forgejo');
-      if (!isSupportedForge) return false;
-      const cleanPath = parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
-      const segments = cleanPath.split('/').filter(Boolean);
-      return segments.length >= 2;
-    } catch {
-      return false;
-    }
+    return checkEligibleGitRepoUrl(rawUrl);
   }
 
   getPackageSyncStatus(packageId: string): PackageGitSyncStatus | null {

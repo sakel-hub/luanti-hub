@@ -30,6 +30,13 @@ interface Env {
   DB?: any;
 }
 
+export async function onRequestGet(context: { request: Request; env: Env }) {
+  const url = new URL(context.request.url, 'https://luantihub.local');
+  const idsParam = url.searchParams.get('ids') || '';
+  const candidateIds = idsParam ? idsParam.split(',') : [];
+  return handleHydrateRequest(candidateIds, context.env, true);
+}
+
 export async function onRequestPost(context: { request: Request; env: Env }) {
   const { request, env } = context;
 
@@ -40,21 +47,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     return Response.json({ error: 'Invalid JSON payload' }, { status: 400 });
   }
 
+  return handleHydrateRequest(Array.isArray(body.ids) ? body.ids : [], env, false);
+}
+
+async function handleHydrateRequest(
+  candidateIds: unknown[],
+  env: Env,
+  isGetRequest: boolean
+): Promise<Response> {
   const hydratedMap: Record<string, any> = {};
+  const responseHeaders: Record<string, string> = isGetRequest
+    ? {
+        'Cache-Control': 'public, max-age=120, s-maxage=600, stale-while-revalidate=600'
+      }
+    : {};
 
   // Resolve requested package IDs in batch (D1 lookup + server-side upstream edge cache fallback)
   const seenLower = new Set<string>();
   const rawIds: string[] = [];
-  if (Array.isArray(body.ids)) {
-    for (const raw of body.ids) {
-      const id = String(raw || '').trim();
-      if (!/^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,80}$/.test(id)) continue;
-      const lower = id.toLowerCase();
-      if (seenLower.has(lower)) continue;
-      seenLower.add(lower);
-      rawIds.push(id);
-      if (rawIds.length >= 32) break;
-    }
+  for (const raw of candidateIds) {
+    const id = String(raw || '').trim();
+    if (!/^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,80}$/.test(id)) continue;
+    const lower = id.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    seenLower.add(lower);
+    rawIds.push(id);
+    if (rawIds.length >= 32) break;
   }
 
   const hydrateCacheKey =
@@ -70,10 +88,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   if (hydrateCacheKey) {
     const cachedHydration = await readEdgeCacheJson<Record<string, any>>(hydrateCacheKey);
     if (cachedHydration && typeof cachedHydration === 'object') {
-      return Response.json({
-        success: true,
-        hydrated: cachedHydration
-      });
+      return Response.json(
+        {
+          success: true,
+          hydrated: cachedHydration
+        },
+        { headers: responseHeaders }
+      );
     }
   }
 
@@ -95,8 +116,12 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
         const [d1Res, dailyDlRes, promoTagsRes] = await Promise.all([
           env.DB.prepare(
-            `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
-          ).bind(...exactAndLowerIds, ...lowerIds).all(),
+            `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, created_at, dev_state, tags, badge_tags, license, media_license, min_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, download_size, file_size, video_url, video_thumbnail_url FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+          ).bind(...exactAndLowerIds, ...lowerIds).all().catch(() =>
+            env.DB.prepare(
+              `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+            ).bind(...exactAndLowerIds, ...lowerIds).all()
+          ),
           env.DB.prepare(
             `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
              FROM package_daily_downloads
@@ -184,6 +209,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             tags: parsedTags.length > 0 ? parsedTags : undefined,
             badge_tags: parsedBadgeTags.length > 0 ? parsedBadgeTags : undefined,
             dev_state: row.dev_state || undefined,
+            download_size: typeof row.download_size === 'number' && row.download_size > 0 ? row.download_size : undefined,
             file_size: row.file_size || undefined,
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
@@ -545,6 +571,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           }
           hydratedMap[lowerKey] = {
             id: canonicalId,
+            ...(existing?.author_id ? { author_id: existing.author_id } : {}),
             license: lic,
             media_license: mediaLic,
             min_minetest_version: minVer,
@@ -558,7 +585,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             badge_tags: existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
             dev_state: devState || undefined,
             created_at: resolvedDetailCreatedAt,
-            download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
+            download_size:
+              typeof detail?.download_size === 'number'
+                ? detail.download_size
+                : existing?.download_size,
+            ...(existing?.file_size ? { file_size: existing.file_size } : {}),
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined,
@@ -678,12 +709,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       await mergeSharedEdgeRatingsMap(edgeRatingUpdates).catch(() => {});
     }
     if (hydrateCacheKey) {
-      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 3600);
+      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 600);
     }
   }
 
-  return Response.json({
-    success: true,
-    hydrated: hydratedMap
-  });
+  return Response.json(
+    {
+      success: true,
+      hydrated: hydratedMap
+    },
+    { headers: responseHeaders }
+  );
 }

@@ -702,7 +702,14 @@ export class DownloadAnalyticsChartComponent implements OnChanges, AfterViewInit
     this.renderOrUpdateChart();
   }
 
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+
   ngOnDestroy(): void {
+    this.requestSeq++;
+    if (this.renderTimer !== null) {
+      clearTimeout(this.renderTimer);
+      this.renderTimer = null;
+    }
     this.destroyChart();
   }
 
@@ -757,7 +764,13 @@ export class DownloadAnalyticsChartComponent implements OnChanges, AfterViewInit
       if (reqId !== this.requestSeq) return;
       this.statsData.set(result);
       this.hoveredIndex.set(result && result.dates.length > 0 ? result.dates.length - 1 : null);
-      setTimeout(() => this.renderOrUpdateChart(), 0);
+      if (this.renderTimer !== null) {
+        clearTimeout(this.renderTimer);
+      }
+      this.renderTimer = setTimeout(() => {
+        this.renderTimer = null;
+        this.renderOrUpdateChart();
+      }, 0);
     } finally {
       if (reqId === this.requestSeq) {
         this.isLoading.set(false);

@@ -28,6 +28,7 @@ import {
   PackageModalFocusRequest
 } from '../../core/models/package.model';
 import {
+  buildRawDirectoryBaseUrl,
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
   upgradeContentDbThumbnailUrl
@@ -772,7 +773,7 @@ import {
                                   (load)="onScreenshotLoad($event, slide.url)"
                                   (error)="onScreenshotError(slide.url)"
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
-                                  [attr.loading]="idx <= mediaCarouselIndex() + 2 ? 'eager' : 'lazy'"
+                                  [attr.loading]="idx === mediaCarouselIndex() ? 'eager' : 'lazy'"
                                   decoding="async"
                                   class="w-full h-full object-cover object-center group-hover:scale-[1.02] transition-transform duration-500"
                                 />
@@ -3013,33 +3014,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private getRawAssetBase(pkg: LuantiPackage): string | undefined {
     const repoUrl = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
     if (!repoUrl) return undefined;
-    const branch = pkg.default_branch || 'main';
-    try {
-      const u = new URL(repoUrl);
-      const parts = u.pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) {
-        const owner = parts[0];
-        const repo = parts[1].replace(/\.git$/i, '');
-        if (u.hostname === 'github.com') {
-          return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}`;
-        }
-        if (u.hostname === 'codeberg.org') {
-          return `https://codeberg.org/${owner}/${repo}/raw/branch/${branch}`;
-        }
-        if (u.hostname === 'git.minetest.land') {
-          return `https://git.minetest.land/${owner}/${repo}/raw/branch/${branch}`;
-        }
-        if (u.hostname === 'gitlab.com') {
-          return `https://gitlab.com/${owner}/${repo}/-/raw/${branch}`;
-        }
-        if (u.hostname.includes('bitbucket.org')) {
-          return `https://bitbucket.org/${owner}/${repo}/raw/${branch}`;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return `${repoUrl.replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${branch}`;
+    return buildRawDirectoryBaseUrl(repoUrl, pkg.default_branch || 'main');
   }
 
   readonly renderedDescription = computed<SafeHtml | null>(() => {
@@ -3774,18 +3749,33 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   private async ensureExtraDataLoaded(): Promise<void> {
     if (!this.package) return;
-    if (this.packageService.startInEditTagsMode()) {
-      this.packageService.startInEditTagsMode.set(false);
-      this.openEditTags();
-    }
     const resolvedAuthor = this.package.author || (this.package as any).author_name || '';
     const key = (this.package.id || `${resolvedAuthor}/${this.package.name}`).toLowerCase();
-    if (this.loadedPackageKey === key) return;
+    if (this.loadedPackageKey === key) {
+      if (this.packageService.startInEditTagsMode()) {
+        this.packageService.startInEditTagsMode.set(false);
+        this.openEditTags();
+      }
+      return;
+    }
     const isSwitchingPackage = Boolean(this.loadedPackageKey && this.loadedPackageKey !== key);
     if (isSwitchingPackage) {
       this.persistCurrentViewState();
     }
     this.loadedPackageKey = key;
+    this.isEditingTags.set(false);
+    this.isReportOpen.set(false);
+    this.reportDetails = '';
+    this.isConfirmingRemove.set(false);
+    this.flaggingReviewId.set(null);
+    this.flagReviewReason = '';
+    this.reviewTitle = '';
+    this.reviewComment = '';
+    this.releaseNotesByKey.set(new Map());
+    if (this.packageService.startInEditTagsMode()) {
+      this.packageService.startInEditTagsMode.set(false);
+      this.openEditTags();
+    }
     this.activeBannerUrl.set(null);
     this.failedScreenshotUrls.set(new Set());
     this.mediaCarouselIndex.set(0);
@@ -4222,7 +4212,20 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   openEditTags(): void {
     if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
-    const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const systemTagSet = new Set([
+      'git',
+      'github',
+      'codeberg',
+      'gitlab',
+      'mesehub',
+      'bitbucket',
+      'custom',
+      'contentdb',
+      'mod',
+      'game',
+      'txp',
+      'modpack'
+    ]);
     const currentCustom = (Array.isArray(pkg?.tags) ? pkg.tags : [])
       .map(t => String(t).toLowerCase())
       .filter(t => Boolean(t) && !systemTagSet.has(t));
@@ -4511,9 +4514,13 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
 
+    const targetPackageKey = this.loadedPackageKey;
     this.loadingReleaseNotesKey.set(key);
     const headRef = pkg.default_branch || 'main';
     const payload = await this.packageService.fetchReleaseNotesForRelease(pkg, headRef, undefined);
+    if (this.loadedPackageKey !== targetPackageKey) {
+      return;
+    }
     if (this.loadingReleaseNotesKey() === key) {
       this.loadingReleaseNotesKey.set(null);
     }
@@ -4566,6 +4573,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const headRef = extractRef(rel) || pkg.default_branch || 'main';
     const baseRef = extractRef(olderRelease);
 
+    const targetPackageKey = this.loadedPackageKey;
     this.loadingReleaseNotesKey.set(key);
     const payload = await this.packageService.fetchReleaseNotesForRelease(
       pkg,
@@ -4574,6 +4582,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.getCleanReleaseNotes(rel),
       rel.released_at
     );
+    if (this.loadedPackageKey !== targetPackageKey) {
+      return;
+    }
     if (this.loadingReleaseNotesKey() === key) {
       this.loadingReleaseNotesKey.set(null);
     }

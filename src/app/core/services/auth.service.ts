@@ -175,6 +175,7 @@ export class AuthService {
   readonly syncAuthorGitProgress = signal<{ processed: number; total: number } | null>(null);
   readonly packageSyncStatuses = signal<Record<string, PackageGitSyncStatus>>({});
   private lastModerationFetchAt = 0;
+  private lastModerationFetchKey = '';
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
 
@@ -365,11 +366,29 @@ export class AuthService {
       if (this.backgroundAuthDigestTimer) {
         clearInterval(this.backgroundAuthDigestTimer);
       }
+      const DIGEST_INTERVAL_MS = 30 * 60 * 1000;
       this.backgroundAuthDigestTimer = setInterval(() => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          return;
+        }
         if (this.isLoggedIn() && this.pwaService.isOnline()) {
           this.initAuth(true).catch(() => {});
         }
-      }, 30 * 60 * 1000);
+      }, DIGEST_INTERVAL_MS);
+
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (
+            document.visibilityState === 'visible' &&
+            this.isLoggedIn() &&
+            this.pwaService.isOnline() &&
+            this.lastAuthFetchAt > 0 &&
+            Date.now() - this.lastAuthFetchAt >= DIGEST_INTERVAL_MS
+          ) {
+            this.initAuth(true).catch(() => {});
+          }
+        });
+      }
     }
   }
 
@@ -1093,6 +1112,7 @@ export class AuthService {
       }
       this.clearAuthCache();
       this.requestAccountDeleteConfirm.set(false);
+      this.settingsService.clearPendingFavoriteOps();
       this.settingsService.favorites.set([]);
       this.settingsService.downloadedPackages.set({});
       this.settingsService.recentlyViewedPackages.set([]);
@@ -1120,6 +1140,7 @@ export class AuthService {
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_local_user');
       }
+      this.settingsService.clearPendingFavoriteOps();
       this.settingsService.isAuthenticatedSession.set(false);
       this._currentUser.set(null);
       this.closeProfileDrawer();
@@ -1137,15 +1158,16 @@ export class AuthService {
     const targetPage = page ?? this._moderationPage();
     const targetStatus = status ?? this._moderationStatusFilter();
     const targetReason = reason ?? this._moderationReasonFilter();
+    const fetchKey = `${targetPage}:${targetStatus}:${targetReason}`;
+    const keyChanged = fetchKey !== this.lastModerationFetchKey;
 
     this._moderationPage.set(targetPage);
     this._moderationStatusFilter.set(targetStatus);
     this._moderationReasonFilter.set(targetReason);
 
-    if (!force && this.lastModerationFetchAt > 0 && Date.now() - this.lastModerationFetchAt < 60_000) {
+    if (!force && !keyChanged && this.lastModerationFetchAt > 0 && Date.now() - this.lastModerationFetchAt < 60_000) {
       return;
     }
-    this.lastModerationFetchAt = Date.now();
     try {
       const apiStatus = targetStatus === 'delisted' ? 'open' : targetStatus;
       const params = new URLSearchParams({
@@ -1156,6 +1178,8 @@ export class AuthService {
       });
       const res = await fetch(`/api/admin/moderation?${params.toString()}`);
       if (res.ok) {
+        this.lastModerationFetchAt = Date.now();
+        this.lastModerationFetchKey = fetchKey;
         const data = await res.json();
         if (Array.isArray(data.reports)) {
           this._moderationReports.set(data.reports);
@@ -1599,7 +1623,7 @@ export class AuthService {
       }
     }
 
-    if (user.is_admin && Array.isArray(digest.admin_latest_open)) {
+    if (this.isAdmin() && Array.isArray(digest.admin_latest_open)) {
       for (const rep of digest.admin_latest_open) {
         const tag = `lh-mod-admin-${rep.id}-${rep.created_at}`;
         this.pwaService.sendNativeNotification({

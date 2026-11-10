@@ -265,11 +265,12 @@ export class TooltipDirective implements OnInit, OnDestroy {
     // Single escape handler only while tooltip is active
     const onDocKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.stopPropagation();
         this.hide();
       }
     };
-    document.addEventListener('keydown', onDocKey, { once: true });
-    this.escapeCleanup = () => document.removeEventListener('keydown', onDocKey);
+    document.addEventListener('keydown', onDocKey, { capture: true });
+    this.escapeCleanup = () => document.removeEventListener('keydown', onDocKey, { capture: true } as EventListenerOptions);
 
     // Dismiss when tapping/clicking anywhere outside the trigger element
     const onOutsidePointerDown = (e: Event) => {

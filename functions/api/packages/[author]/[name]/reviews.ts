@@ -443,6 +443,12 @@ export async function onRequestPost(context: { request: Request; params: { autho
   if (!numericRating || numericRating < 1 || numericRating > 5 || !comment?.trim()) {
     return Response.json({ error: 'Rating (1-5) and comment are required.' }, { status: 400 });
   }
+  if (typeof title === 'string' && title.trim().length > 160) {
+    return Response.json({ error: 'Review title must be 160 characters or fewer.' }, { status: 400 });
+  }
+  if (comment.trim().length > 5000) {
+    return Response.json({ error: 'Review comment must be 5,000 characters or fewer.' }, { status: 400 });
+  }
 
   let savedReviewId = `lh_${Date.now()}`;
   let authorUsername = reconciledUser?.username || 'community_user';

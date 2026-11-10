@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS packages (
     license TEXT NOT NULL,
     media_license TEXT NOT NULL,
     tags TEXT,                           -- JSON array of tag strings
+    badge_tags TEXT,                     -- JSON array of curator badge tags
     dependencies TEXT,                   -- JSON array of required dependency names
     optional_dependencies TEXT,          -- JSON array of optional dependency names
     min_minetest_version TEXT DEFAULT '5.0.0',
@@ -277,5 +278,11 @@ CREATE INDEX IF NOT EXISTS idx_user_views_user ON user_views(user_id, last_viewe
 CREATE INDEX IF NOT EXISTS idx_promotions_window ON promotions(expires_at, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_hero_promotions_window ON hero_promotions(expires_at, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name));
+CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_lower_pkg ON promo_tag_packages(LOWER(package_id));
+CREATE INDEX IF NOT EXISTS idx_packages_lower_repo_url ON packages(LOWER(TRIM(repo_url)));
+CREATE INDEX IF NOT EXISTS idx_packages_norm_slug ON packages(LOWER(author_name), LOWER(REPLACE(name, '-', '_')));
 CREATE INDEX IF NOT EXISTS idx_reports_status ON moderation_reports(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_pkg ON moderation_reports(package_id);
+CREATE INDEX IF NOT EXISTS idx_reports_lower_pkg_status ON moderation_reports(LOWER(package_id), status);
+CREATE INDEX IF NOT EXISTS idx_users_lower_trim_display ON users(LOWER(TRIM(display_name)));
+CREATE INDEX IF NOT EXISTS idx_reviews_lower_pkg_rating ON reviews(LOWER(package_id), rating);

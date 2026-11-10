@@ -85,7 +85,12 @@ import {
   parsePackageTranslations,
   resolveLocalizedPackageText,
   parseScreenshotMetaArray,
-  findReverseDependenciesForPackage
+  findReverseDependenciesForPackage,
+  stripAuthorForgeSuffix,
+  stripAuthorDisplaySuffix,
+  detectSpdxFromLicenseText as sharedDetectSpdxFromLicenseText,
+  parseLuantiConf,
+  parseLuantiConfList
 } from '../config/package-utils.config';
 
 const PAGE_SIZE = 32;
@@ -178,6 +183,54 @@ export class PackageService {
 
   private readonly _isLoading = signal<boolean>(true);
   private readonly _isLoadingDetails = signal<boolean>(false);
+  private activeDeepFetchCount = 0;
+  private authorDrawerRequestSeq = 0;
+
+  private beginLoadingDetails(): void {
+    this.activeDeepFetchCount++;
+    if (!this._isLoadingDetails()) {
+      this._isLoadingDetails.set(true);
+    }
+  }
+
+  private endLoadingDetails(): void {
+    this.activeDeepFetchCount = Math.max(0, this.activeDeepFetchCount - 1);
+    if (this.activeDeepFetchCount === 0 && this._isLoadingDetails()) {
+      this._isLoadingDetails.set(false);
+    }
+  }
+
+  private readonly authorBaseDisplayMap = computed<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    const officialSet = new Set<string>();
+    for (const p of this._packages()) {
+      const base = stripAuthorDisplaySuffix(p.author || '').toLowerCase();
+      if (!base) continue;
+      const isOfficial = Boolean(p.sources?.includes('official') || p.source === 'official');
+      if (p.author_display_name && p.author_display_name.trim()) {
+        if (isOfficial || !officialSet.has(base)) {
+          map.set(base, p.author_display_name.trim());
+          if (isOfficial) officialSet.add(base);
+        }
+      } else if (isOfficial && !officialSet.has(base)) {
+        map.set(base, p.author);
+        officialSet.add(base);
+      }
+    }
+    return map;
+  });
+
+  private readonly updatedTsCache = new WeakMap<LuantiPackage, { raw: string; ms: number }>();
+
+  private getCachedUpdatedMs(pkg: LuantiPackage): number {
+    const raw = pkg.updated_at || pkg.created_at || '';
+    if (!raw) return 0;
+    const hit = this.updatedTsCache.get(pkg);
+    if (hit && hit.raw === raw) return hit.ms;
+    const ms = Date.parse(String(raw)) || 0;
+    this.updatedTsCache.set(pkg, { raw, ms });
+    return ms;
+  }
   private readonly _activePackage = signal<LuantiPackage | null>(null);
   private readonly _pendingModalFocus = signal<PackageModalFocusRequest | null>(null);
   private readonly _isSubmitModalOpen = signal<boolean>(false);
@@ -285,8 +338,9 @@ export class PackageService {
   });
 
   readonly activeHeroPromotions = computed<HeroPromotion[]>(() => {
-    // Depend on currentLocale so Hero slide titles/descriptions/badges re-evaluate on language switch
+    // Depend on currentLocale & currentDictionary so Hero slide titles/descriptions/badges re-evaluate on lazy locale load
     this.i18n.currentLocale();
+    this.i18n.currentDictionary();
     return this.activePromotions()
       .filter(promo => {
         const showInHero =
@@ -301,6 +355,7 @@ export class PackageService {
 
   readonly activePromotionalRows = computed<PromotionalPackageRow[]>(() => {
     this.i18n.currentLocale();
+    this.i18n.currentDictionary();
     const activePromos = this.activePromotions();
     const rowPromos = activePromos.filter(promo =>
       Boolean(
@@ -487,8 +542,8 @@ export class PackageService {
           if (sortBy === 'rating') {
             return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
           }
-          const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
-          const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+          const timeA = this.getCachedUpdatedMs(a);
+          const timeB = this.getCachedUpdatedMs(b);
           if (timeB !== timeA) return timeB - timeA;
           const relA = Number(a.release_id || 0) || 0;
           const relB = Number(b.release_id || 0) || 0;
@@ -1777,8 +1832,8 @@ export class PackageService {
         return (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'updated') {
-        const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
-        const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+        const timeA = this.getCachedUpdatedMs(a);
+        const timeB = this.getCachedUpdatedMs(b);
         return timeB - timeA || (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'title') {
@@ -1836,7 +1891,7 @@ export class PackageService {
 
     // 4. Release & commit freshness bonus
     if (pkg.updated_at) {
-      const updatedMs = Date.parse(String(pkg.updated_at)) || 0;
+      const updatedMs = this.getCachedUpdatedMs(pkg);
       if (updatedMs > 0) {
         const ageDays = (nowMs - updatedMs) / 86400000;
         if (ageDays <= 7) score += 24;
@@ -2096,10 +2151,7 @@ export class PackageService {
       }
       const inCandidates = candidatesById.get(lowerId);
       if (inCandidates?.created_at) {
-        const existingMs = Date.parse(String(inCandidates.created_at)) || 0;
-        if (existingMs > 0 && nowMs - existingMs <= maxDiscoveryAgeMs) {
-          continue;
-        }
+        continue;
       }
       const existing = inCandidates || byLowerId.get(lowerId);
       if (!existing || this.isPackageDeprecated(existing)) continue;
@@ -5981,14 +6033,31 @@ export class PackageService {
 
   private async hydratePackageBatch(batch: LuantiPackage[]): Promise<void> {
     if (!batch || batch.length === 0) return;
-    const ids = batch.map(p => p.id || `${p.author}/${p.name}`).filter(Boolean);
+    const rawIds = batch.map(p => p.id || `${p.author}/${p.name}`).filter(Boolean);
+    const dedupedByLower = new Map<string, string>();
+    for (const id of rawIds) {
+      const lower = id.toLowerCase();
+      if (!dedupedByLower.has(lower)) {
+        dedupedByLower.set(lower, id);
+      }
+    }
+    const ids = Array.from(dedupedByLower.values()).sort((a, b) =>
+      a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+    const encodedIdsParam = encodeURIComponent(ids.join(','));
     const unresolved: LuantiPackage[] = [];
     try {
-      const res = await fetch('/api/packages/hydrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids })
-      });
+      const res =
+        encodedIdsParam.length > 0 && encodedIdsParam.length <= 1500
+          ? await fetch(`/api/packages/hydrate?ids=${encodedIdsParam}&ngsw-bypass=true`, {
+              method: 'GET',
+              headers: { Accept: 'application/json' }
+            })
+          : await fetch('/api/packages/hydrate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids })
+            });
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const json = await res.json();
         const hydratedMap: Record<string, any> = (json && typeof json.hydrated === 'object' && json.hydrated) || {};
@@ -6100,6 +6169,10 @@ export class PackageService {
 
         const swRatingsUpdates: Record<string, { score?: number; review_thread_counts?: any; rating_checked?: boolean }> = {};
         let hasSwRatingsUpdates = false;
+        const liveByLowerId = new Map<string, LuantiPackage>();
+        for (const p of this._packages()) {
+          liveByLowerId.set((p.id || `${p.author}/${p.name}`).toLowerCase(), p);
+        }
 
         for (const pkg of batch) {
           const lowerKey = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
@@ -6110,9 +6183,7 @@ export class PackageService {
           }
 
           const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
-          const livePkgForHydrate = this._packages().find(
-            p => (p.id || `${p.author}/${p.name}`).toLowerCase() === lowerKey
-          );
+          const livePkgForHydrate = liveByLowerId.get(lowerKey);
           const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerKey] || 0);
           const cdbDl = Math.max(
             Number(pkg.contentdb_downloads || 0),
@@ -7978,27 +8049,7 @@ export class PackageService {
   }
 
   private detectSpdxFromLicenseText(raw: string): string | undefined {
-    if (!raw) return undefined;
-    const text = raw.slice(0, 2000);
-    if (/MIT License|Permission is hereby granted, free of charge/i.test(text)) return 'MIT';
-    if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2\.1/i.test(text)) return 'LGPL-2.1-only';
-    if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'LGPL-3.0-only';
-    if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'AGPL-3.0-only';
-    if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'GPL-3.0-only';
-    if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2/i.test(text)) return 'GPL-2.0-only';
-    if (/Apache License[\s\S]{0,80}Version 2\.0/i.test(text)) return 'Apache-2.0';
-    if (/Mozilla Public License[\s\S]{0,60}2\.0/i.test(text)) return 'MPL-2.0';
-    if (/Creative Commons Attribution-ShareAlike 4\.0|CC-BY-SA-4\.0/i.test(text)) return 'CC-BY-SA-4.0';
-    if (/Creative Commons Attribution-ShareAlike 3\.0|CC-BY-SA-3\.0/i.test(text)) return 'CC-BY-SA-3.0';
-    if (/Creative Commons Attribution 4\.0|CC-BY-4\.0/i.test(text)) return 'CC-BY-4\.0';
-    if (/CC0 1\.0 Universal|Public Domain Dedication/i.test(text)) return 'CC0-1.0';
-    if (/The Unlicense|unlicense\.org/i.test(text)) return 'Unlicense';
-    if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|WTFPL/i.test(text)) return 'WTFPL';
-    if (/zlib License|altered source versions must be plainly marked/i.test(text)) return 'Zlib';
-    if (/Redistribution and use in source and binary forms/i.test(text)) {
-      return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
-    }
-    return undefined;
+    return sharedDetectSpdxFromLicenseText(raw);
   }
 
   normalizeGitRepoUrl(rawUrl?: string): string | undefined {
@@ -8172,42 +8223,16 @@ export class PackageService {
           const confRes = await fetch(confUrl);
           if (confRes.ok) {
             const confText = await confRes.text();
-            const getVal = (key: string): string => {
-              for (const rawLine of confText.split(/\r?\n/)) {
-                const line = rawLine.trim();
-                if (!line || line.startsWith('#')) continue;
-                const eqIdx = line.indexOf('=');
-                if (eqIdx === -1) continue;
-                const k = line.slice(0, eqIdx).trim();
-                if (k.toLowerCase() === key.toLowerCase()) {
-                  let val = line.slice(eqIdx + 1).trim();
-                  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                    val = val.slice(1, -1).trim();
-                  }
-                  return val;
-                }
-              }
-              return '';
-            };
-            const cleanDep = (s: string): string => {
-              return s
-                .trim()
-                .replace(/^["']|["']$/g, '')
-                .replace(/\?$/, '')
-                .split(/\s+#/)[0]
-                .trim();
-            };
-            const depStr = getVal('depends');
-            const optStr = getVal('optional_depends');
-            if (depStr) {
-              depStr.split(',').map(cleanDep).filter(Boolean).forEach(d => deps.push(d));
+            const parsedConf = parseLuantiConf(confText);
+            for (const d of parseLuantiConfList(parsedConf['depends'])) {
+              deps.push(d);
             }
-            if (optStr) {
-              optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => optDeps.push(d));
+            for (const d of parseLuantiConfList(parsedConf['optional_depends'])) {
+              optDeps.push(d);
             }
-            license = getVal('license') || undefined;
-            mediaLicense = getVal('media_license') || undefined;
-            minVersion = getVal('min_minetest_version') || undefined;
+            license = parsedConf['license'] || undefined;
+            mediaLicense = parsedConf['media_license'] || undefined;
+            minVersion = parsedConf['min_minetest_version'] || undefined;
           }
         } catch {
           // Ignore error reading conf file
@@ -8284,7 +8309,7 @@ export class PackageService {
     const startMutationSeq = this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0;
     const work = (async () => {
       if (deepFetch) {
-        this._isLoadingDetails.set(true);
+        this.beginLoadingDetails();
       }
       try {
         this.hydratedIds.add(cacheKey);
@@ -9154,11 +9179,7 @@ export class PackageService {
         console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
       } finally {
         if (deepFetch) {
-          if ((this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0) === startMutationSeq) {
-            this.deepHydratedIds.add(cacheKey);
-            this._deepHydratedVersion.update(v => v + 1);
-          }
-          this._isLoadingDetails.set(false);
+          this.endLoadingDetails();
         }
       }
     })().finally(() => {
@@ -10236,9 +10257,6 @@ export class PackageService {
 
     this.startInEditTagsMode.set(editTags);
     const isAlreadyDeepHydrated = this.deepHydratedIds.has(targetId);
-    if (!isAlreadyDeepHydrated) {
-      this._isLoadingDetails.set(true);
-    }
     this._activePackage.set(hydratedPkg);
     this.updateSeoMeta(hydratedPkg);
     if (updateUrl && hydratedPkg.author && hydratedPkg.name) {
@@ -10521,8 +10539,9 @@ export class PackageService {
     );
 
     const currentActive = this._activePackage();
-    if (!this.deepHydratedIds.has(initialPkg.id.toLowerCase())) {
-      this._isLoadingDetails.set(true);
+    const shouldHoldLoading = !this.deepHydratedIds.has(initialPkg.id.toLowerCase());
+    if (shouldHoldLoading) {
+      this.beginLoadingDetails();
     }
     if (!currentActive || currentActive.id.toLowerCase() !== initialPkg.id.toLowerCase()) {
       this._activePackage.set(initialPkg);
@@ -10564,6 +10583,10 @@ export class PackageService {
       }
     } catch {
       // Fallback handled when initCatalog() completes and checks pendingRoutePackage
+    } finally {
+      if (shouldHoldLoading) {
+        this.endLoadingDetails();
+      }
     }
   }
 
@@ -10673,22 +10696,11 @@ export class PackageService {
       return 'SaKeL';
     }
 
-    if (/[-_](?:hub|git|dev|lab|mods?)$/i.test(rawAuthor)) {
-      const base = rawAuthor.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      if (base) {
-        for (const p of this._packages()) {
-          const pBase = String(p.author || '')
-            .trim()
-            .toLowerCase()
-            .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-          if (pBase !== base) continue;
-          if (p.author_display_name && p.author_display_name.trim()) {
-            return p.author_display_name.trim();
-          }
-          if (p.sources?.includes('official') || p.source === 'official') {
-            return p.author;
-          }
-        }
+    const base = stripAuthorDisplaySuffix(rawAuthor).toLowerCase();
+    if (base && base !== rawAuthor.toLowerCase()) {
+      const mapped = this.authorBaseDisplayMap().get(base);
+      if (mapped) {
+        return mapped;
       }
     }
 
@@ -10698,8 +10710,11 @@ export class PackageService {
   getAuthorPackages(username: string): LuantiPackage[] {
     const clean = (username || '').trim().toLowerCase();
     if (!clean) return [];
-    const normalizeBase = (h: string) =>
-      String(h || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const normalizeBase = (h: string) => stripAuthorDisplaySuffix(String(h || '')).toLowerCase();
+    const hasDisplaySuffix = (h: string) => {
+      const trimmed = String(h || '').trim().toLowerCase();
+      return Boolean(trimmed && normalizeBase(trimmed) !== trimmed);
+    };
     const cleanBase = normalizeBase(clean);
 
     const currentUser = this.authService.currentUser();
@@ -10760,10 +10775,10 @@ export class PackageService {
         normalizeBase(p.author) === cleanBase
     );
     const hasForgeSuffixForBase =
-      /[-_](?:hub|git|dev|lab|mods?)$/i.test(clean) ||
+      hasDisplaySuffix(clean) ||
       catalog.some(
         p =>
-          /[-_](?:hub|git|dev|lab|mods?)$/i.test(p.author || '') &&
+          hasDisplaySuffix(p.author || '') &&
           normalizeBase(p.author) === cleanBase
       );
     const linkByBase = Boolean(cleanBase && hasOfficialForBase && hasForgeSuffixForBase);
@@ -10791,6 +10806,7 @@ export class PackageService {
   async openAuthorDrawer(username: string, updateUrl = true, returnToPkg?: LuantiPackage | null): Promise<void> {
     const clean = (username || '').trim();
     if (!clean) return;
+    const reqSeq = ++this.authorDrawerRequestSeq;
 
     if (returnToPkg !== undefined) {
       this.returnToPackageAfterAuthorDrawer = returnToPkg;
@@ -10881,7 +10897,11 @@ export class PackageService {
         apiAuthor = data?.author || null;
       }
 
-      if ((apiAuthor || cdbUser) && this._activeAuthorUsername()?.toLowerCase() === lower) {
+      if (
+        reqSeq === this.authorDrawerRequestSeq &&
+        (apiAuthor || cdbUser) &&
+        this._activeAuthorUsername()?.toLowerCase() === lower
+      ) {
         const latestPkgs = this.getAuthorPackages(clean);
         const latestDonate =
           cdbUser?.donate_url ||
@@ -10967,7 +10987,10 @@ export class PackageService {
     } catch {
       // Keep local catalog-derived profile
     } finally {
-      if (this._activeAuthorUsername()?.toLowerCase() === lower) {
+      if (
+        reqSeq === this.authorDrawerRequestSeq &&
+        this._activeAuthorUsername()?.toLowerCase() === lower
+      ) {
         this._isLoadingAuthorProfile.set(false);
       }
     }
@@ -11715,6 +11738,7 @@ export class PackageService {
     tags?: string[];
     badge_tags?: string[];
     auditToken?: string;
+    requestAdminClaim?: boolean;
   }): Promise<{
     success: boolean;
     message?: string;

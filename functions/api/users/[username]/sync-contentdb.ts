@@ -192,11 +192,11 @@ export async function onRequestPost(context: {
         const targetUser = await context.env.DB.prepare(
           `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
         ).bind(rawParamUsername).first();
-        if (targetUser?.id) {
+        if (targetUser?.id && !String(targetUser.id).toLowerCase().startsWith('ext_')) {
           const hasVerifiedId = await context.env.DB.prepare(
             `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
           ).bind(String(targetUser.id)).first();
-          if (hasVerifiedId?.id || String(targetUser.id).startsWith('usr_')) {
+          if (hasVerifiedId?.id) {
             registeredTargetUserId = String(targetUser.id);
           }
         }

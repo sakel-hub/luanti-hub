@@ -17,7 +17,8 @@ import {
   setCachedNormalizedZip,
   buildPackageCacheInvalidationKeys,
   buildPackageStatsEdgeCacheKey,
-  buildAuthorStatsEdgeCacheKey
+  buildAuthorStatsEdgeCacheKey,
+  readResponseBytesBounded
 } from '../../../lib/upstream';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
@@ -28,6 +29,14 @@ interface Env {
 
 const recentDownloadWrites = new Map<string, number>();
 const DOWNLOAD_WRITE_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per IP + package
+const BOOT_CATALOG_EVICT_COOLDOWN_MS = 60_000; // 60s burst guard so download storms do not thrash boot catalog
+let lastBootCatalogEvictAtMs = 0;
+let userDownloadsSchemaReady = false;
+
+export function resetDownloadTelemetryCooldownForTests(): void {
+  recentDownloadWrites.clear();
+  lastBootCatalogEvictAtMs = 0;
+}
 
 async function shouldRecordDownloadWrite(request: Request, packageId: string): Promise<boolean> {
   const method = (request.method || 'GET').toUpperCase();
@@ -109,16 +118,25 @@ export async function onRequest(context: {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       pkgRecord = await env.DB.prepare(
-        `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size
+        `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size, tags, contentdb_downloads, latest_commit_sha, updated_at
          FROM packages
-         WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
+         WHERE LOWER(id) = LOWER(?)
          LIMIT 1`
-      ).bind(packageId, author, name, sanitizedName).first();
+      ).bind(packageId).first();
+
+      if (!pkgRecord) {
+        pkgRecord = await env.DB.prepare(
+          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size, tags, contentdb_downloads, latest_commit_sha, updated_at
+           FROM packages
+           WHERE LOWER(author_name) = LOWER(?) AND LOWER(REPLACE(name, '-', '_')) = ?
+           LIMIT 1`
+        ).bind(author, sanitizedName).first();
+      }
 
       if (!pkgRecord) {
         const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
         pkgRecord = await env.DB.prepare(
-          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size
+          `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size, tags, contentdb_downloads, latest_commit_sha, updated_at
            FROM packages
            WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
              AND (
@@ -210,13 +228,22 @@ export async function onRequest(context: {
 
           const statsAuthor = pkgRecord?.author_name || author;
           const statsName = pkgRecord?.name || name;
-          await invalidateEdgeCacheKeys(
-            buildPackageCacheInvalidationKeys(statsAuthor, statsName, {
-              includeBootCatalog: true,
-              includeAuthorProfile: true,
-              extraAuthors: author && author.toLowerCase() !== String(statsAuthor).toLowerCase() ? [author] : undefined
-            })
-          ).catch(() => {});
+          const nowEvictMs = Date.now();
+          const shouldEvictBoot =
+            lastBootCatalogEvictAtMs === 0 ||
+            nowEvictMs - lastBootCatalogEvictAtMs >= BOOT_CATALOG_EVICT_COOLDOWN_MS;
+          if (shouldEvictBoot) {
+            lastBootCatalogEvictAtMs = nowEvictMs;
+          }
+          const keysToInvalidate = buildPackageCacheInvalidationKeys(statsAuthor, statsName, {
+            includeBootCatalog: shouldEvictBoot,
+            includeAuthorProfile: shouldEvictBoot,
+            extraAuthors: author && author.toLowerCase() !== String(statsAuthor).toLowerCase() ? [author] : undefined
+          });
+          if (shouldEvictBoot) {
+            keysToInvalidate.push('https://edge-cache.luantihub.local/__pkg_daily_dl_sum_v1');
+          }
+          await invalidateEdgeCacheKeys(keysToInvalidate).catch(() => {});
 
           const cookies = parseCookies(request);
           const sessionToken = cookies['lh_session'];
@@ -225,24 +252,34 @@ export async function onRequest(context: {
             : null;
 
           if (userId) {
-            await env.DB.prepare(`
-              CREATE TABLE IF NOT EXISTS user_downloads (
-                user_id TEXT NOT NULL,
-                package_id TEXT NOT NULL,
-                download_count INTEGER NOT NULL DEFAULT 1,
-                last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, package_id)
-              )
-            `).run();
+            const upsertUserDownload = () =>
+              env.DB.prepare(`
+                INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
+                VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, package_id)
+                DO UPDATE SET
+                  download_count = download_count + 1,
+                  last_downloaded_at = CURRENT_TIMESTAMP
+              `).bind(userId, effectivePkgId).run();
 
-            await env.DB.prepare(`
-              INSERT INTO user_downloads (user_id, package_id, download_count, last_downloaded_at)
-              VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-              ON CONFLICT(user_id, package_id)
-              DO UPDATE SET
-                download_count = download_count + 1,
-                last_downloaded_at = CURRENT_TIMESTAMP
-            `).bind(userId, effectivePkgId).run();
+            try {
+              await upsertUserDownload();
+              userDownloadsSchemaReady = true;
+            } catch {
+              if (!userDownloadsSchemaReady) {
+                await env.DB.prepare(`
+                  CREATE TABLE IF NOT EXISTS user_downloads (
+                    user_id TEXT NOT NULL,
+                    package_id TEXT NOT NULL,
+                    download_count INTEGER NOT NULL DEFAULT 1,
+                    last_downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, package_id)
+                  )
+                `).run();
+                userDownloadsSchemaReady = true;
+                await upsertUserDownload();
+              }
+            }
           }
         }
       } catch (err) {
@@ -270,7 +307,7 @@ export async function onRequest(context: {
     `).bind(zipBytes, formattedSize, pkgRecord.id).run().catch(() => {});
     await invalidateEdgeCacheKeys(
       buildPackageCacheInvalidationKeys(effectiveAuthor, effectiveName, {
-        includeBootCatalog: true
+        includeBootCatalog: false
       })
     ).catch(() => {});
   };
@@ -570,9 +607,17 @@ export async function onRequest(context: {
     addCandidate(buildGitBranchArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, 'master'));
   }
 
-  // Fallback to ContentDB release/package download URLs
-  addCandidate(upstreamReleaseUrl);
-  addCandidate(primaryContentDbDownloadUrl);
+  // Fallback to ContentDB release/package download URLs when package exists on ContentDB
+  const hasContentDbMirror =
+    !pkgRecord ||
+    pkgRecord.provider === 'contentdb' ||
+    Number(pkgRecord.contentdb_downloads) > 0 ||
+    String(pkgRecord.tags || '').includes('"contentdb"') ||
+    Boolean(upstreamReleaseUrl);
+  if (hasContentDbMirror) {
+    addCandidate(upstreamReleaseUrl);
+    addCandidate(primaryContentDbDownloadUrl);
+  }
 
   const safeFileName = (effectiveName || 'mod')
     .toLowerCase()
@@ -580,6 +625,7 @@ export async function onRequest(context: {
     .replace(/^_+|_+$/g, '') || 'mod';
 
   const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB threshold for in-memory ZIP normalization
+  let zipSafetyError: string | null = null;
 
   for (const candidateUrl of candidateUrls) {
     const ctrl = new AbortController();
@@ -608,7 +654,10 @@ export async function onRequest(context: {
         return Response.redirect(res.url || candidateUrl, 302);
       }
 
-      const rawBytes = new Uint8Array(await res.arrayBuffer());
+      const rawBytes = await readResponseBytesBounded(res, MAX_BUFFER_BYTES);
+      if (!rawBytes) {
+        return Response.redirect(res.url || candidateUrl, 302);
+      }
       if (
         rawBytes.length < 22 ||
         rawBytes[0] !== 0x50 ||
@@ -630,11 +679,29 @@ export async function onRequest(context: {
       }
 
       return zipResponse;
-    } catch {
+    } catch (err: any) {
       clearTimeout(timer);
+      if (err instanceof Error && /Unsafe ZIP archive rejected/i.test(err.message)) {
+        zipSafetyError = err.message;
+      }
     }
   }
 
-  // Final fallback for ContentDB-only packages without a Git repository if ContentDB challenged Worker IP
+  if (!hasContentDbMirror) {
+    return new Response(
+      JSON.stringify({
+        error: zipSafetyError || 'Package archive could not be retrieved from its Git repository.'
+      }),
+      {
+        status: zipSafetyError ? 422 : 404,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      }
+    );
+  }
+
+  // Final fallback for ContentDB-backed packages if ContentDB challenged Worker IP
   return Response.redirect(primaryContentDbDownloadUrl, 302);
 }

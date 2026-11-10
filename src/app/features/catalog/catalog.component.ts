@@ -389,10 +389,10 @@ import {
               [class]="isTagsExpanded() ? 'bg-sky-500/20 text-sky-300 border-sky-400/40' : 'glass-pill text-sky-400 hover:text-sky-300'"
               class="px-3 py-1 rounded-full border text-xs font-bold flex items-center gap-1 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
               @if (isTagsExpanded()) {
-                <span>Less</span>
+                <span>{{ 'catalog.lessTags' | translate }}</span>
                 <svg lucideChevronUp class="w-3.5 h-3.5"></svg>
               } @else {
-                <span>+{{ extraTags().length }} More</span>
+                <span>{{ 'catalog.moreTags' | translate: { count: extraTags().length } }}</span>
                 <svg lucideChevronDown class="w-3.5 h-3.5"></svg>
               }
             </button>

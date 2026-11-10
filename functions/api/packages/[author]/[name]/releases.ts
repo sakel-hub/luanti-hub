@@ -11,11 +11,19 @@ import {
   mergeUpstreamAndGitReleases,
   sanitizeReleaseNotesText,
   scanGitRepoMetadataCached,
+  readEdgeCacheJson,
+  writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
+  normalizeGitRepoInputUrl,
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
-
+import { findJam2026BrewRepoBySlug } from '../../../lib/jam-2026';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
+import {
+  detectGitProviderFromUrl,
+  isUntrustedTunnelOrPrivateHost
+} from '../../../../../src/app/core/config/git-providers.config';
+import { stripAuthorForgeSuffix } from '../../../../../src/app/core/config/package-utils.config';
 
 interface Env {
   DB?: any;
@@ -23,6 +31,27 @@ interface Env {
 }
 
 const releasesRefreshCooldown = new Map<string, number>();
+
+function validateFallbackRepoMatchesSlug(
+  rawRepo: string | undefined,
+  author: string,
+  name: string
+): string | undefined {
+  const normalized = normalizeGitRepoInputUrl(rawRepo);
+  if (!normalized || isUntrustedTunnelOrPrivateHost(normalized)) return undefined;
+  const detected = detectGitProviderFromUrl(normalized);
+  if (!detected) return undefined;
+  const ownerSegments = detected.owner.split('/').filter(Boolean);
+  const effectiveOwner = ownerSegments[ownerSegments.length - 1] || detected.owner;
+  const ownerMatches =
+    stripAuthorForgeSuffix(effectiveOwner).toLowerCase() ===
+      stripAuthorForgeSuffix(author).toLowerCase() ||
+    stripAuthorForgeSuffix(detected.owner).toLowerCase() ===
+      stripAuthorForgeSuffix(author).toLowerCase();
+  const repoMatches =
+    detected.repo.toLowerCase().replace(/-/g, '_') === name.toLowerCase().replace(/-/g, '_');
+  return ownerMatches && repoMatches ? normalized : undefined;
+}
 
 export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
   const author = safeDecodeParam(context.params.author);
@@ -63,15 +92,31 @@ export async function onRequestGet(context: { request: Request; params: { author
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({ error: 'Package is delisted or suspended.' }, { status: 451 });
     }
+  }
 
-    if (!isNotesQuery) {
-      const effectivePkgId = d1Pkg?.id || packageId;
-      const releases = await context.env.DB.prepare(
-        `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
-      ).bind(effectivePkgId).all();
+  const queryRepoParam = (reqUrl?.searchParams.get('repo') || '').trim();
+  const canonicalReleasesCacheKey = `https://edge-cache.luantihub.local/pkg-releases-v1/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
-      d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
+  if (!isNotesQuery && !forceRefresh && !queryRepoParam) {
+    const cachedReleases = await readEdgeCacheJson<any[]>(canonicalReleasesCacheKey);
+    if (Array.isArray(cachedReleases)) {
+      return new Response(JSON.stringify(cachedReleases), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=60, s-maxage=300'
+        }
+      });
     }
+  }
+
+  if (context.env.DB && !isNotesQuery) {
+    const effectivePkgId = d1Pkg?.id || packageId;
+    const releases = await context.env.DB.prepare(
+      `SELECT * FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
+    ).bind(effectivePkgId).all();
+
+    d1Releases = sortAndCapReleases(releases.results || [], MAX_PACKAGE_RELEASES);
   }
 
   // Handle lazy-loaded expandable Release Notes & Commit Diff request (`?notes=1&head=...&base=...`)
@@ -86,7 +131,8 @@ export async function onRequestGet(context: { request: Request; params: { author
     ).trim();
     const untilParam = (reqUrl.searchParams.get('until') || '').trim();
     const repoParam = (reqUrl.searchParams.get('repo') || '').trim();
-    let repoUrl = d1Pkg?.repo_url || repoParam || '';
+    let repoUrl = d1Pkg?.repo_url ? String(d1Pkg.repo_url).trim() : '';
+    let usedNotesRepoFallback = false;
     const releaseBody = '';
 
     let cdbHasNoRepo = false;
@@ -99,6 +145,13 @@ export async function onRequestGet(context: { request: Request; params: { author
         repoUrl = String(cdbDetail.repo).trim();
       } else if (cdbDetail && typeof cdbDetail === 'object' && (cdbDetail.name || cdbDetail.author)) {
         cdbHasNoRepo = true;
+      }
+    }
+
+    if (!repoUrl) {
+      const jamRepo = await findJam2026BrewRepoBySlug(author, name).catch(() => undefined);
+      if (jamRepo) {
+        repoUrl = jamRepo;
       }
     }
 
@@ -116,6 +169,14 @@ export async function onRequestGet(context: { request: Request; params: { author
       }
     }
 
+    if (!repoUrl && repoParam) {
+      const validatedFallback = validateFallbackRepoMatchesSlug(repoParam, author, name);
+      if (validatedFallback) {
+        repoUrl = validatedFallback;
+        usedNotesRepoFallback = true;
+      }
+    }
+
     const notesPayload = await fetchGitReleaseNotesBetweenRefs(
       repoUrl || null,
       cdbHasNoRepo ? undefined : author,
@@ -130,6 +191,7 @@ export async function onRequestGet(context: { request: Request; params: { author
     );
 
     if (
+      !usedNotesRepoFallback &&
       context.env.DB &&
       d1Pkg?.id &&
       notesPayload.resolved_default_branch &&
@@ -152,8 +214,8 @@ export async function onRequestGet(context: { request: Request; params: { author
 
   // 2. Resolve repository URL & query official ContentDB + live Git repository tags/releases in parallel
   const isPureGitOnly = Boolean(d1Pkg && d1Pkg.provider && d1Pkg.provider !== 'contentdb');
-  const queryRepoParam = (reqUrl?.searchParams.get('repo') || '').trim();
-  let resolvedRepoUrl: string = (d1Pkg?.repo_url ? String(d1Pkg.repo_url).trim() : '') || queryRepoParam;
+  let resolvedRepoUrl: string = d1Pkg?.repo_url ? String(d1Pkg.repo_url).trim() : '';
+  let usedExplicitRepoFallback = false;
   let cdbHasNoRepo = false;
 
   if (!resolvedRepoUrl && !isPureGitOnly) {
@@ -165,6 +227,39 @@ export async function onRequestGet(context: { request: Request; params: { author
       resolvedRepoUrl = String(cdbDetail.repo || cdbDetail.repo_url).trim();
     } else if (cdbDetail && typeof cdbDetail === 'object') {
       cdbHasNoRepo = true;
+    }
+  }
+
+  if (!resolvedRepoUrl) {
+    const jamRepo = await findJam2026BrewRepoBySlug(author, name).catch(() => undefined);
+    if (jamRepo) {
+      resolvedRepoUrl = jamRepo;
+    }
+  }
+
+  if (!resolvedRepoUrl && queryRepoParam) {
+    const validatedFallback = validateFallbackRepoMatchesSlug(queryRepoParam, author, name);
+    if (validatedFallback) {
+      resolvedRepoUrl = validatedFallback;
+      usedExplicitRepoFallback = true;
+    }
+  }
+
+  const effectiveReleasesCacheKey =
+    usedExplicitRepoFallback && resolvedRepoUrl
+      ? `${canonicalReleasesCacheKey}?repo=${encodeURIComponent(resolvedRepoUrl.toLowerCase())}`
+      : canonicalReleasesCacheKey;
+
+  if (!forceRefresh && queryRepoParam) {
+    const cachedReleases = await readEdgeCacheJson<any[]>(effectiveReleasesCacheKey);
+    if (Array.isArray(cachedReleases)) {
+      return new Response(JSON.stringify(cachedReleases), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=60, s-maxage=300'
+        }
+      });
     }
   }
 
@@ -271,7 +366,12 @@ export async function onRequestGet(context: { request: Request; params: { author
   );
 
   if (hasRealMergedReleases) {
-    if (context.env.DB && d1Pkg?.id && (discoveredGitReleases.length > 0 || forceRefresh)) {
+    if (
+      !usedExplicitRepoFallback &&
+      context.env.DB &&
+      d1Pkg?.id &&
+      (discoveredGitReleases.length > 0 || forceRefresh)
+    ) {
       const topMerged = mergedReleases[0];
       const topD1 = d1Releases[0];
       const topMergedTag = String(topMerged?.tag_name || topMerged?.version || '').trim();
@@ -344,11 +444,15 @@ export async function onRequestGet(context: { request: Request; params: { author
       }
     }
 
+    if (!forceRefresh) {
+      await writeEdgeCacheJson(effectiveReleasesCacheKey, mergedReleases, 300);
+    }
+
     return new Response(JSON.stringify(mergedReleases), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=120'
+        'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=300'
       }
     });
   }
@@ -375,11 +479,14 @@ export async function onRequestGet(context: { request: Request; params: { author
           upstream_url: rel.download_url
         };
       });
+      if (!forceRefresh) {
+        await writeEdgeCacheJson(effectiveReleasesCacheKey, packagedFallbackReleases, 300);
+      }
       return new Response(JSON.stringify(packagedFallbackReleases), {
         headers: {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=120'
+          'Cache-Control': forceRefresh ? 'no-store' : 'public, max-age=60, s-maxage=300'
         }
       });
     }
@@ -387,7 +494,7 @@ export async function onRequestGet(context: { request: Request; params: { author
 
   // 4. Final Fallback: Default branch archive from D1 or repository URL when no tags or releases exist
   if (d1Releases.length > 0 && !forceRefresh) {
-    return new Response(JSON.stringify(d1Releases.map((r: any) => {
+    const fallbackD1Payload = d1Releases.map((r: any) => {
       const tag = String(r.tag_name || r.version || '').trim();
       const packagedUrl = `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
       return {
@@ -406,7 +513,9 @@ export async function onRequestGet(context: { request: Request; params: { author
         release_date: r.released_at,
         released_at: r.released_at
       };
-    })), {
+    });
+    await writeEdgeCacheJson(effectiveReleasesCacheKey, fallbackD1Payload, 300);
+    return new Response(JSON.stringify(fallbackD1Payload), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   }
@@ -418,12 +527,12 @@ export async function onRequestGet(context: { request: Request; params: { author
         ? (smartRefs?.defaultBranch || 'HEAD')
         : (d1Pkg?.default_branch || smartRefs?.defaultBranch || 'HEAD');
     const resolvedHeadSha = smartRefs?.headSha || 'HEAD';
-    if (context.env.DB && d1Pkg?.id && smartRefs?.headSha) {
+    if (!usedExplicitRepoFallback && context.env.DB && d1Pkg?.id && smartRefs?.headSha) {
       await syncDebouncedGitVersionStamp(context.env.DB, d1Pkg, smartRefs.headSha, false);
     }
     const branchUrl = buildGitBranchArchiveUrl(resolvedRepoUrl, author, name, branch);
     const packagedUrl = `/api/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/download`;
-    return Response.json([
+    const branchPayload = [
       {
         id: 1,
         version: branch,
@@ -436,7 +545,11 @@ export async function onRequestGet(context: { request: Request; params: { author
         min_minetest_version: d1Pkg?.min_minetest_version || '5.0.0',
         released_at: ''
       }
-    ], { headers: { 'Access-Control-Allow-Origin': '*' } });
+    ];
+    if (!forceRefresh) {
+      await writeEdgeCacheJson(effectiveReleasesCacheKey, branchPayload, 300);
+    }
+    return Response.json(branchPayload, { headers: { 'Access-Control-Allow-Origin': '*' } });
   }
 
   return Response.json([], { headers: { 'Access-Control-Allow-Origin': '*' } });

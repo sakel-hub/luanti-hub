@@ -72,23 +72,6 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
 }
 
 /**
- * Normalizes naive UTC timestamp strings (e.g. Python's `datetime.utcnow().isoformat()` or SQLite's
- * `YYYY-MM-DD HH:MM:SS` without a timezone suffix) by appending `Z` so `Date.parse()` / `new Date()`
- * always evaluates them in UTC rather than local time.
- */
-export function normalizeUtcIsoTimestamp(raw: unknown): string {
-  const str = String(raw ?? '').trim();
-  if (!str) return '';
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
-    return `${str.replace(' ', 'T')}Z`;
-  }
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
-    return `${str}Z`;
-  }
-  return str;
-}
-
-/**
  * Normalizes a ContentDB `PackageReview.as_dict()` entry from `GET /api/packages/<author>/<name>/reviews/`
  * or `GET /api/reviews/` (see `luanti-org/contentdb` `app/models/threads.py:202-225` and `app/flatpages/help/api.md:382-427`).
  */
@@ -679,11 +662,20 @@ import {
   parsePackageTranslations,
   resolveLocalizedPackageText,
   parseScreenshotMetaArray,
-  findReverseDependenciesForPackage
+  findReverseDependenciesForPackage,
+  stripAuthorForgeSuffix,
+  parsePackageStringArray,
+  normalizeUtcIsoTimestamp,
+  detectSpdxFromLicenseText,
+  parseLuantiConf,
+  computeConfShortDescription
 } from '../../../src/app/core/config/package-utils.config';
 import {
   normalizeRepoComparisonKey,
-  normalizeRepoKey
+  normalizeRepoKey,
+  DEFUNCT_GIT_HOSTS,
+  isEligibleGitRepoUrl,
+  buildRawDirectoryBaseUrl
 } from '../../../src/app/core/config/git-providers.config';
 export {
   parseJsonArray,
@@ -717,8 +709,17 @@ export {
   resolveLocalizedPackageText,
   parseScreenshotMetaArray,
   findReverseDependenciesForPackage,
+  stripAuthorForgeSuffix,
+  parsePackageStringArray,
+  normalizeUtcIsoTimestamp,
+  detectSpdxFromLicenseText,
+  parseLuantiConf,
+  computeConfShortDescription,
   normalizeRepoComparisonKey,
-  normalizeRepoKey
+  normalizeRepoKey,
+  DEFUNCT_GIT_HOSTS,
+  isEligibleGitRepoUrl,
+  buildRawDirectoryBaseUrl
 };
 
 export interface SharedEdgeRatingEntry {
@@ -792,27 +793,8 @@ export async function mergeSharedEdgeRatingsMap(
  * Heuristic SPDX license identifier detection from LICENSE or README text
  */
 export function detectSpdxFromText(text: string): string {
-  const sample = text.slice(0, 4000);
-  if (/MIT License|Permission is hereby granted, free of charge/i.test(sample)) return 'MIT';
-  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2\.1|LGPL-2\.1/i.test(sample)) return 'LGPL-2.1-only';
-  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|LGPL-3\.0/i.test(sample)) return 'LGPL-3.0-only';
-  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|GPL-3\.0/i.test(sample)) return 'GPL-3.0-only';
-  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2|GPL-2\.0/i.test(sample)) return 'GPL-2.0-only';
-  if (/Apache License[\s\S]{0,150}Version 2\.0|Apache-2\.0/i.test(sample)) return 'Apache-2.0';
-  if (/Mozilla Public License[\s\S]{0,100}2\.0|MPL-2\.0/i.test(sample)) return 'MPL-2.0';
-  if (/Creative Commons Attribution-ShareAlike 4\.0|CC-BY-SA-4\.0/i.test(sample)) return 'CC-BY-SA-4.0';
-  if (/Creative Commons Zero|CC0-1\.0|WTFPL|Unlicense/i.test(sample)) return 'CC0-1.0';
-  if (/zlib License|Zlib/i.test(sample)) return 'Zlib';
-  if (/BSD 3-Clause/i.test(sample)) return 'BSD-3-Clause';
-  if (/BSD 2-Clause/i.test(sample)) return 'BSD-2-Clause';
-  return '';
+  return detectSpdxFromLicenseText(text) || '';
 }
-
-const DEFUNCT_GIT_HOSTS = [
-  'notabug.org',
-  'gitea.your-land.de',
-  'repo.or.cz'
-];
 
 /**
  * Checks if a repository URL belongs to a defunct Git forge or an untrusted ephemeral tunnel / private IP
@@ -1662,6 +1644,59 @@ function computeCrc32(bytes: Uint8Array): number {
  * - Converts streaming data-descriptor Local File Headers (bit 3 `0x0008` used by GitHub/GitLab `git archive`)
  *   into explicit pre-sized Local File Headers for maximum compatibility with Luanti's `minizip` extractor.
  */
+/**
+ * Reads an HTTP response body into a `Uint8Array` with a strict streaming byte cap (`maxBytes`),
+ * aborting oversized chunked transfers even when `Content-Length` is omitted or spoofed.
+ */
+export async function readResponseBytesBounded(
+  response: Response,
+  maxBytes: number
+): Promise<Uint8Array | null> {
+  if (!response || maxBytes <= 0) return null;
+  const contentLength = Number(response.headers?.get?.('content-length') || 0);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    await response.body?.cancel?.().catch(() => {});
+    return null;
+  }
+
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const ab = await response.arrayBuffer();
+    if (ab.byteLength > maxBytes) return null;
+    return new Uint8Array(ab);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => {});
+    return null;
+  }
+
+  if (chunks.length === 1) {
+    return chunks[0];
+  }
+  const out = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 export function normalizeLuantiPackageZip(
   zipBytes: Uint8Array,
   packageName: string,
@@ -1670,11 +1705,16 @@ export function normalizeLuantiPackageZip(
   if (!zipBytes || zipBytes.length < 22) return zipBytes;
   if (zipBytes[0] !== 0x50 || zipBytes[1] !== 0x4b) return zipBytes;
 
+  const MAX_ZIP_ENTRIES = 32768;
+  const MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
+  const MAX_NORMALIZED_OUT_BYTES = 40 * 1024 * 1024;
+
   const safePkgName = (packageName || 'mod')
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, '_')
     .replace(/^_+|_+$/g, '') || 'mod';
 
+  let safetyViolationError: Error | null = null;
   try {
     const view = new DataView(zipBytes.buffer, zipBytes.byteOffset, zipBytes.byteLength);
 
@@ -1692,6 +1732,10 @@ export function normalizeLuantiPackageZip(
     const totalEntries = view.getUint16(eocdPos + 10, true);
     const cdSize = view.getUint32(eocdPos + 12, true);
     const cdOffset = view.getUint32(eocdPos + 16, true);
+
+    if (totalEntries > MAX_ZIP_ENTRIES) {
+      return zipBytes;
+    }
 
     // Bail out on ZIP64 or invalid offsets
     if (totalEntries === 0xffff || cdOffset === 0xffffffff || cdOffset + cdSize > eocdPos) {
@@ -1716,6 +1760,8 @@ export function normalizeLuantiPackageZip(
     const entries: ParsedZipEntry[] = [];
     const decoder = new TextDecoder();
     let ptr = cdOffset;
+    let totalUncompressedBytes = 0;
+    let droppedUnsafeTraversalEntry = false;
 
     for (let i = 0; i < totalEntries; i++) {
       if (ptr + 46 > eocdPos) return zipBytes;
@@ -1741,11 +1787,36 @@ export function normalizeLuantiPackageZip(
       }
 
       const rawNameBytes = zipBytes.subarray(ptr + 46, ptr + 46 + fileNameLen);
-      const normalizedPath = decoder.decode(rawNameBytes).replace(/\\/g, '/').replace(/^\/+/, '');
+      const rawDecodedPath = decoder.decode(rawNameBytes).replace(/\\/g, '/');
       ptr += 46 + fileNameLen + extraLen + commentLen;
 
+      // ZipSlip / null-byte / Windows drive path traversal defense: strip any entry containing `\0`, `..`, or `C:` segments
+      const rawSegments = rawDecodedPath.split('/');
+      if (
+        rawDecodedPath.includes('\0') ||
+        rawSegments.includes('..') ||
+        /^[a-zA-Z]:/.test(rawSegments[0] || '')
+      ) {
+        droppedUnsafeTraversalEntry = true;
+        continue;
+      }
+
+      const normalizedPath = rawDecodedPath
+        .replace(/\/+/g, '/')
+        .replace(/^(?:\.\/)+/, '')
+        .replace(/^\/+/, '');
       if (!normalizedPath || normalizedPath.endsWith('/')) {
         continue;
+      }
+      const cleanSegments = normalizedPath.split('/').filter((seg) => seg && seg !== '.');
+      if (cleanSegments.length === 0) {
+        continue;
+      }
+      const safeRelativePath = cleanSegments.join('/');
+
+      totalUncompressedBytes += uncompressedSize;
+      if (totalUncompressedBytes > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+        return zipBytes;
       }
 
       if (localHeaderOffset + 30 > cdOffset) return zipBytes;
@@ -1757,7 +1828,7 @@ export function normalizeLuantiPackageZip(
       if (dataEnd > cdOffset) return zipBytes;
 
       entries.push({
-        path: normalizedPath,
+        path: safeRelativePath,
         versionMadeBy,
         versionNeeded,
         flags,
@@ -1772,7 +1843,13 @@ export function normalizeLuantiPackageZip(
       });
     }
 
-    if (entries.length === 0) return zipBytes;
+    if (entries.length === 0) {
+      if (droppedUnsafeTraversalEntry) {
+        safetyViolationError = new Error('Unsafe ZIP archive rejected: path traversal entries detected.');
+        throw safetyViolationError;
+      }
+      return zipBytes;
+    }
 
     // 2. Identify the Luanti package root directory prefix inside the ZIP
     const ROOT_MARKERS = new Set([
@@ -1958,6 +2035,9 @@ export function normalizeLuantiPackageZip(
     }
 
     const totalOutSize = localSectionSize + cdSectionSize + 22;
+    if (totalOutSize > MAX_NORMALIZED_OUT_BYTES) {
+      return zipBytes;
+    }
     const outBuf = new Uint8Array(totalOutSize);
     const outView = new DataView(outBuf.buffer);
 
@@ -2018,6 +2098,9 @@ export function normalizeLuantiPackageZip(
 
     return outBuf;
   } catch {
+    if (safetyViolationError) {
+      throw safetyViolationError;
+    }
     return zipBytes;
   }
 }
@@ -3175,7 +3258,10 @@ export async function fetchAccurateGitZipSize(
         return result;
       }
 
-      const rawBytes = new Uint8Array(await res.arrayBuffer());
+      const rawBytes = await readResponseBytesBounded(res, MAX_BUFFER_BYTES);
+      if (!rawBytes) {
+        continue;
+      }
       if (
         rawBytes.length >= 22 &&
         rawBytes[0] === 0x50 &&
@@ -3313,9 +3399,11 @@ let moderationColsEnsured = false;
 
 /**
  * Ensures `moderation_reports` table and its communication/auto-heal columns (`resolution_note`, `updated_at`) exist.
+ * Production D1 already has all columns migrated via `schema.sql` / `migrate.sql`, so this is a zero-query
+ * no-op unless `force === true` (matching `ensureExtendedPackageColumns`).
  */
-export async function ensureModerationColumns(db: any): Promise<void> {
-  if (!db || moderationColsEnsured) return;
+export async function ensureModerationColumns(db: any, force = false): Promise<void> {
+  if (!db || !force || moderationColsEnsured) return;
   moderationColsEnsured = true;
 
   try {
@@ -3368,76 +3456,6 @@ export interface CdbJsonMetadata {
   donate_url?: string;
   translation_url?: string;
   screenshots: string[];
-}
-
-/**
- * Parses a Luanti `.conf` file (`mod.conf`, `game.conf`, `modpack.conf`, `texture_pack.conf`)
- * following `luanti-org/contentdb` `app/tasks/luanticheck/config.py` rules, including
- * multiline `"""..."""` string values and `#` comments.
- */
-export function parseLuantiConf(confText: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (!confText || typeof confText !== 'string') return result;
-
-  const lines = confText.split(/\r?\n/);
-  let i = 0;
-  while (i < lines.length) {
-    const rawLine = lines[i];
-    const trimmed = rawLine.trim();
-    i++;
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-
-    const key = trimmed.slice(0, eqIdx).trim().toLowerCase();
-    if (!key) continue;
-
-    let val = trimmed.slice(eqIdx + 1).trim();
-    if (val.startsWith('"""')) {
-      const afterOpen = val.slice(3);
-      const closeSameLine = afterOpen.indexOf('"""');
-      if (closeSameLine !== -1) {
-        result[key] = afterOpen.slice(0, closeSameLine).trim();
-      } else {
-        const chunks: string[] = [afterOpen];
-        while (i < lines.length) {
-          const nextLine = lines[i++];
-          const closeIdx = nextLine.indexOf('"""');
-          if (closeIdx !== -1) {
-            chunks.push(nextLine.slice(0, closeIdx));
-            break;
-          }
-          chunks.push(nextLine);
-        }
-        result[key] = chunks.join('\n').trim();
-      }
-      continue;
-    }
-
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1).trim();
-    }
-    result[key] = val;
-  }
-
-  return result;
-}
-
-/**
- * Computes `short_description` from a `.conf` or `description.txt` description string
- * using `luanti-org/contentdb` `app/tasks/luanticheck/tree.py:234-241` rules.
- */
-export function computeConfShortDescription(description?: string): string | undefined {
-  if (!description || typeof description !== 'string') return undefined;
-  const clean = description.replace(/\s+/g, ' ').trim();
-  if (!clean) return undefined;
-  if (clean.length <= 200) return clean;
-  const firstSentenceIdx = clean.indexOf('.');
-  if (firstSentenceIdx > 0 && firstSentenceIdx < 200) {
-    return clean.slice(0, firstSentenceIdx).trim();
-  }
-  return clean.slice(0, 200).trim();
 }
 
 /**
@@ -4425,9 +4443,15 @@ function extractAnubisChallengeScript(html: string): {
  * Git forges (such as Mesehub `git.minetest.land`), caching the signed JWT clearance cookie
  * in Isolate Memory + Cloudflare Edge Cache (`caches.default`) for 24 hours.
  */
+export interface OutboundFetchSafetyOptions {
+  allowHost?: (hostname: string, targetUrl: string) => boolean;
+  maxRedirects?: number;
+}
+
 export async function fetchWithAnubisSupport(
   url: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  safetyOptions?: OutboundFetchSafetyOptions
 ): Promise<Response> {
   if (isUntrustedTunnelOrPrivateHost(url)) {
     console.warn(
@@ -4443,7 +4467,19 @@ export async function fetchWithAnubisSupport(
   const verifySafeRedirectResponse = (res: Response): Response => {
     const finalUrl = res?.url;
     const locHeader = res?.headers?.get?.('location');
+    let hostDisallowed = false;
+    if (finalUrl && safetyOptions?.allowHost) {
+      try {
+        const fObj = new URL(finalUrl);
+        if (!safetyOptions.allowHost(fObj.hostname.toLowerCase(), fObj.toString())) {
+          hostDisallowed = true;
+        }
+      } catch {
+        hostDisallowed = true;
+      }
+    }
     if (
+      hostDisallowed ||
       (finalUrl && isUntrustedTunnelOrPrivateHost(finalUrl)) ||
       (locHeader && (locHeader.includes('://') || locHeader.startsWith('//')) && isUntrustedTunnelOrPrivateHost(locHeader))
     ) {
@@ -4456,7 +4492,8 @@ export async function fetchWithAnubisSupport(
         })
       );
       return new Response('Forbidden: Redirect to untrusted tunnel or private network host blocked.', {
-        status: 403
+        status: 403,
+        headers: { 'X-LuantiHub-Redirect-Blocked': '1' }
       });
     }
     return res;
@@ -4467,25 +4504,154 @@ export async function fetchWithAnubisSupport(
   let pathname = '/';
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return new Response('Bad Request: Unsupported URL protocol', { status: 400 });
+    }
     host = parsed.hostname.toLowerCase();
     origin = parsed.origin;
     pathname = parsed.pathname || '/';
+    if (safetyOptions?.allowHost && !safetyOptions.allowHost(host, parsed.toString())) {
+      return new Response('Forbidden: Upstream host is not in the permitted allowlist.', { status: 403 });
+    }
   } catch {
     return new Response('Bad Request: Invalid URL', { status: 400 });
   }
 
+  const fetchWithManualRedirectGuard = async (
+    targetUrl: string,
+    reqInit: RequestInit
+  ): Promise<Response> => {
+    if (reqInit.redirect === 'manual') {
+      const manualRes = await fetch(targetUrl, reqInit);
+      return verifySafeRedirectResponse(manualRes);
+    }
+
+    const maxHops = Math.max(0, Math.min(safetyOptions?.maxRedirects ?? 5, 10));
+    let currentUrl = targetUrl;
+    let currentMethod = (reqInit.method || 'GET').toUpperCase();
+    let currentBody = reqInit.body;
+    let currentHeaders: HeadersInit | undefined = reqInit.headers;
+
+    const stripCrossOriginAuthHeaders = (hdrs?: HeadersInit): HeadersInit | undefined => {
+      if (!hdrs) return undefined;
+      const out: Record<string, string> = {};
+      if (hdrs instanceof Headers) {
+        hdrs.forEach((v, k) => {
+          if (k.toLowerCase() !== 'authorization' && k.toLowerCase() !== 'cookie') {
+            out[k] = v;
+          }
+        });
+      } else if (Array.isArray(hdrs)) {
+        for (const [k, v] of hdrs) {
+          if (k.toLowerCase() !== 'authorization' && k.toLowerCase() !== 'cookie') {
+            out[k] = v;
+          }
+        }
+      } else {
+        for (const [k, v] of Object.entries(hdrs as Record<string, string>)) {
+          if (k.toLowerCase() !== 'authorization' && k.toLowerCase() !== 'cookie') {
+            out[k] = v;
+          }
+        }
+      }
+      return out;
+    };
+
+    for (let hop = 0; hop <= maxHops; hop++) {
+      const hopRes = await fetch(currentUrl, {
+        ...reqInit,
+        method: currentMethod,
+        body: currentBody,
+        headers: currentHeaders,
+        redirect: 'manual'
+      });
+
+      const isRedirectStatus =
+        hopRes.status === 301 ||
+        hopRes.status === 302 ||
+        hopRes.status === 303 ||
+        hopRes.status === 307 ||
+        hopRes.status === 308;
+      const locHeader = hopRes.headers?.get?.('location');
+      if (!isRedirectStatus || !locHeader) {
+        if (currentUrl && !hopRes.url) {
+          try {
+            Object.defineProperty(hopRes, 'url', { value: currentUrl, configurable: true });
+          } catch {
+            // Ignore read-only native Response url
+          }
+        }
+        return verifySafeRedirectResponse(hopRes);
+      }
+
+      if (hop === maxHops) {
+        await hopRes.body?.cancel?.().catch(() => {});
+        return new Response('Bad Gateway: Too many upstream redirects.', { status: 502 });
+      }
+
+      let nextUrlObj: URL;
+      let prevUrlObj: URL;
+      try {
+        prevUrlObj = new URL(currentUrl);
+        nextUrlObj = new URL(locHeader, currentUrl);
+      } catch {
+        await hopRes.body?.cancel?.().catch(() => {});
+        return new Response('Bad Gateway: Invalid upstream redirect target.', { status: 502 });
+      }
+
+      const nextUrlStr = nextUrlObj.toString();
+      const nextHost = nextUrlObj.hostname.toLowerCase();
+      if (
+        (nextUrlObj.protocol !== 'https:' && nextUrlObj.protocol !== 'http:') ||
+        isUntrustedTunnelOrPrivateHost(nextUrlStr) ||
+        isUntrustedTunnelOrPrivateHost(nextHost) ||
+        (safetyOptions?.allowHost && !safetyOptions.allowHost(nextHost, nextUrlStr))
+      ) {
+        await hopRes.body?.cancel?.().catch(() => {});
+        console.warn(
+          JSON.stringify({
+            event: 'SECURITY_ALERT:OUTBOUND_TUNNEL_SSRF_REDIRECT_BLOCKED',
+            sourceUrl: String(currentUrl).slice(0, 200),
+            redirectUrl: nextUrlStr.slice(0, 200),
+            timestamp: new Date().toISOString()
+          })
+        );
+        return new Response('Forbidden: Redirect to untrusted tunnel or private network host blocked.', {
+          status: 403,
+          headers: { 'X-LuantiHub-Redirect-Blocked': '1' }
+        });
+      }
+
+      await hopRes.body?.cancel?.().catch(() => {});
+      if (nextUrlObj.origin !== prevUrlObj.origin) {
+        currentHeaders = stripCrossOriginAuthHeaders(currentHeaders);
+      }
+      if (
+        hopRes.status === 303 ||
+        ((hopRes.status === 301 || hopRes.status === 302) && currentMethod === 'POST')
+      ) {
+        currentMethod = 'GET';
+        currentBody = undefined;
+      }
+      currentUrl = nextUrlStr;
+    }
+
+    return new Response('Bad Gateway: Too many upstream redirects.', { status: 502 });
+  };
+
   const isAnubisCandidate =
     host.includes('minetest.land') ||
     host.includes('mesehub') ||
+    host.includes('mese.hub') ||
     host.includes('gitea') ||
     host.includes('forgejo') ||
-    host.includes('codeberg');
+    host.includes('codeberg') ||
+    host.startsWith('git.');
   if (!isAnubisCandidate) {
-    const directRes = await fetch(url, init);
-    return verifySafeRedirectResponse(directRes);
+    return fetchWithManualRedirectGuard(url, init);
   }
 
-  const cookieCacheKey = `/__anubis_cookie_v3/${encodeURIComponent(host)}`;
+  let cookieCacheKey = `/__anubis_cookie_v3/${encodeURIComponent(host)}`;
   const cachedCookieObj = await readEdgeCacheJson<{ cookie: string }>(cookieCacheKey);
 
   // Enforce a consistent browser User-Agent across the initial request, `/pass-challenge`, and
@@ -4532,13 +4698,23 @@ export async function fetchWithAnubisSupport(
     return merged;
   };
 
-  const rawFirstRes = await fetch(url, {
+  const firstRes = await fetchWithManualRedirectGuard(url, {
     ...init,
     headers: buildHeadersWithCookie(cachedCookieObj?.cookie)
   });
-  const firstRes = verifySafeRedirectResponse(rawFirstRes);
-  if (firstRes !== rawFirstRes) {
+  if (firstRes.headers.get('X-LuantiHub-Redirect-Blocked') === '1') {
     return firstRes;
+  }
+  if (firstRes.url) {
+    try {
+      const resolvedUrl = new URL(firstRes.url);
+      host = resolvedUrl.hostname.toLowerCase();
+      origin = resolvedUrl.origin;
+      pathname = resolvedUrl.pathname || '/';
+      cookieCacheKey = `/__anubis_cookie_v3/${encodeURIComponent(host)}`;
+    } catch {
+      // Keep original parsed host/origin
+    }
   }
 
   const contentType = (firstRes.headers.get('content-type') || '').toLowerCase();
@@ -4569,13 +4745,16 @@ export async function fetchWithAnubisSupport(
   if (isLikelyAnubisWithoutInlineScript) {
     try {
       cookieMap.clear();
-      const getChallengeRes = await fetch(`${origin}/`, {
+      const getChallengeRes = await fetchWithManualRedirectGuard(`${origin}/`, {
         method: 'GET',
         headers: {
           'User-Agent': ANUBIS_BROWSER_UA,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
       });
+      if (getChallengeRes.headers.get('X-LuantiHub-Redirect-Blocked') === '1') {
+        return getChallengeRes;
+      }
       applySetCookieHeaders(cookieMap, getChallengeRes.headers);
       const getHtml = await getChallengeRes.text().catch(() => '');
       parsedChallenge = extractAnubisChallengeScript(getHtml);
@@ -4609,7 +4788,7 @@ export async function fetchWithAnubisSupport(
     const passUrl = `${origin}/.within.website/x/cmd/anubis/api/pass-challenge?${query.toString()}`;
     const verificationCookieHeader = serializeCookieMap(cookieMap);
 
-    const passRes = await fetch(passUrl, {
+    const passRes = await fetchWithManualRedirectGuard(passUrl, {
       method: 'GET',
       redirect: 'manual',
       headers: {
@@ -4618,20 +4797,22 @@ export async function fetchWithAnubisSupport(
         ...(verificationCookieHeader ? { 'Cookie': verificationCookieHeader } : {})
       }
     });
+    await passRes.body?.cancel?.().catch(() => {});
 
+    const passAccepted = passRes.status === 302 || passRes.ok;
+    const prevCookieSnapshot = serializeCookieMap(cookieMap);
     applySetCookieHeaders(cookieMap, passRes.headers);
     const allCookies = serializeCookieMap(cookieMap);
-    if (!allCookies) {
+    if (!passAccepted || !allCookies || allCookies === prevCookieSnapshot) {
       return firstRes;
     }
 
     await writeEdgeCacheJson(cookieCacheKey, { cookie: allCookies }, 86400);
 
-    const retryRes = await fetch(url, {
+    return fetchWithManualRedirectGuard(url, {
       ...init,
       headers: buildHeadersWithCookie(allCookies)
     });
-    return verifySafeRedirectResponse(retryRes);
   } catch {
     return firstRes;
   }
@@ -5361,7 +5542,7 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 1800);
     try {
-      const res = await fetch(cand.url, {
+      const res = await fetchWithAnubisSupport(cand.url, {
         signal: controller.signal,
         headers: {
           'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)',
@@ -5489,8 +5670,13 @@ export function buildPackageCacheInvalidationKeys(
     `/__api_hydrate_v9_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v10_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v11_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
-    `https://cache.luantihub.internal/__for_client_v5/${encA}/${encN}/en/%3Fformspec_version%3D8`
+    `https://edge-cache.luantihub.local/pkg-readme-v1/${encA}/${encN}`,
+    `https://edge-cache.luantihub.local/pkg-releases-v1/${encA}/${encN}`
   ]);
+
+  for (const lang of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
+    keys.add(`https://cache.luantihub.internal/__for_client_v5/${lang}/${encA}/${encN}/%3Fformspec_version%3D8`);
+  }
 
   for (const d of [7, 30, 90, 365]) {
     keys.add(buildPackageStatsEdgeCacheKey(lowerA, lowerN, d));
@@ -5499,6 +5685,8 @@ export function buildPackageCacheInvalidationKeys(
   if (options?.includeBootCatalog !== false) {
     keys.add(BOOT_CATALOG_EDGE_CACHE_KEY);
     keys.add(`https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`);
+    keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/today');
+    keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/week');
   }
 
   const addAuthorKeys = (handle: string) => {

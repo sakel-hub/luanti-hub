@@ -36,12 +36,11 @@ export async function onRequestGet(context: {
   }
 
   try {
-    // Parse requested timeframe
+    // Parse requested timeframe (snap strictly to canonical buckets to prevent Edge Cache fragmentation)
     const reqUrl = new URL(request.url, 'https://luantihub.local');
-    const daysParam = Number(reqUrl.searchParams.get('days') || 30);
-    const days = [7, 30, 90, 365].includes(daysParam)
-      ? daysParam
-      : Math.min(365, Math.max(7, Math.round(daysParam) || 30));
+    const rawDays = Number(reqUrl.searchParams.get('days') || 30);
+    const daysParam = Number.isFinite(rawDays) && rawDays > 0 ? rawDays : 30;
+    const days = daysParam <= 7 ? 7 : daysParam <= 30 ? 30 : daysParam <= 90 ? 90 : 365;
     const requestedNoCache =
       reqUrl.searchParams.get('nocache') === '1' || reqUrl.searchParams.get('refresh') === '1';
     const noCache = requestedNoCache
@@ -63,12 +62,20 @@ export async function onRequestGet(context: {
 
     await ensureExtendedPackageColumns(env.DB);
     const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-    const pkgRow = await env.DB.prepare(
+    let pkgRow = await env.DB.prepare(
       `SELECT id, author_id, author_name, name, title, type, provider, repo_url, contentdb_downloads, luantihub_downloads, downloads_count
        FROM packages
-       WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?))
+       WHERE LOWER(id) = LOWER(?)
        LIMIT 1`
-    ).bind(packageId, author, name, sanitizedName).first().catch(() => null);
+    ).bind(packageId).first().catch(() => null);
+    if (!pkgRow) {
+      pkgRow = await env.DB.prepare(
+        `SELECT id, author_id, author_name, name, title, type, provider, repo_url, contentdb_downloads, luantihub_downloads, downloads_count
+         FROM packages
+         WHERE LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+         LIMIT 1`
+      ).bind(author, name, sanitizedName).first().catch(() => null);
+    }
 
     const { dates, prevDates, prevStartDate, endDate } = buildDualPeriodDateRange(days);
     const effectivePkgId = pkgRow?.id || packageId;

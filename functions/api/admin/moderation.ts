@@ -16,6 +16,10 @@ import {
   buildPackageCacheInvalidationKeys,
   BOOT_CATALOG_EDGE_CACHE_KEY
 } from '../lib/upstream';
+import {
+  isUntrustedTunnelOrPrivateHost,
+  detectGitProviderFromUrl
+} from '../../../src/app/core/config/git-providers.config';
 
 interface Env {
   DB?: any;
@@ -68,7 +72,9 @@ export async function probePackageGitOnline(
     );
   }
 
-  const uniqueUrls = Array.from(new Set(candidateUrls));
+  const uniqueUrls = Array.from(new Set(candidateUrls)).filter(
+    u => /^https?:\/\//i.test(u) && !isUntrustedTunnelOrPrivateHost(u)
+  );
   for (const url of uniqueUrls) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2500);
@@ -621,11 +627,66 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             END,
             updated_at = CURRENT_TIMESTAMP
         WHERE LOWER(id) = LOWER(?)
-          AND (author_id IS NULL OR author_id LIKE 'ext_%' OR author_id = ?)
-      `).bind(claimantUserId, claimedPkgId, claimantUserId).run().catch(() => null);
-      if (Number(claimRes?.meta?.changes || 0) > 0) {
+      `).bind(claimantUserId, claimedPkgId).run().catch(() => null);
+      let claimChanges = Number(claimRes?.meta?.changes || 0);
+      const [pkgAuthor, pkgName] = claimedPkgId.split('/');
+      if (claimChanges === 0 && pkgAuthor && pkgName) {
+        const existingClaimTarget = await env.DB.prepare(
+          `SELECT id FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+        )
+          .bind(claimedPkgId)
+          .first()
+          .catch(() => null);
+        if (!existingClaimTarget?.id) {
+          const upstreamCdb = await fetchUpstreamJsonCached<any>(
+            `/packages/${encodeURIComponent(pkgAuthor)}/${encodeURIComponent(pkgName)}/`,
+            600
+          ).catch(() => null);
+          const detailsRepoMatch = String(reportRow.details || '').match(/\((https:\/\/[^\s)]+)\)/i);
+          const detailsRepoUrl =
+            detailsRepoMatch?.[1] && !isUntrustedTunnelOrPrivateHost(detailsRepoMatch[1])
+              ? detailsRepoMatch[1].trim()
+              : '';
+          const seedTitle = upstreamCdb?.title || pkgName;
+          const seedType =
+            upstreamCdb?.type && ['mod', 'game', 'txp', 'modpack'].includes(String(upstreamCdb.type))
+              ? String(upstreamCdb.type)
+              : 'mod';
+          const seedShortDesc = upstreamCdb?.short_desc || upstreamCdb?.short_description || '';
+          const seedRepoUrl = upstreamCdb?.repo || upstreamCdb?.repo_url || detailsRepoUrl || '';
+          const detectedForge = seedRepoUrl ? detectGitProviderFromUrl(seedRepoUrl) : null;
+          const seedProvider = upstreamCdb ? 'contentdb' : (detectedForge?.provider || 'custom');
+          const seedLicense = upstreamCdb?.license || 'MIT';
+          const seedMediaLicense = upstreamCdb?.media_license || seedLicense;
+          if (upstreamCdb || seedRepoUrl) {
+            const seedRes = await env.DB.prepare(`
+              INSERT OR IGNORE INTO packages (
+                id, author_id, author_name, name, title, type, short_desc,
+                repo_url, provider, license, media_license, status
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            `)
+              .bind(
+                claimedPkgId,
+                claimantUserId,
+                pkgAuthor,
+                pkgName,
+                seedTitle,
+                seedType,
+                seedShortDesc,
+                seedRepoUrl,
+                seedProvider,
+                seedLicense,
+                seedMediaLicense
+              )
+              .run()
+              .catch(() => null);
+            claimChanges = Number(seedRes?.meta?.changes || 0);
+          }
+        }
+      }
+      if (claimChanges > 0) {
         packageClaimApproved = true;
-        const [pkgAuthor, pkgName] = claimedPkgId.split('/');
         await invalidateEdgeCacheKeys(
           pkgAuthor && pkgName
             ? buildPackageCacheInvalidationKeys(pkgAuthor, pkgName, {

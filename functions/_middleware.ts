@@ -1,5 +1,8 @@
 // Global Edge Security, Origin Guard & Per-IP Quota Protection Middleware
-import { EPHEMERAL_TUNNEL_HOST_PATTERN } from '../src/app/core/config/git-providers.config';
+import {
+  EPHEMERAL_TUNNEL_HOST_PATTERN,
+  INBOUND_TUNNEL_SUBSTRING_PATTERN
+} from '../src/app/core/config/git-providers.config';
 
 interface RateBucket {
   count: number;
@@ -15,13 +18,22 @@ const BLOCKED_BOT_PATTERN =
 const SCANNER_PROBE_PATTERN =
   /^\/(?:\.env|\.git|\.aws|\.docker|\.ssh|\.kube|wp-admin|wp-login|wp-content|wp-includes|phpmyadmin|xmlrpc\.php|vendor\/phpunit|actuator|server-status|cgi-bin|_ignition|cloudflared|etc\/passwd)(?:\/|$|\.)/i;
 
-const INBOUND_TUNNEL_SUBSTRING_PATTERN =
-  /(?:^|[./:@\s"=])(?:[a-z0-9-]+\.)*(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh)\b/i;
-
 export function detectInboundEphemeralTunnelHeader(
   request: Request
 ): { header: string; value: string } | null {
-  const candidateHeaders = ['Origin', 'Referer', 'X-Forwarded-Host', 'Forwarded'];
+  const candidateHeaders = [
+    'Origin',
+    'Referer',
+    'X-Forwarded-Host',
+    'Forwarded',
+    'X-Original-Host',
+    'X-Host',
+    'X-Forwarded-Server',
+    'X-HTTP-Host-Override',
+    'True-Client-IP',
+    'Cf-Worker',
+    'Via'
+  ];
   for (const headerName of candidateHeaders) {
     const raw = request.headers.get(headerName);
     if (!raw) continue;
@@ -33,6 +45,7 @@ export function detectInboundEphemeralTunnelHeader(
         if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(parsed.hostname.toLowerCase())) {
           return { header: headerName, value: trimmed.slice(0, 200) };
         }
+        continue;
       }
     } catch {
       // Fall through to substring inspection
@@ -62,6 +75,9 @@ function withSecurityHeaders(res: Response): Response {
     if (!headers.has('Permissions-Policy')) {
       headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
     }
+    if (!headers.has('Strict-Transport-Security')) {
+      headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     return new Response(res.body, {
       status: res.status,
       statusText: res.statusText,
@@ -89,7 +105,15 @@ function pruneRateLimitStore(now: number): void {
 
 export function checkEdgeRateLimit(
   ip: string,
-  bucketType: 'mutation' | 'download' | 'hydrate' | 'api_read',
+  bucketType:
+    | 'mutation'
+    | 'download'
+    | 'hydrate'
+    | 'api_read'
+    | 'git_audit'
+    | 'sync'
+    | 'ssr'
+    | 'proxy_image',
   limit: number,
   windowMs: number,
   now = Date.now()
@@ -117,8 +141,7 @@ function isTrustedLuantiHost(host: string): boolean {
   return (
     h === 'luantihub.org' ||
     h.endsWith('.luantihub.org') ||
-    h === 'luanti-hub.pages.dev' ||
-    h.endsWith('.luanti-hub.pages.dev')
+    h === 'luanti-hub.pages.dev'
   );
 }
 
@@ -298,9 +321,25 @@ export async function onRequest(context: {
     'anonymous';
   const userAgent = request.headers.get('User-Agent') || '';
 
+  const isApiRoute = pathname.startsWith('/api/');
+  const isDownloadRoute = pathname.endsWith('/download');
+  const isDynamicSsrRoute =
+    !isDownloadRoute &&
+    (pathname.startsWith('/package/') ||
+      pathname.startsWith('/packages/') ||
+      pathname.startsWith('/author/') ||
+      pathname === '/sitemap.xml');
+
   // 0. Detect & block inbound Cloudflare Quick Tunnel (*.trycloudflare.com) or disposable reverse-tunnel proxying / spoofed forwarding headers
+  // (Allow normal top-level GET/HEAD HTML link clicks where only `Referer` came from a dev preview page)
   const matchedTunnelHeader = detectInboundEphemeralTunnelHeader(request);
-  if (matchedTunnelHeader) {
+  const isSafeTopLevelLinkNavigation =
+    !isApiRoute &&
+    !isDownloadRoute &&
+    (method === 'GET' || method === 'HEAD') &&
+    matchedTunnelHeader?.header === 'Referer' &&
+    request.headers.get('Sec-Fetch-Mode') === 'navigate';
+  if (matchedTunnelHeader && !isSafeTopLevelLinkNavigation) {
     console.warn(
       JSON.stringify({
         event: 'SECURITY_ALERT:EPHEMERAL_TUNNEL_BLOCKED',
@@ -335,9 +374,6 @@ export async function onRequest(context: {
     );
   }
 
-  const isApiRoute = pathname.startsWith('/api/');
-  const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
-
   // Redirect legacy *.pages.dev and www.luantihub.org web/crawler requests to canonical https://luantihub.org
   // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
   const lowerHost = url.hostname.toLowerCase();
@@ -353,7 +389,31 @@ export async function onRequest(context: {
     return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
   }
 
+  // Block known aggressive AI scrapers, automated SEO crawlers & offensive scanners across API, download, and dynamic SSR/D1 routes
+  if ((isApiRoute || isDownloadRoute || isDynamicSsrRoute) && BLOCKED_BOT_PATTERN.test(userAgent)) {
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Automated scraping of API and download endpoints is not permitted.' },
+        { status: 403 }
+      )
+    );
+  }
+
   if (!isApiRoute && !isDownloadRoute) {
+    if (isDynamicSsrRoute) {
+      const ssrRateCheck = checkEdgeRateLimit(clientIp, 'ssr', 90, 60_000);
+      if (!ssrRateCheck.allowed) {
+        return withSecurityHeaders(
+          new Response('Rate limit exceeded. Please wait a moment before making more requests.', {
+            status: 429,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Retry-After': String(ssrRateCheck.retryAfterSeconds)
+            }
+          })
+        );
+      }
+    }
     const sectionMeta = SECTION_HUB_SEO_MAP[pathname];
     const assetsBinding = context.env?.['ASSETS'];
     try {
@@ -433,16 +493,6 @@ export async function onRequest(context: {
     }
   }
 
-  // 1. Block known aggressive AI scrapers, automated SEO crawlers & offensive scanners from burning Function/D1 quotas
-  if (BLOCKED_BOT_PATTERN.test(userAgent)) {
-    return withSecurityHeaders(
-      Response.json(
-        { error: 'Automated scraping of API and download endpoints is not permitted.' },
-        { status: 403 }
-      )
-    );
-  }
-
   // 2. Cross-Origin & Hotlink Protection
   // In-game Luanti C++ clients do not send `Origin` or `Sec-Fetch-Site`, so they remain unaffected.
   // Browsers on third-party websites DO send `Origin` and `Sec-Fetch-Site: cross-site`.
@@ -498,23 +548,33 @@ export async function onRequest(context: {
   }
 
   // 3. Per-IP Sliding-Window Edge Rate Limiting (protects Worker & D1 quotas before hitting DB/upstreams)
+  const isGitAuditEndpoint = pathname.startsWith('/api/packages/git');
+  const isSyncContentDbEndpoint =
+    pathname.startsWith('/api/users/') && pathname.includes('/sync-contentdb');
   const isHydrateEndpoint = pathname.startsWith('/api/packages/hydrate');
+  const isProxyImageEndpoint = pathname === '/api/packages' && url.searchParams.has('proxy_image');
   const isHeavyEndpoint =
-    !isHydrateEndpoint && (
-      isStateMutating ||
-      pathname.startsWith('/api/packages/git') ||
+    !isGitAuditEndpoint &&
+    !isSyncContentDbEndpoint &&
+    !isHydrateEndpoint &&
+    (isStateMutating ||
       pathname.startsWith('/api/users/') ||
       pathname.startsWith('/api/admin/') ||
-      pathname.startsWith('/api/promotions')
-    );
+      pathname.startsWith('/api/promotions'));
 
-  const rateCheck = isHeavyEndpoint
-    ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
-    : isHydrateEndpoint
-      ? checkEdgeRateLimit(clientIp, 'hydrate', 45, 60_000)
-      : isDownloadRoute
-        ? checkEdgeRateLimit(clientIp, 'download', 30, 60_000)
-        : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
+  const rateCheck = isGitAuditEndpoint
+    ? checkEdgeRateLimit(clientIp, 'git_audit', 10, 60_000)
+    : isSyncContentDbEndpoint
+      ? checkEdgeRateLimit(clientIp, 'sync', 6, 60_000)
+      : isHeavyEndpoint
+        ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
+        : isHydrateEndpoint
+          ? checkEdgeRateLimit(clientIp, 'hydrate', 30, 60_000)
+          : isDownloadRoute
+            ? checkEdgeRateLimit(clientIp, 'download', 120, 60_000)
+            : isProxyImageEndpoint
+              ? checkEdgeRateLimit(clientIp, 'proxy_image', 120, 60_000)
+              : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
 
   if (!rateCheck.allowed) {
     return withSecurityHeaders(

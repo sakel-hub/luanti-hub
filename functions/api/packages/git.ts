@@ -47,7 +47,11 @@ import {
   verifyGitOrgOrRepoMembership,
   buildPackageCacheInvalidationKeys
 } from '../lib/upstream';
-import { GitProviderId } from '../../../src/app/core/config/git-providers.config';
+import {
+  GitProviderId,
+  LUA_TUNNEL_C2_PATTERN
+} from '../../../src/app/core/config/git-providers.config';
+import { detectSpdxFromLicenseText } from '../../../src/app/core/config/package-utils.config';
 import { evaluateRepositoryContentSafety } from '../lib/content-safety';
 
 interface Env {
@@ -179,30 +183,6 @@ function isApprovedLicense(lic: string): boolean {
   return /^(MIT|LGPL|GPL|AGPL|BSD|APACHE|MPL|ZLIB|CC0|CC-BY|UNLICENSE|WTFPL|ISC)/i.test(lic.trim());
 }
 
-function detectSpdxFromLicenseText(raw: string): string | undefined {
-  if (!raw) return undefined;
-  const text = raw.slice(0, 4000);
-  if (/MIT License|Permission is hereby granted, free of charge|\bMIT\b/i.test(text)) return 'MIT';
-  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2\.1|\bLGPL-2\.1/i.test(text)) return 'LGPL-2.1-only';
-  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bLGPL-3\.0/i.test(text)) return 'LGPL-3.0-only';
-  if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bAGPL-3\.0/i.test(text)) return 'AGPL-3.0-only';
-  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3|\bGPL-3\.0/i.test(text)) return 'GPL-3.0-only';
-  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2|\bGPL-2\.0/i.test(text)) return 'GPL-2.0-only';
-  if (/Apache License[\s\S]{0,80}Version 2\.0|\bApache-2\.0\b/i.test(text)) return 'Apache-2.0';
-  if (/Mozilla Public License[\s\S]{0,60}2\.0|\bMPL-2\.0\b/i.test(text)) return 'MPL-2.0';
-  if (/Creative Commons Attribution-ShareAlike 4\.0|CC-BY-SA-4\.0/i.test(text)) return 'CC-BY-SA-4.0';
-  if (/Creative Commons Attribution-ShareAlike 3\.0|CC-BY-SA-3\.0/i.test(text)) return 'CC-BY-SA-3.0';
-  if (/Creative Commons Attribution 4\.0|CC-BY-4\.0/i.test(text)) return 'CC-BY-4.0';
-  if (/CC0 1\.0 Universal|Public Domain Dedication|\bCC0-1\.0\b/i.test(text)) return 'CC0-1.0';
-  if (/The Unlicense|unlicense\.org|\bUnlicense\b/i.test(text)) return 'Unlicense';
-  if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|\bWTFPL\b/i.test(text)) return 'WTFPL';
-  if (/zlib License|altered source versions must be plainly marked|\bZlib\b/i.test(text)) return 'Zlib';
-  if (/Redistribution and use in source and binary forms/i.test(text)) {
-    return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
-  }
-  return undefined;
-}
-
 /**
  * Strips Lua single-line comments (`--...`), long comments (`--[=*[ ... ]=*]`),
  * short string literals (`"..."`, `'...'`), and multiline long strings (`[=*[ ... ]=*]`)
@@ -311,8 +291,7 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
     'getmetatable', 'dofile', 'loadfile', 'require', 'collectgarbage', 'print', '_'
   ]);
 
-  const tunnelC2Pattern =
-    /\b((?:[a-z0-9-]+\.)*(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh))\b/i;
+  const tunnelC2Pattern = LUA_TUNNEL_C2_PATTERN;
 
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
@@ -525,6 +504,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       return Response.json({
         error: 'Invalid URL format. Please enter a full HTTPS Git URL (e.g., https://codeberg.org/user/mod_name).'
       }, { status: 400 });
+    }
+
+    if (urlObj.protocol !== 'https:') {
+      return Response.json(
+        {
+          success: false,
+          canPublish: false,
+          error: 'Invalid URL protocol. Only HTTPS Git repository URLs (https://) are permitted.'
+        },
+        { status: 400 }
+      );
     }
 
     if (isUntrustedTunnelOrPrivateHost(repoUrl.trim()) || isUntrustedTunnelOrPrivateHost(urlObj.hostname)) {
@@ -1033,27 +1023,25 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       });
     }
 
-    // Check 5B: Automated Content Safety Audit (4-Layer Static + Optional Cloudflare Workers AI on Publish)
+    // Check 5B: Automated Content Safety Audit (Static Layers 1-3 first; Workers AI Layer 4 runs only after verified ownership on !dryRun)
     const preliminaryTitle = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
     const preliminaryShortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
-    const safetyEval = await evaluateRepositoryContentSafety(
-      {
-        repoOwner: owner,
-        repoName: repo,
-        confFileName,
-        rawConfig,
-        title: preliminaryTitle,
-        shortDesc: preliminaryShortDesc,
-        cdbJsonText: rawCdbJsonText || undefined,
-        readmeMarkdown: readmeMarkdown || undefined,
-        luaSource: luaSource || undefined,
-        rootFileNames: discoveredRootEntries ? discoveredRootEntries.map(e => e.name) : undefined
-      },
-      {
-        aiBinding: context.env.AI,
-        runAiCheck: !dryRun
-      }
-    );
+    const safetyInput = {
+      repoOwner: owner,
+      repoName: repo,
+      confFileName,
+      rawConfig,
+      title: preliminaryTitle,
+      shortDesc: preliminaryShortDesc,
+      cdbJsonText: rawCdbJsonText || undefined,
+      readmeMarkdown: readmeMarkdown || undefined,
+      luaSource: luaSource || undefined,
+      rootFileNames: discoveredRootEntries ? discoveredRootEntries.map(e => e.name) : undefined
+    };
+    let safetyEval = await evaluateRepositoryContentSafety(safetyInput, {
+      aiBinding: context.env.AI,
+      runAiCheck: false
+    });
 
     if (safetyEval.holdForAdminReview) {
       const firstMatch = safetyEval.matches[0];
@@ -1518,15 +1506,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     const licenseValid = !diagnostics.some(d => d.code === 'LICENSE_INVALID');
     const luacheckPassed = !diagnostics.some(d => d.code.startsWith('LUA_') && d.severity === 'error');
     const canonicalRepoKey = `${provider}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
-    const issuedAuditToken = canPublish
-      ? await createAuditProofToken(canonicalRepoKey, context.env.SESSION_SECRET)
-      : undefined;
+    const issuedAuditToken =
+      canPublish && context.env.SESSION_SECRET
+        ? await createAuditProofToken(canonicalRepoKey, context.env.SESSION_SECRET)
+        : undefined;
 
     const auditReport = {
       valid: canPublish,
       passed: canPublish,
       auditToken: issuedAuditToken,
       ownershipVerified,
+      pendingAdminClaim,
       requiredProvider: provider,
       repoOwner: owner,
       configFound: confFileName,
@@ -1564,6 +1554,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         canPublish: true,
         auditToken: issuedAuditToken,
         ownershipVerified,
+        pendingAdminClaim,
         requiredProvider: provider,
         repoOwner: owner,
         dryRun: true,
@@ -1649,8 +1640,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       if (context.env.DB) {
         await ensureExtendedPackageColumns(context.env.DB);
         await ensureModerationColumns(context.env.DB);
-        // Ensure a placeholder package row exists only if not already in D1 so foreign keys on moderation_reports succeed
-        if (!existingD1Pkg) {
+        // Ensure a placeholder package row exists only if not already in D1 AND not a live ContentDB package
+        // (never insert `status = 'flagged'` for an active ContentDB package, which would trigger a 451 Kill-Switch takedown).
+        if (!existingD1Pkg && !matchedContentDbPkg) {
           const placeholderAuthorId = `ext_${canonicalAuthor}`;
           await context.env.DB.prepare(`
             INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
@@ -1701,12 +1693,36 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         success: true,
         canPublish: true,
         pendingModeration: true,
-        status: 'flagged',
+        status: matchedContentDbPkg ? 'active' : 'flagged',
         message: `Your ownership claim for '${packageId}' has been submitted to moderators for verification.`,
         audit: auditReport,
         auditReport,
         package: packagePayload
       });
+    }
+
+    // Layer 4 Workers AI Content Safety Check: invoked ONLY after authentication, audit proof, and repository ownership succeed on publish (!dryRun)
+    if (ownershipVerified && context.env.AI && !safetyEval.holdForAdminReview) {
+      safetyEval = await evaluateRepositoryContentSafety(safetyInput, {
+        aiBinding: context.env.AI,
+        runAiCheck: true
+      });
+      if (safetyEval.holdForAdminReview) {
+        auditReport.contentSafetyHold = true;
+        diagnostics.push({
+          code: 'CONTENT_SAFETY_HOLD',
+          severity: 'warning',
+          file: `${provider}:${owner}/${repo}`,
+          title: 'Queued for Moderator Content Review',
+          message: safetyEval.summary || 'Automated safety check flagged content for moderator review before public listing.'
+        });
+        auditReport.warningsCount = diagnostics.filter(d => d.severity === 'warning').length;
+      }
+      if (safetyEval.autoContentWarnings.length > 0) {
+        const mergedWarns = Array.from(new Set([...resolvedWarnings, ...safetyEval.autoContentWarnings]));
+        resolvedWarnings.splice(0, resolvedWarnings.length, ...mergedWarns);
+        packagePayload.content_warnings = resolvedWarnings.length > 0 ? resolvedWarnings : undefined;
+      }
     }
 
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)

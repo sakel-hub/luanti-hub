@@ -251,16 +251,15 @@ export class SeoService {
       const realReviewCount = threadCounts
         ? (threadCounts.positive || 0) + (threadCounts.neutral || 0) + (threadCounts.negative || 0)
         : 0;
-      const resolvedCount = realReviewCount > 0
-        ? realReviewCount
-        : Math.max(1, Math.round((pkg.downloads || 100) / 50));
-      softwareAppSchema['aggregateRating'] = {
-        '@type': 'AggregateRating',
-        ratingValue: String(pkg.score),
-        bestRating: '5',
-        worstRating: '1',
-        ratingCount: String(resolvedCount)
-      };
+      if (realReviewCount > 0) {
+        softwareAppSchema['aggregateRating'] = {
+          '@type': 'AggregateRating',
+          ratingValue: String(pkg.score),
+          bestRating: '5',
+          worstRating: '1',
+          ratingCount: String(realReviewCount)
+        };
+      }
     }
 
     const breadcrumbSchema = {

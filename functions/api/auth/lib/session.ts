@@ -1,13 +1,15 @@
 // Secure session cookie & admin role management using Web Crypto API
 import { fetchWithAnubisSupport } from '../../lib/upstream';
 
-const DEFAULT_SECRET = 'luantihub-super-secret-session-key-change-in-env-32bytes';
-
-async function getKey(secret: string): Promise<CryptoKey> {
+async function getKey(secret?: string): Promise<CryptoKey> {
+  const normalizedSecret = typeof secret === 'string' ? secret.trim() : '';
+  if (!normalizedSecret) {
+    throw new Error('SESSION_SECRET environment variable is required for cryptographic token operations');
+  }
   const enc = new TextEncoder();
   return crypto.subtle.importKey(
     'raw',
-    enc.encode(secret || DEFAULT_SECRET),
+    enc.encode(normalizedSecret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign', 'verify']
@@ -22,6 +24,7 @@ export interface SessionTokenClaims {
   provider?: string;
   role?: string;
   verified?: boolean;
+  dbPending?: boolean;
   exp?: number;
 }
 
@@ -77,7 +80,7 @@ function decodeUtf8Base64(b64: string): string {
 
 export async function createSessionToken(
   userId: string,
-  secret: string = DEFAULT_SECRET,
+  secret?: string,
   claims?: Partial<SessionTokenClaims>
 ): Promise<string> {
   const payloadObj: Record<string, any> = {
@@ -90,6 +93,7 @@ export async function createSessionToken(
   if (claims?.provider) payloadObj['p'] = String(claims.provider).slice(0, 24);
   if (claims?.role) payloadObj['r'] = String(claims.role).slice(0, 20);
   if (typeof claims?.verified === 'boolean') payloadObj['v'] = claims.verified ? 1 : 0;
+  if (claims?.dbPending) payloadObj['dp'] = 1;
 
   const payload = JSON.stringify(payloadObj);
   const enc = new TextEncoder();
@@ -102,7 +106,7 @@ export async function createSessionToken(
 
 export async function verifySessionTokenClaims(
   token: string,
-  secret: string = DEFAULT_SECRET
+  secret?: string
 ): Promise<SessionTokenClaims | null> {
   try {
     const [b64Payload, b64Sig] = token.split('.');
@@ -133,6 +137,7 @@ export async function verifySessionTokenClaims(
       provider: typeof data.p === 'string' && data.p ? data.p : undefined,
       role: typeof data.r === 'string' && data.r ? data.r : undefined,
       verified: data.v !== undefined ? Boolean(data.v) : undefined,
+      dbPending: data.dp === 1 ? true : undefined,
       exp: typeof data.exp === 'number' ? data.exp : undefined
     };
   } catch {
@@ -140,12 +145,12 @@ export async function verifySessionTokenClaims(
   }
 }
 
-export async function verifySessionToken(token: string, secret: string = DEFAULT_SECRET): Promise<string | null> {
+export async function verifySessionToken(token: string, secret?: string): Promise<string | null> {
   const claims = await verifySessionTokenClaims(token, secret);
   return claims ? claims.userId : null;
 }
 
-export async function createAuditProofToken(repoKey: string, secret: string = DEFAULT_SECRET): Promise<string> {
+export async function createAuditProofToken(repoKey: string, secret?: string): Promise<string> {
   const payload = JSON.stringify({
     repoKey: repoKey.trim().toLowerCase(),
     exp: Date.now() + 15 * 60 * 1000 // 15 minutes
@@ -161,7 +166,7 @@ export async function createAuditProofToken(repoKey: string, secret: string = DE
 export async function verifyAuditProofToken(
   token: string | undefined,
   expectedRepoKey: string,
-  secret: string = DEFAULT_SECRET
+  secret?: string
 ): Promise<boolean> {
   try {
     if (!token) return false;
@@ -285,7 +290,7 @@ export function buildClearOAuthStateCookies(requestUrl: URL | string): string[] 
 
 export async function createOAuthStateToken(
   provider: string,
-  secret: string = DEFAULT_SECRET,
+  secret?: string,
   options?: { origin?: string; popup?: boolean }
 ): Promise<string> {
   const trustedOrigin =
@@ -310,7 +315,7 @@ export async function createOAuthStateToken(
 export async function parseOAuthStateToken(
   token: string | undefined | null,
   expectedProvider: string,
-  secret: string = DEFAULT_SECRET
+  secret?: string
 ): Promise<{ valid: boolean; origin?: string; popup?: boolean }> {
   try {
     if (!token) return { valid: false };
@@ -343,7 +348,7 @@ export async function parseOAuthStateToken(
 export async function verifyOAuthStateToken(
   token: string | undefined | null,
   expectedProvider: string,
-  secret: string = DEFAULT_SECRET
+  secret?: string
 ): Promise<boolean> {
   const parsed = await parseOAuthStateToken(token, expectedProvider, secret);
   return parsed.valid;
@@ -442,17 +447,38 @@ export function isProtectedAdminHandle(username: string, provider?: string, admi
   return false;
 }
 
+function inferRepoForgeProvider(repoUrlRaw?: string): string {
+  const repoUrl = String(repoUrlRaw || '').trim();
+  if (!repoUrl) return '';
+  try {
+    const host = new URL(repoUrl).hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'github.com' || host.endsWith('.github.com')) return 'github';
+    if (host === 'codeberg.org' || host.endsWith('.codeberg.org')) return 'codeberg';
+    if (host === 'gitlab.com' || host.endsWith('.gitlab.com')) return 'gitlab';
+    if (host === 'git.minetest.land' || host === 'mese.hub') return 'mesehub';
+    if (host === 'bitbucket.org' || host.endsWith('.bitbucket.org')) return 'bitbucket';
+    return 'custom';
+  } catch {
+    const lower = repoUrl.toLowerCase();
+    if (lower.includes('github.com')) return 'github';
+    if (lower.includes('codeberg.org')) return 'codeberg';
+    if (lower.includes('gitlab.com')) return 'gitlab';
+    if (lower.includes('minetest.land') || lower.includes('mese.hub')) return 'mesehub';
+    if (lower.includes('bitbucket.org')) return 'bitbucket';
+    return 'custom';
+  }
+}
+
 export function inferPackageProvider(pkgRow?: { provider?: string; repo_url?: string } | null): string {
   const explicit = String(pkgRow?.provider || '').trim().toLowerCase();
-  if (explicit && ['github', 'codeberg', 'gitlab', 'mesehub', 'contentdb'].includes(explicit)) {
+  if (
+    explicit &&
+    ['github', 'codeberg', 'gitlab', 'mesehub', 'contentdb', 'bitbucket', 'custom'].includes(explicit)
+  ) {
     return explicit;
   }
-  const repoUrl = String(pkgRow?.repo_url || '').trim().toLowerCase();
-  if (repoUrl.includes('github.com')) return 'github';
-  if (repoUrl.includes('codeberg.org')) return 'codeberg';
-  if (repoUrl.includes('gitlab.com')) return 'gitlab';
-  if (repoUrl.includes('minetest.land')) return 'mesehub';
-  return 'contentdb';
+  const fromRepo = inferRepoForgeProvider(pkgRow?.repo_url);
+  return fromRepo || 'contentdb';
 }
 
 /**
@@ -460,12 +486,20 @@ export function inferPackageProvider(pkgRow?: { provider?: string; repo_url?: st
  * Prevents cross-forge username spoofing and rejects unverified direct-handle sessions:
  * - Requires at least one verified identity (`verified === 1 | true`)
  * - Requires the verified identity to be on the EXACT forge provider where the package is hosted
- *   (or that `pkgRow.author_id === user.id` while holding a verified identity on that provider).
+ *   (or verified ContentDB ownership when the package is published on ContentDB).
  */
 export function verifyStrictPackageAuthorOwnership(
   user: { id?: string; username?: string } | null,
   identities: Array<{ provider?: string; username?: string; provider_username?: string; verified?: number | boolean }> = [],
-  pkgRow: { author_id?: string; author_name?: string; provider?: string; repo_url?: string } | null,
+  pkgRow: {
+    author_id?: string;
+    author_name?: string;
+    provider?: string;
+    repo_url?: string;
+    tags?: string | string[];
+    contentdb_downloads?: number;
+    has_contentdb?: boolean;
+  } | null,
   fallbackAuthor?: string
 ): boolean {
   if (!user || !user.id || !pkgRow) return false;
@@ -482,6 +516,7 @@ export function verifyStrictPackageAuthorOwnership(
   }
 
   const pkgProvider = inferPackageProvider(pkgRow);
+  const repoForgeProvider = inferRepoForgeProvider(pkgRow.repo_url);
   const pkgAuthor = String(pkgRow.author_name || fallbackAuthor || '').trim().toLowerCase();
   let repoOwner = '';
   if (pkgRow.repo_url) {
@@ -495,14 +530,43 @@ export function verifyStrictPackageAuthorOwnership(
     }
   }
 
-  // 2. Verified identity on the exact package forge provider matching repoOwner or pkgAuthor
-  const hasExactProviderMatch = verifiedIdentities.some(id => {
+  const rawTags = typeof pkgRow.tags === 'string' ? pkgRow.tags.toLowerCase() : Array.isArray(pkgRow.tags) ? pkgRow.tags.join(',').toLowerCase() : '';
+  const isDualOrOfficialContentDb =
+    pkgProvider === 'contentdb' ||
+    pkgRow.has_contentdb === true ||
+    Number(pkgRow.contentdb_downloads || 0) > 0 ||
+    rawTags.includes('"contentdb"') ||
+    rawTags.includes('"official"');
+
+  // 2. Verified identity on the exact package forge provider (never `'custom'`), or verified ContentDB/repo-forge identity on official ContentDB packages
+  return verifiedIdentities.some(id => {
     const idProvider = String(id.provider || '').trim().toLowerCase();
     const idUsername = String(id.username || id.provider_username || '').trim().toLowerCase();
-    if (!idProvider || !idUsername || idProvider !== pkgProvider) return false;
-    return (pkgAuthor && idUsername === pkgAuthor) || (repoOwner && idUsername === repoOwner);
+    if (!idProvider || !idUsername) return false;
+
+    if (pkgProvider !== 'custom' && idProvider === pkgProvider) {
+      if ((pkgAuthor && idUsername === pkgAuthor) || (repoOwner && idUsername === repoOwner)) {
+        return true;
+      }
+    }
+
+    if (isDualOrOfficialContentDb) {
+      if (idProvider === 'contentdb' && pkgAuthor && idUsername === pkgAuthor) {
+        return true;
+      }
+      if (
+        repoForgeProvider &&
+        repoForgeProvider !== 'custom' &&
+        idProvider === repoForgeProvider &&
+        repoOwner &&
+        idUsername === repoOwner
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   });
-  return hasExactProviderMatch;
 }
 
 /**
@@ -537,6 +601,35 @@ export function verifyStrictAuthorPortfolioOwnership(
  * and automatically merges duplicate suffixed accounts (e.g. `username_gi` -> `username`)
  * or orphaned `user_identities` rows whose parent `users` row was deleted.
  */
+async function canSafelyAutoMergeAccounts(db: any, primaryId: string, secondaryId: string): Promise<boolean> {
+  if (!db || !primaryId || !secondaryId || primaryId === secondaryId) return false;
+  try {
+    if (String(secondaryId).startsWith('ext_')) {
+      const secVerified = await db.prepare(
+        `SELECT COUNT(*) as cnt FROM user_identities WHERE user_id = ? AND verified = 1`
+      ).bind(secondaryId).first();
+      if (!secVerified || Number(secVerified.cnt) === 0) {
+        return true;
+      }
+    }
+    const sharedIdentity = await db.prepare(
+      `SELECT 1 as ok
+       FROM user_identities p
+       JOIN user_identities s
+         ON LOWER(p.provider) = LOWER(s.provider)
+        AND p.provider_user_id = s.provider_user_id
+       WHERE p.user_id = ?
+         AND s.user_id = ?
+         AND p.verified = 1
+         AND s.verified = 1
+       LIMIT 1`
+    ).bind(primaryId, secondaryId).first();
+    return Boolean(sharedIdentity?.ok);
+  } catch {
+    return false;
+  }
+}
+
 export async function reconcileAndMergeUserAccount(
   db: any,
   currentUserId: string,
@@ -558,25 +651,36 @@ export async function reconcileAndMergeUserAccount(
   if (!user) {
     try {
       const orphanedIdentity = await db.prepare(
-        `SELECT * FROM user_identities WHERE user_id = ? ORDER BY verified DESC, id ASC LIMIT 1`
+        `SELECT * FROM user_identities WHERE user_id = ? AND verified = 1 ORDER BY id ASC LIMIT 1`
       ).bind(currentUserId).first();
 
       if (orphanedIdentity && orphanedIdentity.provider_username) {
         const orphanedUsername = String(orphanedIdentity.provider_username).trim();
         const orphanedBase = orphanedUsername.replace(/_(gi|gl|co|cd|me)$/i, '');
 
-        const existingCanonical = await db.prepare(
-          `SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) LIMIT 1`
-        ).bind(orphanedBase, orphanedUsername).first();
+        const existingBySameProviderId = await db.prepare(
+          `SELECT u.*
+           FROM users u
+           JOIN user_identities ui ON ui.user_id = u.id
+           WHERE LOWER(ui.provider) = LOWER(?)
+             AND ui.provider_user_id = ?
+             AND ui.verified = 1
+             AND u.id != ?
+           LIMIT 1`
+        ).bind(orphanedIdentity.provider, orphanedIdentity.provider_user_id, currentUserId).first();
 
-        if (existingCanonical) {
-          await mergeSecondaryUserIntoPrimary(db, existingCanonical.id, currentUserId);
-          user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(existingCanonical.id).first();
+        if (existingBySameProviderId) {
+          await mergeSecondaryUserIntoPrimary(db, existingBySameProviderId.id, currentUserId);
+          user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(existingBySameProviderId.id).first();
         } else {
+          const conflictingUser = await db.prepare(
+            `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+          ).bind(orphanedBase).first();
+          const safeUsername = conflictingUser ? `${orphanedBase}_${String(orphanedIdentity.provider || 'gh').slice(0, 2).toLowerCase()}` : orphanedBase;
           const avatarUrl = orphanedIdentity.avatar_url || `https://github.com/${orphanedBase}.png`;
           await db.prepare(
             `INSERT INTO users (id, username, display_name, avatar_url, role) VALUES (?, ?, ?, ?, 'user')`
-          ).bind(currentUserId, orphanedBase, orphanedBase, avatarUrl).run();
+          ).bind(currentUserId, safeUsername, orphanedBase, avatarUrl).run();
           user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(currentUserId).first();
         }
       }
@@ -599,8 +703,10 @@ export async function reconcileAndMergeUserAccount(
       ).bind(baseUsername, user.id).first();
 
       if (canonicalUser) {
-        await mergeSecondaryUserIntoPrimary(db, canonicalUser.id, user.id);
-        user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(canonicalUser.id).first();
+        if (await canSafelyAutoMergeAccounts(db, canonicalUser.id, user.id)) {
+          await mergeSecondaryUserIntoPrimary(db, canonicalUser.id, user.id);
+          user = await db.prepare(`SELECT * FROM users WHERE id = ?`).bind(canonicalUser.id).first();
+        }
       } else {
         // No other user owns the base username — rename suffixed username back to baseUsername
         await db.prepare(`UPDATE users SET username = ? WHERE id = ?`).bind(baseUsername, user.id).run();
@@ -608,7 +714,8 @@ export async function reconcileAndMergeUserAccount(
       }
     } else {
       // Current user is the canonical base user.
-      // Check if any suffixed duplicate accounts (`_gi`, `_gl`, `_co`, `_cd`, `_me`) exist for the same creator.
+      // Only merge suffixed duplicates (`_gi`, `_gl`, `_co`, `_cd`, `_me`) if they are unverified `ext_*` stubs
+      // or share a verified `(provider, provider_user_id)` with this user.
       const suffixedDuplicates = await db.prepare(
         `SELECT id, username FROM users
          WHERE id != ?
@@ -629,11 +736,13 @@ export async function reconcileAndMergeUserAccount(
       ).all();
 
       for (const dup of suffixedDuplicates.results || []) {
-        await mergeSecondaryUserIntoPrimary(db, user.id, dup.id);
+        if (dup?.id && (await canSafelyAutoMergeAccounts(db, user.id, String(dup.id)))) {
+          await mergeSecondaryUserIntoPrimary(db, user.id, String(dup.id));
+        }
       }
     }
 
-    // Reattach any orphaned user_identities rows matching this user's base handle whose user_id no longer exists in `users`
+    // Reattach orphaned user_identities only when they share a verified `(provider, provider_user_id)`
     if (user?.id && baseUsername) {
       const orphanedIdentities = await db.prepare(
         `SELECT DISTINCT ui.user_id
@@ -645,7 +754,7 @@ export async function reconcileAndMergeUserAccount(
       ).bind(user.id, baseUsername).all();
 
       for (const row of orphanedIdentities.results || []) {
-        if (row?.user_id) {
+        if (row?.user_id && (await canSafelyAutoMergeAccounts(db, user.id, String(row.user_id)))) {
           await mergeSecondaryUserIntoPrimary(db, user.id, String(row.user_id));
         }
       }
@@ -911,14 +1020,21 @@ export async function verifyProviderToken(
 }
 
 /**
- * Constant-time string equality check to prevent timing side-channels when comparing secrets.
+ * Constant-time string equality check (including padded constant-time length XOR)
+ * to prevent timing side-channels when comparing secrets.
  */
 export function timingSafeEqualStrings(a?: string | null, b?: string | null): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  if (a.length === 0 || b.length === 0 || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  if (a.length === 0 || b.length === 0) return false;
+  const enc = new TextEncoder();
+  const bytesA = enc.encode(a);
+  const bytesB = enc.encode(b);
+  const maxLen = Math.max(256, bytesA.length, bytesB.length);
+  let diff = bytesA.length ^ bytesB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const byteA = i < bytesA.length ? bytesA[i] : 0;
+    const byteB = i < bytesB.length ? bytesB[i] : 0;
+    diff |= byteA ^ byteB;
   }
   return diff === 0;
 }

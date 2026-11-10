@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  fetchWithAnubisSupport,
   safeDecodeParam,
   parseJsonArray,
   detectSpdxFromText,
@@ -36,6 +37,7 @@ import {
   sanitizeReleaseNotesText,
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES,
+  isUntrustedTunnelOrPrivateHost,
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
@@ -185,12 +187,15 @@ async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | 
     }
   }
 
+  if (isUntrustedTunnelOrPrivateHost(downloadUrl)) {
+    return undefined;
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 1800);
   try {
-    const res = await fetch(downloadUrl, {
+    const res = await fetchWithAnubisSupport(downloadUrl, {
       method: 'HEAD',
-      redirect: 'follow',
       signal: controller.signal,
       headers: {
         'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)'
@@ -1499,7 +1504,6 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               SET download_size = ?, file_size = ?
               WHERE LOWER(id) = LOWER(?)
             `).bind(repoEst.downloadSize, repoEst.fileSize, d1Pkg.id).run().catch(() => {});
-            await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY]).catch(() => {});
           }
         }
       }
@@ -1708,6 +1712,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         releases_list: bundledReleases,
         reviews_list: bundledReviews
       };
+
+      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, isLite ? 1800 : 600);
 
       return new Response(JSON.stringify(pureGitPayload), {
         headers: {
@@ -2385,11 +2391,20 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     };
 
     // If package is not yet in D1 (e.g., ContentDB-sourced package being customized on LuantiHub),
-    // verify ownership against upstream metadata or verified identity and seed a D1 row (with offline fallback).
+    // verify ownership strictly against authoritative upstream metadata (never untrusted body.repo_url).
     if (!pkgRow) {
       const encodedAuthor = encodeURIComponent(author);
       const encodedName = encodeURIComponent(name);
-      const upstreamPkg = await fetchUpstreamJsonCached(`/api/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
+      const upstreamPkg = await fetchUpstreamJsonCached<any>(`/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
+      if (!upstreamPkg && !isAdmin) {
+        return Response.json({
+          error: 'Package not found in LuantiHub or official ContentDB registry.'
+        }, { status: 404 });
+      }
+      const trustedUpstreamRepo =
+        upstreamPkg && typeof (upstreamPkg.repo || upstreamPkg.repo_url) === 'string'
+          ? normalizeGitRepoInputUrl(String(upstreamPkg.repo || upstreamPkg.repo_url).trim()) || ''
+          : '';
       const seedPkg: any = upstreamPkg || {
         author,
         name,
@@ -2397,7 +2412,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         type: typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : 'mod',
         short_description: typeof body.short_desc === 'string' ? body.short_desc.trim() : '',
         long_description: '',
-        repo: typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
+        repo: isAdmin && typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
         license: typeof body.license === 'string' && body.license.trim() ? body.license.trim() : 'MIT',
         media_license: typeof body.media_license === 'string' && body.media_license.trim() ? body.media_license.trim() : 'CC-BY-SA-4.0',
         thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? (sanitizePackageImageUrl(body.thumbnail.trim()) || null) : null,
@@ -2407,8 +2422,9 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         id: `${seedPkg.author || author}/${seedPkg.name || name}`,
         author_name: seedPkg.author || author,
         name: seedPkg.name || name,
-        repo_url: seedPkg.repo || '',
+        repo_url: upstreamPkg ? trustedUpstreamRepo : (isAdmin ? seedPkg.repo || '' : ''),
         provider: 'contentdb',
+        has_contentdb: Boolean(upstreamPkg),
         type: seedPkg.type || 'mod',
         tags: JSON.stringify(Array.isArray(seedPkg.tags) ? seedPkg.tags : [])
       };
@@ -2457,9 +2473,24 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
     }
 
-    const isOwner =
+    let isOwner =
       isAdmin ||
       verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author);
+
+    if (!isOwner && identities.some((i: any) => i.verified && i.provider === 'contentdb')) {
+      const upstreamCheck = await fetchUpstreamJsonCached<any>(
+        `/packages/${encodeURIComponent(pkgRow.author_name || author)}/${encodeURIComponent(pkgRow.name || name)}/`,
+        300
+      ).catch(() => null);
+      if (upstreamCheck && typeof upstreamCheck === 'object' && upstreamCheck.name) {
+        isOwner = verifyStrictPackageAuthorOwnership(
+          user,
+          identities,
+          { ...pkgRow, has_contentdb: true },
+          author
+        );
+      }
+    }
 
     if (!isOwner) {
       return Response.json({
@@ -2472,7 +2503,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     let cleanedCustomTags: string[] = [];
 
     if (Array.isArray(body.tags)) {
-      const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+      const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'custom', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
       cleanedCustomTags = body.tags
         .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
         .filter(t => Boolean(t) && !systemTagSet.has(t))

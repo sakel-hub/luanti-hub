@@ -111,7 +111,7 @@ import {
                     appImgFallback
                     [alt]="slidePkg.title"
                     [attr.fetchpriority]="idx === 0 ? 'high' : 'low'"
-                    loading="eager"
+                    [attr.loading]="idx === currentIndex() || idx === (currentIndex() + 1) % showcase().length ? 'eager' : 'lazy'"
                     [attr.decoding]="idx === 0 ? 'sync' : 'async'"
                     (load)="onSlideImageLoad($event, idx)"
                     [class]="idx === currentIndex() ? 'w-full h-full object-cover object-center scale-100 transition-transform duration-1000 ease-out' : 'w-full h-full object-cover object-center scale-105 transition-transform duration-1000 ease-out'"

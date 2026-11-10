@@ -92,20 +92,45 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ).bind(identity.userId, identity.userId).run();
     }
 
+    const VALID_PKG_ID_RE = /^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,100}$/;
+
     if (body.action === 'add' && body.packageId) {
+      const cleanId = String(body.packageId).trim();
+      if (!VALID_PKG_ID_RE.test(cleanId)) {
+        return Response.json({ error: 'Invalid package identifier.' }, { status: 400 });
+      }
       await context.env.DB.prepare(
         `INSERT OR IGNORE INTO user_favorites (user_id, package_id) VALUES (?, ?)`
-      ).bind(identity.userId, body.packageId).run();
+      ).bind(identity.userId, cleanId).run();
     } else if (body.action === 'remove' && body.packageId) {
+      const cleanId = String(body.packageId).trim();
+      if (!VALID_PKG_ID_RE.test(cleanId)) {
+        return Response.json({ error: 'Invalid package identifier.' }, { status: 400 });
+      }
       await context.env.DB.prepare(
         `DELETE FROM user_favorites WHERE user_id = ? AND LOWER(package_id) = LOWER(?)`
-      ).bind(identity.userId, body.packageId).run();
+      ).bind(identity.userId, cleanId).run();
     } else if (body.action === 'sync' && Array.isArray(body.packageIds)) {
-      for (const pkgId of body.packageIds.slice(0, 200)) {
-        if (pkgId && typeof pkgId === 'string' && pkgId.includes('/')) {
-          await context.env.DB.prepare(
+      const validIds = Array.from(
+        new Set(
+          body.packageIds
+            .slice(0, 200)
+            .map((p) => (typeof p === 'string' ? p.trim() : ''))
+            .filter((p) => VALID_PKG_ID_RE.test(p))
+        )
+      );
+      if (validIds.length > 0) {
+        const stmts = validIds.map((pkgId) =>
+          context.env.DB.prepare(
             `INSERT OR IGNORE INTO user_favorites (user_id, package_id) VALUES (?, ?)`
-          ).bind(identity.userId, pkgId).run();
+          ).bind(identity.userId, pkgId)
+        );
+        if (typeof context.env.DB.batch === 'function') {
+          await context.env.DB.batch(stmts);
+        } else {
+          for (const stmt of stmts) {
+            await stmt.run();
+          }
         }
       }
     }

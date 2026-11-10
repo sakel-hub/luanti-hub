@@ -57,15 +57,29 @@ export async function onRequestGet(context: {
     try {
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       const baseAuthor = author.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      const depCols = `id, author_name, name, provider, tags, dependencies, optional_dependencies, provides`;
       d1Pkg = await context.env.DB.prepare(
-        `SELECT * FROM packages
-         WHERE LOWER(id) = LOWER(?)
-            OR (
-                 (LOWER(author_name) = LOWER(?) OR LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = ?)
-                 AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
-               )
-         LIMIT 1`
-      ).bind(pkgId, author, baseAuthor, name, sanitizedName).first();
+        `SELECT ${depCols} FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+      ).bind(pkgId).first().catch(() =>
+        context.env!.DB.prepare(
+          `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+        ).bind(pkgId).first()
+      );
+      if (!d1Pkg) {
+        d1Pkg = await context.env.DB.prepare(
+          `SELECT ${depCols} FROM packages
+           WHERE (LOWER(author_name) = LOWER(?) OR LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = ?)
+             AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+           LIMIT 1`
+        ).bind(author, baseAuthor, name, sanitizedName).first().catch(() =>
+          context.env!.DB.prepare(
+            `SELECT * FROM packages
+             WHERE (LOWER(author_name) = LOWER(?) OR LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = ?)
+               AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+             LIMIT 1`
+          ).bind(author, baseAuthor, name, sanitizedName).first()
+        );
+      }
     } catch {
       // Proceed below
     }

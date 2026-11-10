@@ -1677,6 +1677,23 @@
           if (!prefs || prefs.notificationsEnabled !== false) {
             const title = String(payload.title || 'LuantiHub');
             const tag = String(payload.tag || `lh-push-${Date.now()}`);
+            const existingSeenTags = Array.isArray(state.seenTags) ? state.seenTags : [];
+            if (payload.tag && existingSeenTags.includes(tag)) {
+              const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+              const hasVisibleWindow = allClients.some((c) => Boolean(c && (c.focused || c.visibilityState === 'visible')));
+              if (!hasVisibleWindow) {
+                await self.registration.showNotification(title, {
+                  body: String(payload.body || ''),
+                  icon: payload.icon || '/icons/icon-192x192.png',
+                  badge: payload.badge || '/icons/icon-72x72.png',
+                  tag,
+                  renotify: false,
+                  silent: true,
+                  data: payload.data || { packageId: payload.packageId, ctaUrl: payload.url }
+                });
+              }
+              return;
+            }
             await self.registration.showNotification(title, {
               body: String(payload.body || ''),
               icon: payload.icon || '/icons/icon-192x192.png',
@@ -1684,8 +1701,12 @@
               tag,
               data: payload.data || { packageId: payload.packageId, ctaUrl: payload.url }
             });
+            const nextSeenTags = Array.from(new Set([...existingSeenTags, tag])).slice(-300);
             const nextBadgeCount = Math.max(0, Number(state.unreadBadgeCount || 0)) + 1;
-            await writeNotifStateFromSw({ unreadBadgeCount: nextBadgeCount });
+            await writeNotifStateFromSw({
+              unreadBadgeCount: nextBadgeCount,
+              seenTags: nextSeenTags
+            });
             await setSwAppBadge(nextBadgeCount);
           }
         } else {

@@ -19,7 +19,8 @@ import {
   ensureExtendedPackageColumns,
   invalidateEdgeCacheKeys,
   sanitizePublicErrorMessage,
-  parseBadgeTagsArray
+  parseBadgeTagsArray,
+  isUntrustedTunnelOrPrivateHost
 } from '../lib/upstream';
 import {
   syncVerifiedAuthorGitPackages,
@@ -79,10 +80,14 @@ function buildFallbackUserFromClaims(
       verified: claims.verified !== false
     }
   ];
-  const isAdmin = checkIsAdmin(
-    { username: inferredUsername, role: claims.role },
-    identities,
-    env.ADMIN_USERS
+  const isAdmin = Boolean(
+    env.ADMIN_USERS &&
+    env.ADMIN_USERS.trim() &&
+    checkIsAdmin(
+      { username: inferredUsername, role: 'user' },
+      identities,
+      env.ADMIN_USERS
+    )
   );
 
   return {
@@ -153,8 +158,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
       : await reconcileAndMergeUserAccount(context.env.DB, userId);
 
     if (!user) {
-      if (!deletedUserIdsInIsolate.has(userId)) {
-        // If the token carries verified OAuth/PAT claims (e.g. minted while D1 was over quota), keep the session alive
+      if (claims.dbPending && !deletedUserIdsInIsolate.has(userId)) {
         const fallbackUser = buildFallbackUserFromClaims(claims, context.env);
         if (fallbackUser) {
           return Response.json(
@@ -163,7 +167,8 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
           );
         }
       }
-
+      // D1 succeeded and confirmed no user row exists (deleted or invalidated account).
+      // Clear session cookies across all isolates instead of resurrecting from JWT claims.
       const clearHeaders = new Headers({ 'Cache-Control': 'no-store' });
       for (const c of buildClearSessionCookies(context.request.url)) {
         clearHeaders.append('Set-Cookie', c);
@@ -474,6 +479,7 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
     );
     const role = isAdmin ? 'admin' : 'user';
     let userId = `usr_${verifiedUsername.toLowerCase()}`;
+    let dbWriteFailed = !context.env.DB;
 
     if (context.env.DB) {
       try {
@@ -578,6 +584,7 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
           userId = String(reconciledUser.id);
         }
       } catch (dbErr) {
+        dbWriteFailed = true;
         console.error('[me.ts POST] Proceeding with verified token claims fallback due to D1 error:', dbErr);
       }
     }
@@ -599,7 +606,8 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
       avatarUrl,
       provider,
       role,
-      verified: isCryptographicallyVerified
+      verified: isCryptographicallyVerified,
+      ...(dbWriteFailed ? { dbPending: true } : {})
     });
 
     return new Response(JSON.stringify({ success: true, userId, verified: isCryptographicallyVerified }), {
@@ -636,7 +644,10 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
     const displayName = (body.display_name || '').trim().slice(0, 60);
     const bio = (body.bio || '').trim().slice(0, 500);
     const rawAvatarUrl = (body.avatar_url || '').trim().slice(0, 500);
-    const avatarUrl = /^https:\/\//i.test(rawAvatarUrl) ? rawAvatarUrl : '';
+    const avatarUrl =
+      /^https:\/\//i.test(rawAvatarUrl) && !isUntrustedTunnelOrPrivateHost(rawAvatarUrl)
+        ? rawAvatarUrl
+        : '';
 
     await context.env.DB.prepare(`
       UPDATE users

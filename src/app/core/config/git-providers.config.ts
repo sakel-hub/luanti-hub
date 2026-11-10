@@ -131,75 +131,119 @@ export function isAuthLoginGitProvider(provider?: string | null): provider is Au
 }
 
 /**
- * Matches ephemeral reverse-tunnel domains (Cloudflare Quick Tunnels `*.trycloudflare.com`,
- * disposable Argo tunnels `*.cfargotunnel.com`, ngrok, localtunnel, serveo, localhost.run,
- * pinggy, bore, zrok, pagekite, telebit, packetriot) and OAST / SSRF callback catchers
- * (`webhook.site`, `oastify.com`, `interact.sh`, `burpcollaborator.net`, `requestbin.com`, `pipedream.net`).
+ * Single source of truth for ephemeral reverse-tunnel domains (Cloudflare Quick Tunnels `*.trycloudflare.com`,
+ * disposable Argo tunnels `*.cfargotunnel.com`, Tailscale Funnel `*.ts.net`, VS Code Dev Tunnels `*.devtunnels.ms`,
+ * ngrok, localtunnel, serveo, localhost.run, pinggy, bore, zrok, pagekite, localxpose, expose, telebit,
+ * packetriot, playit.gg, cloud IDE port-forwards), OAST / SSRF callback catchers (`webhook.site`, `oastify.com`,
+ * `interact.sh`, `burpcollaborator.net`, `requestbin`, `pipedream.net`, `smee.io`, `beeceptor.com`,
+ * `canarytokens.com`, `requestcatcher.com`), and wildcard DNS-rebinding domains (`nip.io`, `sslip.io`, `xip.io`,
+ * `localtest.me`, `lvh.me`, `vcap.me`, `traefik.me`, `rbndr.us`).
  */
-export const EPHEMERAL_TUNNEL_HOST_PATTERN =
-  /(?:^|\.)(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|pagekite\.me|expose\.dev|telebit\.io|pktriot\.net|packetriot\.net|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh|oast\.(?:pro|live|site|online|fun|me)|requestbin\.(?:com|net)|pipedream\.net)$/i;
+export const EPHEMERAL_TUNNEL_DOMAIN_SOURCE =
+  'trycloudflare\\.com|cfargotunnel\\.com|ngrok(?:-free)?\\.(?:app|io|dev|pro|pizza)|loca\\.lt|localtunnel\\.me|serveo\\.net|localhost\\.run|lhr\\.life|pinggy\\.(?:io|link|online)|bore\\.pub|zrok\\.io|pagekite\\.me|expose\\.(?:dev|sh)|sharedwithexpose\\.com|localxpose\\.io|lxpose\\.com|telebit\\.io|pktriot\\.net|packetriot\\.net|playit\\.gg|ply\\.gg|tunwg\\.com|ts\\.net|devtunnels\\.ms|githubpreview\\.dev|app\\.github\\.dev|gitpod\\.io|repl\\.co|replit\\.(?:dev|app)|glitch\\.me|webhook\\.site|burpcollaborator\\.net|oastify\\.com|interact\\.sh|oast\\.(?:pro|live|site|online|fun|me)|requestbin\\.(?:com|net)|pipedream\\.net|smee\\.io|beeceptor\\.com|canarytokens\\.com|requestcatcher\\.com|nip\\.io|sslip\\.io|xip\\.io|localtest\\.me|lvh\\.me|vcap\\.me|traefik\\.me|rbndr\\.us';
+
+export const EPHEMERAL_TUNNEL_HOST_PATTERN = new RegExp(
+  `(?:^|\\.)(?:${EPHEMERAL_TUNNEL_DOMAIN_SOURCE})$`,
+  'i'
+);
+
+export const INBOUND_TUNNEL_SUBSTRING_PATTERN = new RegExp(
+  `(?:^|[./:@\\s"=])(?:[a-z0-9-]+\\.)*(?:${EPHEMERAL_TUNNEL_DOMAIN_SOURCE})\\b`,
+  'i'
+);
+
+export const LUA_TUNNEL_C2_PATTERN = new RegExp(
+  `\\b((?:[a-z0-9-]+\\.)*(?:${EPHEMERAL_TUNNEL_DOMAIN_SOURCE}))\\b`,
+  'i'
+);
+
+/**
+ * Defunct or permanently offline Git hosting domains that should not be probed or treated as live syncable forges.
+ */
+export const DEFUNCT_GIT_HOSTS: readonly string[] = [
+  'notabug.org',
+  'gitea.your-land.de',
+  'repo.or.cz'
+];
 
 /**
  * Returns `true` if the given URL or hostname points to:
- * 1. An ephemeral reverse tunnel (`*.trycloudflare.com`, `*.ngrok-free.app`, `*.loca.lt`, etc.) or OAST callback catcher.
- * 2. A loopback, RFC1918 private network, link-local / cloud metadata (`169.254.169.254`), IPv6 private/loopback, or raw IP literal host.
- * 3. Non-HTTP(S) schemes when a full URL is provided.
+ * 1. An ephemeral reverse tunnel (`*.trycloudflare.com`, `*.ngrok-free.app`, `*.ts.net`, etc.), OAST callback catcher, or DNS-rebinding domain.
+ * 2. A loopback, RFC1918 private network, CGNAT (`100.64.0.0/10`), link-local / cloud metadata (`169.254.169.254`), IPv6/IPv4-mapped literal, or any raw IP literal (including octal `0177.0.0.1`, hex `0x7f.0.0.1`, integer, or shorthand `127.1`).
+ * 3. Non-HTTP(S) schemes or credential-bearing userinfo URLs.
  */
 export function isUntrustedTunnelOrPrivateHost(urlOrHost?: string | null): boolean {
   if (!urlOrHost || typeof urlOrHost !== 'string') return true;
   const trimmed = urlOrHost.trim();
-  if (!trimmed) return true;
+  if (!trimmed || /[\s\u0000-\u001f\u007f\\]/.test(trimmed)) return true;
 
-  let host = trimmed.toLowerCase();
-  if (trimmed.includes('://') || trimmed.startsWith('//')) {
-    try {
-      const parsed = new URL(trimmed.startsWith('//') ? `https:${trimmed}` : trimmed);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        return true;
-      }
-      host = parsed.hostname.toLowerCase();
-    } catch {
+  // Reject scheme-less relative paths (`/uploads/foo.png`) which are not valid outbound hosts
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+    return true;
+  }
+
+  // Bare unbracketed IPv6 literal (e.g. `::1`, `fe80::1`, `::ffff:127.0.0.1`)
+  if (!trimmed.includes('://') && !trimmed.startsWith('//')) {
+    const authorityOnly = trimmed.split('/')[0] || '';
+    if (
+      !authorityOnly.startsWith('[') &&
+      authorityOnly.includes(':') &&
+      authorityOnly.indexOf(':') !== authorityOnly.lastIndexOf(':')
+    ) {
       return true;
     }
-  } else {
-    // Strip path/query/port from bare host inputs while preserving IPv6 brackets
-    host = host.split('/')[0].split('?')[0].split('#')[0];
-    if (host.startsWith('[')) {
-      const closeBracket = host.indexOf(']');
-      if (closeBracket !== -1) {
-        host = host.slice(1, closeBracket);
-      }
-    } else if (host.includes(':') && host.indexOf(':') === host.lastIndexOf(':')) {
-      host = host.split(':')[0];
+  }
+
+  let host = '';
+  try {
+    const candidateUrl = trimmed.includes('://')
+      ? trimmed
+      : trimmed.startsWith('//')
+        ? `https:${trimmed}`
+        : `http://${trimmed}`;
+    const parsed = new URL(candidateUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return true;
     }
+    if (parsed.username || parsed.password) {
+      return true;
+    }
+    host = parsed.hostname.toLowerCase();
+  } catch {
+    return true;
   }
 
   host = host.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!host) return true;
 
-  // 1. Localhost & internal DNS suffixes
+  // 1. Localhost, single-label internal hostnames & internal DNS suffixes
   if (
+    !host.includes('.') ||
     host === 'localhost' ||
     host.endsWith('.localhost') ||
     host.endsWith('.local') ||
     host.endsWith('.internal') ||
     host.endsWith('.home.arpa') ||
-    host.endsWith('.lan')
+    host.endsWith('.lan') ||
+    host.endsWith('.corp') ||
+    host.endsWith('.intranet') ||
+    host.endsWith('.arpa')
   ) {
     return true;
   }
 
-  // 2. IPv6 loopback / unspecified / link-local / unique-local (`::1`, `::`, `fe80::/10`, `fc00::/7`, IPv4-mapped `::ffff:...`)
+  // 2. Any IPv6 literal (`::1`, `::`, `fe80::/10`, `fc00::/7`, WHATWG hex IPv4-mapped `::ffff:7f00:1`, etc.)
   if (host.includes(':')) {
     return true;
   }
 
-  // 3. IPv4 literal (loopback 127.0.0.0/8, RFC1918 10/8, 172.16/12, 192.168/16, link-local/cloud metadata 169.254/16, or any raw IPv4 literal)
+  // 3. Any canonicalized or raw IPv4 literal (loopback 127/8, 0.0.0.0/8, RFC1918 10/8, 172.16/12, 192.168/16,
+  // CGNAT 100.64/10, link-local/metadata 169.254/16, benchmarking 198.18/15, multicast 224/4+, or raw IP hosts)
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || /^0x[0-9a-f]+$/i.test(host) || /^\d+$/.test(host)) {
     return true;
   }
 
-  // 4. Ephemeral reverse tunnels (Cloudflare Quick Tunnel `*.trycloudflare.com`, ngrok, etc.) & OAST domains
+  // 4. Ephemeral reverse tunnels, cloud IDE port-forwards, OAST catchers & DNS-rebinding domains
   if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(host)) {
     return true;
   }
@@ -754,9 +798,9 @@ export function toCanonicalContentDbUploadUrl(rawUrl?: string | null): string | 
 /**
  * Formats a ContentDB image URL using ContentDB's BunnyCDN Optimizer query parameters
  * (`luanti-org/contentdb` `app/uploads/bunny.py:get_Thumbnail_url` & `app/blueprints/thumbnails/__init__.py`):
- * - `'tile'`: `?width=500&aspect_ratio=3:2&format=png` (500×333 px sharp 2x Retina card/Top 10 tile)
- * - `'banner'`: `?width=1100&aspect_ratio=16:9&format=png` (1100×619 px widescreen Hero & Modal header)
- * - `'gallery'`: `?width=720&aspect_ratio=16:9&format=png` (720×405 px inline modal screenshot slide)
+ * - `'tile'`: `?width=500&aspect_ratio=3:2` (500×333 px sharp 2x Retina card/Top 10 tile, auto-negotiated WebP/AVIF)
+ * - `'banner'`: `?width=1100&aspect_ratio=16:9` (1100×619 px widescreen Hero & Modal header, auto-negotiated WebP/AVIF)
+ * - `'gallery'`: `?width=720&aspect_ratio=16:9` (720×405 px inline modal screenshot slide, auto-negotiated WebP/AVIF)
  * - `'original'`: uncropped `https://cdn.content.luanti.org/uploads/<filename>` (for Lightbox full-screen zoom)
  *
  * Non-ContentDB URLs (e.g. Git repository screenshots) are returned sanitized without modification.
@@ -771,11 +815,11 @@ export function formatContentDbCdnUrl(
   }
   switch (preset) {
     case 'tile':
-      return `${canonical}?width=500&aspect_ratio=3:2&format=png`;
+      return `${canonical}?width=500&aspect_ratio=3:2`;
     case 'banner':
-      return `${canonical}?width=1100&aspect_ratio=16:9&format=png`;
+      return `${canonical}?width=1100&aspect_ratio=16:9`;
     case 'gallery':
-      return `${canonical}?width=720&aspect_ratio=16:9&format=png`;
+      return `${canonical}?width=720&aspect_ratio=16:9`;
     case 'original':
     default:
       return canonical;
@@ -1096,6 +1140,8 @@ export function mergeScreenshotsPreferringGit(
  * Used across both Cloudflare Pages Functions (Top 10, catalog normalization) and Angular client
  * (Hero Banner, Home dashboard swimlane rows, Top 10, and personalized taste scoring).
  */
+const DEPRECATED_PKG_CACHE = new WeakMap<object, { sig: string; val: boolean }>();
+
 export function isPackageDeprecated(pkg?: {
   dev_state?: string | null;
   tags?: readonly any[] | string | null;
@@ -1104,48 +1150,61 @@ export function isPackageDeprecated(pkg?: {
   short_description?: string | null;
 } | null): boolean {
   if (!pkg || typeof pkg !== 'object') return false;
-  const devState = String(pkg.dev_state ?? '').trim().toUpperCase();
-  if (devState === 'DEPRECATED' || devState === 'ABANDONED' || devState === 'OBSOLETE') {
-    return true;
+  const tagSig = Array.isArray(pkg.tags) ? pkg.tags.join(',') : String(pkg.tags ?? '');
+  const sig = `${pkg.dev_state ?? ''}|${tagSig}|${pkg.title ?? ''}|${pkg.short_desc ?? pkg.short_description ?? ''}`;
+  const cached = DEPRECATED_PKG_CACHE.get(pkg);
+  if (cached && cached.sig === sig) {
+    return cached.val;
   }
 
-  let tags: readonly any[] = [];
-  if (Array.isArray(pkg.tags)) {
-    tags = pkg.tags;
-  } else if (typeof pkg.tags === 'string' && pkg.tags.trim().startsWith('[')) {
-    try {
-      const parsed = JSON.parse(pkg.tags);
-      if (Array.isArray(parsed)) tags = parsed;
-    } catch {
-      // Ignore malformed JSON tags
+  const compute = (): boolean => {
+    const devState = String(pkg.dev_state ?? '').trim().toUpperCase();
+    if (devState === 'DEPRECATED' || devState === 'ABANDONED' || devState === 'OBSOLETE') {
+      return true;
     }
-  }
-  for (const rawTag of tags) {
-    const lower = (typeof rawTag === 'string' ? rawTag : String(rawTag?.name ?? rawTag?.title ?? '')).trim().toLowerCase();
+
+    let tags: readonly any[] = [];
+    if (Array.isArray(pkg.tags)) {
+      tags = pkg.tags;
+    } else if (typeof pkg.tags === 'string' && pkg.tags.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(pkg.tags);
+        if (Array.isArray(parsed)) tags = parsed;
+      } catch {
+        // Ignore malformed JSON tags
+      }
+    }
+    for (const rawTag of tags) {
+      const lower = (typeof rawTag === 'string' ? rawTag : String(rawTag?.name ?? rawTag?.title ?? '')).trim().toLowerCase();
+      if (
+        lower === 'deprecated' ||
+        lower === 'abandoned' ||
+        lower === 'obsolete' ||
+        lower === 'unmaintained'
+      ) {
+        return true;
+      }
+    }
+
+    const title = String(pkg.title ?? '').trim();
+    const shortDesc = String(pkg.short_desc ?? pkg.short_description ?? '').trim();
+    const combined = `${title} ${shortDesc}`;
+    if (/\b(?:deprecated|abandoned|obsolete|unmaintained|discontinued)\b/i.test(combined)) {
+      return true;
+    }
     if (
-      lower === 'deprecated' ||
-      lower === 'abandoned' ||
-      lower === 'obsolete' ||
-      lower === 'unmaintained'
+      /\bnot\s+worked\s+on\s+anymore\b/i.test(combined) ||
+      /\b(?:do\s+not|don't)\s+recommend\s+using\s+it\s+anymore\b/i.test(combined) ||
+      /\bno\s+longer\s+(?:maintained|supported|updated|developed)\b/i.test(combined)
     ) {
       return true;
     }
-  }
+    return false;
+  };
 
-  const title = String(pkg.title ?? '').trim();
-  const shortDesc = String(pkg.short_desc ?? pkg.short_description ?? '').trim();
-  const combined = `${title} ${shortDesc}`;
-  if (/\b(?:deprecated|abandoned|obsolete|unmaintained|discontinued)\b/i.test(combined)) {
-    return true;
-  }
-  if (
-    /\bnot\s+worked\s+on\s+anymore\b/i.test(combined) ||
-    /\b(?:do\s+not|don't)\s+recommend\s+using\s+it\s+anymore\b/i.test(combined) ||
-    /\bno\s+longer\s+(?:maintained|supported|updated|developed)\b/i.test(combined)
-  ) {
-    return true;
-  }
-  return false;
+  const val = compute();
+  DEPRECATED_PKG_CACHE.set(pkg, { sig, val });
+  return val;
 }
 
 /**
@@ -1185,5 +1244,103 @@ export function normalizeRepoComparisonKey(urlStr?: string | null): string {
 }
 
 export const normalizeRepoKey = normalizeRepoComparisonKey;
+
+/**
+ * Checks whether a repository URL points to a live, supported Git forge repository root
+ * (excluding defunct hosts, ephemeral tunnels, private IPs, and non-repo subpages such as `/issues`, `/wiki`, `/releases`).
+ */
+export function isEligibleGitRepoUrl(rawUrl?: string | null): boolean {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return false;
+  if (isUntrustedTunnelOrPrivateHost(trimmed)) return false;
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    if (DEFUNCT_GIT_HOSTS.some(d => host === d || host.endsWith(`.${d}`))) {
+      return false;
+    }
+    const supportedHosts = [
+      'github.com',
+      'codeberg.org',
+      'gitlab.com',
+      'git.minetest.land',
+      'mese.hub',
+      'bitbucket.org',
+      'framagit.org',
+      'salsa.debian.org',
+      'gitgud.io',
+      'git.gay',
+      'sr.ht',
+      'git.sr.ht'
+    ];
+    const isSupportedForge =
+      supportedHosts.includes(host) ||
+      host.startsWith('git.') ||
+      host.includes('gitlab') ||
+      host.includes('codeberg') ||
+      host.includes('gitea') ||
+      host.includes('forgejo');
+    if (!isSupportedForge) return false;
+    const cleanPath = parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
+    const segments = cleanPath.split('/').filter(Boolean);
+    if (segments.length < 2) return false;
+    if (segments.length >= 3) {
+      const seg2 = (segments[2] || '').toLowerCase();
+      const seg3 = (segments[3] || '').toLowerCase();
+      if (
+        ['wiki', 'wikis', 'issues', 'pulls', 'pull', 'merge_requests', 'discussions', 'blob', 'raw', 'releases', 'archive'].includes(seg2) ||
+        (seg2 === '-' && ['wikis', 'issues', 'merge_requests', 'blob', 'raw', 'releases', 'archive'].includes(seg3))
+      ) {
+        return false;
+      }
+      if (seg2 === 'tree' && segments.length > 4) {
+        return false;
+      }
+      if (seg2 === '-' && seg3 === 'tree' && segments.length > 5) {
+        return false;
+      }
+      if (seg2 === 'src') {
+        if ((seg3 === 'branch' || seg3 === 'commit' || seg3 === 'tag') && segments.length > 5) {
+          return false;
+        }
+        if (seg3 !== 'branch' && seg3 !== 'commit' && seg3 !== 'tag' && segments.length > 4) {
+          return false;
+        }
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Builds the raw directory base URL for resolving relative Markdown image/link paths inside a Git repository.
+ */
+export function buildRawDirectoryBaseUrl(repoUrl?: string | null, branch = 'main'): string | undefined {
+  const trimmed = String(repoUrl || '').trim();
+  if (!trimmed || isUntrustedTunnelOrPrivateHost(trimmed)) return undefined;
+  const effectiveBranch = String(branch || 'main').trim() || 'main';
+  const detected = detectGitProviderFromUrl(trimmed);
+  if (detected) {
+    const { provider, host, owner, repo } = detected;
+    switch (provider) {
+      case 'github':
+        return `https://raw.githubusercontent.com/${owner}/${repo}/${effectiveBranch}`;
+      case 'codeberg':
+        return `https://codeberg.org/${owner}/${repo}/raw/branch/${effectiveBranch}`;
+      case 'mesehub':
+        return `https://git.minetest.land/${owner}/${repo}/raw/branch/${effectiveBranch}`;
+      case 'gitlab':
+        return `https://${host || 'gitlab.com'}/${owner}/${repo}/-/raw/${effectiveBranch}`;
+      case 'bitbucket':
+        return `https://bitbucket.org/${owner}/${repo}/raw/${effectiveBranch}`;
+      default:
+        break;
+    }
+  }
+  return `${trimmed.replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${effectiveBranch}`;
+}
+
 
 

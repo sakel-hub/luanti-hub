@@ -32,6 +32,14 @@ async function recordLuantiClientView(db: any, request: Request | undefined, pac
   const now = Date.now();
   const exp = recentClientViewWrites.get(key);
   if (exp && exp > now) return;
+  if (recentClientViewWrites.size >= 1000) {
+    for (const [k, v] of recentClientViewWrites) {
+      if (v <= now || recentClientViewWrites.size >= 800) {
+        recentClientViewWrites.delete(k);
+      }
+      if (recentClientViewWrites.size < 800) break;
+    }
+  }
   recentClientViewWrites.set(key, now + VIEW_WRITE_COOLDOWN_MS);
 
   try {
@@ -129,8 +137,13 @@ export async function onRequestGet(context: { request: Request; params: { author
     (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
     'en';
   const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
-  const forwardParams = new URLSearchParams(reqUrl.searchParams);
-  forwardParams.delete('lang');
+  const forwardParams = new URLSearchParams();
+  for (const allowedKey of ['protocol_version', 'formspec_version', 'engine_version']) {
+    const val = reqUrl.searchParams.get(allowedKey);
+    if (val && val.length <= 32 && /^[a-zA-Z0-9._-]+$/.test(val)) {
+      forwardParams.set(allowedKey, val);
+    }
+  }
   if (!forwardParams.has('formspec_version')) {
     forwardParams.set('formspec_version', '8');
   }
@@ -160,8 +173,13 @@ export async function onRequestGet(context: { request: Request; params: { author
       await ensureExtendedPackageColumns(context.env.DB);
       const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
       d1Pkg = await context.env.DB.prepare(
-        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
-      ).bind(pkgId, author, name, sanitizedName).first();
+        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
+      ).bind(pkgId).first();
+      if (!d1Pkg) {
+        d1Pkg = await context.env.DB.prepare(
+          `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?) LIMIT 1`
+        ).bind(author, name, sanitizedName).first();
+      }
 
       if (!d1Pkg) {
         const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');

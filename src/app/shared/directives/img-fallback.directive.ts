@@ -8,6 +8,7 @@ import { toProxiedGitImageIfNeeded } from '../../core/config/git-providers.confi
 export class ImgFallbackDirective implements OnChanges {
   @Input() fallbackThumbnail?: string;
   private failedFallbackSrc = '';
+  private lastPrimarySrc = '';
 
   constructor(private el: ElementRef<HTMLImageElement>) {}
 
@@ -30,6 +31,7 @@ export class ImgFallbackDirective implements OnChanges {
       this.onError();
       return;
     }
+    this.failedFallbackSrc = '';
     img.removeAttribute('data-lh-failed-src');
   }
 
@@ -57,6 +59,11 @@ export class ImgFallbackDirective implements OnChanges {
         currentSrc.endsWith(candidateFallback) ||
         img.src === candidateFallback ||
         img.src.endsWith(candidateFallback));
+
+    if (!isCurrentlyOnFallback && currentSrc && !currentSrc.endsWith('logo.svg') && currentSrc !== this.lastPrimarySrc) {
+      this.lastPrimarySrc = currentSrc;
+      this.failedFallbackSrc = '';
+    }
 
     if (isCurrentlyOnFallback && candidateFallback) {
       this.failedFallbackSrc = candidateFallback;

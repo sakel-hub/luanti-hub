@@ -1,6 +1,6 @@
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
-export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'forums' | 'custom';
+export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket' | 'contentdb' | 'forums' | 'custom';
 export type SortOption = 'downloads' | 'score' | 'created' | 'updated' | 'title';
 
 export interface ContentDbTag {
@@ -337,6 +337,7 @@ export interface GitAuditReport {
   valid: boolean;
   auditToken?: string;
   ownershipVerified?: boolean;
+  pendingAdminClaim?: boolean;
   requiredProvider?: GitProvider;
   repoOwner?: string;
   configFound: string | null;

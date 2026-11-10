@@ -65,7 +65,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
         @if (authService.authError() || localError()) {
           <div class="p-3 rounded-xl bg-amber-950/50 border border-amber-800/80 text-amber-300 text-xs">
             @if (authService.authError() === 'oauth_not_configured') {
-              OAuth Client ID is not configured on this server yet. Use Direct Author / Community Sign-In below!
+              {{ 'auth.oauthNotConfiguredNotice' | translate:{ provider: authService.selectedProvider() } }}
             } @else {
               {{ localError() || authService.authError() }}
             }
@@ -242,18 +242,18 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
                 </div>
               </div>
 
-              <!-- Field 2: Optional Access Token / API Key with Tooltip Explanation -->
+              <!-- Field 2: Required Access Token / API Key with Tooltip Explanation -->
               <div class="space-y-1.5">
                 <div class="flex items-center justify-between gap-2">
                   <label for="auth-token-input" class="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
                     <svg lucideKeyRound class="w-3 h-3 text-slate-400"></svg>
                     <span>Access Token / API Key</span>
-                    <span class="text-[10px] font-normal text-slate-500">(Optional)</span>
+                    <span class="text-[10px] font-normal text-amber-400">(Required)</span>
                   </label>
                   <button
                     type="button"
                     (click)="$event.stopPropagation()"
-                    appTooltip="Optional: Provide a read-only Personal Access Token or API key from your selected platform (or your Admin Secret) to verify creator ownership or sign in as an Administrator."
+                    appTooltip="Required: Provide a read-only Personal Access Token or API key from your selected platform (or your Admin Secret) to verify account ownership."
                     aria-label="Why provide an access token?"
                     class="text-slate-400 hover:text-sky-300 transition flex items-center gap-1 text-[10px] cursor-help">
                     <svg lucideInfo class="w-3.5 h-3.5"></svg>
@@ -264,6 +264,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
                   type="password"
                   [(ngModel)]="tokenInput"
                   name="tokenInput"
+                  required
                   autocomplete="off"
                   placeholder="Access token or API key"
                   class="w-full glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
@@ -272,7 +273,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
 
               <button
                 type="submit"
-                [disabled]="authService.isLoading() || authService.isOAuthRedirecting() || !handleInput.trim()"
+                [disabled]="authService.isLoading() || authService.isOAuthRedirecting() || !handleInput.trim() || !tokenInput.trim()"
                 class="w-full py-2.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
                 @if (authService.isLoading()) {
                   <app-frosted-preloader variant="inline" size="sm" [label]="'auth.signingIn' | translate"></app-frosted-preloader>
@@ -332,7 +333,7 @@ export class AuthModalComponent {
 
     // If OAuth Client ID is not configured, seamlessly expand Direct Provider Sign-In without a broken redirect:
     this.isDirectSignInExpanded.set(true);
-    if (this.handleInput.trim()) {
+    if (this.handleInput.trim() && this.tokenInput.trim()) {
       await this.onDirectSignIn();
     } else {
       setTimeout(() => {
@@ -342,12 +343,12 @@ export class AuthModalComponent {
   }
 
   async onDirectSignIn(): Promise<void> {
-    if (!this.handleInput.trim()) return;
+    if (!this.handleInput.trim() || !this.tokenInput.trim()) return;
     this.localError.set(null);
     const res = await this.authService.loginWithHandle(
       this.authService.selectedProvider(),
       this.handleInput.trim(),
-      this.tokenInput.trim() || undefined
+      this.tokenInput.trim()
     );
     if (!res.success && res.message) {
       this.localError.set(res.message);

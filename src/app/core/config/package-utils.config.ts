@@ -361,44 +361,59 @@ export function buildReverseDependencyCountMap(packages: Iterable<any>): Map<str
  * shared library, or pure dependency mod that does not add standalone gameplay on its own
  * (e.g. `TenPlus1/mobs` "Mobs Redo API", `modlib`, `futil`, `signs_lib`, `biome_lib`).
  */
+const API_LIB_PKG_CACHE = new WeakMap<object, { sig: string; val: boolean }>();
+
 export function isApiOrLibraryPackage(pkg: any): boolean {
   if (!pkg || typeof pkg !== 'object') return false;
   const type = String(pkg.type || 'mod').toLowerCase();
   if (type === 'game' || type === 'txp') return false;
 
-  const rawTags = Array.isArray(pkg.tags) ? pkg.tags : parseJsonArray(pkg.tags);
-  for (const t of rawTags) {
-    const tagLower = String(t || '').trim().toLowerCase();
-    if (tagLower === 'library' || tagLower === 'api' || tagLower === 'dev_tools') {
+  const tagSig = Array.isArray(pkg.tags) ? pkg.tags.join(',') : String(pkg.tags ?? '');
+  const sig = `${type}|${pkg.name ?? ''}|${pkg.title ?? ''}|${tagSig}|${pkg.short_desc ?? pkg.short_description ?? ''}|${String(pkg.desc ?? pkg.long_description ?? '').slice(0, 120)}`;
+  const cached = API_LIB_PKG_CACHE.get(pkg);
+  if (cached && cached.sig === sig) {
+    return cached.val;
+  }
+
+  const compute = (): boolean => {
+    const rawTags = Array.isArray(pkg.tags) ? pkg.tags : parseJsonArray(pkg.tags);
+    for (const t of rawTags) {
+      const tagLower = String(t || '').trim().toLowerCase();
+      if (tagLower === 'library' || tagLower === 'api' || tagLower === 'dev_tools') {
+        return true;
+      }
+    }
+
+    const title = String(pkg.title || '').trim();
+    const shortDesc = String(pkg.short_desc || pkg.short_description || '').trim();
+    const desc = String(pkg.desc || pkg.long_description || '').trim();
+    const combinedDesc = `${shortDesc}\n${desc.slice(0, 600)}`;
+
+    // Title explicitly ends with or features standalone API / Library / Lib indicator
+    if (/\b(?:api|library|modlib|futil)\b/i.test(title)) {
       return true;
     }
-  }
+    if (/(?:^|[\s_-])lib(?:$|[\s_-])/i.test(title) || /(?:^|_)(?:api|lib)$/i.test(String(pkg.name || ''))) {
+      return true;
+    }
 
-  const title = String(pkg.title || '').trim();
-  const shortDesc = String(pkg.short_desc || pkg.short_description || '').trim();
-  const desc = String(pkg.desc || pkg.long_description || '').trim();
-  const combinedDesc = `${shortDesc}\n${desc.slice(0, 600)}`;
+    // Description explicitly states the mod is an API/library or requires other mods to do anything
+    if (
+      /\byou\s+need\s+to\s+install\s+some\s+other\s+mods\b/i.test(combinedDesc) ||
+      /\bdoes\s+nothing\s+(?:on\s+its\s+own|by\s+itself)\b/i.test(combinedDesc) ||
+      /\b(?:simple\s+and\s+feature[- ]rich|lightweight|shared|helper|utility|modding)\s+(?:api|library)\b/i.test(combinedDesc) ||
+      /\bapi\s+(?:to\s+add|for\s+adding|for\s+other\s+mods|used\s+by\s+other\s+mods)\b/i.test(combinedDesc) ||
+      /\b(?:library|framework)\s+(?:for|used\s+by)\s+(?:other\s+)?mods\b/i.test(combinedDesc)
+    ) {
+      return true;
+    }
 
-  // Title explicitly ends with or features standalone API / Library / Lib indicator
-  if (/\b(?:api|library|modlib|futil)\b/i.test(title)) {
-    return true;
-  }
-  if (/(?:^|[\s_-])lib(?:$|[\s_-])/i.test(title) || /(?:^|_)(?:api|lib)$/i.test(String(pkg.name || ''))) {
-    return true;
-  }
+    return false;
+  };
 
-  // Description explicitly states the mod is an API/library or requires other mods to do anything
-  if (
-    /\byou\s+need\s+to\s+install\s+some\s+other\s+mods\b/i.test(combinedDesc) ||
-    /\bdoes\s+nothing\s+(?:on\s+its\s+own|by\s+itself)\b/i.test(combinedDesc) ||
-    /\b(?:simple\s+and\s+feature[- ]rich|lightweight|shared|helper|utility|modding)\s+(?:api|library)\b/i.test(combinedDesc) ||
-    /\bapi\s+(?:to\s+add|for\s+adding|for\s+other\s+mods|used\s+by\s+other\s+mods)\b/i.test(combinedDesc) ||
-    /\b(?:library|framework)\s+(?:for|used\s+by)\s+(?:other\s+)?mods\b/i.test(combinedDesc)
-  ) {
-    return true;
-  }
-
-  return false;
+  const val = compute();
+  API_LIB_PKG_CACHE.set(pkg, { sig, val });
+  return val;
 }
 
 /**
@@ -1072,5 +1087,169 @@ export function findReverseDependenciesForPackage<T extends { id?: string; name?
     totalCount: hardDependents.length + optionalDependents.length
   };
 }
+
+/**
+ * Strips trailing LuantiHub forge disambiguation suffixes (`-gh`, `-gl`, `-cb`, `-bb`, `-mh`, `-cdb`
+ * or underscore variants) from an author handle.
+ */
+export function stripAuthorForgeSuffix(handle?: string | null): string {
+  return String(handle || '')
+    .trim()
+    .replace(/[-_](?:gh|gl|cb|bb|mh|cdb|github|gitlab|codeberg|bitbucket|mesehub|contentdb|hub)$/i, '');
+}
+
+/**
+ * Strips trailing forge and community display suffixes (`-hub`, `-git`, `-dev`, `-lab`, `-mod(s)`, `-gh`, etc.)
+ * for matching cross-source author display names in the UI.
+ */
+export function stripAuthorDisplaySuffix(handle?: string | null): string {
+  return stripAuthorForgeSuffix(handle).replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+}
+
+/**
+ * Splits a comma-separated `.conf` value (`depends`, `optional_depends`, `supported_games`, `unsupported_games`),
+ * stripping quotes, legacy trailing `?` optional markers, and inline `#` comments.
+ */
+export function parseLuantiConfList(rawList?: string | null): string[] {
+  if (!rawList || typeof rawList !== 'string') return [];
+  return rawList
+    .split(',')
+    .map(s =>
+      s
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .replace(/\?$/, '')
+        .split(/\s+#/)[0]
+        .trim()
+    )
+    .filter(Boolean);
+}
+
+/**
+ * Alias for `parseJsonArray` for semantic clarity when parsing string array columns.
+ */
+export const parsePackageStringArray = parseJsonArray;
+
+/**
+ * Normalizes SQLite `YYYY-MM-DD HH:MM:SS` or ISO-8601 timestamps into canonical UTC ISO-8601 strings (`...Z`).
+ */
+export function normalizeUtcIsoTimestamp(raw?: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    return new Date(ms).toISOString();
+  }
+  const str = String(raw).trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str.replace(' ', 'T')}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str}Z`;
+  }
+  return str;
+}
+
+/**
+ * Unified heuristic SPDX license identifier detection from `LICENSE` / `COPYING` / `README` text.
+ */
+export function detectSpdxFromLicenseText(raw?: string | null): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  const text = raw.slice(0, 4000);
+  if (/MIT License|Permission is hereby granted, free of charge|\bMIT\b/i.test(text)) return 'MIT';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2\.1|\bLGPL-2\.1\b/i.test(text)) return 'LGPL-2.1-only';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bLGPL-3\.0\b/i.test(text)) return 'LGPL-3.0-only';
+  if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bAGPL-3\.0\b/i.test(text)) return 'AGPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bGPL-3\.0\b/i.test(text)) return 'GPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2|\bGPL-2\.0\b/i.test(text)) return 'GPL-2.0-only';
+  if (/Apache License[\s\S]{0,150}Version 2\.0|\bApache-2\.0\b/i.test(text)) return 'Apache-2.0';
+  if (/Mozilla Public License[\s\S]{0,100}2\.0|\bMPL-2\.0\b/i.test(text)) return 'MPL-2.0';
+  if (/Creative Commons Attribution-ShareAlike 4\.0|\bCC-BY-SA-4\.0\b/i.test(text)) return 'CC-BY-SA-4.0';
+  if (/Creative Commons Attribution-ShareAlike 3\.0|\bCC-BY-SA-3\.0\b/i.test(text)) return 'CC-BY-SA-3.0';
+  if (/Creative Commons Attribution 4\.0|\bCC-BY-4\.0\b/i.test(text)) return 'CC-BY-4.0';
+  if (/Creative Commons Zero|CC0 1\.0 Universal|Public Domain Dedication|\bCC0-1\.0\b/i.test(text)) return 'CC0-1.0';
+  if (/The Unlicense|unlicense\.org|\bUnlicense\b/i.test(text)) return 'Unlicense';
+  if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|\bWTFPL\b/i.test(text)) return 'WTFPL';
+  if (/zlib License|altered source versions must be plainly marked|\bZlib\b/i.test(text)) return 'Zlib';
+  if (/\bBSD 3-Clause\b/i.test(text)) return 'BSD-3-Clause';
+  if (/\bBSD 2-Clause\b/i.test(text)) return 'BSD-2-Clause';
+  if (/Redistribution and use in source and binary forms/i.test(text)) {
+    return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
+  }
+  if (/\bISC License\b|Permission to use, copy, modify, and\/or distribute this software/i.test(text)) return 'ISC';
+  if (/\b0BSD\b|Zero-Clause BSD/i.test(text)) return '0BSD';
+  return undefined;
+}
+
+/**
+ * Parses Luanti `.conf` files (`mod.conf`, `game.conf`, `texture_pack.conf`, `modpack.conf`)
+ * following `luanti-org/contentdb` `app/tasks/luanticheck/config.py` rules, including
+ * multiline `"""..."""` string values and `#` comments.
+ */
+export function parseLuantiConf(confText: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!confText || typeof confText !== 'string') return result;
+
+  const lines = confText.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    i++;
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+
+    const key = trimmed.slice(0, eqIdx).trim().toLowerCase();
+    if (!key) continue;
+
+    let val = trimmed.slice(eqIdx + 1).trim();
+    if (val.startsWith('"""')) {
+      const afterOpen = val.slice(3);
+      const closeSameLine = afterOpen.indexOf('"""');
+      if (closeSameLine !== -1) {
+        result[key] = afterOpen.slice(0, closeSameLine).trim();
+      } else {
+        const chunks: string[] = [afterOpen];
+        while (i < lines.length) {
+          const nextLine = lines[i++];
+          const closeIdx = nextLine.indexOf('"""');
+          if (closeIdx !== -1) {
+            chunks.push(nextLine.slice(0, closeIdx));
+            break;
+          }
+          chunks.push(nextLine);
+        }
+        result[key] = chunks.join('\n').trim();
+      }
+      continue;
+    }
+
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1).trim();
+    }
+    result[key] = val;
+  }
+
+  return result;
+}
+
+/**
+ * Computes `short_description` from a `.conf` or `description.txt` description string
+ * using `luanti-org/contentdb` `app/tasks/luanticheck/tree.py:234-241` rules.
+ */
+export function computeConfShortDescription(description?: string): string | undefined {
+  if (!description || typeof description !== 'string') return undefined;
+  const clean = description.replace(/\s+/g, ' ').trim();
+  if (!clean) return undefined;
+  if (clean.length <= 200) return clean;
+  const firstSentenceIdx = clean.indexOf('.');
+  if (firstSentenceIdx > 0 && firstSentenceIdx < 200) {
+    return clean.slice(0, firstSentenceIdx).trim();
+  }
+  return clean.slice(0, 200).trim();
+}
+
 
 

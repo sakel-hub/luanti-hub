@@ -39,9 +39,16 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const loginHint = (url.searchParams.get('login') || '').trim();
   const isPopup = url.searchParams.get('popup') === '1';
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
+  const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET);
+  if (!sessionSecret) {
+    return Response.redirect(
+      `${url.origin}/?auth_error=oauth_not_configured&provider=${encodeURIComponent(provider)}`,
+      302
+    );
+  }
   const state = await createOAuthStateToken(
     provider,
-    cleanEnvValue(context.env.SESSION_SECRET) || undefined,
+    sessionSecret,
     { origin: url.origin, popup: isPopup }
   );
 
@@ -108,7 +115,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     headers: {
       Location: authUrl,
       'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Set-Cookie': buildOAuthStateCookie(state, url, 600)
+      'Set-Cookie': buildOAuthStateCookie(state, url, 900)
     }
   });
 }

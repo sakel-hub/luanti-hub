@@ -58,12 +58,27 @@ export async function onRequestPost(context: {
     }
 
     const body = await request.json() as {
-      action: 'report' | 'delist' | 'flag' | 'restore' | 'remove';
+      action: 'report' | 'delist' | 'flag' | 'restore' | 'remove' | 'delete';
       reason?: 'dmca' | 'malware' | 'license' | 'broken' | 'inappropriate' | 'other';
       details?: string;
       resolutionNote?: string;
       reportId?: number | string;
     };
+
+    const VALID_MODERATION_ACTIONS = new Set([
+      'report',
+      'delist',
+      'flag',
+      'restore',
+      'remove',
+      'delete'
+    ]);
+    if (!body || typeof body.action !== 'string' || !VALID_MODERATION_ACTIONS.has(body.action)) {
+      return Response.json(
+        { error: 'Invalid moderation action. Expected report, delist, flag, restore, or remove.' },
+        { status: 400 }
+      );
+    }
 
     await ensureModerationColumns(env.DB);
     await ensureExtendedPackageColumns(env.DB);
@@ -163,8 +178,8 @@ export async function onRequestPost(context: {
     }
   }
 
-  // Mode 2A: Permanent Removal of a Submitted Package from Luanti Hub D1 Registry (`action: 'remove'`)
-  if (body.action === 'remove') {
+  // Mode 2A: Permanent Removal of a Submitted Package from Luanti Hub D1 Registry (`action: 'remove' | 'delete'`)
+  if (body.action === 'remove' || body.action === 'delete') {
     if (!existingPkg) {
       return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
     }
@@ -204,9 +219,9 @@ export async function onRequestPost(context: {
   // Upsert package status in D1 so even upstream ContentDB packages can be immediately delisted via the Kill Switch!
   await env.DB.prepare(`
     INSERT INTO packages (
-      id, author_name, name, title, type, repo_url, license, media_license, status, status_reason, flagged_at
+      id, author_name, name, title, type, repo_url, provider, license, media_license, status, status_reason, flagged_at
     )
-    VALUES (?, ?, ?, ?, 'mod', '', 'NONE', 'NONE', ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, 'mod', '', 'contentdb', 'NONE', 'NONE', ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       status_reason = excluded.status_reason,

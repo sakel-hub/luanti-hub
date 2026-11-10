@@ -143,7 +143,9 @@ export class App {
       this.packageService.isSetupModalOpen() ||
       this.packageService.isLegalModalOpen() ||
       this.authService.isAuthModalOpen() ||
-      (this.authService.isProfileDrawerOpen() && this.authService.currentUser())
+      this.authService.isCompletingOAuth() ||
+      (this.authService.isOAuthRedirecting() && !this.renderAuthModal()) ||
+      (this.authService.isProfileDrawerOpen() && (this.authService.currentUser() || this.authService.isLoading()))
     )
   );
 

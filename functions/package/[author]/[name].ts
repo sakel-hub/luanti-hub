@@ -167,6 +167,7 @@ export async function onRequestGet(context: {
   let pkgReviewCount = 0;
   let pkgTags: string[] = [];
   let pkgDeps: string[] = [];
+  let isPackageSuspended = false;
 
   const toAbsoluteSeoImageUrl = (rawImg?: string | null): string => {
     const trimmed = String(rawImg || '').trim();
@@ -181,6 +182,27 @@ export async function onRequestGet(context: {
 
   const lookupMetadata = async () => {
     try {
+      if (context.env?.DB) {
+        const altAuthor =
+          author.toLowerCase() === `${resolvedAuthorIdentity.baseAuthor}-hub`
+            ? resolvedAuthorIdentity.canonicalSlug
+            : `${resolvedAuthorIdentity.baseAuthor}-hub`;
+        const normName = name.replace(/-/g, '_');
+        const killRow = await context.env.DB.prepare(
+          `SELECT status FROM packages
+           WHERE LOWER(id) = LOWER(?)
+              OR (LOWER(author_name) IN (LOWER(?), LOWER(?)) AND LOWER(REPLACE(name, '-', '_')) = LOWER(?))
+           LIMIT 1`
+        )
+          .bind(`${author}/${name}`, author, altAuthor, normName)
+          .first()
+          .catch(() => null);
+        if (killRow && (killRow.status === 'flagged' || killRow.status === 'delisted')) {
+          isPackageSuspended = true;
+          return;
+        }
+      }
+
       const cachedMeta = await readEdgeCacheJson<any>(ssrMetaCacheKey);
       if (cachedMeta && typeof cachedMeta === 'object' && cachedMeta.pkgCleanTitle) {
         pkgCleanTitle = cachedMeta.pkgCleanTitle;
@@ -225,6 +247,10 @@ export async function onRequestGet(context: {
               // ignore fallback D1 error
             }
           }
+        }
+        if (pkgData && (pkgData.status === 'flagged' || pkgData.status === 'delisted')) {
+          isPackageSuspended = true;
+          return;
         }
         if (ratingRow && Number(ratingRow.cnt) > 0 && ratingRow.avg_rating != null) {
           d1RatingAvg = Number(ratingRow.avg_rating);
@@ -283,6 +309,11 @@ export async function onRequestGet(context: {
           }
           if (Array.isArray(upstream.reviews)) {
             pkgReviewCount += upstream.reviews.length;
+          } else if (upstream.reviews && typeof upstream.reviews === 'object') {
+            pkgReviewCount +=
+              (Number(upstream.reviews.positive) || 0) +
+              (Number(upstream.reviews.neutral) || 0) +
+              (Number(upstream.reviews.negative) || 0);
           }
           pkgScore = computeGenuineStarRating(d1RatingAvg, upstream.reviews);
         }
@@ -325,6 +356,20 @@ export async function onRequestGet(context: {
       fetchSpaShellHtml(context.env?.ASSETS, origin),
       lookupMetadata()
     ]);
+
+    if (isPackageSuspended) {
+      return new Response(
+        `<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="robots" content="noindex, nofollow" /><title>Package Unavailable | Luanti Hub</title></head><body><h1>Package Unavailable (451)</h1><p>This package has been delisted or suspended on Luanti Hub.</p></body></html>`,
+        {
+          status: 451,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'X-Robots-Tag': 'noindex, nofollow',
+            'Cache-Control': 'no-store, no-cache, must-revalidate'
+          }
+        }
+      );
+    }
 
     const typeLabel = pkgType === 'game' ? 'Game' : pkgType === 'txp' ? 'Texture Pack' : 'Mod';
     const sectionPath = pkgType === 'game' ? '/games' : pkgType === 'txp' ? '/texture-packs' : '/mods';

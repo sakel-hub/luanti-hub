@@ -61,12 +61,27 @@ function resolveRedirectUri(envValue: string | undefined, requestOrigin: string,
   return cleaned;
 }
 
-function getOAuthCodeEdgeCacheUrl(provider: string, code: string): string {
-  return `https://cache.luantihub.internal/__oauth_code/${encodeURIComponent(provider)}/${encodeURIComponent(code)}`;
+function pruneBoundedMap<K, V>(map: Map<K, V>, maxEntries = 500): void {
+  if (map.size <= maxEntries) return;
+  const excess = map.size - maxEntries;
+  let removed = 0;
+  for (const k of map.keys()) {
+    map.delete(k);
+    removed++;
+    if (removed >= excess) break;
+  }
 }
 
-async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: string): Promise<string | null> {
-  const cachedCodeKey = `${provider}:${code}`;
+function getOAuthCodeEdgeCacheUrl(provider: string, code: string, stateBinding: string): string {
+  return `https://cache.luantihub.internal/__oauth_code/${encodeURIComponent(provider)}/${encodeURIComponent(code)}/${encodeURIComponent(stateBinding)}`;
+}
+
+async function readCompletedOAuthCodeFromEdgeCache(
+  provider: string,
+  code: string,
+  stateBinding: string
+): Promise<string | null> {
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
   const inMemory = completedOAuthCodes.get(cachedCodeKey);
   if (inMemory && Date.now() < inMemory.expiresAt) {
     return inMemory.userId;
@@ -74,10 +89,13 @@ async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: strin
   try {
     const cacheStorage = (globalThis as any).caches?.default;
     if (!cacheStorage) return null;
-    const cachedRes = await cacheStorage.match(new Request(getOAuthCodeEdgeCacheUrl(provider, code)));
+    const cachedRes = await cacheStorage.match(
+      new Request(getOAuthCodeEdgeCacheUrl(provider, code, stateBinding))
+    );
     if (!cachedRes || !cachedRes.ok) return null;
     const data = await cachedRes.json() as { userId?: string };
     if (data?.userId) {
+      pruneBoundedMap(completedOAuthCodes, 500);
       completedOAuthCodes.set(cachedCodeKey, {
         userId: data.userId,
         expiresAt: Date.now() + 90_000
@@ -90,8 +108,14 @@ async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: strin
   return null;
 }
 
-async function writeCompletedOAuthCodeToEdgeCache(provider: string, code: string, userId: string): Promise<void> {
-  const cachedCodeKey = `${provider}:${code}`;
+async function writeCompletedOAuthCodeToEdgeCache(
+  provider: string,
+  code: string,
+  stateBinding: string,
+  userId: string
+): Promise<void> {
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
+  pruneBoundedMap(completedOAuthCodes, 500);
   completedOAuthCodes.set(cachedCodeKey, {
     userId,
     expiresAt: Date.now() + 90_000
@@ -102,10 +126,10 @@ async function writeCompletedOAuthCodeToEdgeCache(provider: string, code: string
     const res = new Response(JSON.stringify({ userId }), {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=90'
+        'Cache-Control': 'private, max-age=90'
       }
     });
-    await cacheStorage.put(new Request(getOAuthCodeEdgeCacheUrl(provider, code)), res);
+    await cacheStorage.put(new Request(getOAuthCodeEdgeCacheUrl(provider, code, stateBinding)), res);
   } catch {
     // Ignore Cache API errors in local/non-Worker environments
   }
@@ -358,22 +382,31 @@ export async function onRequestGet(context: {
   const isCookieStateValid = Boolean(stateParam && expectedState && stateParam === expectedState);
   const isHmacStateValid = stateMeta.valid;
 
-  if (!isCookieStateValid && !isHmacStateValid) {
+  if (!isHmacStateValid) {
     return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
   }
 
   const existingSessionUserId = cookies['lh_session']
     ? await verifySessionToken(cookies['lh_session'], sessionSecret)
     : null;
+  const stateBinding = expectedState || stateParam || '';
 
-  // Fast-path: If this exact authorization code already completed moments ago (in-memory or Cloudflare Edge Cache)
-  const cachedCodeKey = `${provider}:${code}`;
-  const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
-  if (completedUserId) {
+  // Fast-path: If this exact authorization code + state already completed moments ago (in-memory or Cloudflare Edge Cache).
+  // When `lh_oauth_state` was already cleared by the initial callback response, only accept the replay if the browser
+  // already holds the matching `lh_session` for `completedUserId` (preventing cross-site Login CSRF).
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
+  const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
+  if (completedUserId && (isCookieStateValid || existingSessionUserId === completedUserId)) {
     return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, provider, isPopup);
   }
 
-  // Fast-path: If this exact authorization code is currently being processed by a concurrent request
+  // Require BOTH cryptographically valid HMAC state AND matching browser `lh_oauth_state` cookie
+  // to prevent OAuth Login CSRF and cross-site identity-linking account takeover.
+  if (!isCookieStateValid) {
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
+  }
+
+  // Fast-path: If this exact authorization code + state is currently being processed by a concurrent request
   const existingInFlight = inFlightOAuthCodes.get(cachedCodeKey);
   if (existingInFlight) {
     try {
@@ -384,7 +417,7 @@ export async function onRequestGet(context: {
     }
   }
 
-  const checkEdgeCacheBeforeRetry = () => readCompletedOAuthCodeFromEdgeCache(provider, code);
+  const checkEdgeCacheBeforeRetry = () => readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
 
   const processOAuthCallback = async (): Promise<string> => {
     let providerUserId = '';
@@ -512,7 +545,7 @@ export async function onRequestGet(context: {
         // check cross-isolate edge cache first, then fall back to existingSessionUserId if present
         if (tokenData.error === 'bad_verification_code') {
           await new Promise(resolve => setTimeout(resolve, 250));
-          const cachedFromOtherIsolate = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+          const cachedFromOtherIsolate = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
           if (cachedFromOtherIsolate) {
             return cachedFromOtherIsolate;
           }
@@ -585,6 +618,7 @@ export async function onRequestGet(context: {
     );
     const role = isAdmin ? 'admin' : 'user';
 
+    let dbPendingFallback = false;
     if (context.env.DB) {
       try {
         // Verify whether existingSessionUserId actually resolves to a live row in `users`
@@ -748,12 +782,14 @@ export async function onRequestGet(context: {
         }
       } catch (dbErr) {
         console.error('[OAuth Callback] D1 error after verified OAuth profile, falling back to signed session claims:', dbErr);
+        dbPendingFallback = true;
         if (!userId) {
           userId = existingSessionUserId || `usr_${providerUsername.toLowerCase()}`;
         }
       }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
+      dbPendingFallback = true;
       userId = `usr_${provider}_${providerUsername}`;
     }
 
@@ -762,6 +798,7 @@ export async function onRequestGet(context: {
     }
 
     invalidateCachedAuthMePayload(userId);
+    pruneBoundedMap(verifiedOAuthClaimsByUserId, 500);
     verifiedOAuthClaimsByUserId.set(userId, {
       userId,
       username: providerUsername,
@@ -769,18 +806,20 @@ export async function onRequestGet(context: {
       avatarUrl: avatarUrl || `https://github.com/${providerUsername}.png`,
       provider,
       role,
-      verified: true
+      verified: true,
+      ...(dbPendingFallback ? { dbPending: true } : {})
     });
 
     return userId;
   };
 
   const inFlightPromise = processOAuthCallback();
+  pruneBoundedMap(inFlightOAuthCodes, 500);
   inFlightOAuthCodes.set(cachedCodeKey, inFlightPromise);
 
   try {
     const resolvedUserId = await inFlightPromise;
-    await writeCompletedOAuthCodeToEdgeCache(provider, code, resolvedUserId);
+    await writeCompletedOAuthCodeToEdgeCache(provider, code, stateBinding, resolvedUserId);
     context.waitUntil?.(
       syncVerifiedAuthorGitPackages(context.env, {
         userId: resolvedUserId,
@@ -790,7 +829,7 @@ export async function onRequestGet(context: {
     return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
   } catch (err: any) {
     // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache
-    const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+    const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
     if (edgeResolvedUserId) {
       return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, provider, isPopup);
     }
@@ -807,9 +846,15 @@ export async function onRequestGet(context: {
       return Response.redirect(retryUrl.toString(), 302);
     }
 
-    // 3. If another isolate consumed the code and the user already has a valid session cookie, redirect to success
-    if (existingSessionUserId && !isRateLimited429) {
-      return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, provider, isPopup);
+    // 3. Only treat an already-consumed OAuth code (`bad_verification_code` / `invalid_grant`) as completed
+    // when the browser already holds a valid session cookie and matches Edge Cache.
+    const isCodeAlreadyConsumed =
+      /bad_verification_code|invalid_grant|authorization code.*expired/i.test(errMsg);
+    if (existingSessionUserId && isCodeAlreadyConsumed && !isRateLimited429) {
+      const recheckedEdgeUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
+      if (recheckedEdgeUserId && recheckedEdgeUserId === existingSessionUserId) {
+        return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, provider, isPopup);
+      }
     }
 
     console.error('[OAuth Callback Error]:', provider, errMsg);
