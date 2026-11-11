@@ -483,9 +483,10 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/`);
       }
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/latest`);
+      expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/latest`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/hard`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/all`);
-      const zipPrefix = `https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/`;
+      const zipPrefix = `https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/`;
       for (const zk of Array.from(sharedIsolateZipCache.keys())) {
         if (zk.startsWith(zipPrefix)) {
           sharedIsolateZipCache.delete(zk);
@@ -1713,6 +1714,7 @@ export function normalizeLuantiPackageZip(
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, '_')
     .replace(/^_+|_+$/g, '') || 'mod';
+  const normalizedPkgType = (packageType || 'mod').trim().toLowerCase();
 
   let safetyViolationError: Error | null = null;
   try {
@@ -1878,17 +1880,51 @@ export function normalizeLuantiPackageZip(
     if (markerDirs.length > 0) {
       markerDirs.sort((a, b) => a.depth - b.depth);
       const minDepth = markerDirs[0].depth;
-      const shallowestDirs = Array.from(new Set(markerDirs.filter(m => m.depth === minDepth).map(m => m.dir)));
+      const gameMarkerDirs = markerDirs.filter(m => m.file === 'game.conf');
+      const targetGameDepth =
+        gameMarkerDirs.length > 0
+          ? (normalizedPkgType === 'game' ? gameMarkerDirs[0].depth : minDepth)
+          : -1;
+      const shallowestGameDirs =
+        targetGameDepth >= 0
+          ? Array.from(new Set(gameMarkerDirs.filter(m => m.depth === targetGameDepth).map(m => m.dir)))
+          : [];
 
-      if (shallowestDirs.length === 1) {
-        basePrefix = shallowestDirs[0];
-      } else if (minDepth >= 1) {
-        // Multiple sibling mod folders at the same depth (e.g. `repo-main/mod_a/init.lua`, `repo-main/mod_b/init.lua`) -> Modpack!
+      if (shallowestGameDirs.length === 1 && (normalizedPkgType === 'game' || gameMarkerDirs[0].depth === minDepth)) {
+        // Align with ContentDB `tree.py` (`detect_type`): `game.conf` takes precedence as a game root
+        basePrefix = shallowestGameDirs[0];
+      } else {
+        const shallowestDirs = Array.from(new Set(markerDirs.filter(m => m.depth === minDepth).map(m => m.dir)));
         const firstParts = shallowestDirs[0].split('/').filter(Boolean);
-        const parentPrefix = firstParts.length > 1 ? firstParts.slice(0, -1).join('/') + '/' : '';
-        const allShareParent = shallowestDirs.every(d => d.startsWith(parentPrefix));
-        basePrefix = allShareParent ? parentPrefix : '';
-        needsSynthesizedModpackConf = true;
+        const isLegacyGameModsLayout =
+          normalizedPkgType === 'game' &&
+          gameMarkerDirs.length === 0 &&
+          firstParts.length >= 2 &&
+          firstParts[firstParts.length - 2].toLowerCase() === 'mods';
+
+        if (isLegacyGameModsLayout) {
+          // Legacy `game.conf`-less Git game with sub-mods under `<root>/mods/<submod>/init.lua`:
+          // resolve `<root>/` above `mods/` rather than collapsing `mods/` into a modpack
+          const gameRootPrefix = firstParts.length > 2 ? firstParts.slice(0, -2).join('/') + '/' : '';
+          const allUnderSameGameMods = shallowestDirs.every(d =>
+            d.toLowerCase().startsWith(`${gameRootPrefix.toLowerCase()}mods/`)
+          );
+          if (allUnderSameGameMods) {
+            basePrefix = gameRootPrefix;
+          } else if (shallowestDirs.length === 1) {
+            basePrefix = shallowestDirs[0];
+          }
+        } else if (shallowestDirs.length === 1) {
+          basePrefix = shallowestDirs[0];
+        } else if (minDepth >= 1) {
+          // Multiple sibling mod folders at the same depth (e.g. `repo-main/mod_a/init.lua`, `repo-main/mod_b/init.lua`) -> Modpack!
+          const parentPrefix = firstParts.length > 1 ? firstParts.slice(0, -1).join('/') + '/' : '';
+          const allShareParent = shallowestDirs.every(d => d.startsWith(parentPrefix));
+          basePrefix = allShareParent ? parentPrefix : '';
+          if (normalizedPkgType !== 'game' && normalizedPkgType !== 'txp') {
+            needsSynthesizedModpackConf = true;
+          }
+        }
       }
     } else {
       // No standard marker file found (e.g. texture pack without texture_pack.conf): find common single top-level directory
@@ -1908,6 +1944,14 @@ export function normalizeLuantiPackageZip(
     }
 
     // 3. Filter and rebase entries under `<safePkgName>/`
+    const hasRootGameConf = entries.some(entry => {
+      if (basePrefix && !entry.path.startsWith(basePrefix)) return false;
+      const rel = (basePrefix ? entry.path.slice(basePrefix.length) : entry.path).replace(/^\/+/, '');
+      return rel.toLowerCase() === 'game.conf';
+    });
+    const isResolvedGameRoot =
+      normalizedPkgType === 'game' || (hasRootGameConf && normalizedPkgType !== 'modpack');
+
     const encoder = new TextEncoder();
     const rebasedEntries: Array<{
       newPathBytes: Uint8Array;
@@ -1941,6 +1985,16 @@ export function normalizeLuantiPackageZip(
         lowerRel === '.gitattributes' ||
         lowerRel === '.gitmodules' ||
         lowerRel === '.luacheckrc'
+      ) {
+        continue;
+      }
+
+      // Luanti Engine `pkgmgr.get_folder_type` checks `modpack.conf` & `modpack.txt` BEFORE `game.conf`.
+      // Strip any stray root-level modpack markers when `game.conf` defines a game root (nested `mods/<mp>/modpack.conf` is preserved).
+      if (
+        isResolvedGameRoot &&
+        hasRootGameConf &&
+        (lowerRel === 'modpack.conf' || lowerRel === 'modpack.txt')
       ) {
         continue;
       }
@@ -1987,14 +2041,27 @@ export function normalizeLuantiPackageZip(
     };
 
     if (
-      (needsSynthesizedModpackConf || packageType === 'modpack') &&
+      (needsSynthesizedModpackConf || normalizedPkgType === 'modpack') &&
+      normalizedPkgType !== 'game' &&
+      normalizedPkgType !== 'txp' &&
+      !existingRelativeFiles.has('game.conf') &&
+      !existingRelativeFiles.has('texture_pack.conf') &&
       !existingRelativeFiles.has('modpack.conf') &&
       !existingRelativeFiles.has('modpack.txt') &&
       !existingRelativeFiles.has('init.lua')
     ) {
       addSynthesizedFile('modpack.conf', `name = ${safePkgName}\n`);
     } else if (
-      packageType === 'txp' &&
+      normalizedPkgType === 'game' &&
+      !existingRelativeFiles.has('game.conf') &&
+      !existingRelativeFiles.has('init.lua') &&
+      !existingRelativeFiles.has('modpack.conf') &&
+      !existingRelativeFiles.has('modpack.txt') &&
+      !existingRelativeFiles.has('texture_pack.conf')
+    ) {
+      addSynthesizedFile('game.conf', `name = ${safePkgName}\n`);
+    } else if (
+      normalizedPkgType === 'txp' &&
       !existingRelativeFiles.has('texture_pack.conf') &&
       !existingRelativeFiles.has('mod.conf') &&
       !existingRelativeFiles.has('init.lua') &&
@@ -2142,7 +2209,7 @@ export function buildSharedZipCacheKey(author: string, name: string, releaseOrTa
   const encAuthor = encodeURIComponent((author || 'unknown').toLowerCase());
   const encName = encodeURIComponent((name || 'mod').toLowerCase());
   const encRef = encodeURIComponent((releaseOrTag || 'latest').trim().toLowerCase() || 'latest');
-  return `https://cache.luantihub.internal/__pkg_zip_v3/${encAuthor}/${encName}/${encRef}`;
+  return `https://cache.luantihub.internal/__pkg_zip_v4/${encAuthor}/${encName}/${encRef}`;
 }
 
 export async function getCachedNormalizedZip(

@@ -20,6 +20,7 @@ import {
   buildAuthorStatsEdgeCacheKey,
   readResponseBytesBounded
 } from '../../../lib/upstream';
+import { findJam2026BrewRepoBySlug } from '../../../lib/jam-2026';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
 interface Env {
@@ -447,6 +448,21 @@ export async function onRequest(context: {
       normalizeRepoCandidate(forClient?.info_hypertext?.links?.git_repo);
   }
 
+  const applyUpstreamPackageType = (rawType?: unknown, rawProvides?: unknown) => {
+    const normalized = typeof rawType === 'string' ? rawType.trim().toLowerCase() : '';
+    if (normalized === 'game' || normalized === 'txp' || normalized === 'modpack') {
+      effectiveType = normalized;
+    } else if (normalized === 'mod' && (!pkgRecord?.type || String(pkgRecord.type).toLowerCase() === 'mod')) {
+      effectiveType = 'mod';
+    }
+    // ContentDB represents modpacks as `type: "mod"` with multiple `provides`, whereas multi-mod games
+    // (`type: "game"`, e.g. Warr1024/confspace) also list all sub-mods in `provides` (`tree.get_mod_names()`).
+    // Only promote `'mod'` to `'modpack'` — never clobber `'game'` or `'txp'`.
+    if (effectiveType === 'mod' && Array.isArray(rawProvides) && rawProvides.length > 1) {
+      effectiveType = 'modpack';
+    }
+  };
+
   if (!effectiveRepoUrl) {
     const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
     if (Array.isArray(bulkCatalog)) {
@@ -463,9 +479,19 @@ export async function onRequest(context: {
         if (!resolvedReleaseId && found.release) {
           resolvedReleaseId = String(found.release);
         }
-        if (found.type && (!pkgRecord || !pkgRecord.type)) {
-          effectiveType = String(found.type).toLowerCase();
-        }
+        applyUpstreamPackageType(found.type, found.provides);
+      }
+    }
+  }
+
+  let matchedJamBrewFallback = false;
+  if (!effectiveRepoUrl) {
+    const jamRepo = await findJam2026BrewRepoBySlug(effectiveAuthor, effectiveName).catch(() => undefined);
+    if (jamRepo) {
+      effectiveRepoUrl = normalizeRepoCandidate(jamRepo);
+      matchedJamBrewFallback = true;
+      if (!pkgRecord?.type || String(pkgRecord.type).toLowerCase() === 'mod') {
+        effectiveType = 'game';
       }
     }
   }
@@ -478,24 +504,14 @@ export async function onRequest(context: {
   }
 
   if (upstreamPkg) {
-    if (upstreamPkg.type && (!pkgRecord || !pkgRecord.type)) {
-      effectiveType = String(upstreamPkg.type).toLowerCase();
-    }
-    if (Array.isArray(upstreamPkg.provides) && upstreamPkg.provides.length > 1) {
-      effectiveType = 'modpack';
-    }
+    applyUpstreamPackageType(upstreamPkg.type, upstreamPkg.provides);
   }
 
   if (forClient) {
     if (!resolvedReleaseId && forClient.release) {
       resolvedReleaseId = String(forClient.release);
     }
-    if (forClient.type && (!pkgRecord || !pkgRecord.type)) {
-      effectiveType = String(forClient.type).toLowerCase();
-    }
-    if (Array.isArray(forClient.provides) && forClient.provides.length > 1) {
-      effectiveType = 'modpack';
-    }
+    applyUpstreamPackageType(forClient.type, forClient.provides);
   }
 
   const edgeZipCacheKey = buildSharedZipCacheKey(
@@ -608,11 +624,14 @@ export async function onRequest(context: {
   }
 
   // Fallback to ContentDB release/package download URLs when package exists on ContentDB
+  const isJamSlugFallbackOnly = Boolean(
+    matchedJamBrewFallback && !upstreamPkg && !forClient && !upstreamReleaseUrl
+  );
   const hasContentDbMirror =
-    !pkgRecord ||
-    pkgRecord.provider === 'contentdb' ||
-    Number(pkgRecord.contentdb_downloads) > 0 ||
-    String(pkgRecord.tags || '').includes('"contentdb"') ||
+    (!pkgRecord && !isJamSlugFallbackOnly) ||
+    pkgRecord?.provider === 'contentdb' ||
+    Number(pkgRecord?.contentdb_downloads) > 0 ||
+    String(pkgRecord?.tags || '').includes('"contentdb"') ||
     Boolean(upstreamReleaseUrl);
   if (hasContentDbMirror) {
     addCandidate(upstreamReleaseUrl);

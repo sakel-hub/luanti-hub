@@ -1567,4 +1567,207 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(probedJamUrls.some((u) => u.includes('minetest_game'))).toBe(false);
     expect(probedJamUrls.some((u) => u.includes('confspace'))).toBe(true);
   });
+
+  it('installs multi-mod ContentDB & Jam 2026 games (Warr1024/confspace and sztest/confspace) cleanly as Luanti games without injecting modpack.conf when provides.length > 1', async () => {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const buildRawGitZip = (files: Array<{ path: string; content: string }>): Uint8Array => {
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let offset = 0;
+      for (const f of files) {
+        const nameBytes = encoder.encode(f.path);
+        const dataBytes = encoder.encode(f.content);
+        const lh = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lv = new DataView(lh.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);
+        lv.setUint16(6, 0, true);
+        lv.setUint16(8, 0, true);
+        lv.setUint32(14, 0x12345678, true);
+        lv.setUint32(18, dataBytes.length, true);
+        lv.setUint32(22, dataBytes.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        lh.set(nameBytes, 30);
+        lh.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(lh);
+
+        const ch = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(ch.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint32(16, 0x12345678, true);
+        cv.setUint32(20, dataBytes.length, true);
+        cv.setUint32(24, dataBytes.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        ch.set(nameBytes, 46);
+        cdParts.push(ch);
+        offset += lh.length;
+      }
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, files.length, true);
+      ev.setUint16(10, files.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, offset, true);
+      const out = new Uint8Array(offset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const listZipEntries = (zip: Uint8Array): string[] => {
+      const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+      let eocdPos = -1;
+      for (let p = zip.length - 22; p >= 0; p--) {
+        if (v.getUint32(p, true) === 0x06054b50) {
+          eocdPos = p;
+          break;
+        }
+      }
+      const count = v.getUint16(eocdPos + 10, true);
+      let ptr = v.getUint32(eocdPos + 16, true);
+      const paths: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const nLen = v.getUint16(ptr + 28, true);
+        const eLen = v.getUint16(ptr + 30, true);
+        const cLen = v.getUint16(ptr + 32, true);
+        paths.push(decoder.decode(zip.subarray(ptr + 46, ptr + 46 + nLen)));
+        ptr += 46 + nLen + eLen + cLen;
+      }
+      return paths;
+    };
+
+    const upstreamConfspaceGitZip = buildRawGitZip([
+      { path: 'confspace-a1b2c3d4/game.conf', content: 'name = confspace\ntitle = Configuration Space\n' },
+      { path: 'confspace-a1b2c3d4/mods/confspace_core/mod.conf', content: 'name = confspace_core\n' },
+      { path: 'confspace-a1b2c3d4/mods/confspace_core/init.lua', content: '-- confspace_core\n' },
+      { path: 'confspace-a1b2c3d4/mods/confspace_mapgen/mod.conf', content: 'name = confspace_mapgen\n' },
+      { path: 'confspace-a1b2c3d4/mods/confspace_mapgen/init.lua', content: '-- confspace_mapgen\n' },
+      { path: 'confspace-a1b2c3d4/mods/confspace_rooms/init.lua', content: '-- confspace_rooms\n' }
+    ]);
+
+    (globalThis as any).caches = {
+      default: {
+        match: vi.fn(async () => undefined),
+        put: vi.fn(async () => undefined),
+        delete: vi.fn(async () => true)
+      }
+    };
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/packages/Warr1024/confspace/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 99123,
+              title: '2026-11-10',
+              commit: 'a1b2c3d4e5f67890',
+              url: '/packages/Warr1024/confspace/releases/99123/download/'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/packages/Warr1024/confspace/for-client/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Warr1024',
+            name: 'confspace',
+            title: 'Configuration Space',
+            type: 'game',
+            release: 99123,
+            repo: 'https://gitlab.com/sztest/confspace',
+            provides: ['confspace_core', 'confspace_mapgen', 'confspace_rooms']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/packages/Warr1024/confspace/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Warr1024',
+            name: 'confspace',
+            title: 'Configuration Space',
+            type: 'game',
+            repo: 'https://gitlab.com/sztest/confspace',
+            provides: ['confspace_core', 'confspace_mapgen', 'confspace_rooms']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'confspace-brew-2026',
+              repository: 'https://gitlab.com/sztest/confspace',
+              commit: 'a1b2c3d4e5f67890',
+              title: 'Configuration Space',
+              description: 'Puzzle game in configuration space',
+              publishedAt: '2026-11-09T18:00:00.000Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('gitlab.com') && url.includes('archive.zip')) {
+        return new Response(upstreamConfspaceGitZip as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    // 1. Luanti Engine Content tab download for canonical ContentDB game `Warr1024/confspace`
+    const cdbGameRes = await handlePackageDownload({
+      params: { author: 'Warr1024', name: 'confspace', release: '99123' },
+      request: new Request(
+        'https://luantihub.org/packages/Warr1024/confspace/releases/99123/download/?reason=new',
+        {
+          method: 'GET',
+          headers: { 'User-Agent': 'Luanti/5.11.0' }
+        }
+      ),
+      env: {}
+    });
+    expect(cdbGameRes.status).toBe(200);
+    expect(cdbGameRes.headers.get('Content-Type')).toBe('application/zip');
+    const cdbZipEntries = listZipEntries(new Uint8Array(await cdbGameRes.arrayBuffer()));
+    expect(cdbZipEntries[0]).toBe('confspace/');
+    expect(cdbZipEntries).toContain('confspace/game.conf');
+    expect(cdbZipEntries).toContain('confspace/mods/confspace_core/init.lua');
+    expect(cdbZipEntries).toContain('confspace/mods/confspace_mapgen/init.lua');
+    expect(cdbZipEntries).toContain('confspace/mods/confspace_rooms/init.lua');
+    // Must NEVER inject modpack.conf (which caused Luanti pkgmgr to fail with "Unable to install a modpack as a game")
+    expect(cdbZipEntries).not.toContain('confspace/modpack.conf');
+    expect(cdbZipEntries).not.toContain('confspace/modpack.txt');
+
+    // 2. Cross-author Jam brew slug download (`sztest/confspace`) when D1/ContentDB has no `sztest/confspace` row
+    const jamSlugRes = await handlePackageDownload({
+      params: { author: 'sztest', name: 'confspace', release: '1' },
+      request: new Request(
+        'https://luantihub.org/packages/sztest/confspace/releases/1/download/?reason=new',
+        {
+          method: 'GET',
+          headers: { 'User-Agent': 'Luanti/5.11.0' }
+        }
+      ),
+      env: {}
+    });
+    expect(jamSlugRes.status).toBe(200);
+    const jamZipEntries = listZipEntries(new Uint8Array(await jamSlugRes.arrayBuffer()));
+    expect(jamZipEntries).toContain('confspace/game.conf');
+    expect(jamZipEntries).toContain('confspace/mods/confspace_core/init.lua');
+    expect(jamZipEntries).not.toContain('confspace/modpack.conf');
+  });
 });

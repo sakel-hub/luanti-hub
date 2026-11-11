@@ -1351,6 +1351,46 @@ description = Mob animation and spawning framework.
     expect(modpackPaths).toContain('x_pack/mod_alpha/init.lua');
     expect(modpackPaths).toContain('x_pack/mod_beta/init.lua');
 
+    // 2b. Multi-mod Game archive (`confspace`) with game.conf + mods/* must NEVER synthesize modpack.conf
+    // (even if erroneously invoked with packageType = 'modpack'), and must strip stray root modpack.conf
+    // while preserving nested modpacks inside `mods/<subpack>/modpack.conf` so Luanti `pkgmgr.get_folder_type`
+    // always classifies it as `game` instead of failing with "Unable to install a modpack as a game".
+    const rawGameZip = buildTestZip([
+      { path: 'confspace-main/game.conf', content: 'title = Configuration Space\n' },
+      { path: 'confspace-main/modpack.conf', content: 'name = stray_root_modpack\n' },
+      { path: 'confspace-main/mods/confspace_core/init.lua', content: '-- core' },
+      { path: 'confspace-main/mods/confspace_pack/modpack.conf', content: 'name = confspace_pack\n' },
+      { path: 'confspace-main/mods/confspace_pack/submod/init.lua', content: '-- submod' }
+    ]);
+    const normalizedGameZip = normalizeLuantiPackageZip(rawGameZip, 'confspace', 'game');
+    const gamePaths = listZipPaths(normalizedGameZip);
+    expect(gamePaths[0]).toBe('confspace/');
+    expect(gamePaths).toContain('confspace/game.conf');
+    expect(gamePaths).toContain('confspace/mods/confspace_core/init.lua');
+    expect(gamePaths).toContain('confspace/mods/confspace_pack/modpack.conf');
+    expect(gamePaths).not.toContain('confspace/modpack.conf');
+    expect(gamePaths).not.toContain('confspace/modpack.txt');
+
+    const rawCleanGameZip = buildTestZip([
+      { path: 'confspace-main/game.conf', content: 'title = Configuration Space\n' },
+      { path: 'confspace-main/mods/confspace_core/init.lua', content: '-- core' },
+      { path: 'confspace-main/mods/confspace_mapgen/init.lua', content: '-- mapgen' }
+    ]);
+    const defensiveGamePaths = listZipPaths(normalizeLuantiPackageZip(rawCleanGameZip, 'confspace', 'modpack'));
+    expect(defensiveGamePaths).toContain('confspace/game.conf');
+    expect(defensiveGamePaths).not.toContain('confspace/modpack.conf');
+
+    // 2c. Legacy game.conf-less Git game (`mods/*/init.lua`) keeps `mods/` intact and synthesizes root `game.conf`
+    const rawLegacyGameZip = buildTestZip([
+      { path: 'oldgame-main/mods/mod_one/init.lua', content: '-- one' },
+      { path: 'oldgame-main/mods/mod_two/init.lua', content: '-- two' }
+    ]);
+    const legacyGamePaths = listZipPaths(normalizeLuantiPackageZip(rawLegacyGameZip, 'oldgame', 'game'));
+    expect(legacyGamePaths).toContain('oldgame/game.conf');
+    expect(legacyGamePaths).toContain('oldgame/mods/mod_one/init.lua');
+    expect(legacyGamePaths).toContain('oldgame/mods/mod_two/init.lua');
+    expect(legacyGamePaths).not.toContain('oldgame/modpack.conf');
+
     // 3. Verify "Install App" buttons are hidden when PWA is already installed
     const pwaService = TestBed.inject(PwaService);
     const headerFixture = TestBed.createComponent(HeaderComponent);
