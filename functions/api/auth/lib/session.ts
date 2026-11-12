@@ -676,7 +676,9 @@ export async function reconcileAndMergeUserAccount(
           const conflictingUser = await db.prepare(
             `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
           ).bind(orphanedBase).first();
-          const safeUsername = conflictingUser ? `${orphanedBase}_${String(orphanedIdentity.provider || 'gh').slice(0, 2).toLowerCase()}` : orphanedBase;
+          const safeUsername = conflictingUser
+            ? await resolveUniqueCandidateUsername(db, orphanedBase, String(orphanedIdentity.provider || 'github'))
+            : orphanedBase;
           const avatarUrl = orphanedIdentity.avatar_url || `https://github.com/${orphanedBase}.png`;
           await db.prepare(
             `INSERT INTO users (id, username, display_name, avatar_url, role) VALUES (?, ?, ?, ?, 'user')`
@@ -886,69 +888,208 @@ async function deduplicateUserIdentities(db: any, userId: string): Promise<void>
   }
 }
 
-/**
- * Verifies a Personal Access Token (PAT) against GitHub, Codeberg, GitLab, or ContentDB API,
- * or against a configured Cloudflare `ADMIN_SECRET`.
- */
-export async function verifyProviderToken(
-  provider: string,
-  token: string,
-  expectedUsername: string,
-  adminSecret?: string
-): Promise<{
+export type ProviderTokenFailureReason =
+  | 'invalid_token'
+  | 'username_mismatch'
+  | 'excessive_scopes'
+  | 'upstream_error';
+
+export interface ProviderTokenVerificationResult {
   verified: boolean;
+  failureReason?: ProviderTokenFailureReason;
   providerUserId?: string;
   username?: string;
   displayName?: string;
   avatarUrl?: string;
   profileUrl?: string;
   bio?: string;
-}> {
-  const cleanToken = (token || '').trim();
-  if (!cleanToken) return { verified: false };
+}
 
-  // 1. Check Cloudflare ADMIN_SECRET override if configured
-  if (adminSecret && adminSecret.length >= 12 && timingSafeEqualStrings(cleanToken, adminSecret)) {
+export function getProviderCollisionSuffix(provider: string): 'gi' | 'gl' | 'co' | 'cd' | 'me' {
+  const p = String(provider || '').trim().toLowerCase();
+  if (p === 'gitlab') return 'gl';
+  if (p === 'codeberg') return 'co';
+  if (p === 'contentdb') return 'cd';
+  if (p === 'mesehub') return 'me';
+  return 'gi';
+}
+
+export async function resolveUniqueCandidateUsername(
+  db: any,
+  baseUsername: string,
+  provider: string
+): Promise<string> {
+  const suffix = getProviderCollisionSuffix(provider);
+  const cleanBase = String(baseUsername || '').trim().slice(0, 32);
+  const preferred = `${cleanBase}_${suffix}`;
+  if (!db) return preferred;
+  try {
+    const taken = await db
+      .prepare(`SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`)
+      .bind(preferred)
+      .first();
+    if (!taken) {
+      return preferred;
+    }
+  } catch {
+    return preferred;
+  }
+  return `${cleanBase.slice(0, 27)}_${suffix}_${crypto.randomUUID().slice(0, 4)}`;
+}
+
+/**
+ * Inspects upstream OAuth/PAT scope response headers (`X-OAuth-Scopes`, `X-Gitea-Scopes`)
+ * and returns `true` when any write, repository-mutation, or administrative scope is present.
+ * Zero-scope (`""`) and strictly read-only scopes (`read:*`, `user:email`, `read_user`) are permitted.
+ */
+export function hasExcessiveTokenScopes(headers?: Headers | null, provider?: string): boolean {
+  if (!headers || typeof headers.get !== 'function') return false;
+  const rawScopes = [headers.get('x-oauth-scopes'), headers.get('x-gitea-scopes')]
+    .filter(Boolean)
+    .join(',');
+  if (!rawScopes.trim()) return false;
+
+  const p = String(provider || '').trim().toLowerCase();
+  const scopes = rawScopes
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const scope of scopes) {
+    const isReadColonScope = /^read:[a-z0-9_-]+$/.test(scope);
+    const isGitHubEmailRead = p === 'github' && scope === 'user:email';
+    const isGitLabSafeRead =
+      p === 'gitlab' &&
+      (scope === 'read_user' || scope === 'read_repository' || scope === 'read_registry');
+
+    if (!isReadColonScope && !isGitHubEmailRead && !isGitLabSafeRead) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const PROVIDER_VERIFY_TIMEOUT_MS = 5000;
+
+/**
+ * Verifies a Personal Access Token (PAT) against GitHub, Codeberg, Mesehub, GitLab, or ContentDB API,
+ * or against a configured Cloudflare `ADMIN_SECRET`.
+ * Never logs, caches, or echoes the token value.
+ */
+export async function verifyProviderToken(
+  provider: string,
+  token: string,
+  expectedUsername: string,
+  adminSecret?: string
+): Promise<ProviderTokenVerificationResult> {
+  const cleanToken = (token || '').trim();
+  const cleanExpectedUsername = (expectedUsername || '').trim();
+
+  // Reject empty, malformed, oversized, or header-injectable tokens before any outbound call
+  if (
+    !cleanToken ||
+    cleanToken.length < 8 ||
+    cleanToken.length > 512 ||
+    /[\r\n\0]/.test(cleanToken)
+  ) {
+    return { verified: false, failureReason: 'invalid_token' };
+  }
+
+  // 1. Check Cloudflare ADMIN_SECRET override if configured (constant-time)
+  if (
+    cleanExpectedUsername &&
+    adminSecret &&
+    adminSecret.length >= 12 &&
+    timingSafeEqualStrings(cleanToken, adminSecret)
+  ) {
     return {
       verified: true,
-      providerUserId: `${provider}:${expectedUsername.toLowerCase()}`,
-      username: expectedUsername,
-      displayName: expectedUsername
+      providerUserId: `${provider}:${cleanExpectedUsername.toLowerCase()}`,
+      username: cleanExpectedUsername,
+      displayName: cleanExpectedUsername
     };
   }
 
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
+  const baseHeaders: Record<string, string> = {
+    Accept: 'application/json',
     'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
+  };
+
+  const fetchStrictProviderEndpoint = async (
+    url: string,
+    authHeaderValue: string,
+    useAnubisBridge = false
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROVIDER_VERIFY_TIMEOUT_MS);
+    try {
+      const reqInit: RequestInit = {
+        method: 'GET',
+        headers: { ...baseHeaders, Authorization: authHeaderValue },
+        redirect: 'error',
+        cache: 'no-store',
+        signal: controller.signal
+      };
+      const res = useAnubisBridge
+        ? await fetchWithAnubisSupport(url, reqInit, {
+            maxRedirects: 0,
+            allowHost: h => h === 'git.minetest.land'
+          })
+        : await fetch(url, reqInit);
+      return res;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const matchesExpectedHandle = (actualUsername: string): boolean => {
+    if (!cleanExpectedUsername) return true;
+    return actualUsername.trim().toLowerCase() === cleanExpectedUsername.toLowerCase();
   };
 
   try {
     if (provider === 'github') {
-      const res = await fetch('https://api.github.com/user', {
-        headers: { ...headers, Authorization: `Bearer ${cleanToken}` }
-      });
-      if (!res.ok) return { verified: false };
+      const res = await fetchStrictProviderEndpoint('https://api.github.com/user', `Bearer ${cleanToken}`);
+      if (res.redirected || (res.status >= 300 && res.status < 400)) {
+        return { verified: false, failureReason: 'upstream_error' };
+      }
+      if (!res.ok) return { verified: false, failureReason: 'invalid_token' };
+      if (hasExcessiveTokenScopes(res.headers, 'github')) {
+        return { verified: false, failureReason: 'excessive_scopes' };
+      }
       const profile: any = await res.json();
-      if (!profile?.login) return { verified: false };
+      const login = typeof profile?.login === 'string' ? profile.login.trim() : '';
+      if (!login) return { verified: false, failureReason: 'invalid_token' };
+      if (!matchesExpectedHandle(login)) {
+        return { verified: false, failureReason: 'username_mismatch' };
+      }
       return {
         verified: true,
-        providerUserId: String(profile.id || profile.login),
-        username: profile.login,
-        displayName: profile.name || profile.login,
+        providerUserId: String(profile.id || login),
+        username: login,
+        displayName: profile.name || login,
         avatarUrl: profile.avatar_url,
-        profileUrl: profile.html_url || `https://github.com/${profile.login}`,
+        profileUrl: profile.html_url || `https://github.com/${login}`,
         bio: profile.bio || ''
       };
     }
 
     if (provider === 'codeberg') {
-      const res = await fetch('https://codeberg.org/api/v1/user', {
-        headers: { ...headers, Authorization: `token ${cleanToken}` }
-      });
-      if (!res.ok) return { verified: false };
+      const res = await fetchStrictProviderEndpoint('https://codeberg.org/api/v1/user', `token ${cleanToken}`);
+      if (res.redirected || (res.status >= 300 && res.status < 400)) {
+        return { verified: false, failureReason: 'upstream_error' };
+      }
+      if (!res.ok) return { verified: false, failureReason: 'invalid_token' };
+      if (hasExcessiveTokenScopes(res.headers, 'codeberg')) {
+        return { verified: false, failureReason: 'excessive_scopes' };
+      }
       const profile: any = await res.json();
-      const login = profile?.login || profile?.username;
-      if (!login) return { verified: false };
+      const rawLogin = profile?.login || profile?.username;
+      const login = typeof rawLogin === 'string' ? rawLogin.trim() : '';
+      if (!login) return { verified: false, failureReason: 'invalid_token' };
+      if (!matchesExpectedHandle(login)) {
+        return { verified: false, failureReason: 'username_mismatch' };
+      }
       return {
         verified: true,
         providerUserId: String(profile.id || login),
@@ -961,13 +1102,25 @@ export async function verifyProviderToken(
     }
 
     if (provider === 'mesehub') {
-      const res = await fetchWithAnubisSupport('https://git.minetest.land/api/v1/user', {
-        headers: { ...headers, Authorization: `token ${cleanToken}` }
-      });
-      if (!res.ok) return { verified: false };
+      const res = await fetchStrictProviderEndpoint(
+        'https://git.minetest.land/api/v1/user',
+        `token ${cleanToken}`,
+        true
+      );
+      if (res.redirected || (res.status >= 300 && res.status < 400)) {
+        return { verified: false, failureReason: 'upstream_error' };
+      }
+      if (!res.ok) return { verified: false, failureReason: 'invalid_token' };
+      if (hasExcessiveTokenScopes(res.headers, 'mesehub')) {
+        return { verified: false, failureReason: 'excessive_scopes' };
+      }
       const profile: any = await res.json();
-      const login = profile?.login || profile?.username;
-      if (!login) return { verified: false };
+      const rawLogin = profile?.login || profile?.username;
+      const login = typeof rawLogin === 'string' ? rawLogin.trim() : '';
+      if (!login) return { verified: false, failureReason: 'invalid_token' };
+      if (!matchesExpectedHandle(login)) {
+        return { verified: false, failureReason: 'username_mismatch' };
+      }
       return {
         verified: true,
         providerUserId: String(profile.id || login),
@@ -980,43 +1133,61 @@ export async function verifyProviderToken(
     }
 
     if (provider === 'gitlab') {
-      const res = await fetch('https://gitlab.com/api/v4/user', {
-        headers: { ...headers, Authorization: `Bearer ${cleanToken}` }
-      });
-      if (!res.ok) return { verified: false };
+      const res = await fetchStrictProviderEndpoint('https://gitlab.com/api/v4/user', `Bearer ${cleanToken}`);
+      if (res.redirected || (res.status >= 300 && res.status < 400)) {
+        return { verified: false, failureReason: 'upstream_error' };
+      }
+      if (!res.ok) return { verified: false, failureReason: 'invalid_token' };
+      if (hasExcessiveTokenScopes(res.headers, 'gitlab')) {
+        return { verified: false, failureReason: 'excessive_scopes' };
+      }
       const profile: any = await res.json();
-      if (!profile?.username) return { verified: false };
+      const login = typeof profile?.username === 'string' ? profile.username.trim() : '';
+      if (!login) return { verified: false, failureReason: 'invalid_token' };
+      if (!matchesExpectedHandle(login)) {
+        return { verified: false, failureReason: 'username_mismatch' };
+      }
       return {
         verified: true,
-        providerUserId: String(profile.id || profile.username),
-        username: profile.username,
-        displayName: profile.name || profile.username,
+        providerUserId: String(profile.id || login),
+        username: login,
+        displayName: profile.name || login,
         avatarUrl: profile.avatar_url,
-        profileUrl: profile.web_url || `https://gitlab.com/${profile.username}`,
+        profileUrl: profile.web_url || `https://gitlab.com/${login}`,
         bio: profile.bio || ''
       };
     }
 
     if (provider === 'contentdb') {
-      const res = await fetch('https://content.luanti.org/api/whoami/', {
-        headers: { ...headers, Authorization: `Bearer ${cleanToken}` }
-      });
-      if (!res.ok) return { verified: false };
+      const res = await fetchStrictProviderEndpoint(
+        'https://content.luanti.org/api/whoami/',
+        `Bearer ${cleanToken}`
+      );
+      if (res.redirected || (res.status >= 300 && res.status < 400)) {
+        return { verified: false, failureReason: 'upstream_error' };
+      }
+      if (!res.ok) return { verified: false, failureReason: 'invalid_token' };
       const profile: any = await res.json();
-      if (!profile?.is_authenticated || !profile?.username) return { verified: false };
+      const login = typeof profile?.username === 'string' ? profile.username.trim() : '';
+      if (!profile?.is_authenticated || !login) {
+        return { verified: false, failureReason: 'invalid_token' };
+      }
+      if (!matchesExpectedHandle(login)) {
+        return { verified: false, failureReason: 'username_mismatch' };
+      }
       return {
         verified: true,
-        providerUserId: String(profile.username),
-        username: profile.username,
-        displayName: profile.display_name || profile.username,
-        profileUrl: `https://content.luanti.org/users/${profile.username}/`
+        providerUserId: login,
+        username: login,
+        displayName: profile.display_name || login,
+        profileUrl: `https://content.luanti.org/users/${login}/`
       };
     }
   } catch {
-    return { verified: false };
+    return { verified: false, failureReason: 'upstream_error' };
   }
 
-  return { verified: false };
+  return { verified: false, failureReason: 'invalid_token' };
 }
 
 /**

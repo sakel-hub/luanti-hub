@@ -14493,4 +14493,427 @@ core.register_node(modname .. ":panel", {
       pkgService.closePackageModal();
     }
   });
+
+  it('should enforce zero-storage PAT security guarantees, reject write-scoped or mismatched tokens, block cross-provider username collision hijacking, rate-limit auth_verify, and wipe tokens from UI memory', async () => {
+    const {
+      verifyProviderToken,
+      hasExcessiveTokenScopes,
+      createSessionToken,
+      verifySessionTokenClaims,
+      createOAuthStateToken
+    } = await import('../../functions/api/auth/lib/session');
+    const { onRequestPost: onAuthMePost, onRequestPut: onAuthMePut } = await import('../../functions/api/auth/me');
+    const { onRequestGet: oauthCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const { onRequest: edgeMiddleware } = await import('../../functions/_middleware');
+    const { AuthModalComponent } = await import('./features/auth/auth-modal.component');
+
+    // 1. Scope ceiling helper unit checks
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': '' }), 'github')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': 'read:user, user:email' }), 'github')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': 'repo, read:user' }), 'github')).toBe(true);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-Gitea-Scopes': 'read:user' }), 'codeberg')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-Gitea-Scopes': 'write:repository, read:user' }), 'codeberg')).toBe(true);
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    const seenRedirects: Array<RequestRedirect | undefined> = [];
+
+    try {
+      // 2. Reject short / CRLF-injected tokens before any network call
+      globalThis.fetch = (async () => {
+        fetchCalls++;
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      const shortRes = await verifyProviderToken('github', 'short', 'alice');
+      const crlfRes = await verifyProviderToken('github', 'ghp_validlength\r\nX-Injected: 1', 'alice');
+      expect(shortRes).toEqual({ verified: false, failureReason: 'invalid_token' });
+      expect(crlfRes).toEqual({ verified: false, failureReason: 'invalid_token' });
+      expect(fetchCalls).toBe(0);
+
+      // 3. Reject username mismatch, write-scoped PATs, and HTTP 302 redirects
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        seenRedirects.push(init?.redirect);
+        const authHdr = new Headers(init?.headers || {}).get('Authorization') || '';
+
+        if (authHdr.includes('tok_redirect_302')) {
+          return new Response(null, { status: 302, headers: { Location: 'https://evil.example/steal' } });
+        }
+        if (authHdr.includes('tok_write_repo')) {
+          return new Response(JSON.stringify({ id: 101, login: 'alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-OAuth-Scopes': 'repo, workflow' }
+          });
+        }
+        if (authHdr.includes('tok_bob_readonly')) {
+          return new Response(JSON.stringify({ id: 202, login: 'bob' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-OAuth-Scopes': '' }
+          });
+        }
+        if (url === 'https://codeberg.org/api/v1/user' && authHdr.includes('tok_cb_attacker_alice')) {
+          return new Response(JSON.stringify({ id: 9001, login: 'alice', full_name: 'Codeberg Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-Gitea-Scopes': 'read:user' }
+          });
+        }
+        if (url === 'https://content.luanti.org/api/whoami/' && authHdr.includes('tok_cdb_victim_alice')) {
+          return new Response(JSON.stringify({ is_authenticated: true, username: 'alice', display_name: 'Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (url === 'https://gitlab.com/oauth/token') {
+          return new Response(JSON.stringify({ access_token: 'gl_oauth_attacker_alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (url === 'https://gitlab.com/api/v4/user') {
+          return new Response(JSON.stringify({ id: 7777, username: 'alice', name: 'GitLab Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response('{}', { status: 401 });
+      }) as typeof fetch;
+
+      const redirCheck = await verifyProviderToken('github', 'tok_redirect_302_abcdef', 'alice');
+      expect(redirCheck.verified).toBe(false);
+      expect(redirCheck.failureReason).toBe('upstream_error');
+      expect(seenRedirects[0]).toBe('error');
+
+      const writeScopeRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_write_repo_abcdef' })
+        }),
+        env: { SESSION_SECRET: 'sec_pat_test_123456' }
+      } as any);
+      expect(writeScopeRes.status).toBe(400);
+      expect(writeScopeRes.headers.get('Cache-Control')).toContain('no-store');
+      const writeScopeJson = await writeScopeRes.json();
+      expect(writeScopeJson.error).toContain('only accepts zero-scope / read-only tokens');
+
+      const mismatchRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_bob_readonly_abcdef' })
+        }),
+        env: { SESSION_SECRET: 'sec_pat_test_123456' }
+      } as any);
+      expect(mismatchRes.status).toBe(401);
+      const mismatchJson = await mismatchRes.json();
+      expect(mismatchJson.error).toContain('different account than the username entered');
+
+      // 4. Cross-Provider Username Collision Account Takeover Blocked (PAT + OAuth), while Authenticated Linking Works
+      const usersTable: Array<{ id: string; username: string; display_name: string; avatar_url: string; role: string }> = [
+        {
+          id: 'usr_victim_alice',
+          username: 'alice',
+          display_name: 'Original Alice',
+          avatar_url: 'https://github.com/alice.png',
+          role: 'admin'
+        }
+      ];
+      let nextIdentityId = 2;
+      const identitiesTable: Array<{
+        id: number;
+        user_id: string;
+        provider: string;
+        provider_user_id: string;
+        provider_username: string;
+        profile_url: string;
+        avatar_url: string;
+        verified: number;
+      }> = [
+        {
+          id: 1,
+          user_id: 'usr_victim_alice',
+          provider: 'github',
+          provider_user_id: '101',
+          provider_username: 'alice',
+          profile_url: 'https://github.com/alice',
+          avatar_url: 'https://github.com/alice.png',
+          verified: 1
+        }
+      ];
+
+      const mockCollisionDb = {
+        prepare(sql: string) {
+          const norm = sql.replace(/\s+/g, ' ').trim();
+          return {
+            bind(...args: any[]) {
+              const execQuery = (): any[] => {
+                if (/FROM users WHERE id = \?/i.test(norm)) {
+                  return usersTable.filter(u => u.id === String(args[0]));
+                }
+                if (/FROM users WHERE LOWER\(username\) = LOWER\(\?\)\s*(AND id != \?)?/i.test(norm)) {
+                  const targetU = String(args[0] || '').toLowerCase();
+                  const exclId = args[1] ? String(args[1]) : null;
+                  return usersTable.filter(
+                    u => u.username.toLowerCase() === targetU && (!exclId || u.id !== exclId)
+                  );
+                }
+                if (/FROM user_identities WHERE provider = \? AND \(provider_user_id = \? OR LOWER\(provider_username\) = LOWER\(\?\)\)/i.test(norm)) {
+                  const prov = String(args[0] || '').toLowerCase();
+                  const puid = String(args[1] || '');
+                  const puname = String(args[2] || '').toLowerCase();
+                  return identitiesTable.filter(
+                    i =>
+                      i.provider.toLowerCase() === prov &&
+                      (i.provider_user_id === puid || i.provider_username.toLowerCase() === puname)
+                  );
+                }
+                if (/FROM user_identities WHERE user_id = \? AND verified = 1/i.test(norm)) {
+                  return identitiesTable.filter(i => i.user_id === String(args[0]) && i.verified === 1);
+                }
+                if (/FROM user_identities WHERE user_id = \? AND provider = \?/i.test(norm)) {
+                  return identitiesTable.filter(
+                    i => i.user_id === String(args[0]) && i.provider.toLowerCase() === String(args[1]).toLowerCase()
+                  );
+                }
+                if (/FROM user_identities WHERE user_id = \?/i.test(norm)) {
+                  return identitiesTable.filter(i => i.user_id === String(args[0]));
+                }
+                return [];
+              };
+              return {
+                first: async () => execQuery()[0] ?? null,
+                all: async () => ({ results: execQuery() }),
+                run: async () => {
+                  if (/INSERT INTO users/i.test(norm)) {
+                    const [id, username, display_name, avatar_url, role] = args;
+                    const existing = usersTable.find(u => u.id === String(id));
+                    if (existing) {
+                      existing.display_name = String(display_name);
+                      existing.avatar_url = String(avatar_url);
+                    } else {
+                      usersTable.push({
+                        id: String(id),
+                        username: String(username),
+                        display_name: String(display_name),
+                        avatar_url: String(avatar_url),
+                        role: String(role)
+                      });
+                    }
+                  } else if (/INSERT INTO user_identities/i.test(norm)) {
+                    const [user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified] =
+                      args;
+                    identitiesTable.push({
+                      id: nextIdentityId++,
+                      user_id: String(user_id),
+                      provider: String(provider),
+                      provider_user_id: String(provider_user_id),
+                      provider_username: String(provider_username),
+                      profile_url: String(profile_url || ''),
+                      avatar_url: String(avatar_url || ''),
+                      verified: verified === undefined ? 1 : Number(verified)
+                    });
+                  } else if (/UPDATE user_identities/i.test(norm) && args.length >= 7) {
+                    const [user_id, provider_user_id, provider_username, profile_url, avatar_url, verified, rowId] =
+                      args;
+                    const row = identitiesTable.find(i => i.id === Number(rowId));
+                    if (row) {
+                      row.user_id = String(user_id);
+                      row.provider_user_id = String(provider_user_id);
+                      row.provider_username = String(provider_username);
+                      row.profile_url = String(profile_url || '');
+                      row.avatar_url = String(avatar_url || '');
+                      row.verified = Number(verified);
+                    }
+                  }
+                  return { success: true };
+                }
+              };
+            }
+          };
+        }
+      };
+
+      const secret = 'sec_collision_guard_secret_999';
+      // 4a. Unauthenticated Codeberg PAT login for 'alice' must NOT hijack 'usr_victim_alice'
+      const attackerPatRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({
+            provider: 'codeberg',
+            username: 'alice',
+            token: 'tok_cb_attacker_alice_1234'
+          })
+        }),
+        env: { DB: mockCollisionDb, SESSION_SECRET: secret }
+      } as any);
+      expect(attackerPatRes.status).toBe(200);
+      const attackerPatJson = await attackerPatRes.json();
+      expect(attackerPatJson.userId).not.toBe('usr_victim_alice');
+      const attackerCookie = (attackerPatRes.headers.get('Set-Cookie') || '').match(/lh_session=([^;]+)/)?.[1] || '';
+      const attackerClaims = await verifySessionTokenClaims(attackerCookie, secret);
+      expect(attackerClaims?.userId).toBe(attackerPatJson.userId);
+      expect(attackerClaims?.username).toBe('alice_co');
+      expect(attackerClaims?.role).toBe('user');
+      expect(identitiesTable.filter(i => i.user_id === 'usr_victim_alice').length).toBe(1);
+
+      // 4b. Unauthenticated GitLab OAuth callback for 'alice' must ALSO isolate into 'alice_gl'
+      const glState = await createOAuthStateToken('gitlab', secret);
+      const attackerOAuthRes = await oauthCallbackGet({
+        params: { provider: 'gitlab' },
+        request: new Request(
+          `https://luantihub.org/api/auth/gitlab/callback?code=gl_collision_code&state=${encodeURIComponent(glState)}`,
+          { headers: { Cookie: `lh_oauth_state=${glState}` } }
+        ),
+        env: {
+          DB: mockCollisionDb,
+          GITLAB_CLIENT_ID: 'gl_cid',
+          GITLAB_CLIENT_SECRET: 'gl_csec',
+          SESSION_SECRET: secret
+        }
+      } as any);
+      expect(attackerOAuthRes.status).toBe(302);
+      const glCookie = (attackerOAuthRes.headers.get('Set-Cookie') || '').match(/lh_session=([^;]+)/)?.[1] || '';
+      const glClaims = await verifySessionTokenClaims(glCookie, secret);
+      expect(glClaims?.userId).not.toBe('usr_victim_alice');
+      expect(usersTable.some(u => u.username === 'alice_gl' && u.id === glClaims?.userId)).toBe(true);
+
+      // 4c. Authenticated Victim 'alice' linking ContentDB via PAT DOES link onto 'usr_victim_alice'
+      const victimSession = await createSessionToken('usr_victim_alice', secret, {
+        username: 'alice',
+        role: 'admin',
+        verified: true
+      });
+      const victimLinkRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://luantihub.org',
+            Cookie: `lh_session=${victimSession}`
+          },
+          body: JSON.stringify({
+            provider: 'contentdb',
+            username: 'alice',
+            token: 'tok_cdb_victim_alice_5678'
+          })
+        }),
+        env: { DB: mockCollisionDb, SESSION_SECRET: secret }
+      } as any);
+      expect(victimLinkRes.status).toBe(200);
+      const victimLinkJson = await victimLinkRes.json();
+      expect(victimLinkJson.userId).toBe('usr_victim_alice');
+      expect(
+        identitiesTable.some(i => i.user_id === 'usr_victim_alice' && i.provider === 'contentdb' && i.verified === 1)
+      ).toBe(true);
+
+      // 5. Defense-in-depth CSRF on POST & PUT /api/auth/me + Dedicated 5 req/min auth_verify rate limit
+      const crossSitePost = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_12345678' })
+        }),
+        env: { SESSION_SECRET: secret }
+      } as any);
+      expect(crossSitePost.status).toBe(403);
+
+      const crossOriginPut = await onAuthMePut({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+          body: JSON.stringify({ bio: 'pwned' })
+        }),
+        env: { SESSION_SECRET: secret }
+      } as any);
+      expect(crossOriginPut.status).toBe(403);
+
+      const rateLimitIp = '198.51.100.219';
+      for (let i = 1; i <= 5; i++) {
+        const mwRes = await edgeMiddleware({
+          request: new Request('https://luantihub.org/api/auth/me', {
+            method: 'POST',
+            headers: { 'CF-Connecting-IP': rateLimitIp, Origin: 'https://luantihub.org' }
+          }),
+          next: async () => Response.json({ attempt: i }, { status: 401 }),
+          env: {}
+        });
+        expect(mwRes.status).toBe(401);
+      }
+      const sixthMwRes = await edgeMiddleware({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'CF-Connecting-IP': rateLimitIp, Origin: 'https://luantihub.org' }
+        }),
+        next: async () => Response.json({ attempt: 6 }, { status: 401 }),
+        env: {}
+      });
+      expect(sixthMwRes.status).toBe(429);
+
+      // 6. AuthModalComponent UI: Security Guarantee Tooltip, Password-Manager Suppression & Immediate Memory Wipe
+      const authService = TestBed.inject(AuthService);
+      authService.setSelectedProvider('contentdb');
+      const modalFixture = TestBed.createComponent(AuthModalComponent);
+      const modalComp = modalFixture.componentInstance;
+      modalComp.isDirectSignInExpanded.set(true);
+      modalFixture.detectChanges();
+
+      const hostEl = modalFixture.nativeElement as HTMLElement;
+      const tokenInputEl = hostEl.querySelector('#auth-token-input') as HTMLInputElement;
+      expect(tokenInputEl).toBeTruthy();
+      expect(tokenInputEl.getAttribute('data-1p-ignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('data-lpignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('data-bwignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('spellcheck')).toBe('false');
+
+      const scopeHintEl = hostEl.querySelector('[data-testid="auth-token-scope-hint"]') as HTMLElement;
+      expect(scopeHintEl?.textContent).toContain('ContentDB');
+      authService.setSelectedProvider('github');
+      modalFixture.detectChanges();
+      expect(scopeHintEl?.textContent).toContain('ZERO scopes');
+
+      // Clicking/tapping the security tooltip button renders zero-storage + revocation guarantees without Admin Secret
+      const tooltipBtn = hostEl.querySelector('[data-testid="auth-token-security-tooltip-btn"]') as HTMLButtonElement;
+      expect(tooltipBtn).toBeTruthy();
+      tooltipBtn.click();
+      modalFixture.detectChanges();
+      const bodyText = document.body.textContent || '';
+      expect(bodyText).toContain('Zero-Storage Security Guarantee');
+      expect(bodyText).toContain('write-scoped tokens are rejected');
+      expect(bodyText).toContain('revoke');
+      expect(bodyText).not.toContain('Admin Secret');
+      tooltipBtn.click();
+
+      // Submitting immediately wipes tokenInput & DOM value BEFORE network call resolves
+      let resolvePendingLogin!: (val: { success: boolean; message?: string }) => void;
+      const loginSpy = vi.spyOn(authService, 'loginWithHandle').mockImplementation(
+        () =>
+          new Promise(resolve => {
+            resolvePendingLogin = resolve;
+          })
+      );
+
+      modalComp.handleInput = 'alice';
+      modalComp.tokenInput = 'ghp_super_secret_ephemeral_token';
+      tokenInputEl.value = 'ghp_super_secret_ephemeral_token';
+
+      const signInPromise = modalComp.onDirectSignIn();
+      // While the network request is still in-flight, component RAM and DOM input are ALREADY wiped!
+      expect(modalComp.tokenInput).toBe('');
+      expect(tokenInputEl.value).toBe('');
+      expect(loginSpy).toHaveBeenCalledWith('github', 'alice', 'ghp_super_secret_ephemeral_token');
+
+      resolvePendingLogin({ success: false, message: 'Test error' });
+      await signInPromise;
+
+      // Destroying the modal also wipes any unsent token typed in the field
+      modalComp.tokenInput = 'unsent_secret_token';
+      modalFixture.destroy();
+      expect(modalComp.tokenInput).toBe('');
+      loginSpy.mockRestore();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

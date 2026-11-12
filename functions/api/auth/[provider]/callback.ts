@@ -7,6 +7,7 @@ import {
   buildClearOAuthStateCookies,
   parseCookies,
   checkIsAdmin,
+  resolveUniqueCandidateUsername,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount,
   invalidateCachedAuthMePayload
@@ -668,56 +669,82 @@ export async function onRequestGet(context: {
         if (shouldLinkToActiveSession && activeSessionUser?.id) {
           userId = String(activeSessionUser.id);
         } else {
-          // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
+          // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username).
+          // Guard against legacy unverified identity claims attached to an already-verified user on another forge.
+          let hasOrphanedIdentityUserId: string | null = null;
           for (const ident of matchingIdentities) {
             const u = await context.env.DB.prepare(
-              `SELECT id, username FROM users WHERE id = ?`
-            ).bind(ident.user_id).first() as { id: string; username: string } | null;
-            if (u) {
-              userId = u.id;
-              if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
-                break;
+              `SELECT id, username, role FROM users WHERE id = ?`
+            ).bind(ident.user_id).first() as { id: string; username: string; role?: string } | null;
+            if (!u) {
+              if (!hasOrphanedIdentityUserId && ident.user_id) {
+                hasOrphanedIdentityUserId = String(ident.user_id);
               }
+              continue;
+            }
+            if (Number(ident.verified) !== 1) {
+              const otherVerified = await context.env.DB.prepare(
+                `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+              ).bind(u.id).first();
+              if (otherVerified || u.role === 'admin' || u.role === 'moderator') {
+                continue;
+              }
+            }
+            userId = u.id;
+            if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
+              break;
             }
           }
 
-          // If no matching identity points to a live user row, check if a user with this username already exists
+          // If no trusted matching identity points to a live user row, check if a user with this username already exists
           if (!userId) {
             const existingUserByUsername = await context.env.DB.prepare(
-              `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
-            ).bind(providerUsername).first() as { id: string } | null;
+              `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
+            ).bind(providerUsername).first() as { id: string; role?: string } | null;
 
-            const conflictingSameProvider = existingUserByUsername
+            const existingVerifiedIdentity = existingUserByUsername
               ? await context.env.DB.prepare(
-                  `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
-                ).bind(existingUserByUsername.id, provider, providerUsername).first()
+                  `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+                ).bind(existingUserByUsername.id).first()
               : null;
 
-            if (existingUserByUsername && !conflictingSameProvider) {
+            const isPrivilegedExisting =
+              existingUserByUsername?.role === 'admin' || existingUserByUsername?.role === 'moderator';
+            const canClaimUnverifiedExtStub =
+              Boolean(existingUserByUsername) &&
+              !existingVerifiedIdentity &&
+              !isPrivilegedExisting &&
+              String(existingUserByUsername!.id).startsWith('ext_');
+
+            if (canClaimUnverifiedExtStub && existingUserByUsername) {
               userId = existingUserByUsername.id;
             } else {
               const candidateUsername = existingUserByUsername
-                ? `${providerUsername}_${provider.slice(0, 2)}`
+                ? await resolveUniqueCandidateUsername(context.env.DB, providerUsername, provider)
                 : providerUsername;
 
-              // Reuse orphaned identity's user_id if present so existing packages/favorites/downloads stay linked
-              userId = matchingIdentities.length > 0 && matchingIdentities[0].user_id
-                ? String(matchingIdentities[0].user_id)
-                : crypto.randomUUID();
+              // Reuse orphaned identity's user_id only when no live user owned it
+              userId = hasOrphanedIdentityUserId || crypto.randomUUID();
 
               await context.env.DB.prepare(`
-                INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
+                INSERT INTO users (id, username, display_name, avatar_url, role)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  avatar_url = excluded.avatar_url,
+                  role = CASE WHEN users.role = 'admin' THEN 'admin' ELSE excluded.role END
               `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
             }
           }
         }
 
-        // Merge any secondary or orphaned user_ids referenced by matchingIdentities into the resolved primary userId
+        // Merge any secondary or orphaned user_ids referenced by verified/ext_* matchingIdentities into the resolved primary userId
         if (userId) {
           const mergedSecondaryIds = new Set<string>();
           for (const ident of matchingIdentities) {
-            if (ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
+            const canMergeSecondary =
+              Number(ident.verified) === 1 || String(ident.user_id || '').startsWith('ext_');
+            if (canMergeSecondary && ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
               mergedSecondaryIds.add(ident.user_id);
               await mergeSecondaryUserIntoPrimary(context.env.DB, userId, ident.user_id);
             }

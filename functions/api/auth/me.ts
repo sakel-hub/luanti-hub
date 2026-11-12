@@ -8,6 +8,7 @@ import {
   parseCookies,
   checkIsAdmin,
   verifyProviderToken,
+  resolveUniqueCandidateUsername,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount,
   getCachedAuthMePayload,
@@ -430,8 +431,72 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
   }
 }
 
-// POST /api/auth/me: Direct Handle Sign-In / PAT Verification
+const NO_STORE_AUTH_HEADERS: Record<string, string> = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  Pragma: 'no-cache'
+};
+
+function verifySameOriginMutation(request: Request): Response | null {
+  let requestHost = '';
+  try {
+    requestHost = new URL(request.url).host.toLowerCase();
+  } catch {
+    return Response.json(
+      { error: 'Forbidden: Malformed request URL.' },
+      { status: 403, headers: NO_STORE_AUTH_HEADERS }
+    );
+  }
+
+  const secFetchSite = (request.headers.get('Sec-Fetch-Site') || '').toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return Response.json(
+      { error: 'Forbidden: Cross-site auth mutation requests are blocked.' },
+      { status: 403, headers: NO_STORE_AUTH_HEADERS }
+    );
+  }
+
+  const originHeader = request.headers.get('Origin');
+  if (originHeader) {
+    try {
+      if (new URL(originHeader).host.toLowerCase() !== requestHost) {
+        return Response.json(
+          { error: 'Forbidden: Invalid request origin.' },
+          { status: 403, headers: NO_STORE_AUTH_HEADERS }
+        );
+      }
+    } catch {
+      return Response.json(
+        { error: 'Forbidden: Malformed request origin.' },
+        { status: 403, headers: NO_STORE_AUTH_HEADERS }
+      );
+    }
+  }
+
+  const refererHeader = request.headers.get('Referer');
+  if (refererHeader) {
+    try {
+      if (new URL(refererHeader).host.toLowerCase() !== requestHost) {
+        return Response.json(
+          { error: 'Forbidden: Invalid request referer.' },
+          { status: 403, headers: NO_STORE_AUTH_HEADERS }
+        );
+      }
+    } catch {
+      return Response.json(
+        { error: 'Forbidden: Malformed request referer.' },
+        { status: 403, headers: NO_STORE_AUTH_HEADERS }
+      );
+    }
+  }
+
+  return null;
+}
+
+// POST /api/auth/me: Direct Handle Sign-In / Ephemeral One-Time PAT Verification
 export async function onRequestPost(context: { request: Request; env: Env; waitUntil?: (promise: Promise<any>) => void }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const body = await context.request.json() as {
       provider?: string;
@@ -446,21 +511,42 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
     const rawToken = (body.token || '').trim();
 
     if (!rawUsername || !/^[a-zA-Z0-9_.-]{2,39}$/.test(rawUsername)) {
-      return Response.json({ error: 'Please enter a valid username (2–39 alphanumeric characters).' }, { status: 400 });
+      return Response.json(
+        { error: 'Please enter a valid username (2–39 alphanumeric characters).' },
+        { status: 400, headers: NO_STORE_AUTH_HEADERS }
+      );
     }
 
     if (!rawToken) {
       return Response.json(
-        { error: 'Please sign in via OAuth or provide a Personal Access Token.' },
-        { status: 401 }
+        { error: 'Please sign in via OAuth or provide a read-only Personal Access Token.' },
+        { status: 401, headers: NO_STORE_AUTH_HEADERS }
       );
     }
 
     const tokenCheck = await verifyProviderToken(provider, rawToken, rawUsername, context.env.ADMIN_SECRET);
     if (!tokenCheck.verified) {
+      if (tokenCheck.failureReason === 'excessive_scopes') {
+        return Response.json(
+          {
+            error:
+              'Security protection: This token has write or repository permissions. LuantiHub only accepts zero-scope / read-only tokens — please revoke this token on your platform and create a read-only token.'
+          },
+          { status: 400, headers: NO_STORE_AUTH_HEADERS }
+        );
+      }
+      if (tokenCheck.failureReason === 'username_mismatch') {
+        return Response.json(
+          {
+            error:
+              'Token verified a different account than the username entered. Please enter the matching username for this token.'
+          },
+          { status: 401, headers: NO_STORE_AUTH_HEADERS }
+        );
+      }
       return Response.json(
-        { error: 'Invalid Personal Access Token or Admin Secret for the selected provider.' },
-        { status: 401 }
+        { error: 'Invalid or expired read-only Personal Access Token / API key for the selected platform.' },
+        { status: 401, headers: NO_STORE_AUTH_HEADERS }
       );
     }
 
@@ -471,14 +557,15 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
     const avatarUrl = tokenCheck.avatarUrl || `https://github.com/${rawUsername}.png`;
     const profileUrl = tokenCheck.profileUrl || `https://github.com/${rawUsername}`;
 
-    const verifiedFlag = isCryptographicallyVerified ? 1 : 0;
+    const verifiedFlag = 1;
     const isAdmin = checkIsAdmin(
       { username: verifiedUsername },
       [{ provider, username: verifiedUsername, verified: verifiedFlag }],
       context.env.ADMIN_USERS
     );
-    const role = isAdmin ? 'admin' : 'user';
-    let userId = `usr_${verifiedUsername.toLowerCase()}`;
+    let resolvedRole = isAdmin ? 'admin' : 'user';
+    let sessionUsername = verifiedUsername;
+    let userId = `usr_${provider}_${verifiedUsername.toLowerCase()}`;
     let dbWriteFailed = !context.env.DB;
 
     if (context.env.DB) {
@@ -488,10 +575,14 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
           ? await verifySessionToken(cookies['lh_session'], context.env.SESSION_SECRET)
           : null;
         const activeSessionUser = existingSessionUserId
-          ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(existingSessionUserId).first() as { id: string; role: string } | null
+          ? await context.env.DB.prepare(`SELECT id, username, role FROM users WHERE id = ?`).bind(existingSessionUserId).first() as {
+              id: string;
+              username?: string;
+              role: string;
+            } | null
           : null;
 
-        // First check if this provider identity already exists (by provider_user_id or provider_username)
+        // Check if this exact provider identity already exists (by provider_user_id or provider_username)
         const matchedIdentity = await context.env.DB.prepare(
           `SELECT id, user_id, verified, provider_user_id FROM user_identities
            WHERE provider = ? AND (provider_user_id = ? OR LOWER(provider_username) = LOWER(?))
@@ -503,46 +594,92 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
           provider_user_id: string;
         } | null;
 
-        const identityUser = matchedIdentity
-          ? await context.env.DB.prepare(`SELECT id, role FROM users WHERE id = ?`).bind(matchedIdentity.user_id).first() as { id: string; role: string } | null
+        const rawIdentityUser = matchedIdentity
+          ? await context.env.DB.prepare(`SELECT id, username, role FROM users WHERE id = ?`).bind(matchedIdentity.user_id).first() as {
+              id: string;
+              username?: string;
+              role: string;
+            } | null
           : null;
 
-        const usernameUser = (!activeSessionUser && !identityUser)
-          ? await context.env.DB.prepare(
-              `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
-            ).bind(verifiedUsername).first() as { id: string; role: string } | null
-          : null;
-
-        const existingUser = activeSessionUser || identityUser || usernameUser;
-
-        if (existingUser) {
-          // Check if existing user has any cryptographically verified identity or admin role
-          const verifiedIdentity = await context.env.DB.prepare(
+        // Guard against legacy unverified identity claims attached to an already-verified user on another forge
+        let trustedIdentityUser = rawIdentityUser;
+        if (!activeSessionUser && rawIdentityUser && matchedIdentity && Number(matchedIdentity.verified) !== 1) {
+          const otherVerified = await context.env.DB.prepare(
             `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
-          ).bind(existingUser.id).first();
-
-          if (!activeSessionUser && !isCryptographicallyVerified && (verifiedIdentity || existingUser.role === 'admin' || existingUser.role === 'moderator')) {
-            return Response.json(
-              {
-                error: 'This creator account is verified and protected. Please sign in via OAuth or provide a Personal Access Token.'
-              },
-              { status: 403 }
-            );
+          ).bind(rawIdentityUser.id).first();
+          if (otherVerified || rawIdentityUser.role === 'admin' || rawIdentityUser.role === 'moderator') {
+            trustedIdentityUser = null;
           }
+        }
 
-          userId = existingUser.id;
-          if (matchedIdentity && matchedIdentity.user_id !== userId && isCryptographicallyVerified) {
+        const usernameCollisionUser = (!activeSessionUser && !trustedIdentityUser)
+          ? await context.env.DB.prepare(
+              `SELECT id, username, role FROM users WHERE LOWER(username) = LOWER(?)`
+            ).bind(verifiedUsername).first() as { id: string; username?: string; role: string } | null
+          : null;
+
+        // Prevent cross-provider username collision account takeover:
+        // Never attach an unauthenticated login on Provider B onto an existing user who owns a verified identity
+        // on Provider A (or holds admin/moderator role). Only unverified `ext_*` stubs can be claimed directly.
+        let safeExistingUser = activeSessionUser || trustedIdentityUser || null;
+        let hasCrossProviderUsernameCollision = false;
+
+        if (!safeExistingUser && usernameCollisionUser) {
+          const existingVerifiedIdentity = await context.env.DB.prepare(
+            `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+          ).bind(usernameCollisionUser.id).first();
+          const isPrivilegedExisting =
+            usernameCollisionUser.role === 'admin' || usernameCollisionUser.role === 'moderator';
+          const isUnverifiedExtStub =
+            !existingVerifiedIdentity &&
+            !isPrivilegedExisting &&
+            String(usernameCollisionUser.id).startsWith('ext_');
+
+          if (isUnverifiedExtStub) {
+            safeExistingUser = usernameCollisionUser;
+          } else {
+            hasCrossProviderUsernameCollision = true;
+          }
+        }
+
+        if (safeExistingUser) {
+          userId = safeExistingUser.id;
+          if (safeExistingUser.username) {
+            sessionUsername = safeExistingUser.username;
+          }
+          if (safeExistingUser.role === 'admin' || isAdmin) {
+            resolvedRole = 'admin';
+          } else if (safeExistingUser.role === 'moderator') {
+            resolvedRole = 'moderator';
+          }
+          if (
+            matchedIdentity &&
+            matchedIdentity.user_id !== userId &&
+            (Number(matchedIdentity.verified) === 1 || String(matchedIdentity.user_id).startsWith('ext_'))
+          ) {
             await mergeSecondaryUserIntoPrimary(context.env.DB, userId, matchedIdentity.user_id);
           }
-          if (isAdmin) {
+          if (isAdmin && safeExistingUser.role !== 'admin') {
             await context.env.DB.prepare(`UPDATE users SET role = 'admin' WHERE id = ?`).bind(userId).run();
           }
         } else {
-          userId = matchedIdentity?.user_id ? String(matchedIdentity.user_id) : crypto.randomUUID();
+          const canReuseOrphanedIdentityUserId =
+            matchedIdentity?.user_id && !rawIdentityUser;
+          userId = canReuseOrphanedIdentityUserId ? String(matchedIdentity!.user_id) : crypto.randomUUID();
+          const candidateUsername = hasCrossProviderUsernameCollision
+            ? await resolveUniqueCandidateUsername(context.env.DB, verifiedUsername, provider)
+            : verifiedUsername;
+          sessionUsername = candidateUsername;
+
           await context.env.DB.prepare(`
-            INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
+            INSERT INTO users (id, username, display_name, avatar_url, role)
             VALUES (?, ?, ?, ?, ?)
-          `).bind(userId, verifiedUsername, displayName, avatarUrl, role).run();
+            ON CONFLICT(id) DO UPDATE SET
+              display_name = excluded.display_name,
+              avatar_url = excluded.avatar_url,
+              role = CASE WHEN users.role = 'admin' THEN 'admin' ELSE excluded.role END
+          `).bind(userId, candidateUsername, displayName, avatarUrl, resolvedRole).run();
         }
 
         if (matchedIdentity) {
@@ -582,6 +719,14 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
         const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId, true);
         if (reconciledUser?.id) {
           userId = String(reconciledUser.id);
+          if (reconciledUser.username) {
+            sessionUsername = String(reconciledUser.username);
+          }
+          if (reconciledUser.role === 'admin') {
+            resolvedRole = 'admin';
+          } else if (reconciledUser.role === 'moderator' && resolvedRole !== 'admin') {
+            resolvedRole = 'moderator';
+          }
         }
       } catch (dbErr) {
         dbWriteFailed = true;
@@ -601,11 +746,11 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
       );
     }
     const sessionToken = await createSessionToken(userId, context.env.SESSION_SECRET, {
-      username: verifiedUsername,
+      username: sessionUsername,
       displayName,
       avatarUrl,
       provider,
-      role,
+      role: resolvedRole,
       verified: isCryptographicallyVerified,
       ...(dbWriteFailed ? { dbPending: true } : {})
     });
@@ -613,25 +758,32 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
     return new Response(JSON.stringify({ success: true, userId, verified: isCryptographicallyVerified }), {
       headers: {
         'Content-Type': 'application/json',
+        ...NO_STORE_AUTH_HEADERS,
         'Set-Cookie': buildSessionCookie(sessionToken, context.request.url, 86400 * 30)
       }
     });
   } catch (err: any) {
-    return Response.json({ error: sanitizePublicErrorMessage(err, 'Sign in failed.') }, { status: 500 });
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Sign in failed.') },
+      { status: 500, headers: NO_STORE_AUTH_HEADERS }
+    );
   }
 }
 
 // PUT /api/auth/me: Update User Account Information (display_name, bio, avatar_url)
 export async function onRequestPut(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
   if (!sessionToken) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+    return Response.json({ error: 'Unauthorized' }, { status: 401, headers: NO_STORE_AUTH_HEADERS });
   }
 
   const userId = await verifySessionToken(sessionToken, context.env.SESSION_SECRET);
   if (!userId || !context.env.DB) {
-    return Response.json({ error: 'Invalid session' }, { status: 401 });
+    return Response.json({ error: 'Invalid session' }, { status: 401, headers: NO_STORE_AUTH_HEADERS });
   }
 
   try {
@@ -687,9 +839,12 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
     }
 
     invalidateCachedAuthMePayload(userId);
-    return Response.json({ success: true });
+    return Response.json({ success: true }, { headers: NO_STORE_AUTH_HEADERS });
   } catch (err: any) {
-    return Response.json({ error: sanitizePublicErrorMessage(err, 'Failed to update profile.') }, { status: 500 });
+    return Response.json(
+      { error: sanitizePublicErrorMessage(err, 'Failed to update profile.') },
+      { status: 500, headers: NO_STORE_AUTH_HEADERS }
+    );
   }
 }
 

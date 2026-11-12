@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, effect, ViewChild, ElementRef } from '@angular/core';
+import { Component, ChangeDetectionStrategy, OnDestroy, inject, signal, effect, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
@@ -236,39 +236,65 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
                     [(ngModel)]="handleInput"
                     name="handleInput"
                     required
+                    autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck="false"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
+                    data-bwignore="true"
                     [placeholder]="'auth.usernamePlaceholder' | translate"
                     class="flex-1 min-w-0 glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                   />
                 </div>
               </div>
 
-              <!-- Field 2: Required Access Token / API Key with Tooltip Explanation -->
+              <!-- Field 2: Required Access Token / API Key with Zero-Storage Security Guarantee Tooltip -->
               <div class="space-y-1.5">
                 <div class="flex items-center justify-between gap-2">
                   <label for="auth-token-input" class="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
                     <svg lucideKeyRound class="w-3 h-3 text-slate-400"></svg>
-                    <span>Access Token / API Key</span>
-                    <span class="text-[10px] font-normal text-amber-400">(Required)</span>
+                    <span>{{ 'auth.tokenLabel' | translate }}</span>
+                    <span class="text-[10px] font-normal text-amber-400">{{ 'auth.tokenRequiredBadge' | translate }}</span>
                   </label>
                   <button
                     type="button"
+                    data-testid="auth-token-security-tooltip-btn"
                     (click)="$event.stopPropagation()"
-                    appTooltip="Required: Provide a read-only Personal Access Token or API key from your selected platform (or your Admin Secret) to verify account ownership."
-                    aria-label="Why provide an access token?"
+                    [appTooltip]="'auth.tokenSecurityTooltip' | translate"
+                    [appTooltipTap]="true"
+                    aria-label="How is my access token handled securely?"
                     class="text-slate-400 hover:text-sky-300 transition flex items-center gap-1 text-[10px] cursor-help">
                     <svg lucideInfo class="w-3.5 h-3.5"></svg>
                   </button>
                 </div>
                 <input
+                  #tokenInputEl
                   id="auth-token-input"
                   type="password"
                   [(ngModel)]="tokenInput"
                   name="tokenInput"
                   required
                   autocomplete="off"
-                  placeholder="Access token or API key"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  spellcheck="false"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-bwignore="true"
+                  data-form-type="other"
+                  [placeholder]="'auth.tokenPlaceholder' | translate"
                   class="w-full glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                 />
+                <p data-testid="auth-token-scope-hint" class="text-[10.5px] text-slate-400 leading-snug">
+                  @switch (authService.selectedProvider()) {
+                    @case ('github') { {{ 'auth.tokenScopeHintGithub' | translate }} }
+                    @case ('codeberg') { {{ 'auth.tokenScopeHintForgejo' | translate }} }
+                    @case ('mesehub') { {{ 'auth.tokenScopeHintForgejo' | translate }} }
+                    @case ('gitlab') { {{ 'auth.tokenScopeHintGitlab' | translate }} }
+                    @default { {{ 'auth.tokenScopeHintContentdb' | translate }} }
+                  }
+                </p>
               </div>
 
               <button
@@ -294,10 +320,11 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
     </div>
   `
 })
-export class AuthModalComponent {
+export class AuthModalComponent implements OnDestroy {
   readonly authService = inject(AuthService);
 
   @ViewChild('handleInputEl') handleInputEl?: ElementRef<HTMLInputElement>;
+  @ViewChild('tokenInputEl') tokenInputEl?: ElementRef<HTMLInputElement>;
 
   handleInput = '';
   tokenInput = '';
@@ -317,6 +344,17 @@ export class AuthModalComponent {
     });
   }
 
+  ngOnDestroy(): void {
+    this.clearSensitiveTokenFromMemory();
+  }
+
+  private clearSensitiveTokenFromMemory(): void {
+    this.tokenInput = '';
+    if (this.tokenInputEl?.nativeElement) {
+      this.tokenInputEl.nativeElement.value = '';
+    }
+  }
+
   toggleDirectSignIn(): void {
     this.isDirectSignInExpanded.update(v => !v);
   }
@@ -327,6 +365,7 @@ export class AuthModalComponent {
 
     // If OAuth Client ID is configured on Cloudflare for this provider, redirect to 1-click OAuth
     if (this.authService.isOAuthConfigured(provider)) {
+      this.clearSensitiveTokenFromMemory();
       this.authService.loginWith(provider, this.handleInput.trim() || undefined);
       return;
     }
@@ -343,12 +382,18 @@ export class AuthModalComponent {
   }
 
   async onDirectSignIn(): Promise<void> {
-    if (!this.handleInput.trim() || !this.tokenInput.trim()) return;
+    const cleanHandle = this.handleInput.trim();
+    const oneTimeToken = this.tokenInput.trim();
+    if (!cleanHandle || !oneTimeToken) return;
+
+    // Immediately wipe the one-time token from component memory & DOM before awaiting network I/O
+    this.clearSensitiveTokenFromMemory();
     this.localError.set(null);
+
     const res = await this.authService.loginWithHandle(
       this.authService.selectedProvider(),
-      this.handleInput.trim(),
-      this.tokenInput.trim()
+      cleanHandle,
+      oneTimeToken
     );
     if (!res.success && res.message) {
       this.localError.set(res.message);

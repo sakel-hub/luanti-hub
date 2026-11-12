@@ -106,6 +106,7 @@ function pruneRateLimitStore(now: number): void {
 export function checkEdgeRateLimit(
   ip: string,
   bucketType:
+    | 'auth_verify'
     | 'mutation'
     | 'download'
     | 'hydrate'
@@ -729,12 +730,14 @@ export async function onRequest(context: {
   }
 
   // 3. Per-IP Sliding-Window Edge Rate Limiting (protects Worker & D1 quotas before hitting DB/upstreams)
+  const isAuthTokenVerifyEndpoint = pathname === '/api/auth/me' && method === 'POST';
   const isGitAuditEndpoint = pathname.startsWith('/api/packages/git');
   const isSyncContentDbEndpoint =
     pathname.startsWith('/api/users/') && pathname.includes('/sync-contentdb');
   const isHydrateEndpoint = pathname.startsWith('/api/packages/hydrate');
   const isProxyImageEndpoint = pathname === '/api/packages' && url.searchParams.has('proxy_image');
   const isHeavyEndpoint =
+    !isAuthTokenVerifyEndpoint &&
     !isGitAuditEndpoint &&
     !isSyncContentDbEndpoint &&
     !isHydrateEndpoint &&
@@ -743,19 +746,21 @@ export async function onRequest(context: {
       pathname.startsWith('/api/admin/') ||
       pathname.startsWith('/api/promotions'));
 
-  const rateCheck = isGitAuditEndpoint
-    ? checkEdgeRateLimit(clientIp, 'git_audit', 10, 60_000)
-    : isSyncContentDbEndpoint
-      ? checkEdgeRateLimit(clientIp, 'sync', 6, 60_000)
-      : isHeavyEndpoint
-        ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
-        : isHydrateEndpoint
-          ? checkEdgeRateLimit(clientIp, 'hydrate', 30, 60_000)
-          : isDownloadRoute
-            ? checkEdgeRateLimit(clientIp, 'download', 120, 60_000)
-            : isProxyImageEndpoint
-              ? checkEdgeRateLimit(clientIp, 'proxy_image', 120, 60_000)
-              : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
+  const rateCheck = isAuthTokenVerifyEndpoint
+    ? checkEdgeRateLimit(clientIp, 'auth_verify', 5, 60_000)
+    : isGitAuditEndpoint
+      ? checkEdgeRateLimit(clientIp, 'git_audit', 10, 60_000)
+      : isSyncContentDbEndpoint
+        ? checkEdgeRateLimit(clientIp, 'sync', 6, 60_000)
+        : isHeavyEndpoint
+          ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
+          : isHydrateEndpoint
+            ? checkEdgeRateLimit(clientIp, 'hydrate', 30, 60_000)
+            : isDownloadRoute
+              ? checkEdgeRateLimit(clientIp, 'download', 120, 60_000)
+              : isProxyImageEndpoint
+                ? checkEdgeRateLimit(clientIp, 'proxy_image', 120, 60_000)
+                : checkEdgeRateLimit(clientIp, 'api_read', 120, 60_000);
 
   if (!rateCheck.allowed) {
     return withSecurityHeaders(

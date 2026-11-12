@@ -293,6 +293,14 @@ export interface TranslationDictionary {
     directLoginBtn: string;
     footerNote: string;
     oauthNotConfiguredNotice: string;
+    tokenLabel: string;
+    tokenRequiredBadge: string;
+    tokenPlaceholder: string;
+    tokenSecurityTooltip: string;
+    tokenScopeHintContentdb: string;
+    tokenScopeHintGithub: string;
+    tokenScopeHintForgejo: string;
+    tokenScopeHintGitlab: string;
     signingIn?: string;
     redirectingToProvider?: string;
     preparingProfile?: string;

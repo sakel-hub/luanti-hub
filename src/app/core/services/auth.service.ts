@@ -866,6 +866,8 @@ export class AuthService {
       this._isLoading.set(true);
       const res = await fetch('/api/auth/me', {
         method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
@@ -963,6 +965,7 @@ export class AuthService {
       this._isLoading.set(true);
       const res = await fetch('/api/auth/me', {
         method: 'POST',
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({

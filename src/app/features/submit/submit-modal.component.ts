@@ -331,9 +331,16 @@ import {
                       type="password"
                       [(ngModel)]="verifyToken"
                       name="verifyToken"
-                      placeholder="Personal Access Token"
-                      [appTooltip]="'Read-only ' + (target.provider | uppercase) + ' Personal Access Token (verified once on server, never stored)'"
+                      [placeholder]="'auth.tokenPlaceholder' | translate"
+                      [appTooltip]="'auth.tokenSecurityTooltip' | translate"
                       autocomplete="off"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck="false"
+                      data-1p-ignore="true"
+                      data-lpignore="true"
+                      data-bwignore="true"
+                      data-form-type="other"
                       class="sm:col-span-5 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                     />
                     <button
@@ -593,6 +600,7 @@ export class SubmitModalComponent {
   private queryParamsSub: { unsubscribe?: () => void } | null = null;
 
   ngOnDestroy(): void {
+    this.verifyToken = '';
     this.auditRequestSeq++;
     this.queryParamsSub?.unsubscribe?.();
     this.queryParamsSub = null;
