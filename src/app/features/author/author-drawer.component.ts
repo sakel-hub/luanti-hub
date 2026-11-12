@@ -118,9 +118,9 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
 
               <div class="min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <h2 id="author-drawer-title" class="text-base sm:text-lg font-extrabold text-white truncate">
+                  <h1 id="author-drawer-title" class="text-base sm:text-lg font-extrabold text-white truncate">
                     {{ author.display_name || author.username }}
-                  </h2>
+                  </h1>
                   @if (author.is_registered) {
                     <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
                       {{ 'author.verifiedCreator' | translate }}

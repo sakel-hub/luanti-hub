@@ -218,9 +218,9 @@ import {
               </app-package-badges>
 
               <!-- Title -->
-              <h2 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
+              <h1 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
                 {{ packageService.getLocalizedPackageText(package).title || package.title }}
-              </h2>
+              </h1>
 
               <!-- Action Buttons Row -->
               <div class="flex items-center gap-2.5 sm:gap-3 pt-1 flex-wrap">

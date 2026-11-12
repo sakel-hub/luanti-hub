@@ -35,7 +35,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const isHead = context.request.method.toUpperCase() === 'HEAD';
   const origin = 'https://luantihub.org';
   const today = new Date().toISOString().split('T')[0];
-  const sitemapCacheKey = `https://cache.luantihub.internal/sitemap-xml-v4/${today}`;
+  const sitemapCacheKey = `https://cache.luantihub.internal/sitemap-xml-v5/${today}`;
 
   const cachedXml = await readEdgeCacheJson<{ xml: string }>(sitemapCacheKey);
   if (cachedXml && typeof cachedXml.xml === 'string' && cachedXml.xml.startsWith('<?xml')) {
@@ -183,12 +183,11 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const xDefaultLink = `    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeXml(s.loc)}" />`;
     const hreflangLinks = [
       xDefaultLink,
-      ...locales.map(
-        (lang) =>
-          `    <xhtml:link rel="alternate" hreflang="${lang}" href="${escapeXml(
-            s.loc.includes('?') ? `${s.loc}&lang=${lang}` : `${s.loc}?lang=${lang}`
-          )}" />`
-      )
+      ...locales.map((lang) => {
+        const localizedHref =
+          lang === 'en' ? s.loc : s.loc.includes('?') ? `${s.loc}&lang=${lang}` : `${s.loc}?lang=${lang}`;
+        return `    <xhtml:link rel="alternate" hreflang="${lang}" href="${escapeXml(localizedHref)}" />`;
+      })
     ].join('\n');
 
     urlEntries.push(`  <url>

@@ -12,10 +12,24 @@ export class SeoService {
   private readonly doc = inject(DOCUMENT);
 
   private readonly defaultTitle =
-    'Luanti — Mods, Games & Texture Packs | Luanti Hub (LuantiHub)';
+    'Luanti Hub (LuantiHub) — Mods, Games & Texture Packs for Luanti';
   private readonly defaultDesc =
-    'Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub). Direct .zip downloads, Git repository packages, and 1-click in-game ContentDB setup.';
+    'Luanti Hub (LuantiHub) is the open package registry and content hub for Luanti (formerly Minetest). Discover and download thousands of games, mods, and texture packs via .zip, Git, or 1-click in-game setup.';
   private readonly baseUrl = 'https://luantihub.org';
+  private readonly defaultBannerUrl = 'https://luantihub.org/screenshot-desktop.png';
+  private readonly supportedHreflangLocales = ['en', 'sk', 'de', 'fr', 'es', 'ru'] as const;
+  private readonly publicSectionPaths = new Set([
+    '/',
+    '/games',
+    '/mods',
+    '/texture-packs',
+    '/git',
+    '/blog',
+    '/setup',
+    '/submit',
+    '/legal'
+  ]);
+  private cachedHomeFaqJsonLd: string | null = null;
 
   private resolveAuthorIdentity(rawAuthor: string, explicitDisplayName?: string | null): {
     displayName: string;
@@ -82,6 +96,8 @@ export class SeoService {
     this.meta.updateTag({ name: 'twitter:image', content: imageUrl });
 
     this.setCanonicalUrl(canonicalUrl);
+    this.removeHreflangLinks();
+    this.toggleHomeFaqJsonLd(false);
     this.setPackageJsonLd(pkg, canonicalUrl, imageUrl, pageDesc, displayName, canonicalSlug, keywords);
   }
 
@@ -125,44 +141,66 @@ export class SeoService {
     this.meta.updateTag({ name: 'twitter:image', content: imageUrl });
 
     this.setCanonicalUrl(canonicalUrl);
+    this.removeHreflangLinks();
+    this.toggleHomeFaqJsonLd(false);
     this.setAuthorJsonLd(profile, packages, displayName, canonicalUrl, imageUrl, pageDesc, isSakel);
   }
 
   updateStaticRoute(routeTitle: string, routeDesc: string, path = '/'): void {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     const fullTitle = `${routeTitle} | Luanti Hub`;
-    const canonicalUrl = `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+    const baseCanonicalUrl = `${this.baseUrl}${normalizedPath}`;
+    const nonEnQueryLocale = this.getActiveNonEnQueryLocale();
+    const canonicalUrl =
+      nonEnQueryLocale && this.publicSectionPaths.has(normalizedPath)
+        ? `${baseCanonicalUrl}?lang=${nonEnQueryLocale}`
+        : baseCanonicalUrl;
     this.title.setTitle(fullTitle);
     this.meta.updateTag({ name: 'description', content: routeDesc });
     this.meta.updateTag({ property: 'og:title', content: fullTitle });
     this.meta.updateTag({ property: 'og:description', content: routeDesc });
     this.meta.updateTag({ property: 'og:url', content: canonicalUrl });
+    this.meta.updateTag({ property: 'og:image', content: this.defaultBannerUrl });
     this.meta.updateTag({ name: 'twitter:title', content: fullTitle });
     this.meta.updateTag({ name: 'twitter:description', content: routeDesc });
+    this.meta.updateTag({ name: 'twitter:image', content: this.defaultBannerUrl });
     this.setCanonicalUrl(canonicalUrl);
-    if (path && path !== '/') {
+    if (this.publicSectionPaths.has(normalizedPath)) {
+      this.setHreflangLinks(baseCanonicalUrl);
+    } else {
+      this.removeHreflangLinks();
+    }
+    if (normalizedPath !== '/') {
+      this.toggleHomeFaqJsonLd(false);
       this.setBreadcrumbJsonLd(routeTitle, routeDesc, canonicalUrl);
     } else {
+      this.toggleHomeFaqJsonLd(true);
       this.removePackageJsonLd();
     }
   }
 
   resetToHome(): void {
+    const baseHomeUrl = `${this.baseUrl}/`;
+    const nonEnQueryLocale = this.getActiveNonEnQueryLocale();
+    const canonicalUrl = nonEnQueryLocale ? `${baseHomeUrl}?lang=${nonEnQueryLocale}` : baseHomeUrl;
     this.title.setTitle(this.defaultTitle);
     this.meta.updateTag({ name: 'description', content: this.defaultDesc });
     this.meta.updateTag({ property: 'og:title', content: this.defaultTitle });
     this.meta.updateTag({ property: 'og:description', content: this.defaultDesc });
-    this.meta.updateTag({ property: 'og:url', content: `${this.baseUrl}/` });
+    this.meta.updateTag({ property: 'og:url', content: canonicalUrl });
     this.meta.updateTag({
       property: 'og:image',
-      content: `${this.baseUrl}/icons/icon-512x512.png`
+      content: this.defaultBannerUrl
     });
     this.meta.updateTag({ name: 'twitter:title', content: this.defaultTitle });
     this.meta.updateTag({ name: 'twitter:description', content: this.defaultDesc });
     this.meta.updateTag({
       name: 'twitter:image',
-      content: `${this.baseUrl}/icons/icon-512x512.png`
+      content: this.defaultBannerUrl
     });
-    this.setCanonicalUrl(`${this.baseUrl}/`);
+    this.setCanonicalUrl(canonicalUrl);
+    this.setHreflangLinks(baseHomeUrl);
+    this.toggleHomeFaqJsonLd(true);
     this.removePackageJsonLd();
   }
 
@@ -443,6 +481,61 @@ export class SeoService {
       }
     };
     scriptEl.textContent = JSON.stringify(schema);
+  }
+
+  private getActiveNonEnQueryLocale(): string | null {
+    try {
+      const search = this.doc?.defaultView?.location?.search || '';
+      if (!search) return null;
+      const raw = (new URLSearchParams(search).get('lang') || '').trim().toLowerCase();
+      return ['sk', 'de', 'fr', 'es', 'ru'].includes(raw) ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private setHreflangLinks(baseCanonicalUrl: string): void {
+    if (!this.doc?.head) return;
+    this.removeHreflangLinks();
+    const entries: Array<{ hreflang: string; href: string }> = [
+      { hreflang: 'x-default', href: baseCanonicalUrl },
+      ...this.supportedHreflangLocales.map(loc => ({
+        hreflang: loc,
+        href: loc === 'en' ? baseCanonicalUrl : `${baseCanonicalUrl}?lang=${loc}`
+      }))
+    ];
+    for (const entry of entries) {
+      const link = this.doc.createElement('link');
+      link.setAttribute('rel', 'alternate');
+      link.setAttribute('hreflang', entry.hreflang);
+      link.setAttribute('href', entry.href);
+      this.doc.head.appendChild(link);
+    }
+  }
+
+  private removeHreflangLinks(): void {
+    if (!this.doc?.head) return;
+    const links = this.doc.head.querySelectorAll('link[rel="alternate"][hreflang]');
+    links.forEach(el => el.remove());
+  }
+
+  private toggleHomeFaqJsonLd(enabled: boolean): void {
+    if (!this.doc?.head) return;
+    const existing = this.doc.getElementById('home-faq-jsonld') as HTMLScriptElement | null;
+    if (!enabled) {
+      if (existing) {
+        this.cachedHomeFaqJsonLd = existing.textContent;
+        existing.remove();
+      }
+      return;
+    }
+    if (!existing && this.cachedHomeFaqJsonLd) {
+      const scriptEl = this.doc.createElement('script');
+      scriptEl.id = 'home-faq-jsonld';
+      scriptEl.type = 'application/ld+json';
+      scriptEl.textContent = this.cachedHomeFaqJsonLd;
+      this.doc.head.appendChild(scriptEl);
+    }
   }
 
   private removePackageJsonLd(): void {

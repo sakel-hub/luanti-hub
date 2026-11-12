@@ -227,12 +227,130 @@ function escapeHtmlAttr(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
+const SUPPORTED_NON_EN_LOCALES: Record<
+  string,
+  { ogLocale: string; homeTitle: string; homeDesc: string }
+> = {
+  sk: {
+    ogLocale: 'sk_SK',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mody, hry a textúry pre Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) je otvorený katalóg balíčkov pre engine Luanti (bývalý Minetest). Stiahnite si tisíce hier, modov a textúr priamo ako .zip, z Gitu alebo priamo v hre.'
+  },
+  de: {
+    ogLocale: 'de_DE',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Spiele & Texturpakete für Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) ist das offene Paketverzeichnis für die Voxel-Engine Luanti (ehemals Minetest). Tausende Spiele, Mods und Texturpakete als .zip, Git-Paket oder per 1-Klick im Spiel.'
+  },
+  fr: {
+    ogLocale: 'fr_FR',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Jeux et Packs de Textures pour Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) est le registre ouvert de paquets pour le moteur voxel Luanti (anciennement Minetest). Téléchargez des milliers de jeux, mods et packs de textures en .zip, Git ou en jeu.'
+  },
+  es: {
+    ogLocale: 'es_ES',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Juegos y Paquetes de Texturas para Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) es el registro abierto de paquetes para el motor voxel Luanti (antes Minetest). Descarga miles de juegos, mods y paquetes de texturas en .zip, Git o con 1 clic en el juego.'
+  },
+  ru: {
+    ogLocale: 'ru_RU',
+    homeTitle: 'Luanti Hub (LuantiHub) — Моды, игры и текстурпаки для Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) — открытый каталог пакетов для воксельного движка Luanti (ранее Minetest). Тысячи игр, модов и текстурпаков в формате .zip, из Git или в 1 клик прямо в игре.'
+  }
+};
+
+function resolveNonEnLocale(searchParams: URLSearchParams): string | null {
+  const raw = (searchParams.get('lang') || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SUPPORTED_NON_EN_LOCALES, raw) ? raw : null;
+}
+
+function buildHreflangLinksHtml(baseCanonicalUrl: string): string {
+  const locales = ['en', 'sk', 'de', 'fr', 'es', 'ru'];
+  const lines = [
+    `<link rel="alternate" hreflang="x-default" href="${escapeHtmlAttr(baseCanonicalUrl)}" />`
+  ];
+  for (const loc of locales) {
+    const href = loc === 'en' ? baseCanonicalUrl : `${baseCanonicalUrl}?lang=${loc}`;
+    lines.push(`<link rel="alternate" hreflang="${loc}" href="${escapeHtmlAttr(href)}" />`);
+  }
+  return lines.join('\n    ');
+}
+
+function replaceHreflangBlock(html: string, baseCanonicalUrl: string): string {
+  const newBlock = buildHreflangLinksHtml(baseCanonicalUrl);
+  if (/<link\s+rel="alternate"\s+hreflang="/i.test(html)) {
+    let inserted = false;
+    return html.replace(/\s*<link\s+rel="alternate"\s+hreflang="[^"]*"[^>]*?>/gi, () => {
+      if (!inserted) {
+        inserted = true;
+        return `\n    ${newBlock}`;
+      }
+      return '';
+    });
+  }
+  return html.replace(
+    /(<link\s+rel="canonical"[^>]*?>)/i,
+    `$1\n    ${newBlock}`
+  );
+}
+
+function injectHomeLocaleSeoIntoHtml(html: string, locale: string): string {
+  const locMeta = SUPPORTED_NON_EN_LOCALES[locale];
+  if (!locMeta) return html;
+  const canonicalUrl = `https://luantihub.org/?lang=${locale}`;
+  const safeTitle = escapeHtmlAttr(locMeta.homeTitle);
+  const safeDesc = escapeHtmlAttr(locMeta.homeDesc);
+
+  return html
+    .replace(/<html\s+lang="en"/i, `<html lang="${escapeHtmlAttr(locale)}"`)
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
+    .replace(
+      /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<link\s+rel="canonical"[^>]*?>/i,
+      `<link rel="canonical" id="canonical-link" href="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:url" content="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+property="og:locale"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:locale" content="${locMeta.ogLocale}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:description" content="${safeDesc}" />`
+    );
+}
+
 function injectSectionSeoIntoHtml(
   html: string,
   sectionPath: string,
-  meta: { title: string; breadcrumbName: string; description: string }
+  meta: { title: string; breadcrumbName: string; description: string },
+  nonEnLocale: string | null = null
 ): string {
-  const canonicalUrl = `https://luantihub.org${sectionPath}`;
+  const baseCanonicalUrl = `https://luantihub.org${sectionPath}`;
+  const canonicalUrl = nonEnLocale ? `${baseCanonicalUrl}?lang=${nonEnLocale}` : baseCanonicalUrl;
+  const locMeta = nonEnLocale ? SUPPORTED_NON_EN_LOCALES[nonEnLocale] : null;
   const safeTitle = escapeHtmlAttr(meta.title);
   const safeDesc = escapeHtmlAttr(meta.description);
   const safeBreadcrumb = escapeHtmlAttr(meta.breadcrumbName);
@@ -242,6 +360,7 @@ function injectSectionSeoIntoHtml(
     name: meta.breadcrumbName,
     description: meta.description,
     url: canonicalUrl,
+    inLanguage: nonEnLocale || 'en',
     isPartOf: {
       '@type': 'WebSite',
       '@id': 'https://luantihub.org/#website',
@@ -260,13 +379,14 @@ function injectSectionSeoIntoHtml(
           '@type': 'ListItem',
           position: 2,
           name: meta.breadcrumbName,
-          item: canonicalUrl
+          item: baseCanonicalUrl
         }
       ]
     }
   });
 
-  return html
+  let transformed = html
+    .replace(/\s*<script[^>]*id="home-faq-jsonld"[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
     .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
@@ -304,6 +424,19 @@ function injectSectionSeoIntoHtml(
       '</head>',
       `<script type="application/ld+json" id="luanti-pkg-jsonld">${breadcrumbJsonLd}</script></head>`
     );
+
+  transformed = replaceHreflangBlock(transformed, baseCanonicalUrl);
+
+  if (nonEnLocale && locMeta) {
+    transformed = transformed
+      .replace(/<html\s+lang="en"/i, `<html lang="${escapeHtmlAttr(nonEnLocale)}"`)
+      .replace(
+        /<meta\s+property="og:locale"\s+content="[^"]*"\s*\/?>/i,
+        `<meta property="og:locale" content="${locMeta.ogLocale}" />`
+      );
+  }
+
+  return transformed;
 }
 
 export async function onRequest(context: {
@@ -415,10 +548,32 @@ export async function onRequest(context: {
       }
     }
     const sectionMeta = SECTION_HUB_SEO_MAP[pathname];
+    const nonEnLocale = resolveNonEnLocale(url.searchParams);
+    const isKnownSpaRoute =
+      pathname === '/' ||
+      Boolean(sectionMeta) ||
+      pathname === '/profile' ||
+      pathname === '/analytics' ||
+      pathname.startsWith('/analytics/');
     const assetsBinding = context.env?.['ASSETS'];
     try {
       const res = await next();
       if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
+        if (!isKnownSpaRoute) {
+          return withSecurityHeaders(
+            new Response(
+              '<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="robots" content="noindex" /><title>404 Not Found | Luanti Hub</title></head><body><h1>404 Not Found</h1><p><a href="/">Return to Luanti Hub</a></p></body></html>',
+              {
+                status: 404,
+                headers: {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'X-Robots-Tag': 'noindex',
+                  'Cache-Control': 'public, max-age=300, s-maxage=600'
+                }
+              }
+            )
+          );
+        }
         const rootUrl = new URL('/', url.origin);
         const spaRes = await assetsBinding.fetch(
           new Request(rootUrl.toString(), {
@@ -429,7 +584,19 @@ export async function onRequest(context: {
         if (sectionMeta) {
           const rawHtml = await spaRes.text();
           return withSecurityHeaders(
-            new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+            new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale), {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'public, max-age=300, s-maxage=900'
+              }
+            })
+          );
+        }
+        if (pathname === '/' && nonEnLocale) {
+          const rawHtml = await spaRes.text();
+          return withSecurityHeaders(
+            new Response(injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale), {
               status: 200,
               headers: {
                 'Content-Type': 'text/html; charset=utf-8',
@@ -451,7 +618,19 @@ export async function onRequest(context: {
       if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
         const rawHtml = await res.text();
         return withSecurityHeaders(
-          new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+          new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'public, max-age=300, s-maxage=900'
+            }
+          })
+        );
+      }
+      if (pathname === '/' && nonEnLocale && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+        const rawHtml = await res.text();
+        return withSecurityHeaders(
+          new Response(injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale), {
             status: 200,
             headers: {
               'Content-Type': 'text/html; charset=utf-8',
@@ -476,17 +655,19 @@ export async function onRequest(context: {
           })
         );
         const rawHtml = await spaRes.text();
+        const fallbackHtml = sectionMeta
+          ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale)
+          : pathname === '/' && nonEnLocale
+            ? injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale)
+            : rawHtml;
         return withSecurityHeaders(
-          new Response(
-            sectionMeta ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta) : rawHtml,
-            {
-              status: 200,
-              headers: {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Cache-Control': 'no-store, no-cache, must-revalidate'
-              }
+          new Response(fallbackHtml, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store, no-cache, must-revalidate'
             }
-          )
+          })
         );
       }
       throw err;

@@ -14132,4 +14132,163 @@ core.register_node(modname .. ":panel", {
       requestAdminClaim: true
     }));
   });
+
+  it('enforces brand-first SEO metadata, per-route hreflang & self-canonical ?lang, scoped FAQPage schema, 301 /packages/ redirect, 0-review AggregateRating guard, real 404s, and single H1 hierarchy', async () => {
+    const { onRequest: edgeMw } = await import('../../functions/_middleware');
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const { onRequestGet: pluralPackagesGet } = await import('../../functions/packages/[author]/[name]/index');
+    const { onRequestGet: authorSsrGet } = await import('../../functions/author/[username]');
+    const sitemapMod = await import('../../functions/sitemap.xml');
+
+    const richShellHtml = `<!doctype html><html lang="en" class="dark"><head><title>Luanti Hub (LuantiHub) — Mods, Games &amp; Texture Packs for Luanti</title><meta name="description" content="Default" /><meta name="keywords" content="luanti hub, luantihub" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><link rel="alternate" hreflang="x-default" href="https://luantihub.org/" /><link rel="alternate" hreflang="en" href="https://luantihub.org/" /><link rel="alternate" hreflang="de" href="https://luantihub.org/?lang=de" /><meta property="og:title" content="Default" /><meta property="og:description" content="Default" /><meta property="og:url" content="https://luantihub.org/" /><meta property="og:image" content="https://luantihub.org/screenshot-desktop.png" /><meta property="og:locale" content="en_US" /><meta name="twitter:title" content="Default" /><meta name="twitter:description" content="Default" /><meta name="twitter:image" content="https://luantihub.org/screenshot-desktop.png" /><script type="application/ld+json" id="home-faq-jsonld">{"@type":"FAQPage"}</script></head><body><h1>Home</h1><main class="sr-only"></main></body></html>`;
+
+    // 1. Plural /packages/:author/:name 301-redirects to canonical singular /package/:author/:name
+    const pluralRes = await pluralPackagesGet({
+      request: new Request('https://luantihub.org/packages/SaKeL/everness?utm_source=cdb'),
+      params: { author: 'SaKeL', name: 'everness' }
+    });
+    expect(pluralRes.status).toBe(301);
+    expect(pluralRes.headers.get('Location')).toBe('https://luantihub.org/package/SaKeL/everness?utm_source=cdb');
+
+    // 2. Section hub (/mods) rewrites hreflang to /mods (never leaking homepage /?lang=...), strips #home-faq-jsonld, and supports self-canonical ?lang=de
+    const modsDeRes = await edgeMw({
+      request: new Request('https://luantihub.org/mods?lang=de', { method: 'GET' }),
+      next: async () =>
+        new Response(richShellHtml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        }),
+      env: {}
+    });
+    expect(modsDeRes.status).toBe(200);
+    const modsDeHtml = await modsDeRes.text();
+    expect(modsDeHtml).toContain('<html lang="de"');
+    expect(modsDeHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/mods?lang=de" />');
+    expect(modsDeHtml).toContain('hreflang="x-default" href="https://luantihub.org/mods"');
+    expect(modsDeHtml).toContain('hreflang="en" href="https://luantihub.org/mods"');
+    expect(modsDeHtml).toContain('hreflang="de" href="https://luantihub.org/mods?lang=de"');
+    expect(modsDeHtml).not.toContain('href="https://luantihub.org/?lang=de"');
+    expect(modsDeHtml).not.toContain('id="home-faq-jsonld"');
+
+    // 3. Localized homepage (/?lang=sk) emits <html lang="sk">, self-referencing canonical, and Slovak metadata while keeping #home-faq-jsonld
+    const homeSkRes = await edgeMw({
+      request: new Request('https://luantihub.org/?lang=sk', { method: 'GET' }),
+      next: async () =>
+        new Response(richShellHtml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        }),
+      env: {}
+    });
+    const homeSkHtml = await homeSkRes.text();
+    expect(homeSkHtml).toContain('<html lang="sk"');
+    expect(homeSkHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/?lang=sk" />');
+    expect(homeSkHtml).toContain('og:locale" content="sk_SK"');
+    expect(homeSkHtml).toContain('id="home-faq-jsonld"');
+
+    // 4. Unknown non-SPA paths hitting Edge middleware return real HTTP 404 with noindex instead of 200 Soft-404
+    const unknownRes = await edgeMw({
+      request: new Request('https://luantihub.org/nonexistent-random-page', { method: 'GET' }),
+      next: async () => new Response('Not Found', { status: 404 }),
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        }
+      }
+    });
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.headers.get('X-Robots-Tag')).toBe('noindex');
+
+    // 5. Package & Author SSR strip homepage hreflang & #home-faq-jsonld, and Package SSR omits AggregateRating when review count is 0
+    const zeroReviewPkgRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/ZeroRevAuthor/zero_rev_mod'),
+      params: { author: 'ZeroRevAuthor', name: 'zero_rev_mod' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('FROM packages')
+                  ? {
+                      title: 'Zero Rev Mod',
+                      author_name: 'ZeroRevAuthor',
+                      name: 'zero_rev_mod',
+                      provider: 'github',
+                      short_desc: 'Brand new mod with zero reviews',
+                      type: 'mod',
+                      license: 'MIT',
+                      score: 4.5,
+                      downloads_count: 10
+                    }
+                  : { avg_rating: null, cnt: 0 }
+            })
+          })
+        }
+      }
+    });
+    const zeroReviewHtml = await zeroReviewPkgRes.text();
+    expect(zeroReviewHtml).not.toContain('hreflang=');
+    expect(zeroReviewHtml).not.toContain('id="home-faq-jsonld"');
+    expect(zeroReviewHtml).not.toContain('AggregateRating');
+
+    const authorCleanRes = await authorSsrGet({
+      request: new Request('https://luantihub.org/author/SaKeL'),
+      params: { username: 'SaKeL' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        }
+      }
+    });
+    const authorCleanHtml = await authorCleanRes.text();
+    expect(authorCleanHtml).not.toContain('hreflang=');
+    expect(authorCleanHtml).not.toContain('id="home-faq-jsonld"');
+
+    // 6. Sitemap uses clean URL for hreflang="en" (no ?lang=en duplicate) while keeping ?lang=de, ?lang=sk, etc.
+    const smRes = await sitemapMod.onRequestGet({
+      request: new Request('https://luantihub.org/sitemap.xml', { method: 'GET' }),
+      env: {}
+    });
+    const smXml = await smRes.text();
+    expect(smXml).toContain('hreflang="en" href="https://luantihub.org/"');
+    expect(smXml).not.toContain('?lang=en');
+    expect(smXml).toContain('hreflang="de" href="https://luantihub.org/?lang=de"');
+
+    // 7. Single H1 hierarchy: HeaderComponent uses <span> (0 <h1>), CatalogComponent uses <h1> on Home and downgrades to <h2> when modal/author overlay is open
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    headerFixture.detectChanges();
+    expect(headerFixture.nativeElement.querySelectorAll('h1').length).toBe(0);
+    headerFixture.destroy();
+
+    const pkgService = TestBed.inject(PackageService);
+    pkgService.closePackageModal();
+    pkgService.closeAuthorDrawer();
+    const catalogFixture = TestBed.createComponent(CatalogComponent);
+    catalogFixture.detectChanges();
+    expect(catalogFixture.nativeElement.querySelectorAll('h1').length).toBe(1);
+    expect(catalogFixture.nativeElement.querySelector('h1')?.textContent).toContain('Luanti Hub (LuantiHub)');
+
+    pkgService.openPackageModal({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Custom biomes',
+      thumbnail: 'logo.svg',
+      score: 5,
+      downloads: 50000,
+      license: 'LGPL-2.1-only',
+      source: 'official',
+      tags: ['biomes']
+    });
+    catalogFixture.detectChanges();
+    expect(catalogFixture.nativeElement.querySelectorAll('h1').length).toBe(0);
+    expect(catalogFixture.nativeElement.querySelector('h2#luanti-ecosystem-guide-heading')).toBeTruthy();
+    pkgService.closePackageModal();
+    catalogFixture.destroy();
+  });
 });

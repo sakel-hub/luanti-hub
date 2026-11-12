@@ -76,6 +76,8 @@ export function injectPackageSeoIntoHtml(
   const scriptBlock = `<script id="luanti-pkg-jsonld" type="application/ld+json">${opts.jsonLd}</script><script id="luanti-initial-pkg">window.__LUANTI_INITIAL_PACKAGE__=${opts.initialPkgScript};</script>`;
 
   return html
+    .replace(/\s*<link\s+rel="alternate"\s+hreflang="[^"]*"[^>]*?>/gi, '')
+    .replace(/\s*<script[^>]*id="home-faq-jsonld"[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${safeTitle}</title>`)
     .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
@@ -425,13 +427,13 @@ export async function onRequestGet(context: {
       }
     };
 
-    if (pkgScore >= 1 && pkgScore <= 5) {
+    if (pkgScore >= 1 && pkgScore <= 5 && pkgReviewCount > 0) {
       softwareAppSchema['aggregateRating'] = {
         '@type': 'AggregateRating',
         ratingValue: String(pkgScore),
         bestRating: '5',
         worstRating: '1',
-        ratingCount: String(Math.max(1, pkgReviewCount))
+        ratingCount: String(pkgReviewCount)
       };
     }
 
