@@ -6163,10 +6163,11 @@ supported_games = minetest_game, voxelibre
     }
   });
 
-  it('should share lh_session cookies across .luantihub.org and preserve initiating PWA origin & popup mode across OAuth redirects', async () => {
+  it('should share lh_session cookies across .luantihub.org and preserve initiating PWA origin & validated returnTo path across OAuth redirects', async () => {
     const {
       createOAuthStateToken,
       parseOAuthStateToken,
+      sanitizeRelativeReturnPath,
       buildSessionCookie,
       buildClearSessionCookies
     } = await import('../../functions/api/auth/lib/session');
@@ -6183,23 +6184,31 @@ supported_games = minetest_game, voxelibre
     expect(clearCookies.length).toBe(2);
     expect(clearCookies.some(c => c.includes('Domain=.luantihub.org'))).toBe(true);
 
-    // 2. Verify HMAC OAuth state preserves trusted initiating origin (e.g. https://www.luantihub.org) and popup mode
+    // 2. Verify HMAC OAuth state preserves trusted initiating origin and validated relative returnTo path
     const stateWww = await createOAuthStateToken('github', 'test-secret', {
       origin: 'https://www.luantihub.org',
-      popup: true
+      returnTo: '/package/SaKeL/everness'
     });
     const parsedWww = await parseOAuthStateToken(stateWww, 'github', 'test-secret');
     expect(parsedWww.valid).toBe(true);
     expect(parsedWww.origin).toBe('https://www.luantihub.org');
-    expect(parsedWww.popup).toBe(true);
+    expect(parsedWww.returnTo).toBe('/package/SaKeL/everness');
 
-    // Reject untrusted origin in state token
+    // Reject untrusted origin and open-redirect returnTo payloads in state token
+    expect(sanitizeRelativeReturnPath('//evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/\\evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('https://evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/valid\r\nHeader: injected')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/profile?tab=account&auth_success=1')).toBe('/profile?tab=account');
+
     const stateEvil = await createOAuthStateToken('github', 'test-secret', {
-      origin: 'https://evil.example.com'
+      origin: 'https://evil.example.com',
+      returnTo: '//evil.example.com/steal'
     });
     const parsedEvil = await parseOAuthStateToken(stateEvil, 'github', 'test-secret');
     expect(parsedEvil.valid).toBe(true);
     expect(parsedEvil.origin).toBeUndefined();
+    expect(parsedEvil.returnTo).toBeUndefined();
   });
 
   it('should enforce strict package ownership via claimed author_id or verified forge ownership (without heuristic suffix stripping) and block self-reviews', async () => {
@@ -10143,16 +10152,15 @@ supported_games = minetest_game, voxelibre
     const bulkRes = await authService.bulkModerationAction('clear_closed');
     expect(bulkRes.success).toBe(false);
 
-    // 3. Untrusted postMessage origin is ignored by AuthService OAuth popup listener
-    const handlePopupSpy = vi.spyOn(authService as any, 'handleOAuthPopupMessage');
+    // 3. Synthetic postMessage OAuth events are completely inert (no cross-window postMessage auth surface)
+    (authService as any)._currentUser.set(null);
     window.dispatchEvent(
       new MessageEvent('message', {
         origin: 'https://evil.example.com',
         data: { type: 'LH_OAUTH_COMPLETE', success: true, provider: 'github' }
       })
     );
-    expect(handlePopupSpy).not.toHaveBeenCalled();
-    handlePopupSpy.mockRestore();
+    expect(authService.currentUser()).toBeNull();
   });
 
   it('should share warm boot catalog with in-game client (HIT-BOOT-SHARED), isolate release IDs across authors in /api/updates/, and refresh .zip archives on in-game ?reason=update', async () => {
@@ -15168,17 +15176,64 @@ core.register_node(modname .. ":panel", {
     expect(removeFavRes.status).toBe(200);
     expect(executedSql.some(s => s.includes('INSERT OR IGNORE INTO users'))).toBe(false);
 
-    // 5. Empty-origin postMessage is rejected by AuthService
+    // 5. Installed PWA OAuth uses single-window 302 redirect (never window.open floating popup) and preserves return_to
     const authService = TestBed.inject(AuthService);
-    const popupHandlerSpy = vi.spyOn(authService as any, 'handleOAuthPopupMessage');
-    window.dispatchEvent(
-      new MessageEvent('message', {
-        origin: '',
-        data: { type: 'LH_OAUTH_COMPLETE', success: true, provider: 'github' }
-      })
+    const pwaService = TestBed.inject(PwaService);
+    pwaService.isInstalled.set(true);
+    (authService as any)._oauthProviders.set({ github: true });
+    (authService as any)._isOAuthRedirecting.set(false);
+    authService.selectProfileDrawerTab('account', false);
+    (authService as any)._isProfileDrawerOpen.set(true);
+
+    const winOpenSpy = vi.spyOn(window, 'open');
+    const navUrlSpy = vi.spyOn(authService as any, 'navigateToUrl').mockImplementation(() => {});
+
+    authService.loginWith('github', 'sakel-hub', true);
+    expect(winOpenSpy).not.toHaveBeenCalled();
+    expect(navUrlSpy).toHaveBeenCalledTimes(1);
+    const redirectLoginUrl = String(navUrlSpy.mock.calls[0][0]);
+    expect(redirectLoginUrl).toContain('/api/auth/github/login?');
+    expect(redirectLoginUrl).not.toContain('popup=1');
+    expect(redirectLoginUrl).toContain('return_to=%2Fprofile%3Ftab%3Daccount');
+
+    // Verify /api/auth/github/login -> /api/auth/github/callback round-trip preserves return_to via 302 redirect
+    const { onRequestGet: onLoginGet } = await import('../../functions/api/auth/[provider]/login');
+    const { onRequestGet: onCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const loginRes = await onLoginGet({
+      params: { provider: 'github' },
+      request: new Request(`https://luantihub.org${redirectLoginUrl}`),
+      env: {
+        GITHUB_CLIENT_ID: 'gh_client_test',
+        SESSION_SECRET: 'test-edge-secret-32chars-minimum!!'
+      }
+    });
+    expect(loginRes.status).toBe(302);
+    const ghAuthLoc = new URL(loginRes.headers.get('Location') || '');
+    const signedState = ghAuthLoc.searchParams.get('state') || '';
+    expect(signedState.length).toBeGreaterThan(10);
+
+    const cancelCbRes = await onCallbackGet({
+      params: { provider: 'github' },
+      request: new Request(
+        `https://luantihub.org/api/auth/github/callback?state=${encodeURIComponent(signedState)}`,
+        { headers: { Cookie: `lh_oauth_state=${encodeURIComponent(signedState)}` } }
+      ),
+      env: {
+        GITHUB_CLIENT_ID: 'gh_client_test',
+        GITHUB_CLIENT_SECRET: 'gh_secret_test',
+        SESSION_SECRET: 'test-edge-secret-32chars-minimum!!'
+      }
+    });
+    expect(cancelCbRes.status).toBe(302);
+    expect(cancelCbRes.headers.get('Location')).toBe(
+      'https://luantihub.org/profile?tab=account&auth_error=auth_cancelled&provider=github'
     );
-    expect(popupHandlerSpy).not.toHaveBeenCalled();
-    popupHandlerSpy.mockRestore();
+
+    (authService as any)._isOAuthRedirecting.set(false);
+    (authService as any)._isProfileDrawerOpen.set(false);
+    pwaService.isInstalled.set(false);
+    winOpenSpy.mockRestore();
+    navUrlSpy.mockRestore();
 
     // 6. Security UX badges/tooltips, Legal Modal Section 4 & Footer /LICENSE.txt link
     const authModalFix = TestBed.createComponent(AuthModalComponent);

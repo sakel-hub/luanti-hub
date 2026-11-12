@@ -3,6 +3,7 @@ import {
   verifySessionToken,
   SessionTokenClaims,
   parseOAuthStateToken,
+  sanitizeRelativeReturnPath,
   buildSessionCookie,
   buildClearOAuthStateCookies,
   parseCookies,
@@ -241,64 +242,17 @@ async function exchangeOAuthTokenWithRetry(
   throw rateLimitError;
 }
 
-function serializePopupInlineJson(data: unknown): string {
-  return JSON.stringify(data)
-    .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e')
-    .replace(/&/g, '\\u0026')
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
-}
-
-function buildPopupCompletionHtml(
-  targetOrigin: string,
-  payload: { type: 'LH_OAUTH_COMPLETE'; success: boolean; provider: string; error?: string },
-  fallbackRedirectUrl: string
+function buildReturnRedirectUrl(
+  returnOrigin: string,
+  returnTo: string | undefined,
+  extraParams: Record<string, string>
 ): string {
-  const safePayloadJson = serializePopupInlineJson(payload);
-  const safeOriginJson = serializePopupInlineJson(targetOrigin);
-  const safeFallbackUrlJson = serializePopupInlineJson(fallbackRedirectUrl);
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Completing Sign-In – LuantiHub</title>
-  <style>
-    body { background: #020617; color: #f8fafc; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .msg { font-size: 14px; color: #94a3b8; }
-  </style>
-</head>
-<body>
-  <div class="msg">Completing sign-in…</div>
-  <script>
-    (function () {
-      var msg = ${safePayloadJson};
-      var targetOrigin = ${safeOriginJson};
-      var fallbackUrl = ${safeFallbackUrlJson};
-      try {
-        if (typeof BroadcastChannel !== 'undefined') {
-          var bc = new BroadcastChannel('lh-auth-sync');
-          bc.postMessage(msg);
-          bc.close();
-        }
-      } catch (e) {}
-      try {
-        if (window.opener && !window.opener.closed && targetOrigin) {
-          window.opener.postMessage(msg, targetOrigin);
-          window.close();
-          setTimeout(function () {
-            if (!window.closed) {
-              window.location.replace(fallbackUrl);
-            }
-          }, 350);
-          return;
-        }
-      } catch (e) {}
-      window.location.replace(fallbackUrl);
-    })();
-  </script>
-</body>
-</html>`;
+  const safePath = sanitizeRelativeReturnPath(returnTo) || '/';
+  const target = new URL(safePath, returnOrigin);
+  for (const [k, v] of Object.entries(extraParams)) {
+    target.searchParams.set(k, v);
+  }
+  return target.toString();
 }
 
 async function buildSuccessRedirectResponse(
@@ -306,28 +260,16 @@ async function buildSuccessRedirectResponse(
   requestUrl: URL,
   userId: string,
   sessionSecret?: string,
-  provider = 'github',
-  isPopup = false
+  returnTo?: string
 ): Promise<Response> {
   const claims = verifiedOAuthClaimsByUserId.get(userId);
   const sessionToken = await createSessionToken(userId, sessionSecret, claims);
   const headers = new Headers();
-  const redirectTarget = `${returnOrigin}/?auth_success=1`;
+  const redirectTarget = buildReturnRedirectUrl(returnOrigin, returnTo, { auth_success: '1' });
   headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   headers.append('Set-Cookie', buildSessionCookie(sessionToken, requestUrl, 86400 * 30));
   for (const clearCookie of buildClearOAuthStateCookies(requestUrl)) {
     headers.append('Set-Cookie', clearCookie);
-  }
-  if (isPopup) {
-    headers.set('Content-Type', 'text/html; charset=utf-8');
-    return new Response(
-      buildPopupCompletionHtml(
-        returnOrigin,
-        { type: 'LH_OAUTH_COMPLETE', success: true, provider },
-        redirectTarget
-      ),
-      { status: 200, headers }
-    );
   }
   headers.set('Location', redirectTarget);
   return new Response(null, { status: 302, headers });
@@ -337,25 +279,12 @@ function buildErrorRedirectResponse(
   returnOrigin: string,
   errorCode: string,
   provider: string,
-  isPopup = false
+  returnTo?: string
 ): Response {
-  const errorRedirectUrl = `${returnOrigin}/?auth_error=${encodeURIComponent(errorCode)}&provider=${encodeURIComponent(provider)}`;
-  if (isPopup) {
-    return new Response(
-      buildPopupCompletionHtml(
-        returnOrigin,
-        { type: 'LH_OAUTH_COMPLETE', success: false, provider, error: errorCode },
-        errorRedirectUrl
-      ),
-      {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store, no-cache, must-revalidate'
-        }
-      }
-    );
-  }
+  const errorRedirectUrl = buildReturnRedirectUrl(returnOrigin, returnTo, {
+    auth_error: errorCode,
+    provider
+  });
   return Response.redirect(errorRedirectUrl, 302);
 }
 
@@ -372,7 +301,7 @@ export async function onRequestGet(context: {
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
   const stateMeta = await parseOAuthStateToken(stateParam, provider, sessionSecret);
   const returnOrigin = stateMeta.origin || url.origin;
-  const isPopup = Boolean(stateMeta.popup);
+  const returnTo = stateMeta.valid ? stateMeta.returnTo : undefined;
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
     codeberg: resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
@@ -384,7 +313,7 @@ export async function onRequestGet(context: {
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 
   if (!code) {
-    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, returnTo);
   }
 
   const cookies = parseCookies(context.request);
@@ -393,7 +322,7 @@ export async function onRequestGet(context: {
   const isHmacStateValid = stateMeta.valid;
 
   if (!isHmacStateValid) {
-    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
   }
 
   const existingSessionUserId = cookies['lh_session']
@@ -407,13 +336,13 @@ export async function onRequestGet(context: {
   const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
   const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
   if (completedUserId && (isCookieStateValid || existingSessionUserId === completedUserId)) {
-    return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, provider, isPopup);
+    return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, returnTo);
   }
 
   // Require BOTH cryptographically valid HMAC state AND matching browser `lh_oauth_state` cookie
   // to prevent OAuth Login CSRF and cross-site identity-linking account takeover.
   if (!isCookieStateValid) {
-    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
   }
 
   // Fast-path: If this exact authorization code + state is currently being processed by a concurrent request
@@ -421,7 +350,7 @@ export async function onRequestGet(context: {
   if (existingInFlight) {
     try {
       const resolvedUserId = await existingInFlight;
-      return buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
+      return buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, returnTo);
     } catch {
       // Fall through to standard flow if in-flight promise failed
     }
@@ -862,12 +791,12 @@ export async function onRequestGet(context: {
         triggerProvider: provider
       })
     );
-    return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
+    return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, returnTo);
   } catch (err: any) {
     // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache
     const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
     if (edgeResolvedUserId) {
-      return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, provider, isPopup);
+      return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, returnTo);
     }
 
     // 2. If GitHub's front-end load balancer returned HTTP 429, the authorization code is still unconsumed.
@@ -889,7 +818,7 @@ export async function onRequestGet(context: {
     if (existingSessionUserId && isCodeAlreadyConsumed && !isRateLimited429) {
       const recheckedEdgeUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
       if (recheckedEdgeUserId && recheckedEdgeUserId === existingSessionUserId) {
-        return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, provider, isPopup);
+        return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, returnTo);
       }
     }
 
@@ -898,7 +827,7 @@ export async function onRequestGet(context: {
       ? 'provider_busy'
       : 'provider_unavailable';
 
-    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, returnTo);
   } finally {
     inFlightOAuthCodes.delete(cachedCodeKey);
   }

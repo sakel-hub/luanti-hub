@@ -391,20 +391,46 @@ export function buildClearOAuthStateCookies(requestUrl: URL | string): string[] 
   return cookies;
 }
 
+export function sanitizeRelativeReturnPath(rawPath?: string | null): string | undefined {
+  if (!rawPath || typeof rawPath !== 'string') return undefined;
+  const trimmed = rawPath.trim();
+  if (
+    !trimmed.startsWith('/') ||
+    trimmed.startsWith('//') ||
+    trimmed.startsWith('/\\') ||
+    /[\r\n\0]/.test(trimmed) ||
+    trimmed.length > 240
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed, 'https://luantihub.org');
+    if (parsed.origin !== 'https://luantihub.org') return undefined;
+    parsed.searchParams.delete('auth_success');
+    parsed.searchParams.delete('auth_error');
+    parsed.searchParams.delete('provider');
+    const qs = parsed.searchParams.toString();
+    return `${parsed.pathname}${qs ? `?${qs}` : ''}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createOAuthStateToken(
   provider: string,
   secret?: string,
-  options?: { origin?: string; popup?: boolean }
+  options?: { origin?: string; returnTo?: string }
 ): Promise<string> {
   const trustedOrigin =
     options?.origin && isTrustedLuantiHubOrigin(options.origin)
       ? new URL(options.origin.trim()).origin
       : undefined;
+  const safeReturnTo = sanitizeRelativeReturnPath(options?.returnTo);
   const payload = JSON.stringify({
     p: provider.trim().toLowerCase(),
     n: crypto.randomUUID().slice(0, 8),
     ...(trustedOrigin ? { o: trustedOrigin } : {}),
-    ...(options?.popup ? { pop: 1 } : {}),
+    ...(safeReturnTo && safeReturnTo !== '/' ? { r: safeReturnTo } : {}),
     exp: Date.now() + 15 * 60 * 1000 // 15 minutes
   });
   const enc = new TextEncoder();
@@ -419,7 +445,7 @@ export async function parseOAuthStateToken(
   token: string | undefined | null,
   expectedProvider: string,
   secret?: string
-): Promise<{ valid: boolean; origin?: string; popup?: boolean }> {
+): Promise<{ valid: boolean; origin?: string; returnTo?: string }> {
   try {
     if (!token) return { valid: false };
     const [b64Payload, b64Sig] = token.split('.');
@@ -441,7 +467,7 @@ export async function parseOAuthStateToken(
     return {
       valid: true,
       origin: data.o && isTrustedLuantiHubOrigin(data.o) ? new URL(data.o).origin : undefined,
-      popup: Boolean(data.pop)
+      returnTo: typeof data.r === 'string' ? sanitizeRelativeReturnPath(data.r) : undefined
     };
   } catch {
     return { valid: false };

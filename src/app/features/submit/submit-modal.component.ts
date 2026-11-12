@@ -323,7 +323,7 @@ import {
                   @if (authService.isOAuthConfigured(target.provider)) {
                     <button
                       type="button"
-                      (click)="authService.loginWith(target.provider)"
+                      (click)="connectViaOAuth(target.provider)"
                       class="w-full py-2 px-3 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
                       <span>{{ 'submit.connectViaOAuthBtn' | translate:{ provider: (target.provider | uppercase) } }}</span>
                     </button>
@@ -565,9 +565,22 @@ export class SubmitModalComponent {
     return this.authService.hasVerifiedProviderOwnership(target.provider, target.owner);
   }
 
+  private buildSubmitReturnPath(): string {
+    const cleanRepoUrl = this.repoUrl.trim();
+    return cleanRepoUrl ? `/submit?url=${encodeURIComponent(cleanRepoUrl)}` : '/submit';
+  }
+
+  connectViaOAuth(provider: GitProvider): void {
+    const target = this.parsedRepoTarget();
+    this.authService.loginWith(provider, target?.owner || undefined, true, {
+      returnTo: this.buildSubmitReturnPath()
+    });
+  }
+
   onSignInFromSubmit(): void {
+    const returnTo = this.buildSubmitReturnPath();
     this.packageService.closeSubmitModal();
-    this.authService.openAuthModal();
+    this.authService.openAuthModal(false, { returnTo });
   }
 
   constructor() {

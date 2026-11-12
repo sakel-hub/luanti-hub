@@ -1,4 +1,8 @@
-import { createOAuthStateToken, buildOAuthStateCookie } from '../lib/session';
+import {
+  createOAuthStateToken,
+  buildOAuthStateCookie,
+  sanitizeRelativeReturnPath
+} from '../lib/session';
 
 interface Env {
   CODEBERG_CLIENT_ID?: string;
@@ -37,7 +41,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const { provider } = context.params;
   const url = new URL(context.request.url);
   const loginHint = (url.searchParams.get('login') || '').trim();
-  const isPopup = url.searchParams.get('popup') === '1';
+  const returnTo = sanitizeRelativeReturnPath(url.searchParams.get('return_to'));
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET);
   if (!sessionSecret) {
@@ -49,7 +53,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   const state = await createOAuthStateToken(
     provider,
     sessionSecret,
-    { origin: url.origin, popup: isPopup }
+    { origin: url.origin, returnTo }
   );
 
   let authUrl = '';
