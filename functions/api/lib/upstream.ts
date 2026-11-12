@@ -5738,7 +5738,8 @@ export function buildPackageCacheInvalidationKeys(
     `/__api_hydrate_v10_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v11_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `https://edge-cache.luantihub.local/pkg-readme-v1/${encA}/${encN}`,
-    `https://edge-cache.luantihub.local/pkg-releases-v1/${encA}/${encN}`
+    `https://edge-cache.luantihub.local/pkg-releases-v1/${encA}/${encN}`,
+    `https://cache.luantihub.internal/ssr-pkg-meta-v4/${encA}/${encN}`
   ]);
 
   for (const lang of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
@@ -5772,6 +5773,10 @@ export function buildPackageCacheInvalidationKeys(
 
   if (Array.isArray(options?.extraAuthors)) {
     for (const extra of options!.extraAuthors) {
+      const cleanExtra = String(extra || '').trim().toLowerCase();
+      if (cleanExtra) {
+        keys.add(`https://cache.luantihub.internal/ssr-pkg-meta-v4/${encodeURIComponent(cleanExtra)}/${encN}`);
+      }
       addAuthorKeys(extra);
     }
   }

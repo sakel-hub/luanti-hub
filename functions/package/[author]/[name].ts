@@ -165,6 +165,11 @@ export async function onRequestGet(context: {
   let pkgType = 'mod';
   let pkgLicense = 'Open Source';
   let pkgDownloads = 0;
+  let pkgCdbDownloads: number | undefined = undefined;
+  let pkgLhDownloads: number | undefined = undefined;
+  let pkgProvider: string | undefined = undefined;
+  let pkgSource: 'official' | 'git' | undefined = undefined;
+  let pkgSources: Array<'official' | 'git'> = [];
   let pkgScore = 0;
   let pkgReviewCount = 0;
   let pkgTags: string[] = [];
@@ -180,7 +185,7 @@ export async function onRequestGet(context: {
     return `${canonicalOrigin}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
   };
 
-  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v3/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v4/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
 
   const lookupMetadata = async () => {
     try {
@@ -215,6 +220,21 @@ export async function onRequestGet(context: {
         pkgType = cachedMeta.pkgType || 'mod';
         pkgLicense = cachedMeta.pkgLicense || pkgLicense;
         pkgDownloads = Number(cachedMeta.pkgDownloads) || 0;
+        if (cachedMeta.pkgCdbDownloads !== undefined) {
+          pkgCdbDownloads = Number(cachedMeta.pkgCdbDownloads) || 0;
+        }
+        if (cachedMeta.pkgLhDownloads !== undefined) {
+          pkgLhDownloads = Number(cachedMeta.pkgLhDownloads) || 0;
+        }
+        if (cachedMeta.pkgProvider) {
+          pkgProvider = String(cachedMeta.pkgProvider);
+        }
+        if (cachedMeta.pkgSource === 'git' || cachedMeta.pkgSource === 'official') {
+          pkgSource = cachedMeta.pkgSource;
+        }
+        if (Array.isArray(cachedMeta.pkgSources)) {
+          pkgSources = cachedMeta.pkgSources.filter((s: any) => s === 'official' || s === 'git');
+        }
         pkgScore = Number(cachedMeta.pkgScore) || 0;
         pkgReviewCount = Number(cachedMeta.pkgReviewCount) || 0;
         pkgTags = Array.isArray(cachedMeta.pkgTags) ? cachedMeta.pkgTags : [];
@@ -260,6 +280,51 @@ export async function onRequestGet(context: {
         }
       }
 
+      if (pkgData) {
+        let d1Tags: string[] = [];
+        try {
+          if (pkgData.tags) d1Tags = JSON.parse(pkgData.tags);
+        } catch {
+          // ignore
+        }
+        const lowerD1Tags = Array.isArray(d1Tags)
+          ? d1Tags.map(t => String(t || '').toLowerCase())
+          : [];
+        const rawProv = String(pkgData.provider || '').trim().toLowerCase();
+        const isGitRow = Boolean(rawProv && rawProv !== 'contentdb') || lowerD1Tags.includes('git');
+        const isOfficialRow =
+          rawProv === 'contentdb' ||
+          lowerD1Tags.includes('contentdb') ||
+          Number(pkgData.contentdb_downloads || 0) > 0;
+
+        if (rawProv) {
+          pkgProvider = rawProv;
+        }
+        const srcs: Array<'official' | 'git'> = [];
+        if (isOfficialRow) srcs.push('official');
+        if (isGitRow) srcs.push('git');
+        if (srcs.length > 0) {
+          pkgSources = srcs;
+          pkgSource = srcs.includes('git') ? 'git' : 'official';
+        }
+
+        const rawTotal = Number(pkgData.downloads_count) || 0;
+        const hasExplicitSplit =
+          pkgData.contentdb_downloads !== undefined || pkgData.luantihub_downloads !== undefined;
+        if (hasExplicitSplit) {
+          pkgCdbDownloads = Math.max(0, Number(pkgData.contentdb_downloads) || 0);
+          const explicitLh = Math.max(0, Number(pkgData.luantihub_downloads) || 0);
+          pkgLhDownloads = !isOfficialRow && explicitLh === 0 && rawTotal > 0 ? rawTotal : explicitLh;
+        } else if (isGitRow && !isOfficialRow) {
+          pkgCdbDownloads = 0;
+          pkgLhDownloads = Math.max(0, rawTotal);
+        } else if (isOfficialRow && !isGitRow) {
+          pkgCdbDownloads = Math.max(0, rawTotal);
+          pkgLhDownloads = 0;
+        }
+        pkgDownloads = Math.max(rawTotal, (pkgCdbDownloads || 0) + (pkgLhDownloads || 0));
+      }
+
       if (pkgData && (pkgData.provider !== 'contentdb' || pkgData.long_desc || pkgData.short_desc || pkgData.banner_url)) {
         pkgCleanTitle = pkgData.title || name;
         pkgDesc = pkgData.short_desc || pkgDesc;
@@ -270,7 +335,6 @@ export async function onRequestGet(context: {
         pkgThumb = pkgBanner || pkgData.thumbnail_url || pkgThumb;
         pkgType = pkgData.type || 'mod';
         pkgLicense = pkgData.license || pkgLicense;
-        pkgDownloads = Number(pkgData.downloads_count) || 0;
         pkgScore = computeGenuineStarRating(d1RatingAvg, pkgData.score);
         try {
           if (pkgData.tags) pkgTags = JSON.parse(pkgData.tags);
@@ -305,7 +369,19 @@ export async function onRequestGet(context: {
           pkgThumb = pkgBanner || upstreamThumb || pkgThumb;
           pkgType = upstream.type || pkgType || 'mod';
           pkgLicense = upstream.license || pkgLicense;
-          pkgDownloads = Math.max(pkgDownloads, Number(upstream.downloads) || 0);
+          const upstreamDl = Math.max(0, Number(upstream.downloads) || 0);
+          pkgCdbDownloads = Math.max(pkgCdbDownloads || 0, upstreamDl);
+          if (pkgLhDownloads === undefined) {
+            pkgLhDownloads = 0;
+          }
+          pkgDownloads = Math.max(pkgDownloads, pkgCdbDownloads + pkgLhDownloads);
+          if (!pkgProvider) {
+            pkgProvider = 'contentdb';
+          }
+          if (!pkgSources.includes('official')) {
+            pkgSources = ['official', ...pkgSources.filter(s => s !== 'official')];
+          }
+          pkgSource = pkgSources.includes('git') ? 'git' : 'official';
           if (Array.isArray(upstream.tags)) {
             pkgTags = upstream.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title)).filter(Boolean);
           }
@@ -337,6 +413,11 @@ export async function onRequestGet(context: {
           pkgType,
           pkgLicense,
           pkgDownloads,
+          ...(pkgCdbDownloads !== undefined ? { pkgCdbDownloads } : {}),
+          ...(pkgLhDownloads !== undefined ? { pkgLhDownloads } : {}),
+          ...(pkgProvider ? { pkgProvider } : {}),
+          ...(pkgSource ? { pkgSource } : {}),
+          ...(pkgSources.length > 0 ? { pkgSources } : {}),
           pkgScore,
           pkgReviewCount,
           pkgTags,
@@ -474,6 +555,11 @@ export async function onRequestGet(context: {
       thumbnail: pkgThumb,
       ...(pkgBanner ? { banner: pkgBanner } : {}),
       type: pkgType,
+      ...(pkgProvider ? { provider: pkgProvider } : {}),
+      ...(pkgSource ? { source: pkgSource } : {}),
+      ...(pkgSources.length > 0 ? { sources: pkgSources } : {}),
+      ...(pkgCdbDownloads !== undefined ? { contentdb_downloads: pkgCdbDownloads } : {}),
+      ...(pkgLhDownloads !== undefined ? { luantihub_downloads: pkgLhDownloads } : {}),
       downloads: pkgDownloads,
       score: pkgScore
     });

@@ -2492,6 +2492,7 @@ export class PackageService {
           }
         }
       }
+      const rawV15 = localStorage.getItem('lh_hydrated_meta_v15');
       const rawV14 = localStorage.getItem('lh_hydrated_meta_v14');
       const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
       const rawV12 = localStorage.getItem('lh_hydrated_meta_v12');
@@ -2513,9 +2514,13 @@ export class PackageService {
       if (rawV13) {
         localStorage.removeItem('lh_hydrated_meta_v13');
       }
-      const raw = rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      if (rawV14) {
+        localStorage.removeItem('lh_hydrated_meta_v14');
+      }
+      const raw = rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
       if (!raw) return;
-      const isMigratingLegacy = !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingLegacy = !rawV15 && Boolean(rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingPreV14 = !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -2551,9 +2556,24 @@ export class PackageService {
             if (entry.review_thread_counts) {
               entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
             }
-            if (isMigratingLegacy && !entry.review_thread_counts) {
+            if (isMigratingPreV14 && !entry.review_thread_counts) {
               entry.score = 0;
               entry.rating_checked = false;
+            }
+            if (isMigratingLegacy) {
+              // Heal any SSR deep-link phantom contentdb_downloads / 'official' source cached prior to v15
+              delete entry.contentdb_downloads;
+              if (typeof entry.luantihub_downloads === 'number' && entry.luantihub_downloads > 0) {
+                entry.downloads = entry.luantihub_downloads;
+              } else {
+                delete entry.downloads;
+              }
+              const lowerKeyAuthor = k.toLowerCase().split('/')[0] || '';
+              const hasCdbTag = Array.isArray(entry.tags) && entry.tags.some(t => String(t).toLowerCase() === 'contentdb');
+              if (Array.isArray(entry.sources) && !hasCdbTag && (lowerKeyAuthor.endsWith('-hub') || entry.sources.includes('git'))) {
+                const cleanedSources = entry.sources.filter(s => s !== 'official');
+                entry.sources = cleanedSources.length > 0 ? cleanedSources : ['git'];
+              }
             }
             this.hydratedMetaCache.set(k.toLowerCase(), entry);
           }
@@ -2579,7 +2599,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v14', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v15', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -2710,21 +2730,32 @@ export class PackageService {
     const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerPkgId] || 0);
 
     const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
+    const isUnhydratedSeed = Boolean(item?._unhydratedSeed);
+    const inferredHubGitAuthor = String(resolvedAuthor || '').trim().toLowerCase().endsWith('-hub');
+    const isGitOnlyItem =
+      isGitProviderId(item?.provider) ||
+      (item?.source === 'git' && (!Array.isArray(item?.sources) || !item.sources.includes('official'))) ||
+      (inferredHubGitAuthor && !Array.isArray(item?.sources) && item?.source !== 'official' && item?.provider !== 'contentdb');
     const hasSplitDownloads = item?.contentdb_downloads !== undefined || item?.luantihub_downloads !== undefined;
     const rawCdbDl = Math.max(
       0,
       Number(
         item?.contentdb_downloads ??
-          (!isGitProviderId(item?.provider)
+          (!isUnhydratedSeed && !isGitOnlyItem
             ? item?.downloads
             : 0) ??
           0
       ) || 0
     );
-    const contentdbDownloads = Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
+    const contentdbDownloads = isGitOnlyItem && item?.contentdb_downloads === 0
+      ? 0
+      : Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
     const luantihubDownloads = Math.max(
       0,
-      Number(item?.luantihub_downloads ?? 0) || 0,
+      Number(
+        item?.luantihub_downloads ??
+          (!hasSplitDownloads && isGitOnlyItem && !isUnhydratedSeed ? item?.downloads : 0)
+      ) || 0,
       Number(cachedMeta?.luantihub_downloads || 0),
       localUserDlCount
     );
@@ -2858,7 +2889,10 @@ export class PackageService {
     const rawProvider = typeof item.provider === 'string' ? item.provider.toLowerCase() : '';
     const isGitProvider = !isExplicitOfficialOnly && isGitProviderId(rawProvider);
     const source: PackageSource =
-      explicitSources.includes('git') || item.source === 'git' || isGitProvider
+      explicitSources.includes('git') ||
+      item.source === 'git' ||
+      isGitProvider ||
+      (inferredHubGitAuthor && !isExplicitOfficialOnly && !rawProvider)
         ? 'git'
         : item.source === 'mirror'
           ? 'mirror'
@@ -3020,6 +3054,7 @@ export class PackageService {
           ? cachedMeta?.created_at
           : (item.created_at || cachedMeta?.created_at)) || undefined,
       updated_at: item.updated_at || undefined,
+      ...(isUnhydratedSeed ? { _unhydratedSeed: true } : {}),
       status: item.status || 'active'
     };
 
@@ -4357,9 +4392,15 @@ export class PackageService {
       const mergedBadgeTags = prev?.badge_tags?.length
         ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...prev.badge_tags])
         : pkg.badge_tags;
-      const mergedCdbDl = Math.max(pkg.contentdb_downloads || 0, prev?.contentdb_downloads || 0);
+      const isPureGitBootPkg =
+        pkg.source === 'git' && !pkg.sources?.includes('official') && (pkg.contentdb_downloads || 0) === 0;
+      const mergedCdbDl = isPureGitBootPkg
+        ? 0
+        : Math.max(pkg.contentdb_downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.contentdb_downloads || 0));
       const mergedLhDl = Math.max(pkg.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
-      const mergedTotalDl = Math.max(pkg.downloads || 0, prev?.downloads || 0, mergedCdbDl + mergedLhDl);
+      const mergedTotalDl = isPureGitBootPkg
+        ? Math.max(pkg.downloads || 0, mergedLhDl)
+        : Math.max(pkg.downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.downloads || 0), mergedCdbDl + mergedLhDl);
       const tagsChanged =
         mergedTags.length !== (pkg.tags?.length || 0) ||
         (mergedBadgeTags?.length || 0) !== (pkg.badge_tags?.length || 0);
@@ -4494,15 +4535,36 @@ export class PackageService {
             (curr.banner && curr.banner !== 'logo.svg' ? curr.banner : freshMatch.banner) ||
             mergedShots[0] ||
             resolvedThumb;
+          const isPureGitFresh =
+            freshMatch.source === 'git' &&
+            !freshMatch.sources?.includes('official') &&
+            (freshMatch.contentdb_downloads || 0) === 0;
+          const nextCdbDl = isPureGitFresh
+            ? 0
+            : Math.max(curr._unhydratedSeed ? 0 : (curr.contentdb_downloads || 0), freshMatch.contentdb_downloads || 0);
+          const nextLhDl = Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0);
+          const nextTotalDl = Math.max(
+            curr._unhydratedSeed ? 0 : (curr.downloads || 0),
+            freshMatch.downloads || 0,
+            nextCdbDl + nextLhDl
+          );
+          const { _unhydratedSeed: _dropSeed, ...cleanCurr } = curr;
           return {
-            ...curr,
+            ...cleanCurr,
+            ...(curr._unhydratedSeed
+              ? {
+                  provider: freshMatch.provider || curr.provider,
+                  source: freshMatch.source,
+                  sources: freshMatch.sources
+                }
+              : {}),
             title: curr.title === curr.name && freshMatch.title ? freshMatch.title : curr.title,
             thumbnail: resolvedThumb,
             banner: resolvedBanner,
             screenshots: mergedShots.length > 0 ? mergedShots : (curr.screenshots || freshMatch.screenshots),
-            downloads: Math.max(curr.downloads || 0, freshMatch.downloads || 0),
-            contentdb_downloads: Math.max(curr.contentdb_downloads || 0, freshMatch.contentdb_downloads || 0),
-            luantihub_downloads: Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0),
+            downloads: nextTotalDl,
+            contentdb_downloads: nextCdbDl,
+            luantihub_downloads: nextLhDl,
             score: freshMatch.score || curr.score,
             release_id: freshMatch.release_id || curr.release_id,
             latest_commit_sha: freshMatch.latest_commit_sha || curr.latest_commit_sha,
@@ -4841,9 +4903,26 @@ export class PackageService {
                   pkg.license = detail.license || detail.media_license || pkg.license;
                   pkg.media_license = detail.media_license || detail.license || pkg.media_license;
                 }
-                if (typeof detail.downloads === 'number') {
-                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detail.downloads);
-                  pkg.downloads = Math.max(pkg.downloads || 0, pkg.contentdb_downloads + (pkg.luantihub_downloads || 0));
+                const detailCdbDl =
+                  typeof detail.contentdb_downloads === 'number'
+                    ? detail.contentdb_downloads
+                    : detail.contentdb_downloads === undefined &&
+                        typeof detail.downloads === 'number' &&
+                        (pkg.source !== 'git' || pkg.sources?.includes('official'))
+                      ? detail.downloads
+                      : undefined;
+                if (typeof detail.luantihub_downloads === 'number') {
+                  pkg.luantihub_downloads = Math.max(pkg.luantihub_downloads || 0, detail.luantihub_downloads);
+                }
+                if (typeof detailCdbDl === 'number') {
+                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detailCdbDl);
+                }
+                if (typeof detail.downloads === 'number' || typeof detailCdbDl === 'number') {
+                  pkg.downloads = Math.max(
+                    pkg.downloads || 0,
+                    typeof detail.contentdb_downloads === 'number' ? Number(detail.downloads || 0) : 0,
+                    (pkg.contentdb_downloads || 0) + (pkg.luantihub_downloads || 0)
+                  );
                 }
                 if (Array.isArray(detail.screenshots) && detail.screenshots.length > 0) {
                   const mergedShots = this.mergePackageScreenshots([pkg.banner, pkg.thumbnail], detail.screenshots, pkg.screenshots);
@@ -7175,33 +7254,45 @@ export class PackageService {
       Number(prevMeta.luantihub_downloads || 0)
     );
     const latestLhDownloads = Math.max(baseLhDownloads + 1, localUserDlCount);
-    const latestCdbDownloads = Math.max(
-      0,
-      Number(
-        pkg.contentdb_downloads ??
-          activeMatch?.contentdb_downloads ??
-          catalogMatch?.contentdb_downloads ??
-          prevMeta.contentdb_downloads ??
-          Math.max(0, (pkg.downloads || 0) - (pkg.luantihub_downloads || 0))
-      ) || 0
-    );
+    const isPureGitTarget =
+      pkg.source === 'git' &&
+      !pkg.sources?.includes('official') &&
+      !activeMatch?.sources?.includes('official') &&
+      !catalogMatch?.sources?.includes('official');
+    const latestCdbDownloads = isPureGitTarget
+      ? 0
+      : Math.max(
+          0,
+          Number(
+            pkg.contentdb_downloads ??
+              activeMatch?.contentdb_downloads ??
+              catalogMatch?.contentdb_downloads ??
+              prevMeta.contentdb_downloads ??
+              Math.max(0, (pkg.downloads || 0) - (pkg.luantihub_downloads || 0))
+          ) || 0
+        );
     const latestTotalDownloads = Math.max(
-      Number(pkg.downloads || 0),
-      Number(activeMatch?.downloads || 0),
-      Number(catalogMatch?.downloads || 0),
-      Number(prevMeta.downloads || 0),
+      isPureGitTarget ? 0 : Number(pkg.downloads || 0),
+      isPureGitTarget ? 0 : Number(activeMatch?.downloads || 0),
+      isPureGitTarget ? 0 : Number(catalogMatch?.downloads || 0),
+      isPureGitTarget ? 0 : Number(prevMeta.downloads || 0),
       latestCdbDownloads + latestLhDownloads
     );
 
     const bumpCounters = (item: LuantiPackage): LuantiPackage => {
-      const cdb = Math.max(
-        latestCdbDownloads,
-        Number(
-          item.contentdb_downloads ??
-            Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0))
-        ) || 0
-      );
-      const total = Math.max(item.downloads || 0, latestTotalDownloads, cdb + latestLhDownloads);
+      const itemIsPureGit = item.source === 'git' && !item.sources?.includes('official');
+      const cdb = itemIsPureGit
+        ? 0
+        : Math.max(
+            latestCdbDownloads,
+            Number(
+              item.contentdb_downloads ??
+                Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0))
+            ) || 0
+          );
+      const total = itemIsPureGit
+        ? Math.max(latestTotalDownloads, latestLhDownloads)
+        : Math.max(item.downloads || 0, latestTotalDownloads, cdb + latestLhDownloads);
       return {
         ...item,
         contentdb_downloads: cdb,
@@ -8819,17 +8910,29 @@ export class PackageService {
             (p.author.toLowerCase() === (pkg.author || '').toLowerCase() &&
               p.name.toLowerCase() === (pkg.name || '').toLowerCase())
         );
+        const dataSources: PackageSource[] = Array.isArray(data.sources)
+          ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
+          : [];
         const hasSplitDownloads = data.contentdb_downloads !== undefined || data.luantihub_downloads !== undefined;
-        const resolvedCdbDownloads = Math.max(
-          hasSplitDownloads
-            ? Math.max(0, Number(data.contentdb_downloads || 0))
-            : (pkg.source !== 'git' || pkg.sources?.includes('official')
-                ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
-                : (pkg.contentdb_downloads || 0)),
-          Number(pkg.contentdb_downloads || 0),
-          Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
-          Number(cachedMetaForDownloads?.contentdb_downloads || 0)
-        );
+        const isAuthoritativePureGit =
+          hasSplitDownloads &&
+          Number(data.contentdb_downloads || 0) === 0 &&
+          ((dataSources.length > 0 && !dataSources.includes('official')) ||
+            (dataSources.length === 0 &&
+              data.source === 'git' &&
+              !liveCatalogPkgForDownloads?.sources?.includes('official')));
+        const resolvedCdbDownloads = isAuthoritativePureGit
+          ? 0
+          : Math.max(
+              hasSplitDownloads
+                ? Math.max(0, Number(data.contentdb_downloads || 0))
+                : (!pkg._unhydratedSeed && (pkg.source !== 'git' || pkg.sources?.includes('official'))
+                    ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
+                    : (pkg._unhydratedSeed ? 0 : (pkg.contentdb_downloads || 0))),
+              pkg._unhydratedSeed ? 0 : Number(pkg.contentdb_downloads || 0),
+              Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
+              Number(cachedMetaForDownloads?.contentdb_downloads || 0)
+            );
         const localUserDlCount = Number(this.settingsService.downloadedPackages()[cacheKey] || 0);
         const resolvedLhDownloads = Math.max(
           0,
@@ -8839,13 +8942,19 @@ export class PackageService {
           Number(cachedMetaForDownloads?.luantihub_downloads ?? 0) || 0,
           localUserDlCount
         );
-        const resolvedDownloads = Math.max(
-          resolvedCdbDownloads + resolvedLhDownloads,
-          Number(data.downloads ?? data.downloads_count ?? 0) || 0,
-          Number(pkg.downloads || 0),
-          Number(liveCatalogPkgForDownloads?.downloads || 0),
-          Number(cachedMetaForDownloads?.downloads || 0)
-        );
+        const resolvedDownloads = isAuthoritativePureGit
+          ? Math.max(
+              resolvedLhDownloads,
+              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+              Number(liveCatalogPkgForDownloads?.downloads || 0)
+            )
+          : Math.max(
+              resolvedCdbDownloads + resolvedLhDownloads,
+              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+              pkg._unhydratedSeed ? 0 : Number(pkg.downloads || 0),
+              Number(liveCatalogPkgForDownloads?.downloads || 0),
+              Number(cachedMetaForDownloads?.downloads || 0)
+            );
 
         const reviewThreadCounts =
           parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
@@ -8934,12 +9043,10 @@ export class PackageService {
 
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
-        const dataSources: PackageSource[] = Array.isArray(data.sources)
-          ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
-          : [];
-        let mergedSources = Array.from(
-          new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources])
-        );
+        let mergedSources =
+          pkg._unhydratedSeed && dataSources.length > 0
+            ? Array.from(new Set<PackageSource>(dataSources))
+            : Array.from(new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources]));
 
         const forumUrl = this.normalizeForumUrl(data.forum_url || data.forums) || pkg.forum_url || pkg.forums;
         const providesList = this.parseArrayField(data.provides)
@@ -9105,9 +9212,13 @@ export class PackageService {
             license: resolvedLicense || prevMeta.license,
             media_license: resolvedMediaLicense || prevMeta.media_license,
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
-            contentdb_downloads: Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
+            contentdb_downloads: isAuthoritativePureGit
+              ? 0
+              : Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
             luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
-            downloads: Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
+            downloads: isAuthoritativePureGit
+              ? Math.max(resolvedDownloads, resolvedLhDownloads)
+              : Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
             score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
             ...(reviewThreadCounts || prevMeta.review_thread_counts
               ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
@@ -9140,22 +9251,28 @@ export class PackageService {
               ((current.author || '').toLowerCase() === targetAuthorLower &&
                 (current.name || '').toLowerCase() === targetNameLower))
           ) {
-            const mergedCdbDl = Math.max(
-              Number(current.contentdb_downloads || 0),
-              Number(updatedFields.contentdb_downloads || 0)
-            );
+            const mergedCdbDl = isAuthoritativePureGit
+              ? 0
+              : Math.max(
+                  current._unhydratedSeed ? 0 : Number(current.contentdb_downloads || 0),
+                  Number(updatedFields.contentdb_downloads || 0)
+                );
             const mergedLhDl = Math.max(
               Number(current.luantihub_downloads || 0),
               Number(updatedFields.luantihub_downloads || 0)
             );
-            const mergedTotalDl = Math.max(
-              Number(current.downloads || 0),
-              Number(updatedFields.downloads || 0),
-              mergedCdbDl + mergedLhDl
-            );
+            const mergedTotalDl = isAuthoritativePureGit
+              ? Math.max(Number(updatedFields.downloads || 0), mergedLhDl)
+              : Math.max(
+                  current._unhydratedSeed ? 0 : Number(current.downloads || 0),
+                  Number(updatedFields.downloads || 0),
+                  mergedCdbDl + mergedLhDl
+                );
+            const { _unhydratedSeed: _dropSeed, ...cleanCurrent } = current;
             const merged = {
-              ...current,
+              ...cleanCurrent,
               ...updatedFields,
+              ...(data.source ? { source: data.source as PackageSource } : {}),
               contentdb_downloads: mergedCdbDl,
               luantihub_downloads: mergedLhDl,
               downloads: mergedTotalDl,
@@ -10520,10 +10637,23 @@ export class PackageService {
     if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
       delete (window as any).__LUANTI_INITIAL_PACKAGE__;
     }
-    const matchesSeed =
+    const matchesSeed = Boolean(
       edgeSeed &&
       String(edgeSeed.author || '').toLowerCase() === author.trim().toLowerCase() &&
-      String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase();
+      String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase()
+    );
+    if (matchesSeed && this.edgeInitialPackageSeed === edgeSeed) {
+      this.edgeInitialPackageSeed = null;
+    }
+    const hasExplicitSeedProvenance = Boolean(
+      matchesSeed &&
+        (edgeSeed.provider ||
+          edgeSeed.source ||
+          (Array.isArray(edgeSeed.sources) && edgeSeed.sources.length > 0) ||
+          edgeSeed.contentdb_downloads !== undefined ||
+          edgeSeed.luantihub_downloads !== undefined)
+    );
+    const inferredHubGit = author.trim().toLowerCase().endsWith('-hub');
 
     const baseInitial = {
       id: `${author}/${name}`,
@@ -10532,7 +10662,9 @@ export class PackageService {
       title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
       type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
       short_desc: '',
-      thumbnail: 'logo.svg'
+      thumbnail: 'logo.svg',
+      ...(inferredHubGit ? { source: 'git', sources: ['git'] } : {}),
+      ...(!hasExplicitSeedProvenance ? { _unhydratedSeed: true } : {})
     };
     const initialPkg = this.normalizePackage(
       matchesSeed ? { ...baseInitial, ...edgeSeed } : baseInitial

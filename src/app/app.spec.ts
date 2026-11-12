@@ -14291,4 +14291,206 @@ core.register_node(modname .. ":panel", {
     pkgService.closePackageModal();
     catalogFixture.destroy();
   });
+
+  it('prevents phantom ContentDB downloads & source badges on browser-tab SSR deep links and self-heals v14 localStorage', async () => {
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const shellHtml =
+      '<!doctype html><html lang="en"><head><title>Luanti Hub</title><meta name="description" content="" /><meta name="keywords" content="" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><meta property="og:title" content="" /><meta property="og:description" content="" /><meta property="og:url" content="" /><meta property="og:image" content="" /><meta name="twitter:title" content="" /><meta name="twitter:description" content="" /><meta name="twitter:image" content="" /></head><body><app-root><main class="sr-only"></main></app-root></body></html>';
+
+    // 1. Edge SSR for Git package emits exact split counters + Git provenance in __LUANTI_INITIAL_PACKAGE__
+    const ssrRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/sakel-hub/terrarium_crucible'),
+      params: { author: 'sakel-hub', name: 'terrarium_crucible' },
+      env: {
+        ASSETS: { fetch: async () => new Response(shellHtml, { status: 200 }) },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('SELECT status FROM packages')
+                  ? { status: 'active' }
+                  : sql.includes('FROM packages')
+                    ? {
+                        id: 'sakel-hub/terrarium_crucible',
+                        author_name: 'sakel-hub',
+                        name: 'terrarium_crucible',
+                        title: 'Terrarium Crucible',
+                        provider: 'github',
+                        short_desc: 'Action-puzzle gardening game for the 2026 Luanti Game Jam.',
+                        long_desc: 'Full README description',
+                        type: 'game',
+                        license: 'MIT',
+                        contentdb_downloads: 0,
+                        luantihub_downloads: 1,
+                        downloads_count: 1,
+                        tags: '["git","github","game","jam_game_2026"]'
+                      }
+                    : { avg_rating: null, cnt: 0 }
+            })
+          })
+        }
+      }
+    });
+    expect(ssrRes.status).toBe(200);
+    const ssrHtml = await ssrRes.text();
+    const seedMatch = ssrHtml.match(/window\.__LUANTI_INITIAL_PACKAGE__=(\{.*?\});<\/script>/);
+    expect(seedMatch).toBeTruthy();
+    const parsedSsrSeed = JSON.parse(seedMatch![1]);
+    expect(parsedSsrSeed.contentdb_downloads).toBe(0);
+    expect(parsedSsrSeed.luantihub_downloads).toBe(1);
+    expect(parsedSsrSeed.downloads).toBe(1);
+    expect(parsedSsrSeed.provider).toBe('github');
+    expect(parsedSsrSeed.source).toBe('git');
+    expect(parsedSsrSeed.sources).toEqual(['git']);
+
+    // 2. Self-heals poisoned lh_hydrated_meta_v14 in localStorage on reload while preserving Hub downloads
+    const pkgService = TestBed.inject(PackageService);
+    localStorage.removeItem('lh_hydrated_meta_v15');
+    localStorage.setItem(
+      'lh_hydrated_meta_v14',
+      JSON.stringify({
+        'sakel-hub/terrarium_crucible': {
+          contentdb_downloads: 1,
+          luantihub_downloads: 1,
+          downloads: 2,
+          sources: ['official', 'git'],
+          tags: ['git', 'game', 'jam_game_2026']
+        }
+      })
+    );
+    (pkgService as any).hydratedMetaCache.clear();
+    (pkgService as any).loadHydratedMetaCache();
+    expect(localStorage.getItem('lh_hydrated_meta_v14')).toBeNull();
+    const healedCached = (pkgService as any).hydratedMetaCache.get('sakel-hub/terrarium_crucible');
+    expect(healedCached?.contentdb_downloads).toBeUndefined();
+    expect(healedCached?.luantihub_downloads).toBe(1);
+    expect(healedCached?.downloads).toBe(1);
+    expect(healedCached?.sources).toEqual(['git']);
+
+    // 3. Even if a stale CDN edge serves legacy unsplit __LUANTI_INITIAL_PACKAGE__ ({ downloads: 1 }),
+    // cold browser-tab deep-link boot + API hydration resolves ContentDB: 0, Hub: 1, Total: 1, sources: ['git']
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/packages/sakel-hub/terrarium_crucible')) {
+        return new Response(
+          JSON.stringify({
+            id: 'sakel-hub/terrarium_crucible',
+            author: 'sakel-hub',
+            author_display_name: 'SaKeL',
+            name: 'terrarium_crucible',
+            title: 'Terrarium Crucible',
+            type: 'game',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            repo_url: 'https://github.com/SaKeL/terrarium_crucible',
+            license: 'MIT',
+            contentdb_downloads: 0,
+            luantihub_downloads: 1,
+            downloads: 1,
+            tags: ['git', 'game', 'jam_game_2026'],
+            badge_tags: ['jam_game_2026'],
+            releases: [],
+            reviews_list: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    try {
+      (pkgService as any).edgeApiAvailable = true;
+      (pkgService as any).initialUrlSynced = false;
+      (pkgService as any)._packages.set([]);
+      (pkgService as any)._activePackage.set(null);
+      (pkgService as any).deepHydratedIds.clear();
+      (window as any).__LUANTI_INITIAL_PACKAGE__ = {
+        author: 'sakel-hub',
+        name: 'terrarium_crucible',
+        title: 'Terrarium Crucible',
+        type: 'game',
+        downloads: 1
+      };
+
+      (pkgService as any).syncStateFromUrl('/package/sakel-hub/terrarium_crucible');
+      expect(pkgService.activePackage()?.contentdb_downloads).toBe(0);
+      expect(pkgService.activePackage()?.sources).toEqual(['git']);
+
+      (pkgService as any).applyBootPayload({
+        packages: [
+          {
+            id: 'sakel-hub/terrarium_crucible',
+            author: 'sakel-hub',
+            name: 'terrarium_crucible',
+            title: 'Terrarium Crucible',
+            type: 'game',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            contentdb_downloads: 0,
+            luantihub_downloads: 1,
+            downloads: 1,
+            tags: ['git', 'game', 'jam_game_2026']
+          }
+        ]
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 30));
+
+      const active = pkgService.activePackage();
+      expect(active?.contentdb_downloads).toBe(0);
+      expect(active?.luantihub_downloads).toBe(1);
+      expect(active?.downloads).toBe(1);
+      expect(active?.sources).toEqual(['git']);
+
+      // 4. ensureRecentlyAddedLoaded() does not copy aggregated detail.downloads into contentdb_downloads on ?lite=1
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes('sort=approved_at')) {
+          return new Response(
+            JSON.stringify([
+              {
+                author: 'SaKeL',
+                name: 'terrarium_crucible',
+                title: 'Terrarium Crucible',
+                type: 'game',
+                short_desc: 'Action-puzzle gardening game'
+              }
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('terrarium_crucible')) {
+          return new Response(
+            JSON.stringify({
+              id: 'SaKeL/terrarium_crucible',
+              author: 'SaKeL',
+              name: 'terrarium_crucible',
+              contentdb_downloads: 0,
+              luantihub_downloads: 1,
+              downloads: 1,
+              license: 'MIT',
+              created_at: '2026-11-12T00:00:00Z'
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response('{}', { status: 404 });
+      }) as any;
+      (pkgService as any).recentlyAddedInFlight = null;
+      (pkgService as any).ensureRecentlyAddedLoaded(true);
+      await (pkgService as any).recentlyAddedInFlight;
+      const recentItem = (pkgService as any)._serverRecentlyAdded().find(
+        (p: any) => p.name === 'terrarium_crucible' && p.author === 'SaKeL'
+      );
+      expect(recentItem?.contentdb_downloads).toBe(0);
+      expect(recentItem?.luantihub_downloads).toBe(1);
+      expect(recentItem?.downloads).toBe(1);
+    } finally {
+      globalThis.fetch = origFetch;
+      pkgService.closePackageModal();
+    }
+  });
 });

@@ -186,6 +186,7 @@ export interface LuantiPackage {
   moderation_reason?: string;
   _searchBlob?: string; // Pre-computed lowercase search string for O(1) filtering
   _promo?: HeroPromotion; // Attached when synthetic Hero Carousel slide represents an active promotion
+  _unhydratedSeed?: boolean; // True on synthetic 0ms route placeholders before catalog/API hydration
 }
 
 export interface PackageRelease {
