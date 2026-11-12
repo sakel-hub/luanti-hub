@@ -18,7 +18,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
 import {
   LuantiPackage,
@@ -31,6 +31,7 @@ import {
   buildRawDirectoryBaseUrl,
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
+  isUntrustedTunnelOrPrivateHost,
   upgradeContentDbThumbnailUrl
 } from '../../core/config/git-providers.config';
 import {
@@ -227,7 +228,9 @@ import {
                 <!-- Primary Direct ZIP Download Button with File Size -->
                 <button
                   type="button"
+                  data-testid="modal-download-zip-btn"
                   (click)="onDownloadClick()"
+                  [appTooltip]="(isGitSubmittedPackage() ? 'modal.downloadSecurityTooltipGit' : 'modal.downloadSecurityTooltipContentDb') | translate"
                   class="h-10 sm:h-11 px-5 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2 hover:scale-[1.03] transition whitespace-nowrap cursor-pointer">
                   <svg lucideDownload class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
                   <span>{{ 'modal.downloadZip' | translate }}</span>
@@ -277,8 +280,9 @@ import {
                 @if (!isPackageAuthor()) {
                   <button
                     type="button"
+                    data-testid="modal-report-package-btn"
                     (click)="toggleReportForm()"
-                    [appTooltip]="'modal.reportPackage' | translate"
+                    [appTooltip]="'modal.reportSecurityTooltip' | translate"
                     [attr.aria-label]="'modal.reportPackage' | translate"
                     [class]="isReportOpen()
                       ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber-active text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
@@ -357,6 +361,11 @@ import {
                 <button type="button" (click)="isReportOpen.set(false)" class="text-slate-400 hover:text-white cursor-pointer">
                   <svg lucideX class="w-4 h-4"></svg>
                 </button>
+              </div>
+
+              <div class="p-2.5 rounded-xl bg-slate-950/60 border border-emerald-400/25 flex items-start gap-2 text-[11px] text-slate-300 leading-relaxed">
+                <svg lucideShieldCheck class="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5"></svg>
+                <span>{{ 'modal.reportConfidentialNotice' | translate }}</span>
               </div>
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -728,6 +737,8 @@ import {
                                   <iframe
                                     [src]="embedUrl"
                                     [title]="package.title + ' video'"
+                                    sandbox="allow-scripts allow-same-origin allow-presentation"
+                                    referrerpolicy="strict-origin-when-cross-origin"
                                     class="w-full h-full border-0 bg-black"
                                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                     allowfullscreen>
@@ -911,6 +922,7 @@ import {
                   </div>
                 } @else if (renderedDescription(); as descHtml) {
                   <div
+                    (click)="onMarkdownContentClick($event)"
                     class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
                     [innerHTML]="descHtml">
                   </div>
@@ -1164,6 +1176,7 @@ import {
                           </div>
                         } @else if (renderedReadme(); as readmeHtml) {
                           <div
+                            (click)="onMarkdownContentClick($event)"
                             class="luanti-markdown text-slate-200 text-sm leading-relaxed max-h-[32rem] overflow-y-auto pr-1.5 break-words"
                             [innerHTML]="readmeHtml">
                           </div>
@@ -1180,9 +1193,19 @@ import {
                 <!-- 1-Click In-Game Setup Snippet Box -->
                 <div class="p-4 rounded-2xl glass-panel space-y-3">
                   <div class="flex items-center justify-between gap-2 flex-wrap">
-                    <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
-                      {{ 'modal.registryConfig' | translate }}
-                    </span>
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
+                        {{ 'modal.registryConfig' | translate }}
+                      </span>
+                      <button
+                        type="button"
+                        [appTooltip]="'setup.securityTooltip' | translate"
+                        [appTooltipTap]="true"
+                        [attr.aria-label]="'setup.securityBadge' | translate"
+                        class="text-emerald-400 hover:text-emerald-300 transition cursor-pointer inline-flex items-center">
+                        <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                      </button>
+                    </div>
                     <div class="flex items-center gap-3">
                       <button
                         type="button"
@@ -1456,11 +1479,12 @@ import {
                     {{ 'modal.linksTitle' | translate }}
                   </span>
                   <div class="flex flex-col gap-1.5">
-                    @if (package.donate_url) {
+                    @if (getSafeExternalHref(package.donate_url); as safeDonateUrl) {
                       <a
-                        [href]="package.donate_url"
+                        [href]="safeDonateUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeDonateUrl) }"
                         class="px-2.5 py-2 rounded-lg bg-gradient-to-r from-rose-500/20 via-amber-500/15 to-rose-500/20 border border-rose-400/40 hover:border-rose-400/70 text-rose-200 hover:text-white flex items-center justify-between text-xs font-bold transition shadow-sm cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideHeart class="w-3.5 h-3.5 fill-rose-400 text-rose-400" [style.fill]="'#fb7185'" [color]="'#fb7185'"></svg>
@@ -1470,33 +1494,37 @@ import {
                       </a>
                     }
 
-                    <a
-                      [href]="gitRepoUrl"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
-                      <span class="flex items-center gap-2">
-                        @if (hasValidGitRepo) {
-                          <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
-                          <span>{{ 'modal.viewGitRepo' | translate }}</span>
-                        } @else {
-                          <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
-                          <span>{{ 'modal.viewOnContentDb' | translate }}</span>
-                        }
-                      </span>
-                      <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
-                    </a>
+                    @if (getSafeExternalHref(gitRepoUrl); as safeRepoHref) {
+                      <a
+                        [href]="safeRepoHref"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeRepoHref) }"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          @if (hasValidGitRepo) {
+                            <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
+                            <span>{{ 'modal.viewGitRepo' | translate }}</span>
+                          } @else {
+                            <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
+                            <span>{{ 'modal.viewOnContentDb' | translate }}</span>
+                          }
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
                     @if (package.git_repo_status === 'broken_404') {
                       <div class="px-2.5 py-1.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] flex items-start gap-2 leading-snug">
                         <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400 flex-shrink-0 mt-0.5"></svg>
                         <span>404 Git repository detected and automatically reported to moderators.</span>
                       </div>
                     }
-                    @if (package.website) {
+                    @if (getSafeExternalHref(package.website); as safeWebsiteUrl) {
                       <a
-                        [href]="package.website"
+                        [href]="safeWebsiteUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeWebsiteUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideGlobe class="w-3.5 h-3.5 text-sky-400"></svg>
@@ -1505,11 +1533,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.issue_tracker) {
+                    @if (getSafeExternalHref(package.issue_tracker); as safeIssueUrl) {
                       <a
-                        [href]="package.issue_tracker"
+                        [href]="safeIssueUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeIssueUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400"></svg>
@@ -1518,11 +1547,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.forum_url || package.forums) {
+                    @if (getSafeExternalHref(package.forum_url || package.forums); as safeForumUrl) {
                       <a
-                        [href]="package.forum_url || package.forums"
+                        [href]="safeForumUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeForumUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideMessageSquare class="w-3.5 h-3.5 text-emerald-400"></svg>
@@ -1531,11 +1561,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.translation_url) {
+                    @if (getSafeExternalHref(package.translation_url); as safeTranslationUrl) {
                       <a
-                        [href]="package.translation_url"
+                        [href]="safeTranslationUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeTranslationUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideGlobe class="w-3.5 h-3.5 text-purple-400"></svg>
@@ -2979,24 +3010,143 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       .some(d => (d.id || `${d.author}/${d.name}`).toLowerCase() === targetId);
   });
 
-  private parseSafeMarkdown(markdownText: string): SafeHtml {
+  getSafeExternalHref(rawUrl?: string | null): string | null {
+    if (!rawUrl || typeof rawUrl !== 'string') return null;
+    const trimmed = rawUrl.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:') return null;
+      if (parsed.username || parsed.password) return null;
+      if (isUntrustedTunnelOrPrivateHost(parsed.hostname)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  getExternalHostLabel(rawUrl?: string | null): string {
+    const safe = this.getSafeExternalHref(rawUrl);
+    if (!safe) return '';
+    try {
+      return new URL(safe).hostname.replace(/^www\./i, '');
+    } catch {
+      return '';
+    }
+  }
+
+  private decodeHtmlAttrEntities(raw: string): string {
+    return (raw || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>');
+  }
+
+  private sanitizeMarkdownImgSrc(rawSrc: string): string | null {
+    const trimmed = this.decodeHtmlAttrEntities(rawSrc)
+      .trim()
+      .replace(/[\u0000-\u001F\u007F]/g, '');
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+    if (trimmed.startsWith('/')) {
+      if (/^\/api\/packages\?proxy_image=/i.test(trimmed)) {
+        try {
+          const proxyCheck = new URL(trimmed, 'https://luantihub.org');
+          const proxiedTarget = proxyCheck.searchParams.get('proxy_image') || '';
+          const parsedTarget = new URL(proxiedTarget);
+          if (
+            parsedTarget.protocol === 'https:' &&
+            !parsedTarget.username &&
+            !parsedTarget.password &&
+            !isUntrustedTunnelOrPrivateHost(parsedTarget.hostname)
+          ) {
+            return `${proxyCheck.pathname}${proxyCheck.search}`;
+          }
+        } catch {
+          return null;
+        }
+        return null;
+      }
+      return /^\/api\/git-image\b/i.test(trimmed) || /^\/[a-zA-Z0-9._/-]+$/.test(trimmed)
+        ? trimmed
+        : null;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:') return null;
+      if (parsed.username || parsed.password) return null;
+      if (isUntrustedTunnelOrPrivateHost(parsed.hostname)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  onMarkdownContentClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+    if (!anchor) return;
+    const rawHref = (anchor.getAttribute('href') || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) return;
+    const safeExt = this.getSafeExternalHref(rawHref);
+    if (safeExt && typeof window !== 'undefined') {
+      event.preventDefault();
+      window.open(safeExt, '_blank', 'noopener,noreferrer');
+    }
+  }
+
+  parseSafeMarkdown(markdownText: string): string {
     try {
       const rawHtml = marked.parse(markdownText, { async: false }) as string;
       const preCleanedHtml = rawHtml
-        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
-        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[^>]*\/?>/gi, '')
-        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-      const domSanitized = this.sanitizer.sanitize(SecurityContext.HTML, preCleanedHtml) ?? '';
-      const sanitizedHtml = domSanitized
-        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/(?:href|src)\s*=\s*["']\s*(?:unsafe:)?(?:javascript|vbscript|data):[^"']*["']/gi, 'href="#"')
         .replace(
-          /<a\s+href="(https?:\/\/[^"]+)"/gi,
-          '<a href="$1" target="_blank" rel="noopener noreferrer"'
-        );
-      return this.sanitizer.bypassSecurityTrustHtml(sanitizedHtml);
+          /<(script|iframe|object|embed|style|form|svg|math|video|audio|source|track|applet|meta|link|base|template|noscript)[\s\S]*?>[\s\S]*?<\/\1>/gi,
+          ''
+        )
+        .replace(
+          /<(script|iframe|object|embed|style|form|svg|math|video|audio|source|track|applet|meta|link|base|template|noscript)[^>]*\/?>/gi,
+          ''
+        )
+        .replace(/(?:[\s/"']+)on[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/<img\b([^>]*)>/gi, (_full, attrs: string) => {
+          const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          const candidate = srcMatch ? (srcMatch[1] ?? srcMatch[2] ?? srcMatch[3] ?? '') : '';
+          const safeSrc = this.sanitizeMarkdownImgSrc(candidate);
+          if (!safeSrc) return '';
+          const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+          const safeAlt = this.decodeHtmlAttrEntities(altMatch ? (altMatch[1] ?? altMatch[2] ?? '') : '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          const encodedSrc = safeSrc.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+          return `<img src="${encodedSrc}" alt="${safeAlt}">`;
+        })
+        .replace(/<a\b([^>]*)>/gi, (_full, attrs: string) => {
+          const hrefMatch = attrs.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          const candidate = this.decodeHtmlAttrEntities(
+            hrefMatch ? (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3] ?? '') : ''
+          ).trim();
+          if (!candidate) return '<a>';
+          if (candidate.startsWith('#')) {
+            const safeAnchor = candidate.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            return `<a href="${safeAnchor}">`;
+          }
+          const safeExt = this.getSafeExternalHref(candidate);
+          if (!safeExt) return '<a href="#">';
+          const encodedHref = safeExt.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+          return `<a href="${encodedHref}" rel="noopener noreferrer">`;
+        });
+      return this.sanitizer.sanitize(SecurityContext.HTML, preCleanedHtml) ?? '';
     } catch {
-      return markdownText;
+      const escaped = (markdownText || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      return `<p>${escaped}</p>`;
     }
   }
 
@@ -3017,7 +3167,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return buildRawDirectoryBaseUrl(repoUrl, pkg.default_branch || 'main');
   }
 
-  readonly renderedDescription = computed<SafeHtml | null>(() => {
+  readonly renderedDescription = computed<string | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return null;
     const localized = this.packageService.getLocalizedPackageText(pkg);
@@ -3052,7 +3202,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return this.parseSafeMarkdown(rewritten);
   });
 
-  readonly renderedReadme = computed<SafeHtml | null>(() => {
+  readonly renderedReadme = computed<string | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     const rawReadme = (pkg?.readme || this.packageService.getCachedReadme(pkg) || '').trim();
     if (!rawReadme) return null;

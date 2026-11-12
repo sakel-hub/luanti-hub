@@ -57,6 +57,7 @@ import {
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   normalizeRepoComparisonKey,
+  isUntrustedTunnelOrPrivateHost,
   GitProviderId
 } from '../config/git-providers.config';
 import {
@@ -66,6 +67,8 @@ import {
   parseNonZeroReviewThreadCounts,
   deriveReviewThreadCountsFromList,
   extractEmbeddedVideo as sharedExtractEmbeddedVideo,
+  isSafeDirectVideoUrl,
+  buildSafeVideoEmbedUrl,
   buildReverseDependencyCountMap,
   isApiOrLibraryPackage,
   computeDependencyPrioritizationMultiplier,
@@ -4809,7 +4812,7 @@ export class PackageService {
    * (for example on `localhost:4200` before redeploying the Cloudflare Worker).
    */
   private ensureRecentlyAddedLoaded(forceInTest = false): void {
-    if (this._serverRecentlyAdded().length > 0 || this.recentlyAddedInFlight) return;
+    if ((!forceInTest && this._serverRecentlyAdded().length > 0) || this.recentlyAddedInFlight) return;
     const isUnitTestEnv =
       typeof (globalThis as any).__karma__ !== 'undefined' ||
       typeof (globalThis as any).jasmine !== 'undefined' ||
@@ -7891,85 +7894,27 @@ export class PackageService {
   }
 
   /**
-   * Shared DRY helper: returns true if `url` points to a direct HTML5 video file (`.mp4`, `.webm`, `.ogg`, `.ogv`).
+   * Shared DRY helper: returns true strictly when `url` is a verified `https://` direct HTML5 open video file
+   * (`.mp4`, `.webm`, `.ogg`, `.ogv`) on a public non-tunnel host.
    */
   isDirectVideoUrl(url?: string): boolean {
-    if (!url) return false;
-    const clean = url.split('?')[0].toLowerCase();
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+    return isSafeDirectVideoUrl(url);
   }
 
   /**
-   * Shared DRY helper: builds an embeddable iframe URL for YouTube (`/watch`, `/shorts/`, `/live/`, `/embed/`, `youtu.be`),
-   * PeerTube (`/videos/watch/`, `/w/`, `/videos/embed/`), and Vimeo.
+   * Shared DRY helper: builds a strictly allowlisted `https://` embed URL for verified video providers
+   * (YouTube/Invidious/Piped -> `youtube-nocookie.com`, Vimeo `dnt=1`, PeerTube UUIDs, Twitch,
+   * Dailymotion, Streamable, Odysee, Bilibili). Never falls back to returning an unverified `rawUrl`.
    */
   buildVideoEmbedUrl(
     rawUrl?: string,
     options: { autoplay?: boolean; mute?: boolean; minimalControls?: boolean; startSeconds?: number } = {}
   ): string | null {
-    if (!rawUrl) return null;
-    try {
-      const u = new URL(rawUrl);
-      const host = u.hostname.toLowerCase();
-      const autoplay = options.autoplay !== false ? '1' : '0';
-      const mute = options.mute ? '1' : '0';
-      const minimal = Boolean(options.minimalControls);
-      const startSec = Number.isFinite(options.startSeconds) && (options.startSeconds || 0) > 0
-        ? Math.floor(Number(options.startSeconds))
-        : 0;
-
-      const extractYoutubeId = (): string | null => {
-        if (host === 'youtu.be') {
-          return u.pathname.split('/').filter(Boolean)[0] || null;
-        }
-        if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-          const v = u.searchParams.get('v');
-          if (v) return v;
-          const parts = u.pathname.split('/').filter(Boolean);
-          if (parts.length >= 2 && ['embed', 'shorts', 'live', 'v'].includes(parts[0].toLowerCase())) {
-            return parts[1];
-          }
-        }
-        return null;
-      };
-
-      const ytId = extractYoutubeId();
-      if (ytId) {
-        const enc = encodeURIComponent(ytId);
-        const startParam = startSec > 0 ? `&start=${startSec}` : '';
-        if (minimal) {
-          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}${startParam}`;
-        }
-        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1${startParam}`;
-      }
-
-      if (host.includes('vimeo.com')) {
-        const id = u.pathname.split('/').filter(Boolean).pop();
-        if (id && /^\d+$/.test(id)) {
-          const vimeoHash = startSec > 0 ? `#t=${startSec}s` : '';
-          if (minimal) {
-            return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0${vimeoHash}`;
-          }
-          return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${vimeoHash}`;
-        }
-      }
-
-      if (u.pathname.includes('/videos/watch/') || u.pathname.startsWith('/w/') || u.pathname.includes('/videos/embed/')) {
-        const embedBase = u.pathname.startsWith('/w/')
-          ? `${u.origin}${u.pathname.replace(/^\/w\//, '/videos/embed/')}`
-          : rawUrl.replace('/videos/watch/', '/videos/embed/');
-        const sep = embedBase.includes('?') ? '&' : '?';
-        const startParam = startSec > 0 ? `&start=${startSec}s` : '';
-        if (minimal) {
-          return `${embedBase}${sep}autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0${startParam}`;
-        }
-        return `${embedBase}${sep}autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${startParam}`;
-      }
-
-      return minimal ? null : rawUrl;
-    } catch {
-      return null;
-    }
+    const parentHostname =
+      typeof window !== 'undefined' && window.location?.hostname
+        ? window.location.hostname
+        : 'luantihub.org';
+    return buildSafeVideoEmbedUrl(rawUrl, { ...options, parentHostname });
   }
 
   private readonly warmedVideoOrigins = new Set<string>();
@@ -7977,14 +7922,19 @@ export class PackageService {
   private readonly preloadedVideoThumbs = new Set<string>();
 
   /**
-   * Pre-warms DNS/TCP/TLS connections (`<link rel="preconnect">`) for a package's video host,
-   * preloads its video thumbnail image, and (when `eagerDirectPreload` is true on `mouseenter`)
-   * injects a `<link rel="preload" as="video" fetchpriority="low">` for direct `.mp4`/`.webm` URLs.
+   * Pre-warms DNS/TCP/TLS connections (`<link rel="preconnect">`) for a package's verified HTTPS video host,
+   * preloads its HTTPS video thumbnail image, and (when `eagerDirectPreload` is true on `mouseenter`)
+   * injects a `<link rel="preload" as="video" fetchpriority="low">` for verified direct `.mp4`/`.webm` URLs.
    */
   warmUpVideoPreview(rawVideoUrl?: string, videoThumbUrl?: string, eagerDirectPreload = false): void {
     if (typeof document === 'undefined' || !document.head) return;
 
-    if (videoThumbUrl && /^https?:\/\//i.test(videoThumbUrl) && !this.preloadedVideoThumbs.has(videoThumbUrl)) {
+    if (
+      videoThumbUrl &&
+      /^https:\/\//i.test(videoThumbUrl) &&
+      !isUntrustedTunnelOrPrivateHost(videoThumbUrl) &&
+      !this.preloadedVideoThumbs.has(videoThumbUrl)
+    ) {
       if (this.preloadedVideoThumbs.size < 40) {
         this.preloadedVideoThumbs.add(videoThumbUrl);
         try {
@@ -7999,15 +7949,21 @@ export class PackageService {
 
     if (!rawVideoUrl) return;
     try {
-      const u = new URL(rawVideoUrl);
+      const isDirect = this.isDirectVideoUrl(rawVideoUrl);
+      const safeEmbedUrl = isDirect ? null : this.buildVideoEmbedUrl(rawVideoUrl, { autoplay: false });
+      const verifiedTarget = isDirect ? rawVideoUrl : safeEmbedUrl;
+      if (!verifiedTarget) return;
+
+      const u = new URL(verifiedTarget);
+      if (u.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(u.hostname)) return;
       const host = u.hostname.toLowerCase();
       const originsToWarm: string[] = [];
 
-      if (host === 'youtu.be' || host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-        originsToWarm.push('https://www.youtube-nocookie.com', 'https://i.ytimg.com', 'https://www.google.com');
-      } else if (host.includes('vimeo.com')) {
+      if (host === 'www.youtube-nocookie.com' || host === 'youtube-nocookie.com') {
+        originsToWarm.push('https://www.youtube-nocookie.com', 'https://i.ytimg.com');
+      } else if (host === 'player.vimeo.com') {
         originsToWarm.push('https://player.vimeo.com', 'https://f.vimeocdn.com');
-      } else if (u.origin && /^https?:\/\//i.test(u.origin)) {
+      } else if (u.origin && u.origin.startsWith('https://')) {
         originsToWarm.push(u.origin);
       }
 
@@ -8022,7 +7978,7 @@ export class PackageService {
         document.head.appendChild(link);
       }
 
-      if (eagerDirectPreload && this.isDirectVideoUrl(rawVideoUrl)) {
+      if (eagerDirectPreload && isDirect) {
         const cleanHref = u.href;
         if (!this.preloadedDirectVideos.has(cleanHref) && this.preloadedDirectVideos.size < 8) {
           this.preloadedDirectVideos.add(cleanHref);

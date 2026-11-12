@@ -31,6 +31,7 @@ import { LocaleId } from '../../core/i18n/translation.types';
 import { isEligibleGitRepoUrl as checkEligibleGitRepoUrl } from '../../core/config/git-providers.config';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import {
@@ -61,7 +62,8 @@ import {
   LucideChevronDown,
   LucideChevronUp,
   LucideTrendingUp,
-  LucideStar
+  LucideStar,
+  LucideShieldCheck
 } from '@lucide/angular';
 
 @Component({
@@ -73,6 +75,7 @@ import {
     FormsModule,
     CompactNumberPipe,
     TranslatePipe,
+    TooltipDirective,
     ImgFallbackDirective,
     PackageBadgesComponent,
     DrawerPaginationComponent,
@@ -96,7 +99,8 @@ import {
     LucideChevronDown,
     LucideChevronUp,
     LucideTrendingUp,
-    LucideStar
+    LucideStar,
+    LucideShieldCheck
   ],
   template: `
     @if (authService.currentUser(); as user) {
@@ -857,10 +861,21 @@ import {
               <!-- Connected Accounts & Forges -->
               <div class="space-y-3">
                 <div class="flex items-center justify-between">
-                  <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    {{ 'profile.connectedAccounts' | translate }}
-                  </h3>
-                  <span class="text-[11px] text-slate-500">{{ user.identities.length }} linked</span>
+                  <div class="flex items-center gap-1.5">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
+                      {{ 'profile.connectedAccounts' | translate }}
+                    </h3>
+                    <button
+                      type="button"
+                      data-testid="connected-accounts-security-btn"
+                      [appTooltip]="'profile.connectedAccountsSecurityTooltip' | translate"
+                      [appTooltipTap]="true"
+                      [attr.aria-label]="'profile.connectedAccounts' | translate"
+                      class="text-emerald-400 hover:text-emerald-300 transition cursor-pointer inline-flex items-center">
+                      <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                    </button>
+                  </div>
+                  <span class="text-[11px] text-slate-500">{{ 'profile.linkedCount' | translate:{ count: user.identities.length } }}</span>
                 </div>
 
                 <div class="space-y-2">

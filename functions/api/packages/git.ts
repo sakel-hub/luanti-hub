@@ -7,7 +7,8 @@ import {
   reconcileAndMergeUserAccount,
   createAuditProofToken,
   verifyAuditProofToken,
-  verifyStrictPackageAuthorOwnership
+  verifyStrictPackageAuthorOwnership,
+  verifySameOriginMutation
 } from '../auth/lib/session';
 import {
   fetchUpstreamJsonCached,
@@ -461,6 +462,9 @@ export function runLuacheckStaticAudit(luaSource: string, modName: string): GitA
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const cookies = parseCookies(context.request);
     const sessionToken = cookies['lh_session'];

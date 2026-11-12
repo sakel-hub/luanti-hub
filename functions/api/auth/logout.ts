@@ -1,6 +1,9 @@
-import { buildClearSessionCookies } from './lib/session';
+import { buildClearSessionCookies, verifySameOriginMutation } from './lib/session';
 
 export async function onRequestPost(context: { request: Request }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const headers = new Headers({
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store, no-cache, must-revalidate'

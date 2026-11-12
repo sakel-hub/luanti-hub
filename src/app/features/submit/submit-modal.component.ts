@@ -177,24 +177,36 @@ import {
                 <!-- Summary Pills -->
                 <div class="flex items-center gap-1.5 flex-wrap text-[10px] font-bold">
                   <span
+                    data-testid="audit-pill-conf"
+                    [appTooltip]="'submit.pillConfTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.configFound ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
-                    class="px-2 py-0.5 rounded border">
-                    {{ report.configFound || 'Missing *.conf' }}
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ report.configFound || ('submit.pillMissingConf' | translate) }}
                   </span>
                   <span
+                    data-testid="audit-pill-license"
+                    [appTooltip]="'submit.pillLicenseTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.licenseValid ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
-                    class="px-2 py-0.5 rounded border">
-                    SPDX License
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ 'submit.pillLicenseLabel' | translate }}
                   </span>
                   <span
+                    data-testid="audit-pill-luacheck"
+                    [appTooltip]="'submit.pillLuacheckTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.luacheckPassed ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
-                    class="px-2 py-0.5 rounded border">
-                    Luacheck
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ 'submit.pillLuacheckLabel' | translate }}
                   </span>
                   <span
+                    data-testid="audit-pill-owner"
+                    [appTooltip]="'submit.pillOwnerTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="isOwnershipVerified() ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
-                    class="px-2 py-0.5 rounded border">
-                    {{ isOwnershipVerified() ? 'Owner Verified' : (report.pendingAdminClaim || !supportsDirectOwnerAuth(parsedRepoTarget()?.provider) ? 'Admin Claim Queue' : 'Verify Owner') }}
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ (isOwnershipVerified() ? 'submit.pillOwnerVerified' : (report.pendingAdminClaim || !supportsDirectOwnerAuth(parsedRepoTarget()?.provider) ? 'submit.pillAdminClaimQueue' : 'submit.pillVerifyOwner')) | translate }}
                   </span>
                 </div>
               </div>
@@ -286,17 +298,17 @@ import {
                   @if (isOwnershipVerified()) {
                     <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
                     <span class="font-bold text-emerald-300">
-                      Repository Ownership Verified ({{ target.provider | uppercase }}: {{ target.owner }})
+                      {{ 'submit.ownerVerifiedBanner' | translate:{ provider: (target.provider | uppercase), owner: target.owner } }}
                     </span>
                   } @else if (supportsDirectOwnerAuth(target.provider)) {
                     <svg lucideKeyRound class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
                     <span class="font-bold text-amber-300">
-                      Verify {{ target.provider | uppercase }} Ownership for "{{ target.owner }}/{{ target.repo }}"
+                      {{ 'submit.verifyOwnerBanner' | translate:{ provider: (target.provider | uppercase), repo: target.owner + '/' + target.repo } }}
                     </span>
                   } @else {
                     <svg lucideShieldAlert class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
                     <span class="font-bold text-amber-300">
-                      Moderator Ownership Verification ({{ target.provider | uppercase }}: "{{ target.owner }}/{{ target.repo }}")
+                      {{ 'submit.moderatorOwnerBanner' | translate:{ provider: (target.provider | uppercase), repo: target.owner + '/' + target.repo } }}
                     </span>
                   }
                 </div>
@@ -305,7 +317,7 @@ import {
               @if (!isOwnershipVerified()) {
                 @if (supportsDirectOwnerAuth(target.provider)) {
                   <p class="text-[11px] text-slate-300 leading-relaxed">
-                    Only the verified repository owner or organization member on <strong class="text-white uppercase">{{ target.provider }}</strong> can publish this repository. Your token is verified once on the server and is <strong class="text-emerald-300">never stored in the browser</strong>.
+                    {{ 'submit.ownerTokenZeroStorageDesc' | translate:{ provider: (target.provider | uppercase) } }}
                   </p>
 
                   @if (authService.isOAuthConfigured(target.provider)) {
@@ -313,7 +325,7 @@ import {
                       type="button"
                       (click)="authService.loginWith(target.provider)"
                       class="w-full py-2 px-3 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
-                      <span>Connect {{ target.provider | uppercase }} via 1-Click OAuth</span>
+                      <span>{{ 'submit.connectViaOAuthBtn' | translate:{ provider: (target.provider | uppercase) } }}</span>
                     </button>
                   }
 
@@ -323,7 +335,7 @@ import {
                       [(ngModel)]="verifyUsername"
                       name="verifyUsername"
                       [placeholder]="target.owner"
-                      [appTooltip]="target.provider + ' username (e.g. ' + target.owner + ')'"
+                      [appTooltip]="target.provider + ' (' + target.owner + ')'"
                       autocomplete="username"
                       class="sm:col-span-4 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                     />
@@ -350,10 +362,10 @@ import {
                       class="sm:col-span-3 px-3 py-2 rounded-xl glass-btn-primary disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
                       @if (isVerifyingOwner()) {
                         <svg lucideLoader2 class="w-3.5 h-3.5 text-sky-300 animate-spin"></svg>
-                        <span>Verifying...</span>
+                        <span>{{ 'submit.verifyingBtn' | translate }}</span>
                       } @else {
                         <svg lucideShieldCheck class="w-3.5 h-3.5 text-sky-300"></svg>
-                        <span>Verify Owner</span>
+                        <span>{{ 'submit.pillVerifyOwner' | translate }}</span>
                       }
                     </button>
                   </div>
@@ -365,7 +377,7 @@ import {
                   }
                 } @else {
                   <p class="text-[11px] text-slate-300 leading-relaxed">
-                    Repositories hosted on <strong class="text-white uppercase">{{ target.provider }}</strong> are verified via linked ContentDB metadata or queued for administrator ownership approval upon submission.
+                    {{ 'submit.moderatorOwnerDesc' | translate:{ provider: (target.provider | uppercase) } }}
                   </p>
                 }
               }

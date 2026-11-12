@@ -73,7 +73,8 @@ import {
   checkIsAdmin,
   reconcileAndMergeUserAccount,
   verifyStrictPackageAuthorOwnership,
-  shouldHonorAuthenticatedNoCache
+  shouldHonorAuthenticatedNoCache,
+  verifySameOriginMutation
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -2326,6 +2327,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
 // PATCH /api/packages/:author/:name — Allow package author or admin to edit package metadata & tags (LuantiHub-first)
 export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -2710,6 +2714,9 @@ export async function onRequestPatch(context: { request: Request; params: { auth
 
 // POST /api/packages/:author/:name?view=1 — Lightweight non-blocking web view beacon
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request, { allowSimpleBeacon: true });
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -2730,7 +2737,6 @@ export async function onRequestPost(context: { request: Request; params: { autho
       { recorded },
       {
         headers: {
-          'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'private, no-store'
         }
       }

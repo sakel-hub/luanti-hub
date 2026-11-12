@@ -223,6 +223,109 @@ export function isTrustedLuantiHubOrigin(rawOrigin?: string | null): boolean {
   }
 }
 
+const CSRF_REJECT_HEADERS: Record<string, string> = {
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+  Pragma: 'no-cache'
+};
+
+function isMatchingRequestHost(candidateUrl: string, requestHost: string): boolean {
+  try {
+    const parsed = new URL(candidateUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+    const candidateHost = parsed.host.toLowerCase();
+    if (candidateHost === requestHost) {
+      return true;
+    }
+    const candidateHostname = parsed.hostname.toLowerCase();
+    const requestHostname = requestHost.split(':')[0].toLowerCase();
+    if (
+      (candidateHostname === 'localhost' || candidateHostname === '127.0.0.1') &&
+      (requestHostname === 'localhost' || requestHostname === '127.0.0.1')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Unified CSRF & Cross-Origin Mutation Guard for state-changing Edge API routes.
+ * Blocks cross-site / cross-subdomain Fetch Metadata (`Sec-Fetch-Site`), HTML `<form>` navigation
+ * submissions (`Sec-Fetch-Mode: navigate` or form-encoded `Content-Type`), opaque `Origin: null`,
+ * and cross-origin `Origin` / `Referer` headers.
+ */
+export function verifySameOriginMutation(
+  request: Request,
+  options?: { allowSimpleBeacon?: boolean }
+): Response | null {
+  let requestHost = '';
+  try {
+    requestHost = new URL(request.url).host.toLowerCase();
+  } catch {
+    return Response.json(
+      { error: 'Forbidden: Malformed request URL.' },
+      { status: 403, headers: CSRF_REJECT_HEADERS }
+    );
+  }
+
+  const allowSimpleBeacon = Boolean(options?.allowSimpleBeacon);
+
+  const secFetchSite = (request.headers.get('Sec-Fetch-Site') || '').trim().toLowerCase();
+  if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+    return Response.json(
+      { error: 'Forbidden: Cross-site mutation requests are blocked.' },
+      { status: 403, headers: CSRF_REJECT_HEADERS }
+    );
+  }
+
+  const secFetchMode = (request.headers.get('Sec-Fetch-Mode') || '').trim().toLowerCase();
+  if (secFetchMode === 'navigate' || (secFetchMode === 'no-cors' && !allowSimpleBeacon)) {
+    return Response.json(
+      { error: 'Forbidden: Browser navigation or opaque mutation requests are blocked.' },
+      { status: 403, headers: CSRF_REJECT_HEADERS }
+    );
+  }
+
+  const contentType = (request.headers.get('Content-Type') || '').trim().toLowerCase();
+  if (
+    contentType.startsWith('application/x-www-form-urlencoded') ||
+    contentType.startsWith('multipart/form-data') ||
+    (contentType.startsWith('text/plain') && !allowSimpleBeacon)
+  ) {
+    return Response.json(
+      { error: 'Forbidden: HTML form content types are not accepted on JSON API endpoints.' },
+      { status: 403, headers: CSRF_REJECT_HEADERS }
+    );
+  }
+
+  const originHeader = request.headers.get('Origin');
+  if (originHeader !== null) {
+    const trimmedOrigin = originHeader.trim();
+    if (!trimmedOrigin || trimmedOrigin.toLowerCase() === 'null' || !isMatchingRequestHost(trimmedOrigin, requestHost)) {
+      return Response.json(
+        { error: 'Forbidden: Invalid request origin.' },
+        { status: 403, headers: CSRF_REJECT_HEADERS }
+      );
+    }
+  }
+
+  const refererHeader = request.headers.get('Referer');
+  if (refererHeader !== null && refererHeader.trim() !== '') {
+    if (!isMatchingRequestHost(refererHeader.trim(), requestHost)) {
+      return Response.json(
+        { error: 'Forbidden: Invalid request referer.' },
+        { status: 403, headers: CSRF_REJECT_HEADERS }
+      );
+    }
+  }
+
+  return null;
+}
+
 export function getSharedCookieDomain(requestUrl: URL | string): string | null {
   try {
     const u = typeof requestUrl === 'string' ? new URL(requestUrl) : requestUrl;

@@ -241,14 +241,23 @@ async function exchangeOAuthTokenWithRetry(
   throw rateLimitError;
 }
 
+function serializePopupInlineJson(data: unknown): string {
+  return JSON.stringify(data)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
 function buildPopupCompletionHtml(
   targetOrigin: string,
   payload: { type: 'LH_OAUTH_COMPLETE'; success: boolean; provider: string; error?: string },
   fallbackRedirectUrl: string
 ): string {
-  const safePayloadJson = JSON.stringify(payload).replace(/</g, '\\u003c');
-  const safeOriginJson = JSON.stringify(targetOrigin).replace(/</g, '\\u003c');
-  const safeFallbackUrlJson = JSON.stringify(fallbackRedirectUrl).replace(/</g, '\\u003c');
+  const safePayloadJson = serializePopupInlineJson(payload);
+  const safeOriginJson = serializePopupInlineJson(targetOrigin);
+  const safeFallbackUrlJson = serializePopupInlineJson(fallbackRedirectUrl);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -274,8 +283,8 @@ function buildPopupCompletionHtml(
         }
       } catch (e) {}
       try {
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage(msg, targetOrigin || '*');
+        if (window.opener && !window.opener.closed && targetOrigin) {
+          window.opener.postMessage(msg, targetOrigin);
           window.close();
           setTimeout(function () {
             if (!window.closed) {

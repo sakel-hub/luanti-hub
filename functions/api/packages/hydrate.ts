@@ -25,6 +25,7 @@ import {
   normalizeUtcIsoTimestamp,
   isCreatedIn2026OrUnknown
 } from '../lib/upstream';
+import { verifySameOriginMutation } from '../auth/lib/session';
 
 interface Env {
   DB?: any;
@@ -38,6 +39,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
 
   let body: { ids?: string[] } = {};

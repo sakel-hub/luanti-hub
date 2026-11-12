@@ -1820,7 +1820,19 @@
         }
       }
     } else if (notifData.ctaUrl && typeof notifData.ctaUrl === 'string') {
-      targetPath = notifData.ctaUrl;
+      const candidateCta = notifData.ctaUrl.trim();
+      if (candidateCta.startsWith('/') && !candidateCta.startsWith('//') && !candidateCta.startsWith('/\\')) {
+        targetPath = candidateCta;
+      } else if (/^https:\/\//i.test(candidateCta)) {
+        try {
+          const parsedSwUrl = new URL(candidateCta, self.location ? self.location.origin : 'https://luantihub.org');
+          if (parsedSwUrl.protocol === 'https:') {
+            targetPath = parsedSwUrl.toString();
+          }
+        } catch {
+          targetPath = '/';
+        }
+      }
     } else if (notifData.targetTab) {
       targetPath = '/profile';
     }

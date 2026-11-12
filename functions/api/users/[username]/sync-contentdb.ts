@@ -2,7 +2,8 @@ import {
   verifySessionTokenClaims,
   parseCookies,
   checkIsAdmin,
-  shouldHonorAuthenticatedNoCache
+  shouldHonorAuthenticatedNoCache,
+  verifySameOriginMutation
 } from '../../auth/lib/session';
 import {
   syncVerifiedAuthorGitPackages,
@@ -97,6 +98,9 @@ export async function onRequestPost(context: {
   env: Env;
   params?: { username?: string };
 }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   if (!context.env.DB) {
     return Response.json({ error: 'Database unavailable.' }, { status: 503 });
   }

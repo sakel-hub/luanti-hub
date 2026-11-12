@@ -60,8 +60,14 @@ export function detectInboundEphemeralTunnelHeader(
   return null;
 }
 
-function withSecurityHeaders(res: Response): Response {
+export const ENFORCING_CSP_HEADER =
+  "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self' https://content.luanti.org https://github.com https://codeberg.org https://git.minetest.land https://gitlab.com; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' data:; media-src 'self' https: blob:; connect-src 'self' https:; frame-src https:; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests";
+
+function applyEdgeSecurityHeaders(res: Response, requestUrl?: URL): Response {
   try {
+    const isLocalHttpDev =
+      requestUrl?.protocol === 'http:' &&
+      (requestUrl.hostname === 'localhost' || requestUrl.hostname === '127.0.0.1');
     const headers = new Headers(res.headers);
     if (!headers.has('X-Content-Type-Options')) {
       headers.set('X-Content-Type-Options', 'nosniff');
@@ -75,8 +81,25 @@ function withSecurityHeaders(res: Response): Response {
     if (!headers.has('Permissions-Policy')) {
       headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
     }
-    if (!headers.has('Strict-Transport-Security')) {
+    if (!isLocalHttpDev && !headers.has('Strict-Transport-Security')) {
       headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    if (!headers.has('Cross-Origin-Opener-Policy')) {
+      headers.set('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    }
+    if (!headers.has('X-Permitted-Cross-Domain-Policies')) {
+      headers.set('X-Permitted-Cross-Domain-Policies', 'none');
+    }
+    if (!headers.has('Content-Security-Policy')) {
+      const cspValue = isLocalHttpDev
+        ? ENFORCING_CSP_HEADER
+            .replace('; upgrade-insecure-requests', '')
+            .replace(
+              "connect-src 'self' https:;",
+              "connect-src 'self' https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;"
+            )
+        : ENFORCING_CSP_HEADER;
+      headers.set('Content-Security-Policy', cspValue);
     }
     return new Response(res.body, {
       status: res.status,
@@ -447,6 +470,7 @@ export async function onRequest(context: {
 }): Promise<Response> {
   const { request, next } = context;
   const url = new URL(request.url);
+  const withSecurityHeaders = (res: Response): Response => applyEdgeSecurityHeaders(res, url);
   const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
   const clientIp =
@@ -711,10 +735,19 @@ export async function onRequest(context: {
     pathname.endsWith('/moderate');
 
   if (isStateMutating || isInternalWebEndpoint) {
-    if (secFetchSite === 'cross-site') {
+    if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
       return withSecurityHeaders(
         Response.json(
           { error: 'Forbidden: Cross-site requests are blocked.' },
+          { status: 403 }
+        )
+      );
+    }
+    const secFetchMode = (request.headers.get('Sec-Fetch-Mode') || '').toLowerCase();
+    if (isStateMutating && !isOAuthFlow && secFetchMode === 'navigate') {
+      return withSecurityHeaders(
+        Response.json(
+          { error: 'Forbidden: Top-level navigation mutations are blocked.' },
           { status: 403 }
         )
       );

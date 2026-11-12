@@ -5,7 +5,8 @@ import {
   checkIsAdmin,
   reconcileAndMergeUserAccount,
   verifyStrictPackageAuthorOwnership,
-  timingSafeEqualStrings
+  timingSafeEqualStrings,
+  verifySameOriginMutation
 } from '../../../auth/lib/session';
 import {
   invalidateEdgeCacheKeys,
@@ -28,6 +29,12 @@ export async function onRequestPost(context: {
   request: Request;
   env: Env;
 }) {
+  const rawAuthHeader = (context.request.headers.get('Authorization') || '').trim();
+  if (!rawAuthHeader.toLowerCase().startsWith('bearer ')) {
+    const csrfBlock = verifySameOriginMutation(context.request);
+    if (csrfBlock) return csrfBlock;
+  }
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);

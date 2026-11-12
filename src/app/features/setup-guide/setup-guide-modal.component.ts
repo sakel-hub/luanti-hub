@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { PackageService } from '../../core/services/package.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideTerminal,
@@ -10,7 +11,8 @@ import {
   LucideCopy,
   LucideCheck,
   LucideShieldCheck,
-  LucideChevronDown
+  LucideChevronDown,
+  LucideInfo
 } from '@lucide/angular';
 
 @Component({
@@ -20,13 +22,15 @@ import {
   imports: [
     CommonModule,
     TranslatePipe,
+    TooltipDirective,
     ThemeIconComponent,
     LucideTerminal,
     LucideX,
     LucideCopy,
     LucideCheck,
     LucideShieldCheck,
-    LucideChevronDown
+    LucideChevronDown,
+    LucideInfo
   ],
   template: `
     <div
@@ -67,9 +71,21 @@ import {
 
         <!-- Option A (Preferred): In-Game Settings UI -->
         <div class="space-y-3 text-xs text-slate-300 p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/25">
-          <span class="font-bold text-emerald-300 block text-xs">
-            {{ 'setup.optionA' | translate }}
-          </span>
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <span class="font-bold text-emerald-300 block text-xs">
+              {{ 'setup.optionA' | translate }}
+            </span>
+            <button
+              type="button"
+              data-testid="setup-security-badge"
+              [appTooltip]="'setup.securityTooltip' | translate"
+              [appTooltipTap]="true"
+              class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-400/35 text-[10px] font-bold text-emerald-300 hover:text-emerald-200 transition cursor-pointer">
+              <svg lucideShieldCheck class="w-3 h-3 text-emerald-400 shrink-0"></svg>
+              <span>{{ 'setup.securityBadge' | translate }}</span>
+              <svg lucideInfo class="w-3 h-3 text-emerald-400/80 shrink-0"></svg>
+            </button>
+          </div>
           <p class="text-slate-300 leading-relaxed">
             {{ 'setup.optionADesc' | translate }}
           </p>

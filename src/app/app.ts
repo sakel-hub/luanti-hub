@@ -1,7 +1,7 @@
-import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, computed, WritableSignal } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, HostListener, effect, signal, computed, WritableSignal, SecurityContext } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
-import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { HeaderComponent } from './features/header/header.component';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
 import { SubmitModalComponent } from './features/submit/submit-modal.component';
@@ -114,18 +114,40 @@ export class App {
     }
   });
 
-  readonly safeBlogArticleHtml = computed<SafeHtml>(() => {
+  readonly safeBlogArticleHtml = computed<string>(() => {
     const post = this.packageService.activeBlogArticle() || this.displayedBlogArticle();
-    if (!post) return this.sanitizer.bypassSecurityTrustHtml('');
+    if (!post) return '';
     const rawHtml =
       post.content_html ||
       `<p>${String(post.summary || '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')}</p>`;
-    const formatted = sanitizeAndFormatBlogHtml(rawHtml, post.image_url);
-    return this.sanitizer.bypassSecurityTrustHtml(formatted);
+    const formatted = sanitizeAndFormatBlogHtml(rawHtml, post.image_url)
+      .replace(/\s+target="_blank"/gi, '')
+      .replace(/\s+loading="lazy"/gi, '')
+      .replace(/\s+decoding="async"/gi, '');
+    return this.sanitizer.sanitize(SecurityContext.HTML, formatted) ?? '';
   });
+
+  onBlogArticleContentClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+    if (!anchor) return;
+    const rawHref = (anchor.getAttribute('href') || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) return;
+    if (/^https:\/\//i.test(rawHref)) {
+      event.preventDefault();
+      try {
+        const parsed = new URL(rawHref);
+        if (parsed.protocol === 'https:') {
+          window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+        }
+      } catch {
+        // Ignore invalid URL
+      }
+    }
+  }
 
   private pkgCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private videoTheaterCloseTimer: ReturnType<typeof setTimeout> | null = null;

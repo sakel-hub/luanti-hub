@@ -130,7 +130,7 @@ describe('App & Core Services', () => {
     expect(compiled.textContent).toContain('LuantiHub');
     expect(compiled.textContent).toContain('DMCA');
     expect(compiled.textContent).toContain(`© ${new Date().getFullYear()}`);
-    expect(compiled.textContent).toContain('LGPL-2.1+');
+    expect(compiled.textContent).toContain('LGPL-2.1-or-later');
   });
 
   it('should provide In-Game Setup and GitHub issue tracker link inside header gear menu and footer', async () => {
@@ -2162,9 +2162,22 @@ description = Mob animation and spawning framework.
       // Vignette/shadow overlay is removed while hover video is playing to prevent bottom subpixel seam
       expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).toBeNull();
 
-      // Simulate YouTube IFrame API infoDelivery postMessage indicating playback at 14.7s
+      // Untrusted/empty postMessage origins are ignored when hover video is active
       cardComp.onWindowMessage(
         new MessageEvent('message', {
+          origin: 'https://evil.example',
+          data: JSON.stringify({
+            event: 'infoDelivery',
+            info: { playerState: 1, currentTime: 99 }
+          })
+        })
+      );
+      expect(cardComp.isEmbedVideoReady()).toBe(false);
+
+      // Simulate YouTube IFrame API infoDelivery postMessage from exact embed origin indicating playback at 14.7s
+      cardComp.onWindowMessage(
+        new MessageEvent('message', {
+          origin: 'https://www.youtube-nocookie.com',
           data: JSON.stringify({
             event: 'infoDelivery',
             info: { playerState: 1, currentTime: 14.7 }
@@ -6970,7 +6983,7 @@ supported_games = minetest_game, voxelibre
 
     const legalDeleteSection = appFixture.nativeElement.querySelector('[data-testid="legal-account-deletion-section"]') as HTMLElement;
     expect(legalDeleteSection).toBeTruthy();
-    expect(legalDeleteSection.textContent).toContain('4. Account & Data Deletion');
+    expect(legalDeleteSection.textContent).toContain('5. Account & Data Deletion');
     expect(legalDeleteSection.textContent).toContain('LuantiHub');
     expect(legalDeleteSection.textContent).toContain('from our databases');
 
@@ -7515,7 +7528,7 @@ supported_games = minetest_game, voxelibre
     expect(ssrHtml).toContain('href="https://luantihub.org/package/Hybrid%20Dog/technic"');
     expect(ssrHtml).not.toContain('Hybrid%2520Dog');
     expect(ssrHtml).toContain('window.__LUANTI_INITIAL_PACKAGE__=');
-    expect(ssrHtml).toContain('<\\/script>');
+    expect(ssrHtml).toContain('\\u003c/script\\u003e');
     expect(ssrHtml).not.toContain('</script><script>alert(1)</script>');
 
     // 4. Middleware blocks scanner probes (/.env, /wp-admin/*) with edge-cached 404 Not Found
@@ -13446,7 +13459,7 @@ core.register_node(modname .. ":panel", {
       )
     );
     expect(safeRendered).toContain('<strong>world</strong>');
-    expect(safeRendered).toContain('href="https://luantihub.org/docs" target="_blank" rel="noopener noreferrer"');
+    expect(safeRendered).toContain('href="https://luantihub.org/docs" rel="noopener noreferrer"');
     expect(safeRendered).not.toContain('onerror');
     expect(safeRendered).not.toContain('<svg');
     expect(safeRendered).not.toContain('javascript:');
@@ -14915,5 +14928,313 @@ core.register_node(modname .. ":panel", {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it('should enforce strict HTML/Markdown sanitization, 9-host allowlisted video embeds with zero rawUrl fallback, CSP/CSRF edge defenses, and 6-locale security UX tooltips', async () => {
+    const { sanitizeAndFormatBlogHtml } = await import('./core/models/package.model');
+    const { buildSafeVideoEmbedUrl, isSafeDirectVideoUrl, extractEmbeddedVideo } = await import(
+      './core/config/package-utils.config'
+    );
+    const { verifySameOriginMutation } = await import('../../functions/api/auth/lib/session');
+    const { onRequestPost: onFavoritesPost } = await import('../../functions/api/auth/favorites');
+    const { SetupGuideModalComponent } = await import(
+      './features/setup-guide/setup-guide-modal.component'
+    );
+
+    // 1. Blog HTML sanitization strips <svg>, <math>, event attributes, and non-HTTPS/private images without bypassSecurityTrustHtml
+    const cleanedBlog = sanitizeAndFormatBlogHtml(
+      '<p>Hello</p><svg onload="void(0)"><circle r="5"/></svg><math><mtext>m</mtext></math><img/onerror="void(0)" src="https://blog.luanti.org/assets/post.png"><img src="http://127.0.0.1/internal.png">',
+      'https://blog.luanti.org/2026/11/01/release/'
+    );
+    expect(cleanedBlog).toContain('https://blog.luanti.org/assets/post.png');
+    expect(cleanedBlog).not.toContain('<svg');
+    expect(cleanedBlog).not.toContain('<math');
+    expect(cleanedBlog).not.toContain('onerror');
+    expect(cleanedBlog).not.toContain('127.0.0.1');
+
+    // 2. Multi-host video allowlist supports 9 verified HTTPS ecosystems and NEVER falls back to rawUrl
+    expect(buildSafeVideoEmbedUrl('https://youtu.be/dQw4w9WgXcQ')).toContain(
+      'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+    );
+    expect(buildSafeVideoEmbedUrl('https://piped.video/watch?v=dQw4w9WgXcQ')).toContain(
+      'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+    );
+    expect(buildSafeVideoEmbedUrl('https://vimeo.com/123456789')).toContain(
+      'https://player.vimeo.com/video/123456789?dnt=1'
+    );
+    expect(
+      buildSafeVideoEmbedUrl('https://tilvids.com/w/12345678-1234-1234-1234-123456789abc')
+    ).toContain('https://tilvids.com/videos/embed/12345678-1234-1234-1234-123456789abc');
+    expect(
+      buildSafeVideoEmbedUrl('https://www.twitch.tv/videos/987654321', {
+        autoplay: false,
+        parentHostname: 'luantihub.org'
+      })
+    ).toBe('https://player.twitch.tv/?video=987654321&parent=luantihub.org&autoplay=false');
+    expect(
+      buildSafeVideoEmbedUrl('https://clips.twitch.tv/ImportantSlugName123', {
+        autoplay: false,
+        parentHostname: 'luantihub.org'
+      })
+    ).toBe('https://clips.twitch.tv/embed?clip=ImportantSlugName123&parent=luantihub.org&autoplay=false');
+    expect(buildSafeVideoEmbedUrl('https://dai.ly/x8abcde', { autoplay: false })).toBe(
+      'https://www.dailymotion.com/embed/video/x8abcde?autoplay=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://streamable.com/abc1234', { autoplay: false })).toBe(
+      'https://streamable.com/e/abc1234?autoplay=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://odysee.com/@luanti:1/showcase:2', { autoplay: false })).toBe(
+      'https://odysee.com/$/embed/@luanti:1/showcase:2?r=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://www.bilibili.com/video/BV1xx411c7mD', { autoplay: false })).toBe(
+      'https://player.bilibili.com/player.html?bvid=BV1xx411c7mD&autoplay=0'
+    );
+    expect(isSafeDirectVideoUrl('https://cdn.content.luanti.org/uploads/trailer.webm')).toBe(true);
+    expect(isSafeDirectVideoUrl('http://cdn.content.luanti.org/uploads/trailer.webm')).toBe(false);
+    expect(buildSafeVideoEmbedUrl('https://untrusted-iframe-host.example/embed/123')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('http://youtube.com/watch?v=dQw4w9WgXcQ')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('https://demo.trycloudflare.com/w/12345678-1234-1234-1234-123456789abc')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('https://wiki.luanti.org/w/Main_Page')).toBeNull();
+    const extractedAfterRepoLink = extractEmbeddedVideo(
+      null,
+      null,
+      'Source: https://github.com/SaKeL/everness and docs https://wiki.luanti.org/w/Main_Page',
+      'Showcase clip: https://streamable.com/abc1234'
+    );
+    expect(extractedAfterRepoLink.video_url).toBe('https://streamable.com/abc1234');
+
+    // 3. PackageDetailModalComponent Markdown & external link guards
+    const pkgService = TestBed.inject(PackageService);
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    const samplePkg: LuantiPackage = {
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Biomes and structures',
+      desc: '![Valid](https://cdn.content.luanti.org/uploads/valid.png)\n![Insecure](http://example.com/bad.png)\n![Local](https://192.168.1.1/lan.png)',
+      readme:
+        '![Valid](https://cdn.content.luanti.org/uploads/valid.png)\n' +
+        '![Mesehub](shot.png)\n' +
+        '![BadProxy](/api/packages?proxy_image=http%3A%2F%2F127.0.0.1%2Fsecret.png&ngsw-bypass=true)\n' +
+        '![Insecure](http://example.com/bad.png)\n' +
+        '![Local](https://192.168.1.1/lan.png)\n' +
+        '[QueryLink](https://codeberg.org/SaKeL/everness?foo=1&bar=2)',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 50000,
+      license: 'LGPL-2.1-or-later',
+      source: 'git',
+      repo_url: 'https://git.minetest.land/SaKeL/everness',
+      default_branch: 'main',
+      tags: ['worldgen'],
+      website: 'https://codeberg.org/SaKeL/everness'
+    };
+    modalComp.package = samplePkg;
+    (pkgService as any)._activePackage.set(samplePkg);
+    modalFixture.detectChanges();
+
+    const renderedMd = String(modalComp.renderedReadme());
+    expect(renderedMd).toContain('https://cdn.content.luanti.org/uploads/valid.png');
+    expect(renderedMd).toContain('/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2FSaKeL%2Feverness%2Fraw%2Fbranch%2Fmain%2Fshot.png&amp;ngsw-bypass=true');
+    expect(renderedMd).not.toContain('127.0.0.1');
+    expect(renderedMd).not.toContain('http://example.com/bad.png');
+    expect(renderedMd).not.toContain('192.168.1.1');
+    expect(renderedMd).toContain('href="https://codeberg.org/SaKeL/everness?foo=1&amp;bar=2"');
+    expect(renderedMd).not.toContain('&amp;amp;');
+
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const anchorEl = document.createElement('a');
+    anchorEl.setAttribute('href', 'https://codeberg.org/SaKeL/everness');
+    const clickEvt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    Object.defineProperty(clickEvt, 'target', { value: anchorEl });
+    modalComp.onMarkdownContentClick(clickEvt);
+    expect(clickEvt.defaultPrevented).toBe(true);
+    expect(openSpy).toHaveBeenCalledWith('https://codeberg.org/SaKeL/everness', '_blank', 'noopener,noreferrer');
+    openSpy.mockRestore();
+
+    expect(modalComp.getSafeExternalHref('https://codeberg.org/SaKeL')).toBe('https://codeberg.org/SaKeL');
+    expect(modalComp.getSafeExternalHref('http://insecure.example')).toBeNull();
+    expect(modalComp.getSafeExternalHref('https://quick.trycloudflare.com/test')).toBeNull();
+    expect(modalComp.getExternalHostLabel('https://www.codeberg.org/SaKeL')).toBe('codeberg.org');
+    (pkgService as any)._activePackage.set(null);
+    modalFixture.destroy();
+
+    // 4. Edge CSP headers & unified verifySameOriginMutation CSRF protection
+    const mwHtmlRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/api/tags', { method: 'GET' }),
+      next: async () => Response.json([]),
+      env: {}
+    });
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain("object-src 'none'");
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain('upgrade-insecure-requests');
+    expect(mwHtmlRes.headers.get('Strict-Transport-Security')).toContain('max-age=31536000');
+    expect(mwHtmlRes.headers.get('Cross-Origin-Opener-Policy')).toBe('same-origin-allow-popups');
+    expect(mwHtmlRes.headers.get('X-Permitted-Cross-Domain-Policies')).toBe('none');
+
+    const mwLocalDevRes = await edgeMiddleware({
+      request: new Request('http://localhost:8788/api/tags', { method: 'GET' }),
+      next: async () => Response.json([]),
+      env: {}
+    });
+    expect(mwLocalDevRes.headers.get('Strict-Transport-Security')).toBeNull();
+    expect(mwLocalDevRes.headers.get('Content-Security-Policy')).not.toContain('upgrade-insecure-requests');
+    expect(mwLocalDevRes.headers.get('Content-Security-Policy')).toContain('ws://localhost:*');
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org', 'Sec-Fetch-Site': 'same-origin' }
+        })
+      )
+    ).toBeNull();
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { Origin: 'null' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Site': 'same-site' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Mode': 'navigate' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/packages/SaKeL/everness?view=1', {
+          method: 'POST',
+          headers: {
+            Origin: 'https://luantihub.org',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Content-Type': 'text/plain;charset=UTF-8'
+          }
+        }),
+        { allowSimpleBeacon: true }
+      )
+    ).toBeNull();
+
+    // Guest empty/remove favorites calls do NOT insert orphan guest rows into D1 users
+    const executedSql: string[] = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          run: async () => {
+            executedSql.push(sql);
+            return { meta: { changes: 0 } };
+          },
+          all: async () => ({ results: [] })
+        })
+      })
+    };
+    const removeFavRes = await onFavoritesPost({
+      request: new Request('https://luantihub.org/api/auth/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+        body: JSON.stringify({ action: 'remove', packageId: 'SaKeL/everness', clientId: 'guest_1234567890' })
+      }),
+      env: { DB: mockDb }
+    });
+    expect(removeFavRes.status).toBe(200);
+    expect(executedSql.some(s => s.includes('INSERT OR IGNORE INTO users'))).toBe(false);
+
+    // 5. Empty-origin postMessage is rejected by AuthService
+    const authService = TestBed.inject(AuthService);
+    const popupHandlerSpy = vi.spyOn(authService as any, 'handleOAuthPopupMessage');
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: '',
+        data: { type: 'LH_OAUTH_COMPLETE', success: true, provider: 'github' }
+      })
+    );
+    expect(popupHandlerSpy).not.toHaveBeenCalled();
+    popupHandlerSpy.mockRestore();
+
+    // 6. Security UX badges/tooltips, Legal Modal Section 4 & Footer /LICENSE.txt link
+    const authModalFix = TestBed.createComponent(AuthModalComponent);
+    authModalFix.detectChanges();
+    expect(authModalFix.nativeElement.querySelector('[data-testid="oauth-security-pill"]')).toBeTruthy();
+    authModalFix.destroy();
+
+    const setupFix = TestBed.createComponent(SetupGuideModalComponent);
+    setupFix.detectChanges();
+    expect(setupFix.nativeElement.querySelector('[data-testid="setup-security-badge"]')).toBeTruthy();
+    setupFix.destroy();
+
+    const submitFix = TestBed.createComponent(SubmitModalComponent);
+    submitFix.componentInstance.auditReport.set({
+      valid: true,
+      configFound: 'mod.conf',
+      luacheckPassed: true,
+      licenseValid: true,
+      diagnostics: []
+    });
+    submitFix.detectChanges();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-conf"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-luacheck"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-license"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-owner"]')).toBeTruthy();
+    submitFix.destroy();
+
+    (authService as any)._currentUser.set({
+      id: 'usr_sec_test',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [{ provider: 'codeberg', username: 'SaKeL', verified: true }]
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+    const profileFix = TestBed.createComponent(ProfileDrawerComponent);
+    profileFix.componentInstance.activeTab.set('account');
+    profileFix.detectChanges();
+    expect(
+      profileFix.nativeElement.querySelector('[data-testid="connected-accounts-security-btn"]')
+    ).toBeTruthy();
+    profileFix.destroy();
+    (authService as any)._isProfileDrawerOpen.set(false);
+    (authService as any)._currentUser.set(null);
+    (authService as any)._currentUser.set(null);
+
+    const appFix = TestBed.createComponent(App);
+    pkgService.openLegalModal();
+    appFix.detectChanges();
+    const appEl = appFix.nativeElement as HTMLElement;
+    expect(appEl.querySelector('[data-testid="legal-security-architecture-section"]')).toBeTruthy();
+    const footerLicenseLink = appEl.querySelector('[data-testid="footer-license-link"]') as HTMLAnchorElement;
+    expect(footerLicenseLink).toBeTruthy();
+    expect(footerLicenseLink.getAttribute('href')).toBe('/LICENSE.txt');
+    pkgService.closeLegalModal();
+    appFix.destroy();
   });
 });

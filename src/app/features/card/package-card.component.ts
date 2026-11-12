@@ -111,6 +111,8 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 [src]="safeEmbed"
                 [title]="package.title + ' preview'"
                 (load)="onHoverIframeLoad()"
+                sandbox="allow-scripts allow-same-origin allow-presentation"
+                referrerpolicy="strict-origin-when-cross-origin"
                 tabindex="-1"
                 aria-hidden="true"
                 class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[108%] h-[240%] border-0 pointer-events-none select-none"
@@ -180,7 +182,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             <button
               type="button"
               (click)="onDownload($event)"
-              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '')"
+              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '') + ' — ' + ((package.source === 'git' ? 'card.downloadSecurityTooltipGit' : 'card.downloadSecurityTooltipContentDb') | translate)"
               [attr.aria-label]="'card.downloadZip' | translate"
               class="w-8 h-8 rounded-full glass-btn-primary text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
               <svg lucideDownload class="w-4 h-4 text-white"></svg>
@@ -318,6 +320,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   private embedReadyTimer: any = null;
   private isPointerHovering = false;
   private isMessageListenerAttached = false;
+  private hoverEmbedOrigin: string | null = null;
   private readonly boundWindowMessageHandler = (event: MessageEvent) => this.onWindowMessage(event);
   currentHoverSeconds = 0;
 
@@ -526,11 +529,12 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onHoverIframeLoad(): void {
     const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
-    if (iframeWin) {
+    const targetOrigin = this.hoverEmbedOrigin;
+    if (iframeWin && targetOrigin) {
       try {
-        iframeWin.postMessage(JSON.stringify({ event: 'listening' }), '*');
-        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'play' }), '*');
-        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'playProgress' }), '*');
+        iframeWin.postMessage(JSON.stringify({ event: 'listening' }), targetOrigin);
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'play' }), targetOrigin);
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'playProgress' }), targetOrigin);
       } catch {
         // Ignore cross-origin postMessage restrictions
       }
@@ -549,6 +553,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onWindowMessage(event: MessageEvent): void {
     if (!this.isHoverVideoActive()) return;
+    if (!this.hoverEmbedOrigin || event.origin !== this.hoverEmbedOrigin) return;
     const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
     if (iframeWin && event.source && event.source !== window && event.source !== iframeWin) {
       return;
@@ -612,9 +617,16 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       if (!this.isDirectVideo(activeVideoUrl)) {
         const embed = this.buildHoverEmbedUrl(activeVideoUrl);
         if (!embed) return;
+        try {
+          this.hoverEmbedOrigin = new URL(embed).origin;
+        } catch {
+          this.hoverEmbedOrigin = null;
+          return;
+        }
         this.hoverEmbedSafeUrl.set(this.sanitizer.bypassSecurityTrustResourceUrl(embed));
         this.attachHoverMessageListener();
       } else {
+        this.hoverEmbedOrigin = null;
         this.hoverEmbedSafeUrl.set(null);
       }
       this.isHoverVideoActive.set(true);
@@ -627,6 +639,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   private clearHoverVideo(): void {
     this.isPointerHovering = false;
+    this.hoverEmbedOrigin = null;
     this.detachHoverMessageListener();
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
@@ -672,7 +685,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     }
 
     const iframeEl = this.hoverIframeRef?.nativeElement;
-    if (iframeEl?.contentWindow) {
+    if (iframeEl?.contentWindow && this.hoverEmbedOrigin) {
       try {
         iframeEl.contentWindow.postMessage(
           JSON.stringify({
@@ -680,7 +693,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
             func: nextMuted ? 'mute' : 'unMute',
             args: []
           }),
-          '*'
+          this.hoverEmbedOrigin
         );
       } catch {
         // Ignore cross-origin postMessage restrictions

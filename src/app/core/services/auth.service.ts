@@ -269,7 +269,7 @@ export class AuthService {
         const rawUrl = data.ctaUrl.trim();
         if (rawUrl) {
           this.closeProfileDrawer(false);
-          if (rawUrl.startsWith('/')) {
+          if (rawUrl.startsWith('/') && !rawUrl.startsWith('//') && !rawUrl.startsWith('/\\')) {
             if (this.router) {
               this.router.navigateByUrl(rawUrl).catch(() => {});
             } else if (typeof window !== 'undefined') {
@@ -277,15 +277,17 @@ export class AuthService {
             }
             return;
           }
-          if (typeof window !== 'undefined') {
+          if (typeof window !== 'undefined' && /^https:\/\//i.test(rawUrl)) {
             try {
               const parsed = new URL(rawUrl, window.location.origin);
-              if (parsed.origin === window.location.origin && this.router) {
-                this.router.navigateByUrl(parsed.pathname + parsed.search + parsed.hash).catch(() => {});
-              } else {
-                window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+              if (parsed.protocol === 'https:') {
+                if (parsed.origin === window.location.origin && this.router) {
+                  this.router.navigateByUrl(parsed.pathname + parsed.search + parsed.hash).catch(() => {});
+                } else {
+                  window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+                }
+                return;
               }
-              return;
             } catch {
               // Fall through
             }
@@ -332,10 +334,10 @@ export class AuthService {
   private initOAuthPopupListener(): void {
     if (typeof window === 'undefined') return;
     window.addEventListener('message', (event: MessageEvent) => {
-      if (event?.origin && event.origin !== window.location.origin) {
+      if (!event || !event.origin || event.origin !== window.location.origin) {
         return;
       }
-      if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
+      if (event.data?.type === 'LH_OAUTH_COMPLETE') {
         this.handleOAuthPopupMessage(event.data);
       }
     });

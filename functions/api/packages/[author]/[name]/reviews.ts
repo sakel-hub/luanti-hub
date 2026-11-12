@@ -20,7 +20,8 @@ import {
   checkIsAdmin,
   verifyStrictPackageAuthorOwnership,
   reconcileAndMergeUserAccount,
-  shouldHonorAuthenticatedNoCache
+  shouldHonorAuthenticatedNoCache,
+  verifySameOriginMutation
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -278,6 +279,9 @@ async function recalculateAndPersistPackageScore(db: any, packageId: string): Pr
 
 // POST: Submit a Community Review, Flag an Inappropriate Comment, or Remove a Comment (Admin/Author)
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -578,11 +582,16 @@ export async function onRequestPost(context: { request: Request; params: { autho
 
 // DELETE /api/packages/:author/:name/reviews?reviewId=...
 export async function onRequestDelete(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const url = new URL(context.request.url);
   const reviewId = url.searchParams.get('reviewId') || '';
+  const headers = new Headers(context.request.headers);
+  headers.set('Content-Type', 'application/json');
   const syntheticReq = new Request(context.request.url, {
     method: 'POST',
-    headers: context.request.headers,
+    headers,
     body: JSON.stringify({ action: 'delete', reviewId })
   });
   return onRequestPost({ ...context, request: syntheticReq });

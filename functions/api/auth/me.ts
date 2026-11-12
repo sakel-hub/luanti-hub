@@ -13,7 +13,8 @@ import {
   reconcileAndMergeUserAccount,
   getCachedAuthMePayload,
   setCachedAuthMePayload,
-  invalidateCachedAuthMePayload
+  invalidateCachedAuthMePayload,
+  verifySameOriginMutation
 } from './lib/session';
 import {
   ensureModerationColumns,
@@ -436,62 +437,6 @@ const NO_STORE_AUTH_HEADERS: Record<string, string> = {
   Pragma: 'no-cache'
 };
 
-function verifySameOriginMutation(request: Request): Response | null {
-  let requestHost = '';
-  try {
-    requestHost = new URL(request.url).host.toLowerCase();
-  } catch {
-    return Response.json(
-      { error: 'Forbidden: Malformed request URL.' },
-      { status: 403, headers: NO_STORE_AUTH_HEADERS }
-    );
-  }
-
-  const secFetchSite = (request.headers.get('Sec-Fetch-Site') || '').toLowerCase();
-  if (secFetchSite === 'cross-site') {
-    return Response.json(
-      { error: 'Forbidden: Cross-site auth mutation requests are blocked.' },
-      { status: 403, headers: NO_STORE_AUTH_HEADERS }
-    );
-  }
-
-  const originHeader = request.headers.get('Origin');
-  if (originHeader) {
-    try {
-      if (new URL(originHeader).host.toLowerCase() !== requestHost) {
-        return Response.json(
-          { error: 'Forbidden: Invalid request origin.' },
-          { status: 403, headers: NO_STORE_AUTH_HEADERS }
-        );
-      }
-    } catch {
-      return Response.json(
-        { error: 'Forbidden: Malformed request origin.' },
-        { status: 403, headers: NO_STORE_AUTH_HEADERS }
-      );
-    }
-  }
-
-  const refererHeader = request.headers.get('Referer');
-  if (refererHeader) {
-    try {
-      if (new URL(refererHeader).host.toLowerCase() !== requestHost) {
-        return Response.json(
-          { error: 'Forbidden: Invalid request referer.' },
-          { status: 403, headers: NO_STORE_AUTH_HEADERS }
-        );
-      }
-    } catch {
-      return Response.json(
-        { error: 'Forbidden: Malformed request referer.' },
-        { status: 403, headers: NO_STORE_AUTH_HEADERS }
-      );
-    }
-  }
-
-  return null;
-}
-
 // POST /api/auth/me: Direct Handle Sign-In / Ephemeral One-Time PAT Verification
 export async function onRequestPost(context: { request: Request; env: Env; waitUntil?: (promise: Promise<any>) => void }) {
   const csrfBlock = verifySameOriginMutation(context.request);
@@ -852,34 +797,10 @@ export async function onRequestPut(context: { request: Request; env: Env }) {
 // - ?account=1(&deletePackages=1|0): Permanently delete user profile and all stored personal data (Google Play & GDPR Right to Erasure)
 // - ?provider=github&username=sakel: Unlink a specific secondary identity handle
 export async function onRequestDelete(context: { request: Request; env: Env }) {
-  const url = new URL(context.request.url);
-  const requestHost = url.host.toLowerCase();
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
 
-  // Defense-in-depth CSRF & cross-origin protection on DELETE /api/auth/me
-  const secFetchSite = (context.request.headers.get('Sec-Fetch-Site') || '').toLowerCase();
-  if (secFetchSite === 'cross-site') {
-    return Response.json({ error: 'Forbidden: Cross-site delete requests are blocked.' }, { status: 403 });
-  }
-  const originHeader = context.request.headers.get('Origin');
-  if (originHeader) {
-    try {
-      if (new URL(originHeader).host.toLowerCase() !== requestHost) {
-        return Response.json({ error: 'Forbidden: Invalid request origin.' }, { status: 403 });
-      }
-    } catch {
-      return Response.json({ error: 'Forbidden: Malformed request origin.' }, { status: 403 });
-    }
-  }
-  const refererHeader = context.request.headers.get('Referer');
-  if (refererHeader) {
-    try {
-      if (new URL(refererHeader).host.toLowerCase() !== requestHost) {
-        return Response.json({ error: 'Forbidden: Invalid request referer.' }, { status: 403 });
-      }
-    } catch {
-      return Response.json({ error: 'Forbidden: Malformed request referer.' }, { status: 403 });
-    }
-  }
+  const url = new URL(context.request.url);
 
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];

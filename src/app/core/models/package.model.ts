@@ -1,3 +1,5 @@
+import { isUntrustedTunnelOrPrivateHost } from '../config/git-providers.config';
+
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
 export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket' | 'contentdb' | 'forums' | 'custom';
@@ -488,11 +490,17 @@ function decodeHtmlAndXmlEntities(input: string): string {
 
 function resolveBlogAssetUrl(rawUrl?: string | null): string | null {
   const trimmed = String(rawUrl || '').trim();
-  if (!trimmed) return null;
-  if (/^(javascript|data|vbscript):/i.test(trimmed)) return null;
+  if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+  if (/^(javascript|data|vbscript|blob|file):/i.test(trimmed)) return null;
   try {
     const resolved = new URL(trimmed, 'https://blog.luanti.org');
-    if (resolved.protocol === 'https:' || resolved.protocol === 'http:') {
+    if (
+      (resolved.protocol === 'https:' || resolved.protocol === 'http:') &&
+      !isUntrustedTunnelOrPrivateHost(resolved.hostname)
+    ) {
+      if (resolved.protocol === 'http:') {
+        resolved.protocol = 'https:';
+      }
       return resolved.toString();
     }
   } catch {
@@ -543,22 +551,29 @@ export function sanitizeAndFormatBlogHtml(rawHtml?: string | null, heroImageUrl?
     html = decodeHtmlAndXmlEntities(html);
   }
 
-  // Strip dangerous elements and inline event handlers
+  // Strip dangerous elements, embedded active content, SVG/MathML namespaces, and inline event handlers
   html = html
-    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*\/?>/gi, '')
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base|svg|math|video|audio|source|track|template|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base|svg|math|video|audio|source|track|template|noscript)\b[^>]*\/?>/gi, '')
+    .replace(/(?:[\s/"']+)on[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
 
-  // Rewrite relative src/poster URLs on media elements and add lazy loading to images
+  // Rewrite relative src URLs on images to verified HTTPS URLs (dropping unsafe or untrusted image tags)
   html = html.replace(/<img\b([^>]*)>/gi, (_full, attrs: string) => {
+    let validSrc = false;
     let updatedAttrs = attrs.replace(
       /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
-      (srcFull, d, s, u) => {
+      (_srcFull, d, s, u) => {
         const rawSrc = d ?? s ?? u ?? '';
         const resolved = resolveBlogAssetUrl(decodeHtmlAndXmlEntities(rawSrc));
-        return resolved ? `src="${resolved}"` : srcFull;
+        if (!resolved) return '';
+        validSrc = true;
+        return `src="${resolved}"`;
       }
     );
+    if (!validSrc) {
+      return '';
+    }
+    updatedAttrs = updatedAttrs.replace(/\bsrcset\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
     if (!/\bloading\s*=/i.test(updatedAttrs)) {
       updatedAttrs += ' loading="lazy" decoding="async"';
     }

@@ -1,0 +1,7 @@
+# LuantiHub Coordinated Vulnerability & Abuse Disclosure Policy (RFC 9116)
+Contact: https://github.com/sakel-hub/luanti-hub/security/advisories/new
+Contact: https://github.com/sakel-hub/luanti-hub/issues/new/choose
+Expires: 2027-12-31T23:59:59.000Z
+Preferred-Languages: en, sk, de, fr, es, ru
+Canonical: https://luantihub.org/.well-known/security.txt
+Policy: https://luantihub.org/legal

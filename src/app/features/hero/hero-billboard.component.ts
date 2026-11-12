@@ -517,13 +517,18 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
     if (!raw) return;
 
     let targetPath = raw;
+    if (raw.startsWith('//') || raw.startsWith('/\\') || /^(?:javascript|data|vbscript):/i.test(raw)) {
+      return;
+    }
     if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
       try {
         const parsed = new URL(raw);
         if (parsed.origin === window.location.origin) {
           targetPath = parsed.pathname + parsed.search + parsed.hash;
-        } else {
+        } else if (parsed.protocol === 'https:') {
           window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+          return;
+        } else {
           return;
         }
       } catch {
@@ -533,6 +538,9 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
 
     if (!targetPath.startsWith('/')) {
       targetPath = `/${targetPath}`;
+    }
+    if (targetPath.startsWith('//') || targetPath.startsWith('/\\')) {
+      return;
     }
 
     if (this.router) {

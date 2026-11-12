@@ -6,7 +6,7 @@ import { GitProvider } from '../../core/models/package.model';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { FrostedPreloaderComponent } from '../../shared/components/frosted-preloader.component';
-import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, LucideGlobe, LucideUser, LucideInfo, LucideKeyRound } from '@lucide/angular';
+import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, LucideGlobe, LucideUser, LucideInfo, LucideKeyRound, LucideShieldCheck } from '@lucide/angular';
 
 @Component({
   selector: 'app-auth-modal',
@@ -25,7 +25,8 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
     LucideGlobe,
     LucideUser,
     LucideInfo,
-    LucideKeyRound
+    LucideKeyRound,
+    LucideShieldCheck
   ],
   template: `
     <div
@@ -86,6 +87,18 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
           [class.opacity-50]="authService.isOAuthRedirecting() || authService.isLoading()"
           [class.pointer-events-none]="authService.isOAuthRedirecting() || authService.isLoading()"
           class="space-y-2.5">
+          <div class="flex items-center justify-between">
+            <button
+              type="button"
+              data-testid="oauth-security-pill"
+              [appTooltip]="'auth.oauthSecurityTooltip' | translate"
+              [appTooltipTap]="true"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-400/30 text-[10px] font-bold text-emerald-300 hover:text-emerald-200 transition cursor-pointer">
+              <svg lucideShieldCheck class="w-3 h-3 text-emerald-400 shrink-0"></svg>
+              <span>{{ 'auth.oauthSecurityBadge' | translate }}</span>
+              <svg lucideInfo class="w-3 h-3 text-emerald-400/80 shrink-0"></svg>
+            </button>
+          </div>
           <!-- 1. ContentDB Official (Luanti Sky Cyan) -->
           <button
             type="button"
@@ -214,7 +227,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
               <!-- Field 1: Provider & Username -->
               <div class="space-y-1.5">
                 <label for="auth-handle-input" class="block text-[11px] font-semibold text-slate-300">
-                  Platform &amp; {{ 'auth.usernamePlaceholder' | translate }}
+                  {{ 'auth.platformAndUsernameLabel' | translate }}
                 </label>
                 <div class="flex gap-2">
                   <select

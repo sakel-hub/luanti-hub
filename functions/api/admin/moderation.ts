@@ -3,7 +3,8 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
-  verifyStrictPackageAuthorOwnership
+  verifyStrictPackageAuthorOwnership,
+  verifySameOriginMutation
 } from '../auth/lib/session';
 import {
   ensureModerationColumns,
@@ -378,6 +379,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const { request, env } = context;
 

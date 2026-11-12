@@ -2,7 +2,8 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  verifySameOriginMutation
 } from '../auth/lib/session';
 import {
   ensureExtendedPackageColumns,
@@ -230,6 +231,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
 // POST /api/promotions: Create or update a Hero Carousel slide and/or Promotional Package Row #1 (Admin-only)
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
   const { isAdmin, username } = await resolveAdminSession(request, env);
   if (!isAdmin) {
@@ -487,6 +491,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
 // DELETE /api/promotions: Delete or end a promotion (Admin-only)
 export async function onRequestDelete(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
   const { isAdmin } = await resolveAdminSession(request, env);
   if (!isAdmin) {
