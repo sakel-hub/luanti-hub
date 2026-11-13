@@ -9,10 +9,18 @@
  */
 
 import { fetchJam2026BrewsCached } from './lib/jam-2026';
+import { shouldHonorAuthenticatedNoCache } from './auth/lib/session';
 
-export async function onRequestGet(context: { request?: Request }): Promise<Response> {
+interface Env {
+  SESSION_SECRET?: string;
+}
+
+export async function onRequestGet(context: { request?: Request; env?: Env }): Promise<Response> {
   const reqUrl = context.request ? new URL(context.request.url) : null;
-  const noCache = reqUrl?.searchParams.get('nocache') === '1';
+  const requestedNoCache = reqUrl?.searchParams.get('nocache') === '1';
+  const noCache = requestedNoCache
+    ? await shouldHonorAuthenticatedNoCache(context.request, context.env?.SESSION_SECRET, 'jam-2026')
+    : false;
 
   const brews = await fetchJam2026BrewsCached(noCache);
 

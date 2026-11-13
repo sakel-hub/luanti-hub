@@ -12,11 +12,15 @@ import {
   normalizeRepoKey,
   readEdgeCacheJson,
   writeEdgeCacheJson,
+  invalidateEdgeCacheKeys,
+  buildPackageCacheInvalidationKeys,
   rewriteRelativeMarkdownUrls,
   fetchWithAnubisSupport,
+  fetchUpstreamJsonCached,
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables
 } from './upstream';
+import { isUntrustedTunnelOrPrivateHost } from '../../../src/app/core/config/git-providers.config';
 
 export const JAM_2026_API_ORIGIN = 'https://jam.greenxenith.com';
 export const JAM_2026_BREWS_URL = `${JAM_2026_API_ORIGIN}/api/brews`;
@@ -26,7 +30,7 @@ export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as c
 
 const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v1';
 const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v1';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v1';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v2';
 const JAM_2026_BREWS_TTL_SECONDS = 600; // 10 minutes Edge + Isolate cache
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
@@ -123,7 +127,9 @@ export function parseJam2026RepositoryUrl(rawRepoUrl: string): {
   try {
     const u = new URL(rawRepoUrl.trim());
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (isUntrustedTunnelOrPrivateHost(u.toString())) return null;
     const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (isUntrustedTunnelOrPrivateHost(host)) return null;
     const cleanedPath = u.pathname
       .replace(/\/+$/, '')
       .replace(/\.git$/i, '')
@@ -216,7 +222,9 @@ export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | 
   }
 
   const commitUrl =
-    typeof raw.commitUrl === 'string' && raw.commitUrl.startsWith('https://')
+    typeof raw.commitUrl === 'string' &&
+    raw.commitUrl.startsWith('https://') &&
+    !isUntrustedTunnelOrPrivateHost(raw.commitUrl)
       ? raw.commitUrl.trim()
       : `${repoInfo.canonicalRepoUrl}/tree/${commit}`;
 
@@ -338,6 +346,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
   d1UpsertPairs: Array<{ tag: string; pkgId: string }>;
   db?: any;
   noCache?: boolean;
+  upstreamCatalog?: any[];
 }): Promise<Record<string, string[]> | undefined> {
   const {
     uniqueTags,
@@ -347,7 +356,8 @@ export async function syncJam2026IntoPromoRowDelta(params: {
     queuedUpsertKeys,
     d1UpsertPairs,
     db,
-    noCache = false
+    noCache = false,
+    upstreamCatalog
   } = params;
 
   if (!isJam2026TagList(uniqueTags)) {
@@ -387,6 +397,63 @@ export async function syncJam2026IntoPromoRowDelta(params: {
       discoveredByKey.set(lowerId, brew);
     }
   }
+
+  // Cross-author ContentDB canonical resolution (e.g. Git owner `sztest/confspace` -> ContentDB `Warr1024/confspace`):
+  // Bulk ContentDB `/packages/?fmt=vcs` omits `repo`, so when a Jam 2026 game is published on ContentDB under a different
+  // username with the same technical `name`, verify its ContentDB `detail.repo` (1h Edge-cached) and stamp the canonical ID.
+  await Promise.all(
+    brews.slice(0, 30).map(async (brew) => {
+      const rKey = normalizeRepoKey(brew.repo_url);
+      if (!rKey) return;
+      const lowerBrewName = brew.name.toLowerCase();
+      const lowerBrewAuthor = brew.author.toLowerCase();
+
+      let candidates: any[] = [];
+      if (Array.isArray(upstreamCatalog) && upstreamCatalog.length > 0) {
+        candidates = upstreamCatalog.filter(
+          (c) =>
+            c &&
+            String(c.type || 'mod').toLowerCase() === 'game' &&
+            String(c.name || '').toLowerCase() === lowerBrewName &&
+            String(c.author || '').toLowerCase() !== lowerBrewAuthor
+        );
+      } else {
+        const searchList = await fetchUpstreamJsonCached<any[]>(
+          `/packages/?q=${encodeURIComponent(brew.name)}&type=game&fmt=vcs`,
+          1800
+        ).catch(() => null);
+        if (Array.isArray(searchList)) {
+          candidates = searchList.filter(
+            (c) =>
+              c &&
+              String(c.type || 'mod').toLowerCase() === 'game' &&
+              String(c.name || '').toLowerCase() === lowerBrewName &&
+              String(c.author || '').toLowerCase() !== lowerBrewAuthor
+          );
+        }
+      }
+
+      for (const cand of candidates.slice(0, 2)) {
+        const detail = await fetchUpstreamJsonCached<any>(
+          `/packages/${encodeURIComponent(cand.author)}/${encodeURIComponent(cand.name)}/`,
+          3600
+        ).catch(() => null);
+        const detailRepoKey = normalizeRepoKey(detail?.repo || detail?.repo_url || cand.repo_url || cand.repo);
+        if (detailRepoKey && detailRepoKey === rKey) {
+          const canonicalId = `${detail?.author || cand.author}/${detail?.name || cand.name}`;
+          const canonicalLowerId = canonicalId.toLowerCase();
+          for (const tag of jamTagsToStamp) {
+            addTagStamp(canonicalLowerId, tag);
+            const pairKey = `${tag.toLowerCase()}::${canonicalLowerId}`;
+            if (!existingD1Pairs.has(pairKey) && !queuedUpsertKeys.has(pairKey)) {
+              queuedUpsertKeys.add(pairKey);
+              d1UpsertPairs.push({ tag, pkgId: canonicalId });
+            }
+          }
+        }
+      }
+    })
+  );
 
   // Quota-Optimized D1 Package Persistence:
   // Only write to D1 `packages` for jam entries whose `jam_entry_id:latest_commit_sha` has not been synced yet.
@@ -458,7 +525,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
               )
           );
 
-          // 2. If another D1 package already owns `b.repo_url` under a different `id`, stamp `jam_game_2026` & `gamejam` onto it
+          // 2. Ensure any existing D1 package matching either `b.id` (case-insensitively) or `b.repo_url` has `jam_game_2026` & `gamejam` stamped onto it
           stmts.push(
             db
               .prepare(`
@@ -468,9 +535,10 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                   WHEN INSTR(LOWER(tags), 'jam_game_2026') = 0 THEN json_insert(tags, '$[#]', 'jam_game_2026', '$[#]', 'gamejam')
                   ELSE tags
                 END
-                WHERE LOWER(repo_url) = LOWER(?) AND LOWER(id) != LOWER(?) AND INSTR(LOWER(COALESCE(tags, '')), 'jam_game_2026') = 0
+                WHERE (LOWER(id) = LOWER(?) OR LOWER(repo_url) = LOWER(?))
+                  AND INSTR(LOWER(COALESCE(tags, '')), 'jam_game_2026') = 0
               `)
-              .bind(b.repo_url, b.id)
+              .bind(b.id, b.repo_url)
           );
 
           // 3. Ensure pure-Git `ext_jam2026_` package has its pinned commit release in D1 `releases` for 1-click `.zip` downloads
@@ -527,11 +595,22 @@ export async function syncJam2026IntoPromoRowDelta(params: {
         }
 
         const nextDigestMap: Record<string, string> = { ...persistedDigestMap };
+        const cacheKeysToInvalidate: string[] = [];
         for (const b of unsyncedBrews) {
           nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
           isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
+          const lowerId = b.id.toLowerCase();
+          cacheKeysToInvalidate.push(
+            ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
+            `/__api_hydrate_v9_${lowerId}`,
+            `/__api_hydrate_v10_${lowerId}`,
+            `/__api_hydrate_v11_${lowerId}`
+          );
         }
-        await writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {});
+        await Promise.all([
+          writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {}),
+          invalidateEdgeCacheKeys(cacheKeysToInvalidate).catch(() => {})
+        ]);
       }
     } catch {
       // Non-fatal D1 sync error; Edge PromoRowDelta still serves all jam entries
@@ -550,17 +629,65 @@ export async function syncJam2026IntoPromoRowDelta(params: {
  */
 export function applyJam2026RepoOverlayOnCatalog(
   packagesList: any[],
-  repoTagMap?: Record<string, string[]> | null
+  repoTagMap?: Record<string, string[]> | null,
+  discoveredItems?: any[] | null
 ): { packages: any[]; matchedRepoKeys: Set<string> } {
   const matchedRepoKeys = new Set<string>();
   if (!Array.isArray(packagesList) || !repoTagMap || Object.keys(repoTagMap).length === 0) {
     return { packages: packagesList, matchedRepoKeys };
   }
 
+  const normalizeText = (val: any): string =>
+    typeof val === 'string' ? val.trim().replace(/\s+/g, ' ').toLowerCase() : '';
+
+  const discoveredJamByLowerName = new Map<string, any[]>();
+  if (Array.isArray(discoveredItems)) {
+    for (const d of discoveredItems) {
+      if (!d || String(d.type || '').toLowerCase() !== 'game') continue;
+      const dRepoKey = normalizeRepoKey(d.repo_url || d.repo);
+      if (!dRepoKey || !repoTagMap[dRepoKey]) continue;
+      const dName = normalizeText(d.name);
+      if (!dName) continue;
+      const bucket = discoveredJamByLowerName.get(dName);
+      if (bucket) {
+        bucket.push(d);
+      } else {
+        discoveredJamByLowerName.set(dName, [d]);
+      }
+    }
+  }
+
   let clonedList: any[] | null = null;
   for (let i = 0; i < packagesList.length; i++) {
     const pkg = packagesList[i];
-    const rKey = normalizeRepoKey(pkg?.repo_url || pkg?.repo);
+    if (!pkg) continue;
+    let rKey = normalizeRepoKey(pkg?.repo_url || pkg?.repo);
+    let matchedDiscoveredRepoUrl: string | undefined;
+
+    // Fallback for unhydrated ContentDB games whose author handle differs from their Git namespace (e.g. Warr1024/confspace vs sztest/confspace)
+    if (!rKey && String(pkg.type || '').toLowerCase() === 'game' && discoveredJamByLowerName.size > 0) {
+      const lowerPkgName = normalizeText(pkg.name);
+      const jamCandidates = lowerPkgName ? discoveredJamByLowerName.get(lowerPkgName) : undefined;
+      if (jamCandidates && jamCandidates.length > 0) {
+        const normPkgTitle = normalizeText(pkg.title);
+        const normPkgDesc = normalizeText(pkg.short_desc || pkg.short_description);
+        const matchedDisc = jamCandidates.find((d) => {
+          const normDiscTitle = normalizeText(d.title);
+          const normDiscDesc = normalizeText(d.short_desc || d.short_description);
+          const titleMatches =
+            normPkgTitle.length > 0 &&
+            normPkgTitle !== lowerPkgName &&
+            normPkgTitle === normDiscTitle;
+          const descMatches = normPkgDesc.length >= 15 && normPkgDesc === normDiscDesc;
+          return titleMatches || descMatches;
+        });
+        if (matchedDisc) {
+          rKey = normalizeRepoKey(matchedDisc.repo_url || matchedDisc.repo);
+          matchedDiscoveredRepoUrl = matchedDisc.repo_url || matchedDisc.repo;
+        }
+      }
+    }
+
     if (!rKey) continue;
     const tagsToAdd = repoTagMap[rKey];
     if (!Array.isArray(tagsToAdd) || tagsToAdd.length === 0) continue;
@@ -576,11 +703,31 @@ export function applyJam2026RepoOverlayOnCatalog(
         }
       }
     }
-    if (nextTags) {
+
+    const existingBadgeTags: string[] = Array.isArray(pkg.badge_tags) ? pkg.badge_tags : [];
+    const needsJamBadge = !existingBadgeTags.some(
+      (bt) => String(bt).toLowerCase() === JAM_2026_PRIMARY_TAG
+    );
+    const nextBadgeTags = needsJamBadge
+      ? [...existingBadgeTags, JAM_2026_PRIMARY_TAG]
+      : existingBadgeTags;
+
+    const baseSources: string[] = Array.isArray(pkg.sources) && pkg.sources.length > 0
+      ? pkg.sources
+      : [pkg.source || 'official'];
+    const needsGitSource = !baseSources.includes('git');
+    const nextSources = needsGitSource ? [...baseSources, 'git'] : baseSources;
+
+    const needsRepoBackfill = Boolean(!pkg.repo_url && matchedDiscoveredRepoUrl);
+
+    if (nextTags || needsJamBadge || needsGitSource || needsRepoBackfill) {
       if (!clonedList) clonedList = [...packagesList];
       clonedList[i] = {
         ...pkg,
-        tags: nextTags
+        ...(nextTags ? { tags: nextTags } : {}),
+        ...(needsJamBadge ? { badge_tags: nextBadgeTags } : {}),
+        ...(needsGitSource ? { sources: nextSources } : {}),
+        ...(needsRepoBackfill ? { repo_url: matchedDiscoveredRepoUrl } : {})
       };
     }
   }
@@ -604,6 +751,36 @@ export function detectJam2026RootParticipationTags(
     return typeof rawName === 'string' && /^jam2026\.md$/i.test(rawName.trim());
   });
   return hasJam2026File ? [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] : [];
+}
+
+/**
+ * Resolves a verified Game Jam 2026 repository URL for `author/name` (or normalized underscore/hyphen alias)
+ * from the cached `jam.greenxenith.com` brew list.
+ */
+export async function findJam2026BrewRepoBySlug(
+  author: string,
+  name: string
+): Promise<string | undefined> {
+  if (!author || !name) return undefined;
+  const targetSlug = `${author}/${name}`.toLowerCase();
+  const targetAuthorLower = author.toLowerCase();
+  const targetNormName = name.toLowerCase().replace(/-/g, '_');
+  const brews = await fetchJam2026BrewsCached(false);
+  for (const brew of brews) {
+    if (brew.id.toLowerCase() === targetSlug) {
+      return brew.repo_url;
+    }
+    if (brew.aliases?.some((alias) => alias.toLowerCase() === targetSlug)) {
+      return brew.repo_url;
+    }
+    if (
+      brew.author.toLowerCase() === targetAuthorLower &&
+      brew.name.toLowerCase().replace(/-/g, '_') === targetNormName
+    ) {
+      return brew.repo_url;
+    }
+  }
+  return undefined;
 }
 
 /**

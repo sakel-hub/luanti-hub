@@ -172,8 +172,40 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
     });
   });
 
-  describe('Deterministic Zero-Leak Iframe Teardown', () => {
-    it('dispatches SANDBOX_DISPOSE to runner frame and resets src to about:blank', () => {
+  describe('Stream Origin Validation & Deterministic Zero-Leak Iframe Teardown', () => {
+    it('allows HTTPS non-tunnel stream URLs and local HTTP localhost URLs while blocking XSS, private IPs, and tunnels', () => {
+      expect(
+        service.sanitizeSandboxStreamUrl('http://localhost:6080/sandbox.html?t=1', 'localhost')
+      ).toEqual({
+        safeUrl: 'http://localhost:6080/sandbox.html?t=1',
+        origin: 'http://localhost:6080'
+      });
+
+      // Block http://localhost stream if the parent page is running on production luantihub.org
+      expect(
+        service.sanitizeSandboxStreamUrl('http://localhost:6080/sandbox.html', 'luantihub.org')
+      ).toBeNull();
+
+      // Allow legitimate HTTPS container stream domain
+      expect(
+        service.sanitizeSandboxStreamUrl('https://sandbox-stream.luantihub.org/sandbox.html', 'luantihub.org')
+      ).toEqual({
+        safeUrl: 'https://sandbox-stream.luantihub.org/sandbox.html',
+        origin: 'https://sandbox-stream.luantihub.org'
+      });
+
+      // Block javascript:, data:, ephemeral tunnels, and private RFC1918 hosts
+      expect(service.sanitizeSandboxStreamUrl('javascript:alert(1)', 'localhost')).toBeNull();
+      expect(service.sanitizeSandboxStreamUrl('data:text/html,<script>alert(1)</script>', 'localhost')).toBeNull();
+      expect(
+        service.sanitizeSandboxStreamUrl('https://evil-stream.trycloudflare.com/sandbox.html', 'luantihub.org')
+      ).toBeNull();
+      expect(
+        service.sanitizeSandboxStreamUrl('https://192.168.1.20:6080/sandbox.html', 'luantihub.org')
+      ).toBeNull();
+    });
+
+    it('dispatches SANDBOX_DISPOSE scoped to exact stream origin and resets src to about:blank', () => {
       const postMessageSpy = vi.fn();
       const fakeIframe = {
         src: 'http://localhost:8089/stream',
@@ -184,7 +216,10 @@ describe('SandboxMemoryGuardService (Eligibility, Monthly $5 Quota Circuit Break
 
       service.teardownSandboxIframe(fakeIframe);
 
-      expect(postMessageSpy).toHaveBeenCalledWith({ type: 'SANDBOX_DISPOSE' }, '*');
+      expect(postMessageSpy).toHaveBeenCalledWith(
+        { type: 'SANDBOX_DISPOSE' },
+        'http://localhost:8089'
+      );
       expect(fakeIframe.src).toBe('about:blank');
     });
   });

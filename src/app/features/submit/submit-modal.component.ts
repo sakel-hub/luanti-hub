@@ -1,11 +1,12 @@
-import { Component, ChangeDetectionStrategy, inject, signal, computed } from '@angular/core';
+import { Component, ChangeDetectionStrategy, OnDestroy, inject, signal, computed } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { GitAuditReport, GitProvider } from '../../core/models/package.model';
-import { detectGitProviderFromUrl, isAuthLoginGitProvider } from '../../core/config/git-providers.config';
+import { detectGitProviderFromUrl, isAuthLoginGitProvider, GitProviderId } from '../../core/config/git-providers.config';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import {
@@ -176,24 +177,36 @@ import {
                 <!-- Summary Pills -->
                 <div class="flex items-center gap-1.5 flex-wrap text-[10px] font-bold">
                   <span
+                    data-testid="audit-pill-conf"
+                    [appTooltip]="'submit.pillConfTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.configFound ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
-                    class="px-2 py-0.5 rounded border">
-                    {{ report.configFound || 'Missing *.conf' }}
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ report.configFound || ('submit.pillMissingConf' | translate) }}
                   </span>
                   <span
+                    data-testid="audit-pill-license"
+                    [appTooltip]="'submit.pillLicenseTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.licenseValid ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
-                    class="px-2 py-0.5 rounded border">
-                    SPDX License
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ 'submit.pillLicenseLabel' | translate }}
                   </span>
                   <span
+                    data-testid="audit-pill-luacheck"
+                    [appTooltip]="'submit.pillLuacheckTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="report.luacheckPassed ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
-                    class="px-2 py-0.5 rounded border">
-                    Luacheck
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ 'submit.pillLuacheckLabel' | translate }}
                   </span>
                   <span
+                    data-testid="audit-pill-owner"
+                    [appTooltip]="'submit.pillOwnerTooltip' | translate"
+                    [appTooltipTap]="true"
                     [class]="isOwnershipVerified() ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-amber-950/70 text-amber-300 border-amber-800'"
-                    class="px-2 py-0.5 rounded border">
-                    {{ isOwnershipVerified() ? 'Owner Verified' : 'Verify Owner' }}
+                    class="px-2 py-0.5 rounded border cursor-help">
+                    {{ (isOwnershipVerified() ? 'submit.pillOwnerVerified' : (report.pendingAdminClaim || !supportsDirectOwnerAuth(parsedRepoTarget()?.provider) ? 'submit.pillAdminClaimQueue' : 'submit.pillVerifyOwner')) | translate }}
                   </span>
                 </div>
               </div>
@@ -285,68 +298,86 @@ import {
                   @if (isOwnershipVerified()) {
                     <svg lucideShieldCheck class="w-4 h-4 text-emerald-400 flex-shrink-0"></svg>
                     <span class="font-bold text-emerald-300">
-                      Repository Ownership Verified ({{ target.provider | uppercase }}: {{ target.owner }})
+                      {{ 'submit.ownerVerifiedBanner' | translate:{ provider: (target.provider | uppercase), owner: target.owner } }}
                     </span>
-                  } @else {
+                  } @else if (supportsDirectOwnerAuth(target.provider)) {
                     <svg lucideKeyRound class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
                     <span class="font-bold text-amber-300">
-                      Verify {{ target.provider | uppercase }} Ownership for "{{ target.owner }}/{{ target.repo }}"
+                      {{ 'submit.verifyOwnerBanner' | translate:{ provider: (target.provider | uppercase), repo: target.owner + '/' + target.repo } }}
+                    </span>
+                  } @else {
+                    <svg lucideShieldAlert class="w-4 h-4 text-amber-400 flex-shrink-0"></svg>
+                    <span class="font-bold text-amber-300">
+                      {{ 'submit.moderatorOwnerBanner' | translate:{ provider: (target.provider | uppercase), repo: target.owner + '/' + target.repo } }}
                     </span>
                   }
                 </div>
               </div>
 
               @if (!isOwnershipVerified()) {
-                <p class="text-[11px] text-slate-300 leading-relaxed">
-                  Only the verified repository owner or organization member on <strong class="text-white uppercase">{{ target.provider }}</strong> can publish this repository. Your token is verified once on the server and is <strong class="text-emerald-300">never stored in the browser</strong>.
-                </p>
+                @if (supportsDirectOwnerAuth(target.provider)) {
+                  <p class="text-[11px] text-slate-300 leading-relaxed">
+                    {{ 'submit.ownerTokenZeroStorageDesc' | translate:{ provider: (target.provider | uppercase) } }}
+                  </p>
 
-                @if (authService.isOAuthConfigured(target.provider)) {
-                  <button
-                    type="button"
-                    (click)="authService.loginWith(target.provider)"
-                    class="w-full py-2 px-3 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
-                    <span>Connect {{ target.provider | uppercase }} via 1-Click OAuth</span>
-                  </button>
-                }
+                  @if (authService.isOAuthConfigured(target.provider)) {
+                    <button
+                      type="button"
+                      (click)="connectViaOAuth(target.provider)"
+                      class="w-full py-2 px-3 rounded-xl glass-btn-sky text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
+                      <span>{{ 'submit.connectViaOAuthBtn' | translate:{ provider: (target.provider | uppercase) } }}</span>
+                    </button>
+                  }
 
-                <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
-                  <input
-                    type="text"
-                    [(ngModel)]="verifyUsername"
-                    name="verifyUsername"
-                    [placeholder]="target.owner"
-                    [appTooltip]="target.provider + ' username (e.g. ' + target.owner + ')'"
-                    autocomplete="username"
-                    class="sm:col-span-4 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
-                  />
-                  <input
-                    type="password"
-                    [(ngModel)]="verifyToken"
-                    name="verifyToken"
-                    placeholder="Personal Access Token"
-                    [appTooltip]="'Read-only ' + (target.provider | uppercase) + ' Personal Access Token (verified once on server, never stored)'"
-                    autocomplete="off"
-                    class="sm:col-span-5 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
-                  />
-                  <button
-                    type="button"
-                    (click)="onVerifyOwnershipInline()"
-                    [disabled]="isVerifyingOwner() || !verifyToken.trim()"
-                    class="sm:col-span-3 px-3 py-2 rounded-xl glass-btn-primary disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
-                    @if (isVerifyingOwner()) {
-                      <svg lucideLoader2 class="w-3.5 h-3.5 text-sky-300 animate-spin"></svg>
-                      <span>Verifying...</span>
-                    } @else {
-                      <svg lucideShieldCheck class="w-3.5 h-3.5 text-sky-300"></svg>
-                      <span>Verify Owner</span>
-                    }
-                  </button>
-                </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                    <input
+                      type="text"
+                      [(ngModel)]="verifyUsername"
+                      name="verifyUsername"
+                      [placeholder]="target.owner"
+                      [appTooltip]="target.provider + ' (' + target.owner + ')'"
+                      autocomplete="username"
+                      class="sm:col-span-4 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                    />
+                    <input
+                      type="password"
+                      [(ngModel)]="verifyToken"
+                      name="verifyToken"
+                      [placeholder]="'auth.tokenPlaceholder' | translate"
+                      [appTooltip]="'auth.tokenSecurityTooltip' | translate"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck="false"
+                      data-1p-ignore="true"
+                      data-lpignore="true"
+                      data-bwignore="true"
+                      data-form-type="other"
+                      class="sm:col-span-5 glass-input rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
+                    />
+                    <button
+                      type="button"
+                      (click)="onVerifyOwnershipInline()"
+                      [disabled]="isVerifyingOwner() || !verifyToken.trim()"
+                      class="sm:col-span-3 px-3 py-2 rounded-xl glass-btn-primary disabled:opacity-50 text-white font-black text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+                      @if (isVerifyingOwner()) {
+                        <svg lucideLoader2 class="w-3.5 h-3.5 text-sky-300 animate-spin"></svg>
+                        <span>{{ 'submit.verifyingBtn' | translate }}</span>
+                      } @else {
+                        <svg lucideShieldCheck class="w-3.5 h-3.5 text-sky-300"></svg>
+                        <span>{{ 'submit.pillVerifyOwner' | translate }}</span>
+                      }
+                    </button>
+                  </div>
 
-                @if (verifyOwnerMessage()) {
-                  <p [class]="verifyOwnerSuccess() ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] font-medium">
-                    {{ verifyOwnerMessage() }}
+                  @if (verifyOwnerMessage()) {
+                    <p [class]="verifyOwnerSuccess() ? 'text-emerald-400' : 'text-rose-400'" class="text-[11px] font-medium">
+                      {{ verifyOwnerMessage() }}
+                    </p>
+                  }
+                } @else {
+                  <p class="text-[11px] text-slate-300 leading-relaxed">
+                    {{ 'submit.moderatorOwnerDesc' | translate:{ provider: (target.provider | uppercase) } }}
                   </p>
                 }
               }
@@ -518,22 +549,38 @@ export class SubmitModalComponent {
   readonly parsedRepoTarget = computed<{ provider: GitProvider; owner: string; repo: string } | null>(() => {
     const detected = detectGitProviderFromUrl(this.repoUrlSignal().trim());
     if (!detected?.owner || !detected?.repo) return null;
-    const provider: GitProvider = isAuthLoginGitProvider(detected.provider) ? detected.provider : 'codeberg';
-    return { provider, owner: detected.owner, repo: detected.repo };
+    return { provider: detected.provider as GitProvider, owner: detected.owner, repo: detected.repo };
   });
+
+  supportsDirectOwnerAuth(provider?: GitProvider | GitProviderId | null): boolean {
+    return isAuthLoginGitProvider(provider || '');
+  }
 
   isOwnershipVerified(): boolean {
     if (this.auditReport()?.ownershipVerified) {
       return true;
     }
     const target = this.parsedRepoTarget();
-    if (!target) return false;
+    if (!target || !this.supportsDirectOwnerAuth(target.provider)) return false;
     return this.authService.hasVerifiedProviderOwnership(target.provider, target.owner);
   }
 
+  private buildSubmitReturnPath(): string {
+    const cleanRepoUrl = this.repoUrl.trim();
+    return cleanRepoUrl ? `/submit?url=${encodeURIComponent(cleanRepoUrl)}` : '/submit';
+  }
+
+  connectViaOAuth(provider: GitProvider): void {
+    const target = this.parsedRepoTarget();
+    this.authService.loginWith(provider, target?.owner || undefined, true, {
+      returnTo: this.buildSubmitReturnPath()
+    });
+  }
+
   onSignInFromSubmit(): void {
+    const returnTo = this.buildSubmitReturnPath();
     this.packageService.closeSubmitModal();
-    this.authService.openAuthModal();
+    this.authService.openAuthModal(false, { returnTo });
   }
 
   constructor() {
@@ -554,18 +601,41 @@ export class SubmitModalComponent {
       }
     }
 
-    if (this.route) {
-      this.route.queryParams.subscribe(params => {
-        const candidate = params['url'] || params['text'] || '';
-        if (candidate && typeof candidate === 'string') {
-          const urlMatch = candidate.match(/https?:\/\/[^\s]+/i);
-          const found = urlMatch ? urlMatch[0] : (candidate.startsWith('http') ? candidate.trim() : '');
-          if (found) {
-            this.repoUrl = found;
-            this.onUrlChange();
+      if (this.route?.queryParams) {
+        const obs = typeof (this.route.queryParams as any).pipe === 'function'
+          ? this.route.queryParams.pipe(takeUntilDestroyed())
+          : this.route.queryParams;
+        this.queryParamsSub = obs.subscribe((params: Record<string, any>) => {
+          const candidate = params['url'] || params['text'] || '';
+          if (candidate && typeof candidate === 'string') {
+            const urlMatch = candidate.match(/https?:\/\/[^\s]+/i);
+            const found = urlMatch ? urlMatch[0] : (candidate.startsWith('http') ? candidate.trim() : '');
+            if (found) {
+              this.repoUrl = found;
+              this.onUrlChange();
+            }
           }
-        }
-      });
+        });
+      }
+  }
+
+  private auditRequestSeq = 0;
+  private publishCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  private copyTimer: ReturnType<typeof setTimeout> | null = null;
+  private queryParamsSub: { unsubscribe?: () => void } | null = null;
+
+  ngOnDestroy(): void {
+    this.verifyToken = '';
+    this.auditRequestSeq++;
+    this.queryParamsSub?.unsubscribe?.();
+    this.queryParamsSub = null;
+    if (this.publishCloseTimer !== null) {
+      clearTimeout(this.publishCloseTimer);
+      this.publishCloseTimer = null;
+    }
+    if (this.copyTimer !== null) {
+      clearTimeout(this.copyTimer);
+      this.copyTimer = null;
     }
   }
 
@@ -598,6 +668,8 @@ export class SubmitModalComponent {
   }
 
   onUrlChange(): void {
+    this.auditRequestSeq++;
+    this.isAuditing.set(false);
     this.repoUrlSignal.set(this.repoUrl);
     this.auditReport.set(null);
     this.statusMessage.set(null);
@@ -641,12 +713,17 @@ export class SubmitModalComponent {
 
   canPublish(): boolean {
     const report = this.auditReport();
+    const target = this.parsedRepoTarget();
+    const ownerEligible =
+      this.isOwnershipVerified() ||
+      Boolean(report?.pendingAdminClaim) ||
+      (Boolean(target) && !this.supportsDirectOwnerAuth(target?.provider));
     return Boolean(
       this.repoUrl.trim() &&
       this.warrantyOwnership &&
       this.warrantyAssets &&
       this.warrantyTakedown &&
-      this.isOwnershipVerified() &&
+      ownerEligible &&
       report?.valid &&
       report?.auditToken
     );
@@ -656,7 +733,13 @@ export class SubmitModalComponent {
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
       navigator.clipboard.writeText(snippet);
       this.copiedCode.set(code);
-      setTimeout(() => this.copiedCode.set(null), 2000);
+      if (this.copyTimer !== null) {
+        clearTimeout(this.copyTimer);
+      }
+      this.copyTimer = setTimeout(() => {
+        this.copyTimer = null;
+        this.copiedCode.set(null);
+      }, 2000);
     }
   }
 
@@ -665,18 +748,24 @@ export class SubmitModalComponent {
       this.onSignInFromSubmit();
       return;
     }
-    if (!this.repoUrl.trim()) return;
+    const trimmedUrl = this.repoUrl.trim();
+    if (!trimmedUrl) return;
+    const reqId = ++this.auditRequestSeq;
     this.isAuditing.set(true);
     this.statusMessage.set(null);
     this.statusPendingModeration.set(false);
 
     const res = await this.packageService.auditOrSubmitGitPackage({
-      repoUrl: this.repoUrl.trim(),
+      repoUrl: trimmedUrl,
       warrantiesAccepted: true,
       dryRun: true,
       tags: this.selectedTags(),
       badge_tags: this.selectedBadgeTags()
     });
+
+    if (reqId !== this.auditRequestSeq) {
+      return;
+    }
 
     this.isAuditing.set(false);
     if (res.audit) {
@@ -718,7 +807,8 @@ export class SubmitModalComponent {
       dryRun: false,
       tags: this.selectedTags(),
       badge_tags: this.selectedBadgeTags(),
-      auditToken: report.auditToken
+      auditToken: report.auditToken,
+      ...(this.isOwnershipVerified() ? {} : { requestAdminClaim: true })
     });
 
     this.isSubmitting.set(false);
@@ -737,7 +827,11 @@ export class SubmitModalComponent {
       } else {
         this.statusSuccess.set(true);
         this.statusMessage.set(res.message || 'Package successfully audited and indexed! It is now live in the catalog.');
-        setTimeout(() => {
+        if (this.publishCloseTimer !== null) {
+          clearTimeout(this.publishCloseTimer);
+        }
+        this.publishCloseTimer = setTimeout(() => {
+          this.publishCloseTimer = null;
           this.packageService.closeSubmitModal();
         }, 1500);
       }

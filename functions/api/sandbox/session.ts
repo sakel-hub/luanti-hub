@@ -1,13 +1,72 @@
+import { verifySameOriginMutation } from '../auth/lib/session';
 import { getSandboxQuotaStatus, recordSandboxSessionUsage } from './quota';
-import { EPHEMERAL_TUNNEL_HOST_PATTERN, isUntrustedTunnelOrPrivateHost } from '../lib/upstream';
+import {
+  EPHEMERAL_TUNNEL_HOST_PATTERN,
+  isUntrustedTunnelOrPrivateHost,
+  sanitizePublicErrorMessage
+} from '../lib/upstream';
 
-function isEphemeralTunnelUrl(rawUrl?: string | null): boolean {
-  if (!rawUrl || typeof rawUrl !== 'string') return false;
+const SANDBOX_JSON_HEADERS: Record<string, string> = {
+  'Cache-Control': 'no-store',
+  'X-Content-Type-Options': 'nosniff'
+};
+
+const ALLOWED_SANDBOX_ACTIONS = new Set(['boot', 'command', 'stop']);
+const ALLOWED_SANDBOX_COMMANDS = new Set([
+  'TOGGLE_MOUSE_LOCK',
+  'TOGGLE_INVENTORY',
+  'TOGGLE_FLY',
+  'TOGGLE_FAST',
+  'ESCAPE'
+]);
+
+function isLocalhostRequest(request: Request): boolean {
   try {
-    const parsed = new URL(rawUrl);
-    return EPHEMERAL_TUNNEL_HOST_PATTERN.test(parsed.hostname.toLowerCase());
+    const reqUrl = new URL(request.url, 'http://localhost:8788');
+    const host = (reqUrl.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
   } catch {
-    return EPHEMERAL_TUNNEL_HOST_PATTERN.test(rawUrl.toLowerCase());
+    return false;
+  }
+}
+
+function isDisallowedSandboxBundleUrl(
+  rawUrl: unknown,
+  options: { allowRelativeApiPath?: boolean; allowLocalDockerHost?: boolean } = {}
+): boolean {
+  if (rawUrl === undefined || rawUrl === null || rawUrl === '') return false;
+  if (typeof rawUrl !== 'string') return true;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || /[\s\u0000-\u001f\u007f\\]/.test(trimmed)) return true;
+
+  if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(trimmed.toLowerCase())) {
+    return true;
+  }
+
+  if (trimmed.startsWith('/')) {
+    if (!options.allowRelativeApiPath) return true;
+    if (trimmed.startsWith('//') || trimmed.includes('..')) return true;
+    return !trimmed.startsWith('/api/packages/');
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.username || parsed.password) return true;
+    const host = parsed.hostname.toLowerCase();
+    if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(host)) return true;
+
+    if (
+      options.allowLocalDockerHost &&
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (host === 'localhost' || host === '127.0.0.1' || host === 'host.docker.internal')
+    ) {
+      return false;
+    }
+
+    if (parsed.protocol !== 'https:') return true;
+    return isUntrustedTunnelOrPrivateHost(trimmed);
+  } catch {
+    return true;
   }
 }
 
@@ -62,7 +121,7 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
         status: 'quota_exhausted',
         quota
       },
-      { status: 429, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 429, headers: SANDBOX_JSON_HEADERS }
     );
   }
 
@@ -74,7 +133,7 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
         message: 'Sandbox container service is not configured for this environment.',
         quota
       },
-      { status: 503, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 503, headers: SANDBOX_JSON_HEADERS }
     );
   }
 
@@ -98,7 +157,7 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
         streamUrl: data.streamUrl || streamUrl,
         quota
       },
-      { headers: { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' } }
+      { headers: SANDBOX_JSON_HEADERS }
     );
   } catch {
     return Response.json(
@@ -107,12 +166,15 @@ export async function onRequestGet(context: { request: Request; env?: Env }) {
         message: 'Local Luanti sandbox container is not running. Start it with: npm run sandbox:docker:up',
         quota
       },
-      { status: 503, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 503, headers: SANDBOX_JSON_HEADERS }
     );
   }
 }
 
 export async function onRequestPost(context: { request: Request; env?: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const quota = await getSandboxQuotaStatus(context.env);
   if (quota.exhausted) {
     return Response.json(
@@ -122,27 +184,60 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
         message: `Monthly Cloudflare Container quota safety threshold (${quota.usagePercent}%) reached. Resets on ${quota.resetsAt.slice(0, 10)}.`,
         quota
       },
-      { status: 429, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 429, headers: SANDBOX_JSON_HEADERS }
     );
   }
 
   const body = await context.request.json().catch(() => ({} as any));
   const action = String(body.action || 'boot');
+  if (!ALLOWED_SANDBOX_ACTIONS.has(action)) {
+    return Response.json(
+      {
+        ok: false,
+        code: 'SANDBOX_INVALID_ACTION',
+        message: 'Unsupported sandbox session action.',
+        quota
+      },
+      { status: 400, headers: SANDBOX_JSON_HEADERS }
+    );
+  }
+
+  if (action === 'command' && !ALLOWED_SANDBOX_COMMANDS.has(String(body.command || ''))) {
+    return Response.json(
+      {
+        ok: false,
+        code: 'SANDBOX_INVALID_COMMAND',
+        message: 'Unsupported sandbox HUD command.',
+        quota
+      },
+      { status: 400, headers: SANDBOX_JSON_HEADERS }
+    );
+  }
+
+  const allowLocalDocker = isLocalhostRequest(context.request);
   if (
-    isEphemeralTunnelUrl(body?.originUrl) ||
+    isDisallowedSandboxBundleUrl(body?.originUrl, { allowLocalDockerHost: allowLocalDocker }) ||
     (Array.isArray(body?.bundles) &&
       body.bundles.some(
-        (b: any) => isEphemeralTunnelUrl(b?.downloadUrl) || isEphemeralTunnelUrl(b?.gitArchiveUrl)
+        (b: any) =>
+          isDisallowedSandboxBundleUrl(b?.downloadUrl, {
+            allowRelativeApiPath: true,
+            allowLocalDockerHost: allowLocalDocker
+          }) ||
+          isDisallowedSandboxBundleUrl(b?.gitArchiveUrl, {
+            allowRelativeApiPath: false,
+            allowLocalDockerHost: false
+          })
       ))
   ) {
     return Response.json(
       {
         ok: false,
         code: 'SANDBOX_UNTRUSTED_TUNNEL_URL',
-        message: 'Ephemeral tunnel URLs are not permitted in sandbox session requests.',
+        message: 'Untrusted, private, or ephemeral tunnel URLs are not permitted in sandbox session requests.',
         quota
       },
-      { status: 403, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 403, headers: SANDBOX_JSON_HEADERS }
     );
   }
   const { controlBaseUrl, streamUrl } = resolveContainerEndpoint(context.request, context.env);
@@ -155,7 +250,7 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
         message: 'Sandbox container service is not configured.',
         quota
       },
-      { status: 503, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 503, headers: SANDBOX_JSON_HEADERS }
     );
   }
 
@@ -170,7 +265,7 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
       .replace('127.0.0.1', 'host.docker.internal');
     const forwardPayload = {
       ...body,
-      originUrl: body.originUrl || normalizedDockerOrigin
+      originUrl: normalizedDockerOrigin
     };
 
     const ctrl = new AbortController();
@@ -194,13 +289,14 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
 
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
+      const safeDetail = sanitizePublicErrorMessage(errText, 'Container returned an unexpected error.');
       return Response.json(
         {
           ok: false,
           code: 'SANDBOX_BOOT_ERROR',
-          message: `Container boot failed (${res.status}): ${errText}`
+          message: `Container boot failed (${res.status}): ${safeDetail}`
         },
-        { status: 502, headers: { 'Access-Control-Allow-Origin': '*' } }
+        { status: 502, headers: SANDBOX_JSON_HEADERS }
       );
     }
 
@@ -219,7 +315,7 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
         streamUrl: data.streamUrl || streamUrl,
         quota: updatedQuota
       },
-      { headers: { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' } }
+      { headers: SANDBOX_JSON_HEADERS }
     );
   } catch (err: any) {
     const isTimeout = err?.name === 'AbortError' || String(err?.message || '').includes('aborted');
@@ -232,12 +328,15 @@ export async function onRequestPost(context: { request: Request; env?: Env }) {
           : 'Luanti Sandbox Docker container is not running on port 8089. Run `npm run sandbox:docker:up` to start the local Luanti container.',
         quota
       },
-      { status: isTimeout ? 504 : 503, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: isTimeout ? 504 : 503, headers: SANDBOX_JSON_HEADERS }
     );
   }
 }
 
 export async function onRequestDelete(context: { request: Request; env?: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request, { allowSimpleBeacon: true });
+  if (csrfBlock) return csrfBlock;
+
   const { controlBaseUrl } = resolveContainerEndpoint(context.request, context.env);
   let awakeSeconds = 0;
 
@@ -263,7 +362,7 @@ export async function onRequestDelete(context: { request: Request; env?: Env }) 
   const quota = await recordSandboxSessionUsage(context.env, awakeSeconds, false);
   return Response.json(
     { ok: true, stopped: true, awakeSeconds, quota },
-    { headers: { 'Access-Control-Allow-Origin': '*' } }
+    { headers: SANDBOX_JSON_HEADERS }
   );
 }
 

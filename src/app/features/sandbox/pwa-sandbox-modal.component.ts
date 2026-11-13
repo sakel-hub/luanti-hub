@@ -23,6 +23,9 @@ import {
 } from '@lucide/angular';
 import { LuantiPackage } from '../../core/models/package.model';
 import { mergeLuantiHubAndContentDbGameSupport } from '../../core/config/package-utils.config';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { TranslationService } from '../../core/i18n/translation.service';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import {
   SandboxMemoryGuardError,
   SandboxMemoryGuardService,
@@ -76,6 +79,8 @@ export interface SandboxFaultState {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     CommonModule,
+    TranslatePipe,
+    TooltipDirective,
     LucidePlay,
     LucideX,
     LucideRefreshCw,
@@ -90,7 +95,7 @@ export interface SandboxFaultState {
       [style.padding]="isMaximized() ? '0' : '1rem'"
       role="dialog"
       aria-modal="true"
-      [attr.aria-label]="'Try ' + pkg().title + ' in Luanti Sandbox'"
+      [attr.aria-label]="'sandbox.dialogAriaLabel' | translate: { title: pkg().title }"
       (click)="$event.stopPropagation()"
     >
       <div
@@ -114,7 +119,7 @@ export interface SandboxFaultState {
               class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider bg-sky-500/15 text-sky-300 border border-sky-500/30"
             >
               <svg lucidePlay class="w-3.5 h-3.5 text-sky-400"></svg>
-              Luanti Sandbox
+              {{ 'sandbox.badgeLabel' | translate }}
             </span>
             <h3 class="text-sm sm:text-base font-bold text-white truncate">
               {{ pkg().title }}
@@ -124,10 +129,21 @@ export interface SandboxFaultState {
             </span>
           </div>
 
-          <!-- Live Container Memory & Monthly Quota Telemetry Pill -->
+          <!-- Live Container Isolation Security & Monthly Quota Telemetry Pills -->
           <div class="flex items-center gap-2 flex-wrap">
+            <span
+              data-testid="sandbox-isolation-security-badge"
+              [appTooltip]="'sandbox.isolationSecurityTooltip' | translate"
+              [appTooltipMultiline]="true"
+              [appTooltipTap]="true"
+              class="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-950/60 border border-emerald-500/35 text-emerald-300 cursor-help"
+            >
+              <svg lucideShieldCheck class="w-3.5 h-3.5 text-emerald-400 shrink-0"></svg>
+              <span>{{ 'sandbox.isolationSecurityBadge' | translate }}</span>
+            </span>
+
             <div
-              class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border transition-colors"
+              class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border transition-colors cursor-help"
               [class.bg-emerald-950/60]="memoryWarningLevel() === 'normal'"
               [class.border-emerald-500/35]="memoryWarningLevel() === 'normal'"
               [class.text-emerald-300]="memoryWarningLevel() === 'normal'"
@@ -137,17 +153,19 @@ export interface SandboxFaultState {
               [class.bg-rose-950/70]="memoryWarningLevel() === 'critical'"
               [class.border-rose-500/50]="memoryWarningLevel() === 'critical'"
               [class.text-rose-300]="memoryWarningLevel() === 'critical'"
-              title="Container Memory & Monthly Quota Telemetry"
+              [appTooltip]="'sandbox.telemetryTooltip' | translate"
+              [appTooltipMultiline]="true"
+              [appTooltipTap]="true"
             >
               <svg lucideShieldCheck class="w-3.5 h-3.5 shrink-0"></svg>
               <span>
-                RAM: {{ currentMemoryMb() }} / {{ maxMemoryMb() }} MB ({{ memoryUsagePercent() }}%)
+                {{ 'sandbox.ramLabel' | translate }}: {{ currentMemoryMb() }} / {{ maxMemoryMb() }} MB ({{ memoryUsagePercent() }}%)
               </span>
               @if (status() === 'running') {
                 <span class="hidden sm:inline text-slate-500">•</span>
-                <span class="hidden sm:inline">Mods: {{ loadedModCount() }}</span>
+                <span class="hidden sm:inline">{{ 'sandbox.modsLabel' | translate }}: {{ loadedModCount() }}</span>
                 <span class="hidden md:inline text-slate-500">•</span>
-                <span class="hidden md:inline">Quota: {{ quotaUsagePercent() }}%</span>
+                <span class="hidden md:inline">{{ 'sandbox.quotaLabel' | translate }}: {{ quotaUsagePercent() }}%</span>
               }
             </div>
 
@@ -157,8 +175,8 @@ export interface SandboxFaultState {
               class="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
               [class.bg-slate-800]="isMaximized()"
               [class.text-sky-300]="isMaximized()"
-              [attr.title]="isMaximized() ? 'Restore Window Size' : 'Maximize Window'"
-              [attr.aria-label]="isMaximized() ? 'Restore Window Size' : 'Maximize Window'"
+              [appTooltip]="isMaximized() ? ('sandbox.restoreWindow' | translate) : ('sandbox.maximizeWindow' | translate)"
+              [attr.aria-label]="isMaximized() ? ('sandbox.restoreWindow' | translate) : ('sandbox.maximizeWindow' | translate)"
             >
               <svg lucideMaximize2 class="w-4 h-4"></svg>
             </button>
@@ -167,10 +185,11 @@ export interface SandboxFaultState {
               type="button"
               (click)="closeSandbox($event)"
               class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-rose-600/80 border border-slate-700 transition-colors"
-              aria-label="Close Sandbox"
+              [appTooltip]="'sandbox.closeSandboxAria' | translate"
+              [attr.aria-label]="'sandbox.closeSandboxAria' | translate"
             >
               <svg lucideX class="w-4 h-4"></svg>
-              <span class="hidden sm:inline">Exit</span>
+              <span class="hidden sm:inline">{{ 'sandbox.exitBtn' | translate }}</span>
             </button>
           </div>
         </header>
@@ -201,7 +220,7 @@ export interface SandboxFaultState {
                 </div>
 
                 <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                  <span>Engine: Official Luanti Container</span>
+                  <span>{{ 'sandbox.engineLabel' | translate }}</span>
                   <span>{{ loadingProgress() }}%</span>
                 </div>
               </div>
@@ -224,7 +243,7 @@ export interface SandboxFaultState {
                   </div>
                   <div>
                     <span class="inline-block px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 mb-1">
-                      {{ fault.code }} • Sandbox Guard
+                      {{ fault.code }} • {{ 'sandbox.guardBadgeSuffix' | translate }}
                     </span>
                     <h4 class="text-base font-bold text-white">{{ fault.title }}</h4>
                     <p class="text-xs text-slate-300 mt-1 leading-relaxed">{{ fault.message }}</p>
@@ -244,7 +263,7 @@ export interface SandboxFaultState {
                     class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 transition-colors"
                   >
                     <svg lucideRefreshCw class="w-3.5 h-3.5"></svg>
-                    Retry Connection
+                    {{ 'sandbox.retryConnectionBtn' | translate }}
                   </button>
                   <button
                     type="button"
@@ -252,7 +271,7 @@ export interface SandboxFaultState {
                     class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 transition-colors"
                   >
                     <svg lucideDownload class="w-3.5 h-3.5"></svg>
-                    Download for Native Luanti
+                    {{ 'sandbox.downloadForNativeBtn' | translate }}
                   </button>
                 </div>
               </div>
@@ -263,11 +282,13 @@ export interface SandboxFaultState {
           @if (iframeVisible()) {
             <iframe
               #sandboxIframe
-              allow="pointer-lock; fullscreen; autoplay; clipboard-read; clipboard-write"
+              sandbox="allow-scripts allow-same-origin allow-pointer-lock"
+              referrerpolicy="no-referrer"
+              allow="pointer-lock; fullscreen; autoplay"
               class="absolute inset-0 w-full h-full border-0 transition-opacity duration-200"
               [class.opacity-0]="status() !== 'running'"
               [class.pointer-events-none]="status() !== 'running'"
-              title="Isolated Luanti Container Session"
+              [attr.title]="'sandbox.iframeTitle' | translate"
             ></iframe>
           }
         </div>
@@ -277,16 +298,16 @@ export interface SandboxFaultState {
           class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-slate-900 border-t border-slate-800 text-xs"
         >
           <div class="flex flex-wrap items-center gap-1.5">
-            <span class="text-slate-400 font-semibold mr-1">Luanti Controls:</span>
+            <span class="text-slate-400 font-semibold mr-1">{{ 'sandbox.controlsLabel' | translate }}</span>
             @if (!isTouchDevice()) {
               <button
                 type="button"
                 data-testid="sandbox-mouse-lock-btn"
                 (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_MOUSE_LOCK')"
                 class="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-200 font-semibold transition-colors"
-                title="Toggle 3D Mouse Lock / Unlock (Shortcut: Shift+Esc)"
+                [appTooltip]="'sandbox.mouseLockTooltip' | translate"
               >
-                🔒 Lock / Unlock Mouse (Shift+Esc)
+                {{ 'sandbox.mouseLockBtn' | translate }}
               </button>
             }
 
@@ -294,41 +315,45 @@ export interface SandboxFaultState {
               type="button"
               (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_INVENTORY')"
               class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 font-semibold transition-colors"
-              title="Open Creative Inventory (I) to browse blocks, vehicles & mobs"
+              [appTooltip]="'sandbox.inventoryTooltip' | translate"
             >
-              🎒 Creative Inventory (I)
+              {{ 'sandbox.inventoryBtn' | translate }}
             </button>
 
             <button
               type="button"
               (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_FLY')"
               class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+              [appTooltip]="'sandbox.flyTooltip' | translate"
             >
-              🪽 Fly (K)
+              {{ 'sandbox.flyBtn' | translate }}
             </button>
 
             <button
               type="button"
               (click)="$event.stopPropagation(); sendKeyCommand('TOGGLE_FAST')"
               class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+              [appTooltip]="'sandbox.fastTooltip' | translate"
             >
-              ⚡ Fast (J)
+              {{ 'sandbox.fastBtn' | translate }}
             </button>
 
             <button
               type="button"
               (click)="$event.stopPropagation(); sendKeyCommand('ESCAPE')"
               class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+              [appTooltip]="'sandbox.menuTooltip' | translate"
             >
-              ⏸️ Menu (Esc)
+              {{ 'sandbox.menuBtn' | translate }}
             </button>
 
             <button
               type="button"
               (click)="$event.stopPropagation(); retryBoot()"
               class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+              [appTooltip]="'sandbox.restartWorldTooltip' | translate"
             >
-              🔄 Restart World
+              {{ 'sandbox.restartWorldBtn' | translate }}
             </button>
           </div>
 
@@ -339,7 +364,7 @@ export interface SandboxFaultState {
               class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition-colors shadow-sm"
             >
               <svg lucideDownload class="w-3.5 h-3.5"></svg>
-              <span>Download Package</span>
+              <span>{{ 'sandbox.downloadPackageBtn' | translate }}</span>
             </button>
           </div>
         </footer>
@@ -368,6 +393,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   @ViewChild('modalContainer') modalContainerRef?: ElementRef<HTMLElement>;
 
   private readonly memoryGuard = inject(SandboxMemoryGuardService);
+  private readonly i18n = inject(TranslationService);
 
   readonly isMaximized = signal(false);
   readonly isTouchDevice = signal<boolean>(this.detectTouchDevice());
@@ -375,9 +401,10 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   readonly status = signal<'loading' | 'running' | 'fault'>('loading');
   readonly iframeVisible = signal(true);
   readonly activeStreamUrl = signal<string>('');
+  readonly activeStreamOrigin = signal<string>('');
 
-  readonly loadingStepLabel = signal('Resolving Package & Dependency Closure...');
-  readonly loadingSubLabel = signal('Checking monthly quota & archive limits');
+  readonly loadingStepLabel = signal<string>(this.i18n.t('sandbox.resolvingClosureTitle'));
+  readonly loadingSubLabel = signal<string>(this.i18n.t('sandbox.checkingQuotaSubtitle'));
   readonly loadingProgress = signal(15);
 
   readonly currentMemoryMb = signal(180);
@@ -402,6 +429,14 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
   private abortController: AbortController | null = null;
 
   private readonly boundMessageListener = (event: MessageEvent) => {
+    const expectedOrigin = this.activeStreamOrigin();
+    if (!expectedOrigin || event.origin !== expectedOrigin) {
+      return;
+    }
+    const iframeWin = this.sandboxIframeRef?.nativeElement?.contentWindow;
+    if (event.source && iframeWin && event.source !== iframeWin) {
+      return;
+    }
     if (event.data?.source === 'luanti-sandbox-container') {
       if (event.data?.type === 'SANDBOX_STREAM_CONNECTED') {
         this.status.set('running');
@@ -457,8 +492,8 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     this.faultState.set(null);
     this.iframeVisible.set(true);
     this.loadingProgress.set(20);
-    this.loadingStepLabel.set('Resolving Package & Dependency Closure...');
-    this.loadingSubLabel.set('Verifying archive size & monthly container quota...');
+    this.loadingStepLabel.set(this.i18n.t('sandbox.resolvingClosureTitle'));
+    this.loadingSubLabel.set(this.i18n.t('sandbox.verifyingArchiveSubtitle'));
 
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
@@ -476,7 +511,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
       if (manifest.quotaExhausted || this.memoryGuard.isQuotaExhausted()) {
         throw new SandboxMemoryGuardError(
           'SANDBOX_QUOTA_EXHAUSTED',
-          'The monthly Cloudflare Container quota has reached its 90% safety limit and will automatically reset on the 2nd of next month.'
+          this.i18n.t('sandbox.faultQuotaExhaustedMessage')
         );
       }
 
@@ -486,10 +521,13 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
       }
 
       this.loadingProgress.set(55);
-      this.loadingStepLabel.set('Booting Official Luanti Container...');
+      this.loadingStepLabel.set(this.i18n.t('sandbox.bootingContainerTitle'));
       const gameLabel = manifest.targetGame?.title || '/worlds/sandbox/worldmods';
       this.loadingSubLabel.set(
-        `Mounting ${manifest.bundles.length} package bundle(s) into ${gameLabel}...`
+        this.i18n.t('sandbox.mountingBundlesSubtitle', {
+          count: manifest.bundles.length,
+          target: gameLabel
+        })
       );
 
       const isTouchDevice = this.detectTouchDevice();
@@ -521,10 +559,10 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
       if (!bootRes.ok || bootData?.ok === false) {
         this.triggerContainedFault({
           code: String(bootData?.code || 'SANDBOX_CONTAINER_UNAVAILABLE'),
-          title: 'Luanti Sandbox Container Not Running',
+          title: this.i18n.t('sandbox.faultContainerNotRunningTitle'),
           message:
             bootData?.message ||
-            'Start the local Luanti Docker container to test packages in-browser.',
+            this.i18n.t('sandbox.faultStartContainerHint'),
           detail: 'npm run sandbox:docker:up'
         });
         return;
@@ -536,19 +574,30 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
         Array.isArray(bootData.session?.loadedMods) ? bootData.session.loadedMods.length : manifest.bundles.length
       );
 
-      const streamUrl = String(bootData.streamUrl || 'http://localhost:6080/sandbox.html');
+      const rawStreamUrl = String(bootData.streamUrl || 'http://localhost:6080/sandbox.html');
       const touchParam = isTouchDevice ? '&touch=1' : '';
-      const cacheBustedUrl = `${streamUrl}${streamUrl.includes('?') ? '&' : '?'}t=${Date.now()}${touchParam}`;
-      this.activeStreamUrl.set(cacheBustedUrl);
+      const candidateStreamUrl = `${rawStreamUrl}${rawStreamUrl.includes('?') ? '&' : '?'}t=${Date.now()}${touchParam}`;
+      const sanitizedStream = this.memoryGuard.sanitizeSandboxStreamUrl(candidateStreamUrl);
+      if (!sanitizedStream) {
+        this.triggerContainedFault({
+          code: 'SANDBOX_UNTRUSTED_STREAM_URL',
+          title: this.i18n.t('sandbox.faultUnsafeStreamTitle'),
+          message: this.i18n.t('sandbox.faultUnsafeStreamMessage')
+        });
+        return;
+      }
+
+      this.activeStreamOrigin.set(sanitizedStream.origin);
+      this.activeStreamUrl.set(sanitizedStream.safeUrl);
 
       const iframe = this.sandboxIframeRef?.nativeElement;
       if (iframe) {
-        iframe.src = cacheBustedUrl;
+        iframe.src = sanitizedStream.safeUrl;
       }
 
       this.loadingProgress.set(95);
-      this.loadingStepLabel.set('Connecting to Luanti Display Stream...');
-      this.loadingSubLabel.set('Press I inside the game to open the Creative Inventory');
+      this.loadingStepLabel.set(this.i18n.t('sandbox.connectingStreamTitle'));
+      this.loadingSubLabel.set(this.i18n.t('sandbox.inventoryHintSubtitle'));
 
       setTimeout(() => {
         if (this.status() === 'loading') {
@@ -708,7 +757,7 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     if (err instanceof SandboxMemoryGuardError) {
       this.triggerContainedFault({
         code: err.code,
-        title: 'Blocked by Pre-Flight Sandbox Guard',
+        title: this.i18n.t('sandbox.faultGuardBlockedTitle'),
         message: err.message
       });
       return;
@@ -716,8 +765,8 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
 
     this.triggerContainedFault({
       code: 'SANDBOX_CONTAINER_UNAVAILABLE',
-      title: 'Unable to Connect to Luanti Sandbox Container',
-      message: err?.message || 'Start the local Luanti Docker container to test packages in-browser.',
+      title: this.i18n.t('sandbox.faultUnableToConnectTitle'),
+      message: err?.message || this.i18n.t('sandbox.faultStartContainerHint'),
       detail: 'npm run sandbox:docker:up'
     });
   }
@@ -732,15 +781,18 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     command: 'TOGGLE_MOUSE_LOCK' | 'TOGGLE_INVENTORY' | 'TOGGLE_FLY' | 'TOGGLE_FAST' | 'ESCAPE'
   ): void {
     if (this.status() !== 'running') return;
-    try {
-      const iframe = this.sandboxIframeRef?.nativeElement;
-      iframe?.focus();
-      iframe?.contentWindow?.postMessage(
-        { type: 'SANDBOX_HUD_COMMAND', command },
-        '*'
-      );
-    } catch {
-      // Ignore cross-origin postMessage errors
+    const targetOrigin = this.activeStreamOrigin();
+    if (targetOrigin) {
+      try {
+        const iframe = this.sandboxIframeRef?.nativeElement;
+        iframe?.focus();
+        iframe?.contentWindow?.postMessage(
+          { type: 'SANDBOX_HUD_COMMAND', command },
+          targetOrigin
+        );
+      } catch {
+        // Ignore cross-origin postMessage errors
+      }
     }
     if (command === 'TOGGLE_MOUSE_LOCK') return;
     fetch('/api/sandbox/session', {
@@ -778,9 +830,11 @@ export class PwaSandboxModalComponent implements OnInit, OnDestroy {
     }
     if (stopContainer) {
       const iframe = this.sandboxIframeRef?.nativeElement;
-      this.memoryGuard.teardownSandboxIframe(iframe);
+      const targetOrigin = this.activeStreamOrigin();
+      this.memoryGuard.teardownSandboxIframe(iframe, targetOrigin || undefined);
       this.iframeVisible.set(false);
       this.activeStreamUrl.set('');
+      this.activeStreamOrigin.set('');
       if (typeof fetch !== 'undefined') {
         fetch('/api/sandbox/session', { method: 'DELETE', keepalive: true }).catch(() => {});
       }

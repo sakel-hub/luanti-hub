@@ -1,6 +1,8 @@
+import { isUntrustedTunnelOrPrivateHost } from '../config/git-providers.config';
+
 export type PackageType = 'mod' | 'game' | 'txp' | 'modpack';
 export type PackageSource = 'official' | 'git' | 'mirror';
-export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'contentdb' | 'forums' | 'custom';
+export type GitProvider = 'codeberg' | 'mesehub' | 'gitlab' | 'github' | 'bitbucket' | 'contentdb' | 'forums' | 'custom';
 export type SortOption = 'downloads' | 'score' | 'created' | 'updated' | 'title';
 
 export interface ContentDbTag {
@@ -186,6 +188,7 @@ export interface LuantiPackage {
   moderation_reason?: string;
   _searchBlob?: string; // Pre-computed lowercase search string for O(1) filtering
   _promo?: HeroPromotion; // Attached when synthetic Hero Carousel slide represents an active promotion
+  _unhydratedSeed?: boolean; // True on synthetic 0ms route placeholders before catalog/API hydration
 }
 
 export interface PackageRelease {
@@ -337,6 +340,7 @@ export interface GitAuditReport {
   valid: boolean;
   auditToken?: string;
   ownershipVerified?: boolean;
+  pendingAdminClaim?: boolean;
   requiredProvider?: GitProvider;
   repoOwner?: string;
   configFound: string | null;
@@ -486,11 +490,17 @@ function decodeHtmlAndXmlEntities(input: string): string {
 
 function resolveBlogAssetUrl(rawUrl?: string | null): string | null {
   const trimmed = String(rawUrl || '').trim();
-  if (!trimmed) return null;
-  if (/^(javascript|data|vbscript):/i.test(trimmed)) return null;
+  if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+  if (/^(javascript|data|vbscript|blob|file):/i.test(trimmed)) return null;
   try {
     const resolved = new URL(trimmed, 'https://blog.luanti.org');
-    if (resolved.protocol === 'https:' || resolved.protocol === 'http:') {
+    if (
+      (resolved.protocol === 'https:' || resolved.protocol === 'http:') &&
+      !isUntrustedTunnelOrPrivateHost(resolved.hostname)
+    ) {
+      if (resolved.protocol === 'http:') {
+        resolved.protocol = 'https:';
+      }
       return resolved.toString();
     }
   } catch {
@@ -541,22 +551,29 @@ export function sanitizeAndFormatBlogHtml(rawHtml?: string | null, heroImageUrl?
     html = decodeHtmlAndXmlEntities(html);
   }
 
-  // Strip dangerous elements and inline event handlers
+  // Strip dangerous elements, embedded active content, SVG/MathML namespaces, and inline event handlers
   html = html
-    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base)\b[^>]*\/?>/gi, '')
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base|svg|math|video|audio|source|track|template|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(script|style|iframe|object|embed|applet|form|input|button|textarea|select|meta|link|base|svg|math|video|audio|source|track|template|noscript)\b[^>]*\/?>/gi, '')
+    .replace(/(?:[\s/"']+)on[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
 
-  // Rewrite relative src/poster URLs on media elements and add lazy loading to images
+  // Rewrite relative src URLs on images to verified HTTPS URLs (dropping unsafe or untrusted image tags)
   html = html.replace(/<img\b([^>]*)>/gi, (_full, attrs: string) => {
+    let validSrc = false;
     let updatedAttrs = attrs.replace(
       /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
-      (srcFull, d, s, u) => {
+      (_srcFull, d, s, u) => {
         const rawSrc = d ?? s ?? u ?? '';
         const resolved = resolveBlogAssetUrl(decodeHtmlAndXmlEntities(rawSrc));
-        return resolved ? `src="${resolved}"` : srcFull;
+        if (!resolved) return '';
+        validSrc = true;
+        return `src="${resolved}"`;
       }
     );
+    if (!validSrc) {
+      return '';
+    }
+    updatedAttrs = updatedAttrs.replace(/\bsrcset\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
     if (!/\bloading\s*=/i.test(updatedAttrs)) {
       updatedAttrs += ' loading="lazy" decoding="async"';
     }
@@ -641,7 +658,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
       const imageUrl =
         resolveBlogAssetUrl(first.image || first.banner_image || attachmentImg) ||
         extractFirstImageFromHtml(rawHtml) ||
-        '/banners/luanti-5-18-0.png';
+        '/screenshot-desktop.png';
       const contentHtml = sanitizeAndFormatBlogHtml(rawHtml, imageUrl);
       const pubTime = Date.parse(String(first.date_published || first.date_modified || ''));
       const publishedAt = Number.isFinite(pubTime) && pubTime > 0
@@ -695,7 +712,7 @@ export function parseLuantiBlogFeed(rawText: string): LuantiBlogPost | null {
     itemXml.match(/<enclosure\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i) ||
     itemXml.match(/<media:content\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i);
   const enclosureUrl = enclosureMatch?.[1] ? resolveBlogAssetUrl(decodeHtmlAndXmlEntities(enclosureMatch[1])) : null;
-  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/banners/luanti-5-18-0.png';
+  const imageUrl = enclosureUrl || extractFirstImageFromHtml(rawDesc) || '/screenshot-desktop.png';
 
   const summary =
     extractCleanBlogSummary(rawDesc) ||
@@ -736,7 +753,11 @@ export function enrichLuantiBlogPostFromArticleHtml(
   }
 
   let bestImageUrl = post.image_url;
-  const isFallbackImg = !bestImageUrl || bestImageUrl === '/banners/luanti-5-18-0.png' || bestImageUrl === '/promo.png';
+  const isFallbackImg =
+    !bestImageUrl ||
+    bestImageUrl === '/screenshot-desktop.png' ||
+    bestImageUrl === '/promo.png' ||
+    bestImageUrl.includes('luanti-5-18-0');
   if (isFallbackImg) {
     const heroBgMatch = articlePageHtml.match(/class=["'][^"']*\bhero-image\b[^"']*["'][^>]*style=["'][^"']*url\((?:['"]?)([^'")]+)(?:['"]?)\)/i);
     const jsonLdImgMatch = articlePageHtml.match(/"@type"\s*:\s*"BlogPosting"[\s\S]*?"image"\s*:\s*"([^"]+)"/i);

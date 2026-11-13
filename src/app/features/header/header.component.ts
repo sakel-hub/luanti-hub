@@ -129,9 +129,9 @@ import {
             (click)="onHomeClick($event)"
             class="flex items-center gap-2 group focus:outline-none focus:ring-2 focus:ring-sky-500 rounded-lg p-1 flex-shrink-0 cursor-pointer no-underline">
             <img src="/logo.svg" alt="Luanti Hub" width="32" height="32" class="w-7 h-7 sm:w-8 sm:h-8 rounded-xl shadow-md group-hover:scale-105 transition-transform flex-shrink-0" />
-            <h1 class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap m-0 inline-block">
+            <span class="text-sm sm:text-lg font-black tracking-tight text-white whitespace-nowrap m-0 inline-block">
               Luanti<span class="text-sky-400">Hub</span>
-            </h1>
+            </span>
           </a>
 
           <!-- Category Nav Tabs (Wide Desktop 2xl+, moved to Row 2 when WCO titlebar overlay is active) -->

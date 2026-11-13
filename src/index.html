@@ -2,11 +2,11 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
-    <title>Luanti — Mods, Games &amp; Texture Packs | Luanti Hub (LuantiHub)</title>
+    <title>Luanti Hub (LuantiHub) — Mods, Games &amp; Texture Packs for Luanti</title>
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="description" content="Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub). Direct .zip downloads, Git repository packages, and 1-click in-game ContentDB setup." />
-    <meta name="keywords" content="luanti, luanti mods, luanti games, luanti texture packs, luanti hub, luantihub, minetest, minetest mods, contentdb, voxel engine, open source voxel game, lua mods, SaKeL, everness, x_farming, x_bows, x_enchanting, x_mobs, nodecore, mesecons, voxelibre, mineclonia" />
+    <meta name="description" content="Luanti Hub (LuantiHub) is the open package registry and content hub for Luanti (formerly Minetest). Discover and download thousands of games, mods, and texture packs via .zip, Git, or 1-click in-game setup." />
+    <meta name="keywords" content="luanti hub, luantihub, luanti, luanti mods, luanti games, luanti texture packs, minetest mods, contentdb" />
     <meta name="author" content="LuantiHub Community" />
     <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
     <meta name="theme-color" content="#020617" />
@@ -29,7 +29,7 @@
     <!-- Canonical & Internationalization (hreflang) -->
     <link rel="canonical" id="canonical-link" href="https://luantihub.org/" />
     <link rel="alternate" hreflang="x-default" href="https://luantihub.org/" />
-    <link rel="alternate" hreflang="en" href="https://luantihub.org/?lang=en" />
+    <link rel="alternate" hreflang="en" href="https://luantihub.org/" />
     <link rel="alternate" hreflang="sk" href="https://luantihub.org/?lang=sk" />
     <link rel="alternate" hreflang="de" href="https://luantihub.org/?lang=de" />
     <link rel="alternate" hreflang="fr" href="https://luantihub.org/?lang=fr" />
@@ -38,11 +38,12 @@
     <link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml" />
 
     <!-- Preconnect for High-Speed Asset, API & Hover Video Loading (Core Web Vitals LCP Improvement) -->
-    <link rel="preload" as="image" href="/banners/luanti-5-18-0.png" fetchpriority="high" />
     <link rel="preconnect" href="https://content.luanti.org" crossorigin />
+    <link rel="preconnect" href="https://cdn.content.luanti.org" crossorigin />
     <link rel="preconnect" href="https://www.youtube-nocookie.com" crossorigin />
     <link rel="preconnect" href="https://i.ytimg.com" crossorigin />
     <link rel="dns-prefetch" href="https://content.luanti.org" />
+    <link rel="dns-prefetch" href="https://cdn.content.luanti.org" />
     <link rel="dns-prefetch" href="https://contentdb.milcho.org" />
     <link rel="dns-prefetch" href="https://www.youtube-nocookie.com" />
     <link rel="dns-prefetch" href="https://i.ytimg.com" />
@@ -60,13 +61,14 @@
     <!-- OpenGraph / Facebook / Discord -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Luanti Hub" />
-    <meta property="og:title" content="Luanti — Mods, Games &amp; Texture Packs | Luanti Hub (LuantiHub)" />
-    <meta property="og:description" content="Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub). Direct .zip downloads, Git repository packages, and 1-click in-game ContentDB setup." />
+    <meta property="og:title" content="Luanti Hub (LuantiHub) — Mods, Games &amp; Texture Packs for Luanti" />
+    <meta property="og:description" content="Luanti Hub (LuantiHub) is the open package registry and content hub for Luanti (formerly Minetest). Discover and download thousands of games, mods, and texture packs via .zip, Git, or 1-click in-game setup." />
     <meta property="og:url" content="https://luantihub.org/" />
-    <meta property="og:image" content="https://luantihub.org/icons/icon-512x512.png" />
+    <meta property="og:image" content="https://luantihub.org/screenshot-desktop.png" />
     <meta property="og:image:type" content="image/png" />
-    <meta property="og:image:width" content="512" />
-    <meta property="og:image:height" content="512" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="720" />
+    <meta property="og:image:alt" content="Luanti Hub (LuantiHub) — Open-Source Mods, Games &amp; Texture Packs for Luanti" />
     <meta property="og:locale" content="en_US" />
     <meta property="og:locale:alternate" content="sk_SK" />
     <meta property="og:locale:alternate" content="de_DE" />
@@ -76,11 +78,12 @@
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Luanti — Mods, Games &amp; Texture Packs | Luanti Hub (LuantiHub)" />
-    <meta name="twitter:description" content="Discover and download thousands of open-source Luanti (formerly Minetest) games, mods, and texture packs on Luanti Hub (LuantiHub)." />
-    <meta name="twitter:image" content="https://luantihub.org/icons/icon-512x512.png" />
+    <meta name="twitter:title" content="Luanti Hub (LuantiHub) — Mods, Games &amp; Texture Packs for Luanti" />
+    <meta name="twitter:description" content="Luanti Hub (LuantiHub) is the open package registry and content hub for Luanti (formerly Minetest). Discover and download games, mods, and texture packs." />
+    <meta name="twitter:image" content="https://luantihub.org/screenshot-desktop.png" />
+    <meta name="twitter:image:alt" content="Luanti Hub (LuantiHub) — Open-Source Mods, Games &amp; Texture Packs for Luanti" />
 
-    <!-- Schema.org JSON-LD Structured Data (WebSite + SearchAction + Organization + WebApplication + DataCatalog + FAQPage) -->
+    <!-- Schema.org JSON-LD Structured Data (Site-Wide Brand & Navigation) -->
     <script type="application/ld+json" id="base-jsonld">
       {
         "@context": "https://schema.org",
@@ -90,9 +93,12 @@
             "@id": "https://luantihub.org/#website",
             "url": "https://luantihub.org/",
             "name": "Luanti Hub",
-            "alternateName": ["LuantiHub", "Luanti", "Luanti Mods & Games", "Luanti-Hub", "luantihub.org", "Minetest Package Hub"],
-            "description": "Open Package Registry, Mod Repository, and Content Hub for the Luanti (formerly Minetest) Voxel Engine.",
+            "alternateName": ["LuantiHub", "Luanti-Hub", "luantihub.org"],
+            "description": "Luanti Hub (LuantiHub) is the open package registry, mod repository, and community content hub for the Luanti (formerly Minetest) voxel engine.",
             "inLanguage": ["en", "sk", "de", "fr", "es", "ru"],
+            "publisher": {
+              "@id": "https://luantihub.org/#organization"
+            },
             "about": {
               "@type": "SoftwareApplication",
               "name": "Luanti",
@@ -117,9 +123,14 @@
             "@type": "Organization",
             "@id": "https://luantihub.org/#organization",
             "name": "Luanti Hub",
-            "alternateName": "LuantiHub",
+            "alternateName": ["LuantiHub", "luantihub.org"],
             "url": "https://luantihub.org/",
-            "logo": "https://luantihub.org/icons/icon-512x512.png",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://luantihub.org/icons/icon-512x512.png",
+              "width": 512,
+              "height": 512
+            },
             "founder": {
               "@type": "Person",
               "@id": "https://luantihub.org/author/SaKeL#person",
@@ -143,6 +154,7 @@
             "@type": "WebApplication",
             "@id": "https://luantihub.org/#webapp",
             "name": "Luanti Hub",
+            "alternateName": "LuantiHub",
             "url": "https://luantihub.org/",
             "applicationCategory": "GameApplication",
             "operatingSystem": "Windows, Linux, macOS, Android, iOS",
@@ -161,43 +173,6 @@
               "price": "0",
               "priceCurrency": "USD"
             }
-          },
-          {
-            "@type": "DataCatalog",
-            "@id": "https://luantihub.org/#catalog",
-            "name": "Luanti Mods, Games & Texture Packs Catalog",
-            "description": "Comprehensive index of open-source mods, standalone voxel games, texture packs, and modpacks for the Luanti (Minetest) voxel engine.",
-            "url": "https://luantihub.org/"
-          },
-          {
-            "@type": "FAQPage",
-            "@id": "https://luantihub.org/#faq",
-            "mainEntity": [
-              {
-                "@type": "Question",
-                "name": "What is Luanti (formerly Minetest)?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Luanti (formerly known as Minetest) is a free, open-source C++ voxel game engine available on Windows, Linux, macOS, Android, and iOS. Instead of being a single game, Luanti allows players to install complete standalone voxel games, mods, and texture packs built with its fast Lua scripting API."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "How do I install Luanti mods, games, and texture packs from Luanti Hub?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "You can either download any package as a ready-to-drop .zip archive directly from Luanti Hub and extract it into your Luanti mods, games, or textures folder, or configure contentdb_url = https://luantihub.org in your Luanti client settings (luanti.conf) to browse and install packages with 1 click inside the in-game Content tab."
-                }
-              },
-              {
-                "@type": "Question",
-                "name": "How does Luanti Hub work with official Luanti ContentDB and Git repositories?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Luanti Hub synchronizes the official Luanti ContentDB catalog with automatic high-availability mirror failover and combines it with decentralized community Git repositories from GitHub, Codeberg, Mesehub, and GitLab verified with automated mod.conf and Luacheck checks."
-                }
-              }
-            ]
           },
           {
             "@type": "ItemList",
@@ -259,6 +234,59 @@
                 "name": "Terms & Privacy",
                 "description": "Official Luanti trademark disclaimer, SPDX open-source license enforcement, and DMCA / EU DSA Safe Harbor policy.",
                 "url": "https://luantihub.org/legal"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <!-- Homepage-Scoped Catalog & FAQ Structured Data (stripped on subpages by Edge SSR & SeoService) -->
+    <script type="application/ld+json" id="home-faq-jsonld">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "DataCatalog",
+            "@id": "https://luantihub.org/#catalog",
+            "name": "Luanti Hub — Luanti Mods, Games & Texture Packs Catalog",
+            "description": "Comprehensive index of open-source mods, standalone voxel games, texture packs, and modpacks for the Luanti (Minetest) voxel engine.",
+            "url": "https://luantihub.org/"
+          },
+          {
+            "@type": "FAQPage",
+            "@id": "https://luantihub.org/#faq",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "What is Luanti Hub (LuantiHub)?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Luanti Hub (LuantiHub, at luantihub.org) is an open-source package registry, ContentDB mirror, and community discovery platform for the Luanti (formerly Minetest) voxel engine, offering direct .zip downloads, automated Git repository packaging, and 1-click in-game installation."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What is Luanti (formerly Minetest)?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Luanti (formerly known as Minetest) is a free, open-source C++ voxel game engine available on Windows, Linux, macOS, Android, and iOS. Instead of being a single game, Luanti allows players to install complete standalone voxel games, mods, and texture packs built with its fast Lua scripting API."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I install Luanti mods, games, and texture packs from Luanti Hub?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "You can either download any package as a ready-to-drop .zip archive directly from Luanti Hub and extract it into your Luanti mods, games, or textures folder, or configure contentdb_url = https://luantihub.org in your Luanti client settings (luanti.conf) to browse and install packages with 1 click inside the in-game Content tab."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How does Luanti Hub work with official Luanti ContentDB and Git repositories?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Luanti Hub synchronizes the official Luanti ContentDB catalog with automatic high-availability mirror failover and combines it with decentralized community Git repositories from GitHub, Codeberg, Mesehub, and GitLab verified with automated mod.conf and Luacheck checks."
+                }
               }
             ]
           }

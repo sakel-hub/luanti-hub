@@ -26,7 +26,8 @@ export interface SandboxQuotaClientState {
 export type SandboxGuardErrorCode =
   | 'SANDBOX_ARCHIVE_TOO_LARGE'
   | 'SANDBOX_QUOTA_EXHAUSTED'
-  | 'SANDBOX_CONTAINER_UNAVAILABLE';
+  | 'SANDBOX_CONTAINER_UNAVAILABLE'
+  | 'SANDBOX_UNTRUSTED_STREAM_URL';
 
 export class SandboxMemoryGuardError extends Error {
   constructor(
@@ -390,9 +391,56 @@ export class SandboxMemoryGuardService {
   }
 
   /**
+   * Validates and normalizes a sandbox container display stream URL before mounting in an iframe.
+   * Blocks javascript:/data:/blob: URIs, URL credentials, ephemeral tunnels, and private SSRF hosts,
+   * while permitting http://localhost:<port> / http://127.0.0.1:<port> strictly during local dev.
+   */
+  sanitizeSandboxStreamUrl(
+    rawUrl: unknown,
+    currentHostname?: string
+  ): { safeUrl: string; origin: string } | null {
+    if (!rawUrl || typeof rawUrl !== 'string') return null;
+    const trimmed = rawUrl.trim();
+    if (!trimmed || /[\s\u0000-\u001f\u007f\\]/.test(trimmed)) return null;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return null;
+    }
+
+    if (parsed.username || parsed.password) return null;
+
+    const winHost =
+      currentHostname ??
+      (typeof window !== 'undefined' ? window.location?.hostname : '') ??
+      '';
+    const normWinHost = String(winHost).toLowerCase();
+    const isLocalBrowser = normWinHost === 'localhost' || normWinHost === '127.0.0.1';
+    const streamHost = parsed.hostname.toLowerCase();
+
+    if (
+      isLocalBrowser &&
+      (streamHost === 'localhost' || streamHost === '127.0.0.1') &&
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+    ) {
+      return { safeUrl: parsed.toString(), origin: parsed.origin };
+    }
+
+    if (parsed.protocol !== 'https:') return null;
+    if (isUntrustedTunnelOrPrivateHost(parsed.toString())) return null;
+
+    return { safeUrl: parsed.toString(), origin: parsed.origin };
+  }
+
+  /**
    * Deterministic Zero-Leak Teardown of the Sandbox Iframe.
    */
-  teardownSandboxIframe(iframe: HTMLIFrameElement | null | undefined): void {
+  teardownSandboxIframe(
+    iframe: HTMLIFrameElement | null | undefined,
+    targetOrigin?: string
+  ): void {
     if (typeof document !== 'undefined' && document.pointerLockElement) {
       try {
         document.exitPointerLock();
@@ -411,10 +459,26 @@ export class SandboxMemoryGuardService {
 
     if (!iframe) return;
 
-    try {
-      iframe.contentWindow?.postMessage({ type: 'SANDBOX_DISPOSE' }, '*');
-    } catch {
-      // Ignore
+    let resolvedOrigin = '';
+    for (const candidate of [targetOrigin, iframe.src]) {
+      if (!candidate || typeof candidate !== 'string') continue;
+      try {
+        const u = new URL(candidate);
+        if (u.protocol === 'http:' || u.protocol === 'https:') {
+          resolvedOrigin = u.origin;
+          break;
+        }
+      } catch {
+        // Ignore malformed URL
+      }
+    }
+
+    if (resolvedOrigin) {
+      try {
+        iframe.contentWindow?.postMessage({ type: 'SANDBOX_DISPOSE' }, resolvedOrigin);
+      } catch {
+        // Ignore
+      }
     }
 
     try {

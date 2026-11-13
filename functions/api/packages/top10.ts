@@ -13,17 +13,41 @@ import {
   formatContentDbCdnUrl,
   upgradeContentDbThumbnailUrl,
   selectSharpPackageBanner,
-  toProxiedGitImageIfNeeded
+  toProxiedGitImageIfNeeded,
+  readEdgeCacheJson,
+  writeEdgeCacheJson
 } from '../lib/upstream';
+import { shouldHonorAuthenticatedNoCache } from '../auth/lib/session';
 
 interface Env {
   DB?: any;
+  SESSION_SECRET?: string;
 }
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const { request, env } = context;
-  const url = new URL(request.url);
+  const url = new URL(request.url, 'https://luantihub.local');
   const timeframe = url.searchParams.get('timeframe') === 'today' ? 'today' : 'week';
+  const requestedNoCache =
+    url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';
+  const noCache = requestedNoCache
+    ? await shouldHonorAuthenticatedNoCache(request, env.SESSION_SECRET, `pkg-top10:${timeframe}`)
+    : false;
+  const edgeCacheKey = `https://edge-cache.luantihub.local/pkg-top10-v1/${timeframe}`;
+
+  if (!noCache) {
+    const cachedTop10 = await readEdgeCacheJson<any[]>(edgeCacheKey);
+    if (Array.isArray(cachedTop10)) {
+      return new Response(JSON.stringify(cachedTop10), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=60',
+          'X-LuantiHub-Cache': 'HIT-EDGE'
+        }
+      });
+    }
+  }
 
   const dateCondition = timeframe === 'today'
     ? "d.download_date = DATE('now')"
@@ -351,6 +375,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     } catch {
       // Keep existing top10List
     }
+  }
+
+  if (!noCache && top10List.length > 0) {
+    await writeEdgeCacheJson(edgeCacheKey, top10List, 600);
   }
 
   return new Response(JSON.stringify(top10List), {

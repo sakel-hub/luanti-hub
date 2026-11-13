@@ -30,6 +30,11 @@ export class SettingsService {
   readonly isAuthenticatedSession = signal<boolean>(false);
   readonly edgeApiAvailable = signal<boolean>(false);
   readonly clientId = signal<string>('anon_default');
+  private favoriteOpSeq = 0;
+  private readonly pendingLocalFavoriteOps = new Map<
+    string,
+    { action: 'add' | 'remove'; id: string; seq: number }
+  >();
 
   constructor() {
     this.loadSettings();
@@ -226,15 +231,26 @@ export class SettingsService {
       return [...favs, packageId];
     });
 
-    // Track favorite toggle on the server (supports both authenticated and anonymous client IDs)
-    this.syncFavoriteAction(added ? 'add' : 'remove', packageId);
+    if (this.isAuthenticatedSession()) {
+      const seq = ++this.favoriteOpSeq;
+      this.pendingLocalFavoriteOps.set(lowerTarget, { action: added ? 'add' : 'remove', id: packageId, seq });
+      this.syncFavoriteAction(added ? 'add' : 'remove', packageId, seq);
+    }
     return added;
   }
 
   removeFavorite(packageId: string): void {
     const lowerTarget = packageId.toLowerCase();
     this.favorites.update(favs => favs.filter(id => id.toLowerCase() !== lowerTarget));
-    this.syncFavoriteAction('remove', packageId);
+    if (this.isAuthenticatedSession()) {
+      const seq = ++this.favoriteOpSeq;
+      this.pendingLocalFavoriteOps.set(lowerTarget, { action: 'remove', id: packageId, seq });
+      this.syncFavoriteAction('remove', packageId, seq);
+    }
+  }
+
+  clearPendingFavoriteOps(): void {
+    this.pendingLocalFavoriteOps.clear();
   }
 
   isFavorite(packageId: string): boolean {
@@ -243,21 +259,34 @@ export class SettingsService {
     return this.favorites().some(id => id.toLowerCase() === lowerTarget);
   }
 
+  private reconcileWithPendingLocalFavoriteOps(candidates: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const id of candidates) {
+      if (typeof id !== 'string' || !id.includes('/')) continue;
+      const lower = id.toLowerCase();
+      if (this.pendingLocalFavoriteOps.get(lower)?.action === 'remove') continue;
+      if (!seen.has(lower)) {
+        seen.add(lower);
+        out.push(id);
+      }
+    }
+    for (const [lower, op] of this.pendingLocalFavoriteOps) {
+      if (op.action === 'add' && !seen.has(lower)) {
+        seen.add(lower);
+        out.push(op.id);
+      }
+    }
+    return out;
+  }
+
   async mergeServerFavorites(serverFavs?: string[]): Promise<void> {
     const localFavs = this.favorites();
     const validServerFavs = (serverFavs || []).filter(id => typeof id === 'string' && id.includes('/'));
     const serverLowerSet = new Set(validServerFavs.map(id => id.toLowerCase()));
     const hasUnsyncedLocal = localFavs.some(id => !serverLowerSet.has(id.toLowerCase()));
 
-    const seen = new Set<string>();
-    const combined: string[] = [];
-    for (const id of [...localFavs, ...validServerFavs]) {
-      const lower = id.toLowerCase();
-      if (!seen.has(lower)) {
-        seen.add(lower);
-        combined.push(id);
-      }
-    }
+    const combined = this.reconcileWithPendingLocalFavoriteOps([...localFavs, ...validServerFavs]);
     this.favorites.set(combined);
 
     // Only call POST /api/auth/favorites when the browser actually has unsynced local favorites not yet on the server
@@ -278,7 +307,10 @@ export class SettingsService {
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
           const data = await res.json();
           if (Array.isArray(data.favorites) && data.favorites.length > 0) {
-            this.favorites.set(data.favorites.filter((id: any) => typeof id === 'string' && id.includes('/')));
+            const serverSynced = data.favorites.filter((id: any) => typeof id === 'string' && id.includes('/'));
+            this.favorites.set(
+              this.reconcileWithPendingLocalFavoriteOps([...this.favorites(), ...serverSynced])
+            );
           }
         }
       } catch {
@@ -287,8 +319,18 @@ export class SettingsService {
     }
   }
 
-  private syncFavoriteAction(action: 'add' | 'remove', packageId: string): void {
-    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+  private clearPendingFavoriteOpIfSeq(lowerTarget: string, seq: number): void {
+    if (this.pendingLocalFavoriteOps.get(lowerTarget)?.seq === seq) {
+      this.pendingLocalFavoriteOps.delete(lowerTarget);
+    }
+  }
+
+  private syncFavoriteAction(action: 'add' | 'remove', packageId: string, seq: number): void {
+    const lowerTarget = packageId.toLowerCase();
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      this.clearPendingFavoriteOpIfSeq(lowerTarget, seq);
+      return;
+    }
     const headers = {
       'Content-Type': 'application/json',
       'X-Client-Id': this.clientId()
@@ -298,8 +340,9 @@ export class SettingsService {
       packageId,
       clientId: this.clientId()
     };
-    const outboxId = `fav:${packageId.toLowerCase()}`;
+    const outboxId = `fav:${lowerTarget}`;
     const queueFavoriteMutation = () => {
+      this.clearPendingFavoriteOpIfSeq(lowerTarget, seq);
       enqueueBackgroundSyncMutation({
         id: outboxId,
         url: '/api/auth/favorites',
@@ -314,15 +357,24 @@ export class SettingsService {
       return;
     }
 
-    if (!this.edgeApiAvailable()) return;
+    if (!this.edgeApiAvailable()) {
+      this.clearPendingFavoriteOpIfSeq(lowerTarget, seq);
+      return;
+    }
 
     fetch('/api/auth/favorites', {
       method: 'POST',
       headers,
       body: JSON.stringify(body)
-    }).catch(() => {
-      // Queue for W3C Background Sync / online replay
-      queueFavoriteMutation();
-    });
+    })
+      .then(res => {
+        if (res.ok || res.status === 400 || res.status === 401 || res.status === 403) {
+          this.clearPendingFavoriteOpIfSeq(lowerTarget, seq);
+        }
+      })
+      .catch(() => {
+        // Queue for W3C Background Sync / online replay
+        queueFavoriteMutation();
+      });
   }
 }

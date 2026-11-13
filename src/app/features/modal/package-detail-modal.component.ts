@@ -18,7 +18,7 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { DomSanitizer, SafeHtml, SafeResourceUrl } from '@angular/platform-browser';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { marked } from 'marked';
 import {
   LuantiPackage,
@@ -28,8 +28,10 @@ import {
   PackageModalFocusRequest
 } from '../../core/models/package.model';
 import {
+  buildRawDirectoryBaseUrl,
   formatContentDbCdnUrl,
   isContentDbThumbnailUrl,
+  isUntrustedTunnelOrPrivateHost,
   upgradeContentDbThumbnailUrl
 } from '../../core/config/git-providers.config';
 import {
@@ -221,16 +223,18 @@ import {
               </app-package-badges>
 
               <!-- Title -->
-              <h2 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
+              <h1 id="modal-package-title" class="text-2xl sm:text-4xl lg:text-5xl font-black text-white drop-shadow-2xl">
                 {{ packageService.getLocalizedPackageText(package).title || package.title }}
-              </h2>
+              </h1>
 
               <!-- Action Buttons Row -->
               <div class="flex items-center gap-2.5 sm:gap-3 pt-1 flex-wrap">
                 <!-- Primary Direct ZIP Download Button with File Size -->
                 <button
                   type="button"
+                  data-testid="modal-download-zip-btn"
                   (click)="onDownloadClick()"
+                  [appTooltip]="(isGitSubmittedPackage() ? 'modal.downloadSecurityTooltipGit' : 'modal.downloadSecurityTooltipContentDb') | translate"
                   class="h-10 sm:h-11 px-5 sm:px-7 rounded-xl glass-btn-primary text-white font-black text-xs sm:text-sm flex items-center gap-2 hover:scale-[1.03] transition whitespace-nowrap cursor-pointer">
                   <svg lucideDownload class="w-4 h-4 text-sky-300 flex-shrink-0"></svg>
                   <span>{{ 'modal.downloadZip' | translate }}</span>
@@ -300,8 +304,9 @@ import {
                 @if (!isPackageAuthor()) {
                   <button
                     type="button"
+                    data-testid="modal-report-package-btn"
                     (click)="toggleReportForm()"
-                    [appTooltip]="'modal.reportPackage' | translate"
+                    [appTooltip]="'modal.reportSecurityTooltip' | translate"
                     [attr.aria-label]="'modal.reportPackage' | translate"
                     [class]="isReportOpen()
                       ? 'w-10 sm:w-11 h-10 sm:h-11 rounded-full glass-icon-btn-amber-active text-amber-300 flex items-center justify-center transition hover:scale-105 cursor-pointer'
@@ -380,6 +385,11 @@ import {
                 <button type="button" (click)="isReportOpen.set(false)" class="text-slate-400 hover:text-white cursor-pointer">
                   <svg lucideX class="w-4 h-4"></svg>
                 </button>
+              </div>
+
+              <div class="p-2.5 rounded-xl bg-slate-950/60 border border-emerald-400/25 flex items-start gap-2 text-[11px] text-slate-300 leading-relaxed">
+                <svg lucideShieldCheck class="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5"></svg>
+                <span>{{ 'modal.reportConfidentialNotice' | translate }}</span>
               </div>
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -751,6 +761,8 @@ import {
                                   <iframe
                                     [src]="embedUrl"
                                     [title]="package.title + ' video'"
+                                    sandbox="allow-scripts allow-same-origin allow-presentation"
+                                    referrerpolicy="strict-origin-when-cross-origin"
                                     class="w-full h-full border-0 bg-black"
                                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                     allowfullscreen>
@@ -796,7 +808,7 @@ import {
                                   (load)="onScreenshotLoad($event, slide.url)"
                                   (error)="onScreenshotError(slide.url)"
                                   [alt]="package.title + ' screenshot ' + (idx + 1)"
-                                  [attr.loading]="idx <= mediaCarouselIndex() + 2 ? 'eager' : 'lazy'"
+                                  [attr.loading]="idx === mediaCarouselIndex() ? 'eager' : 'lazy'"
                                   decoding="async"
                                   class="w-full h-full object-cover object-center group-hover:scale-[1.02] transition-transform duration-500"
                                 />
@@ -934,6 +946,7 @@ import {
                   </div>
                 } @else if (renderedDescription(); as descHtml) {
                   <div
+                    (click)="onMarkdownContentClick($event)"
                     class="luanti-markdown text-slate-200 text-sm sm:text-base leading-relaxed space-y-3 break-words"
                     [innerHTML]="descHtml">
                   </div>
@@ -1187,6 +1200,7 @@ import {
                           </div>
                         } @else if (renderedReadme(); as readmeHtml) {
                           <div
+                            (click)="onMarkdownContentClick($event)"
                             class="luanti-markdown text-slate-200 text-sm leading-relaxed max-h-[32rem] overflow-y-auto pr-1.5 break-words"
                             [innerHTML]="readmeHtml">
                           </div>
@@ -1203,9 +1217,19 @@ import {
                 <!-- 1-Click In-Game Setup Snippet Box -->
                 <div class="p-4 rounded-2xl glass-panel space-y-3">
                   <div class="flex items-center justify-between gap-2 flex-wrap">
-                    <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
-                      {{ 'modal.registryConfig' | translate }}
-                    </span>
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">
+                        {{ 'modal.registryConfig' | translate }}
+                      </span>
+                      <button
+                        type="button"
+                        [appTooltip]="'setup.securityTooltip' | translate"
+                        [appTooltipTap]="true"
+                        [attr.aria-label]="'setup.securityBadge' | translate"
+                        class="text-emerald-400 hover:text-emerald-300 transition cursor-pointer inline-flex items-center">
+                        <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                      </button>
+                    </div>
                     <div class="flex items-center gap-3">
                       <button
                         type="button"
@@ -1479,11 +1503,12 @@ import {
                     {{ 'modal.linksTitle' | translate }}
                   </span>
                   <div class="flex flex-col gap-1.5">
-                    @if (package.donate_url) {
+                    @if (getSafeExternalHref(package.donate_url); as safeDonateUrl) {
                       <a
-                        [href]="package.donate_url"
+                        [href]="safeDonateUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeDonateUrl) }"
                         class="px-2.5 py-2 rounded-lg bg-gradient-to-r from-rose-500/20 via-amber-500/15 to-rose-500/20 border border-rose-400/40 hover:border-rose-400/70 text-rose-200 hover:text-white flex items-center justify-between text-xs font-bold transition shadow-sm cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideHeart class="w-3.5 h-3.5 fill-rose-400 text-rose-400" [style.fill]="'#fb7185'" [color]="'#fb7185'"></svg>
@@ -1493,33 +1518,37 @@ import {
                       </a>
                     }
 
-                    <a
-                      [href]="gitRepoUrl"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
-                      <span class="flex items-center gap-2">
-                        @if (hasValidGitRepo) {
-                          <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
-                          <span>{{ 'modal.viewGitRepo' | translate }}</span>
-                        } @else {
-                          <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
-                          <span>{{ 'modal.viewOnContentDb' | translate }}</span>
-                        }
-                      </span>
-                      <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
-                    </a>
+                    @if (getSafeExternalHref(gitRepoUrl); as safeRepoHref) {
+                      <a
+                        [href]="safeRepoHref"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeRepoHref) }"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          @if (hasValidGitRepo) {
+                            <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
+                            <span>{{ 'modal.viewGitRepo' | translate }}</span>
+                          } @else {
+                            <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
+                            <span>{{ 'modal.viewOnContentDb' | translate }}</span>
+                          }
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
                     @if (package.git_repo_status === 'broken_404') {
                       <div class="px-2.5 py-1.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] flex items-start gap-2 leading-snug">
                         <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400 flex-shrink-0 mt-0.5"></svg>
                         <span>404 Git repository detected and automatically reported to moderators.</span>
                       </div>
                     }
-                    @if (package.website) {
+                    @if (getSafeExternalHref(package.website); as safeWebsiteUrl) {
                       <a
-                        [href]="package.website"
+                        [href]="safeWebsiteUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeWebsiteUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideGlobe class="w-3.5 h-3.5 text-sky-400"></svg>
@@ -1528,11 +1557,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.issue_tracker) {
+                    @if (getSafeExternalHref(package.issue_tracker); as safeIssueUrl) {
                       <a
-                        [href]="package.issue_tracker"
+                        [href]="safeIssueUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeIssueUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideAlertCircle class="w-3.5 h-3.5 text-rose-400"></svg>
@@ -1541,11 +1571,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.forum_url || package.forums) {
+                    @if (getSafeExternalHref(package.forum_url || package.forums); as safeForumUrl) {
                       <a
-                        [href]="package.forum_url || package.forums"
+                        [href]="safeForumUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeForumUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideMessageSquare class="w-3.5 h-3.5 text-emerald-400"></svg>
@@ -1554,11 +1585,12 @@ import {
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
                     }
-                    @if (package.translation_url) {
+                    @if (getSafeExternalHref(package.translation_url); as safeTranslationUrl) {
                       <a
-                        [href]="package.translation_url"
+                        [href]="safeTranslationUrl"
                         target="_blank"
                         rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeTranslationUrl) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
                           <svg lucideGlobe class="w-3.5 h-3.5 text-purple-400"></svg>
@@ -2497,7 +2529,7 @@ import {
             role="dialog"
             aria-modal="true"
             [attr.aria-label]="package.title + ' enlarged screenshot'"
-            class="fixed inset-0 z-[70] bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-3 sm:p-6 select-none">
+            [class]="isLightboxZoomed() ? 'fixed inset-0 z-[70] w-screen h-screen bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-0 select-none' : 'fixed inset-0 z-[70] w-screen h-screen bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-2 sm:p-4 select-none'">
 
             <!-- Lightbox Top Controls -->
             <div
@@ -2527,20 +2559,34 @@ import {
 
             <!-- Lightbox Image Viewport -->
             <div
-              (click)="$event.stopPropagation()"
-              class="relative max-w-6xl max-h-[86vh] w-full h-full flex items-center justify-center overflow-auto">
+              #lightboxViewport
+              (mousedown)="onLightboxMouseDown($event)"
+              (mousemove)="onLightboxMouseMove($event)"
+              (mouseup)="onLightboxMouseUp()"
+              (mouseleave)="onLightboxMouseUp()"
+              (touchmove)="onLightboxTouchMove($event)"
+              (click)="onLightboxViewportClick($event)"
+              [class]="isLightboxZoomed() ? 'relative w-full h-full flex overflow-auto touch-pan-x touch-pan-y ' + (isLightboxDragging() ? 'cursor-grabbing' : 'cursor-grab') : 'relative w-full h-full flex overflow-auto'">
               <img
                 [src]="getLightboxDisplayUrl(zoomImg)"
                 [alt]="package.title + ' full resolution screenshot'"
+                draggable="false"
                 (click)="toggleLightboxZoom($event)"
-                [class]="isLightboxZoomed() ? 'max-w-none w-[165%] sm:w-[150%] h-auto object-contain cursor-zoom-out transition-transform duration-300' : 'max-w-full max-h-[84vh] object-contain rounded-xl shadow-2xl cursor-zoom-in transition-transform duration-300'"
+                [style.width]="isLightboxZoomed() ? 'max(200vw, 1600px)' : null"
+                [style.minWidth]="isLightboxZoomed() ? 'max(200vw, 1600px)' : null"
+                [style.maxWidth]="isLightboxZoomed() ? 'none' : null"
+                [style.maxHeight]="isLightboxZoomed() ? 'none' : null"
+                [class]="isLightboxZoomed() ? 'm-auto shrink-0 max-w-none w-[180vw] sm:w-[160vw] h-auto select-none ' + (isLightboxDragging() ? 'cursor-grabbing' : 'cursor-grab') : 'm-auto max-w-[96vw] max-h-[92vh] w-auto h-auto object-contain rounded-xl shadow-2xl cursor-zoom-in select-none transition-transform duration-300'"
               />
-              @if (getScreenshotCaption(zoomImg); as lbCaption) {
-                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-xs font-medium text-slate-200 max-w-[85%] truncate pointer-events-none">
-                  {{ lbCaption }}
-                </div>
-              }
             </div>
+
+            @if (getScreenshotCaption(zoomImg); as lbCaption) {
+              <div
+                (click)="$event.stopPropagation()"
+                class="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-xl bg-slate-950/85 backdrop-blur-md border border-white/15 text-xs font-medium text-slate-200 max-w-[85%] truncate pointer-events-none">
+                {{ lbCaption }}
+              </div>
+            }
 
             @if (activeScreenshots().length > 1) {
               <!-- Lightbox Prev / Next Navigation Controls -->
@@ -2765,15 +2811,22 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   // Media Carousel, Video Player & Zoom Lightbox state
   @ViewChild('mediaThumbStrip') mediaThumbStripRef?: ElementRef<HTMLDivElement>;
+  @ViewChild('lightboxViewport') lightboxViewportRef?: ElementRef<HTMLDivElement>;
   readonly mediaCarouselIndex = signal<number>(0);
   readonly isVideoPlaying = signal<boolean>(false);
   readonly lightboxImageUrl = signal<string | null>(null);
   readonly isLightboxZoomed = signal<boolean>(false);
+  readonly isLightboxDragging = signal<boolean>(false);
   readonly failedScreenshotUrls = signal<Set<string>>(new Set());
   private mediaTouchStartX = 0;
   private mediaTouchStartY = 0;
   private lightboxTouchStartX = 0;
   private lightboxTouchStartY = 0;
+  private lightboxDragStartX = 0;
+  private lightboxDragStartY = 0;
+  private lightboxDragScrollLeft = 0;
+  private lightboxDragScrollTop = 0;
+  private lightboxDragMoved = false;
 
   onScreenshotLoad(event: Event, url?: string | null): void {
     const img = event?.target as HTMLImageElement | null;
@@ -3021,24 +3074,143 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       .some(d => (d.id || `${d.author}/${d.name}`).toLowerCase() === targetId);
   });
 
-  private parseSafeMarkdown(markdownText: string): SafeHtml {
+  getSafeExternalHref(rawUrl?: string | null): string | null {
+    if (!rawUrl || typeof rawUrl !== 'string') return null;
+    const trimmed = rawUrl.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:') return null;
+      if (parsed.username || parsed.password) return null;
+      if (isUntrustedTunnelOrPrivateHost(parsed.hostname)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  getExternalHostLabel(rawUrl?: string | null): string {
+    const safe = this.getSafeExternalHref(rawUrl);
+    if (!safe) return '';
+    try {
+      return new URL(safe).hostname.replace(/^www\./i, '');
+    } catch {
+      return '';
+    }
+  }
+
+  private decodeHtmlAttrEntities(raw: string): string {
+    return (raw || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>');
+  }
+
+  private sanitizeMarkdownImgSrc(rawSrc: string): string | null {
+    const trimmed = this.decodeHtmlAttrEntities(rawSrc)
+      .trim()
+      .replace(/[\u0000-\u001F\u007F]/g, '');
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+    if (trimmed.startsWith('/')) {
+      if (/^\/api\/packages\?proxy_image=/i.test(trimmed)) {
+        try {
+          const proxyCheck = new URL(trimmed, 'https://luantihub.org');
+          const proxiedTarget = proxyCheck.searchParams.get('proxy_image') || '';
+          const parsedTarget = new URL(proxiedTarget);
+          if (
+            parsedTarget.protocol === 'https:' &&
+            !parsedTarget.username &&
+            !parsedTarget.password &&
+            !isUntrustedTunnelOrPrivateHost(parsedTarget.hostname)
+          ) {
+            return `${proxyCheck.pathname}${proxyCheck.search}`;
+          }
+        } catch {
+          return null;
+        }
+        return null;
+      }
+      return /^\/api\/git-image\b/i.test(trimmed) || /^\/[a-zA-Z0-9._/-]+$/.test(trimmed)
+        ? trimmed
+        : null;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:') return null;
+      if (parsed.username || parsed.password) return null;
+      if (isUntrustedTunnelOrPrivateHost(parsed.hostname)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  onMarkdownContentClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null;
+    if (!anchor) return;
+    const rawHref = (anchor.getAttribute('href') || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) return;
+    const safeExt = this.getSafeExternalHref(rawHref);
+    if (safeExt && typeof window !== 'undefined') {
+      event.preventDefault();
+      window.open(safeExt, '_blank', 'noopener,noreferrer');
+    }
+  }
+
+  parseSafeMarkdown(markdownText: string): string {
     try {
       const rawHtml = marked.parse(markdownText, { async: false }) as string;
       const preCleanedHtml = rawHtml
-        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[\s\S]*?>[\s\S]*?<\/\1>/gi, '')
-        .replace(/<(script|iframe|object|embed|style|form|svg|math|applet|meta|link|base)[^>]*\/?>/gi, '')
-        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-      const domSanitized = this.sanitizer.sanitize(SecurityContext.HTML, preCleanedHtml) ?? '';
-      const sanitizedHtml = domSanitized
-        .replace(/(?:[\s/]+)on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/(?:href|src)\s*=\s*["']\s*(?:unsafe:)?(?:javascript|vbscript|data):[^"']*["']/gi, 'href="#"')
         .replace(
-          /<a\s+href="(https?:\/\/[^"]+)"/gi,
-          '<a href="$1" target="_blank" rel="noopener noreferrer"'
-        );
-      return this.sanitizer.bypassSecurityTrustHtml(sanitizedHtml);
+          /<(script|iframe|object|embed|style|form|svg|math|video|audio|source|track|applet|meta|link|base|template|noscript)[\s\S]*?>[\s\S]*?<\/\1>/gi,
+          ''
+        )
+        .replace(
+          /<(script|iframe|object|embed|style|form|svg|math|video|audio|source|track|applet|meta|link|base|template|noscript)[^>]*\/?>/gi,
+          ''
+        )
+        .replace(/(?:[\s/"']+)on[a-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/<img\b([^>]*)>/gi, (_full, attrs: string) => {
+          const srcMatch = attrs.match(/\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          const candidate = srcMatch ? (srcMatch[1] ?? srcMatch[2] ?? srcMatch[3] ?? '') : '';
+          const safeSrc = this.sanitizeMarkdownImgSrc(candidate);
+          if (!safeSrc) return '';
+          const altMatch = attrs.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+          const safeAlt = this.decodeHtmlAttrEntities(altMatch ? (altMatch[1] ?? altMatch[2] ?? '') : '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          const encodedSrc = safeSrc.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+          return `<img src="${encodedSrc}" alt="${safeAlt}">`;
+        })
+        .replace(/<a\b([^>]*)>/gi, (_full, attrs: string) => {
+          const hrefMatch = attrs.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          const candidate = this.decodeHtmlAttrEntities(
+            hrefMatch ? (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3] ?? '') : ''
+          ).trim();
+          if (!candidate) return '<a>';
+          if (candidate.startsWith('#')) {
+            const safeAnchor = candidate.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            return `<a href="${safeAnchor}">`;
+          }
+          const safeExt = this.getSafeExternalHref(candidate);
+          if (!safeExt) return '<a href="#">';
+          const encodedHref = safeExt.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+          return `<a href="${encodedHref}" rel="noopener noreferrer">`;
+        });
+      return this.sanitizer.sanitize(SecurityContext.HTML, preCleanedHtml) ?? '';
     } catch {
-      return markdownText;
+      const escaped = (markdownText || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      return `<p>${escaped}</p>`;
     }
   }
 
@@ -3056,36 +3228,10 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   private getRawAssetBase(pkg: LuantiPackage): string | undefined {
     const repoUrl = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
     if (!repoUrl) return undefined;
-    const branch = pkg.default_branch || 'main';
-    try {
-      const u = new URL(repoUrl);
-      const parts = u.pathname.split('/').filter(Boolean);
-      if (parts.length >= 2) {
-        const owner = parts[0];
-        const repo = parts[1].replace(/\.git$/i, '');
-        if (u.hostname === 'github.com') {
-          return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}`;
-        }
-        if (u.hostname === 'codeberg.org') {
-          return `https://codeberg.org/${owner}/${repo}/raw/branch/${branch}`;
-        }
-        if (u.hostname === 'git.minetest.land') {
-          return `https://git.minetest.land/${owner}/${repo}/raw/branch/${branch}`;
-        }
-        if (u.hostname === 'gitlab.com') {
-          return `https://gitlab.com/${owner}/${repo}/-/raw/${branch}`;
-        }
-        if (u.hostname.includes('bitbucket.org')) {
-          return `https://bitbucket.org/${owner}/${repo}/raw/${branch}`;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return `${repoUrl.replace(/\.git$/i, '').replace(/\/+$/, '')}/raw/${branch}`;
+    return buildRawDirectoryBaseUrl(repoUrl, pkg.default_branch || 'main');
   }
 
-  readonly renderedDescription = computed<SafeHtml | null>(() => {
+  readonly renderedDescription = computed<string | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return null;
     const localized = this.packageService.getLocalizedPackageText(pkg);
@@ -3120,7 +3266,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return this.parseSafeMarkdown(rewritten);
   });
 
-  readonly renderedReadme = computed<SafeHtml | null>(() => {
+  readonly renderedReadme = computed<string | null>(() => {
     const pkg = this.packageService.activePackage() || this.package;
     const rawReadme = (pkg?.readme || this.packageService.getCachedReadme(pkg) || '').trim();
     if (!rawReadme) return null;
@@ -3821,18 +3967,33 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
 
   private async ensureExtraDataLoaded(): Promise<void> {
     if (!this.package) return;
-    if (this.packageService.startInEditTagsMode()) {
-      this.packageService.startInEditTagsMode.set(false);
-      this.openEditTags();
-    }
     const resolvedAuthor = this.package.author || (this.package as any).author_name || '';
     const key = (this.package.id || `${resolvedAuthor}/${this.package.name}`).toLowerCase();
-    if (this.loadedPackageKey === key) return;
+    if (this.loadedPackageKey === key) {
+      if (this.packageService.startInEditTagsMode()) {
+        this.packageService.startInEditTagsMode.set(false);
+        this.openEditTags();
+      }
+      return;
+    }
     const isSwitchingPackage = Boolean(this.loadedPackageKey && this.loadedPackageKey !== key);
     if (isSwitchingPackage) {
       this.persistCurrentViewState();
     }
     this.loadedPackageKey = key;
+    this.isEditingTags.set(false);
+    this.isReportOpen.set(false);
+    this.reportDetails = '';
+    this.isConfirmingRemove.set(false);
+    this.flaggingReviewId.set(null);
+    this.flagReviewReason = '';
+    this.reviewTitle = '';
+    this.reviewComment = '';
+    this.releaseNotesByKey.set(new Map());
+    if (this.packageService.startInEditTagsMode()) {
+      this.packageService.startInEditTagsMode.set(false);
+      this.openEditTags();
+    }
     this.activeBannerUrl.set(null);
     this.failedScreenshotUrls.set(new Set());
     this.mediaCarouselIndex.set(0);
@@ -4037,17 +4198,103 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     if (!imageUrl) return;
     this.lightboxImageUrl.set(imageUrl);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
   }
 
   closeLightbox(event?: Event): void {
     if (event) event.stopPropagation();
+    if (this.lightboxDragMoved) {
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
     this.lightboxImageUrl.set(null);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
   }
 
   toggleLightboxZoom(event?: Event): void {
     if (event) event.stopPropagation();
-    this.isLightboxZoomed.update(v => !v);
+    if (this.lightboxDragMoved) {
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
+    const willZoomIn = !this.isLightboxZoomed();
+    let ratioX = 0.5;
+    let ratioY = 0.5;
+    if (
+      willZoomIn &&
+      event &&
+      typeof (event as MouseEvent).clientX === 'number' &&
+      event.target instanceof HTMLElement &&
+      event.target.tagName === 'IMG'
+    ) {
+      const rect = event.target.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        ratioX = Math.min(1, Math.max(0, ((event as MouseEvent).clientX - rect.left) / rect.width));
+        ratioY = Math.min(1, Math.max(0, ((event as MouseEvent).clientY - rect.top) / rect.height));
+      }
+    }
+    this.isLightboxZoomed.set(willZoomIn);
+    this.isLightboxDragging.set(false);
+    if (willZoomIn) {
+      setTimeout(() => {
+        const vp = this.lightboxViewportRef?.nativeElement;
+        if (!vp) return;
+        const maxLeft = Math.max(0, vp.scrollWidth - vp.clientWidth);
+        const maxTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+        vp.scrollLeft = Math.round(maxLeft * ratioX);
+        vp.scrollTop = Math.round(maxTop * ratioY);
+      }, 0);
+    }
+  }
+
+  onLightboxMouseDown(event: MouseEvent): void {
+    if (!this.isLightboxZoomed() || event.button !== 0) return;
+    const vp = this.lightboxViewportRef?.nativeElement;
+    if (!vp) return;
+    this.isLightboxDragging.set(true);
+    this.lightboxDragMoved = false;
+    this.lightboxDragStartX = event.clientX;
+    this.lightboxDragStartY = event.clientY;
+    this.lightboxDragScrollLeft = vp.scrollLeft;
+    this.lightboxDragScrollTop = vp.scrollTop;
+  }
+
+  onLightboxMouseMove(event: MouseEvent): void {
+    if (!this.isLightboxDragging() || !this.isLightboxZoomed()) return;
+    const vp = this.lightboxViewportRef?.nativeElement;
+    if (!vp) return;
+    const dx = event.clientX - this.lightboxDragStartX;
+    const dy = event.clientY - this.lightboxDragStartY;
+    if (!this.lightboxDragMoved && Math.hypot(dx, dy) > 5) {
+      this.lightboxDragMoved = true;
+    }
+    if (this.lightboxDragMoved) {
+      event.preventDefault();
+      vp.scrollLeft = Math.max(0, this.lightboxDragScrollLeft - dx);
+      vp.scrollTop = Math.max(0, this.lightboxDragScrollTop - dy);
+    }
+  }
+
+  onLightboxMouseUp(): void {
+    if (this.isLightboxDragging()) {
+      this.isLightboxDragging.set(false);
+    }
+  }
+
+  onLightboxViewportClick(event: MouseEvent): void {
+    if (this.lightboxDragMoved) {
+      event.stopPropagation();
+      this.lightboxDragMoved = false;
+      this.isLightboxDragging.set(false);
+      return;
+    }
+    if (this.isLightboxZoomed()) {
+      event.stopPropagation();
+    }
   }
 
   prevLightboxImage(event?: Event): void {
@@ -4060,6 +4307,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextShot = shots[prevIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
     const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
     if (slideIdx >= 0) {
       this.mediaCarouselIndex.set(slideIdx);
@@ -4077,6 +4326,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const nextShot = shots[nextIdx];
     this.lightboxImageUrl.set(nextShot);
     this.isLightboxZoomed.set(false);
+    this.isLightboxDragging.set(false);
+    this.lightboxDragMoved = false;
     const slideIdx = this.mediaSlides().findIndex(s => s.url === nextShot);
     if (slideIdx >= 0) {
       this.mediaCarouselIndex.set(slideIdx);
@@ -4106,15 +4357,51 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   }
 
   onLightboxTouchStart(event: TouchEvent): void {
-    if (this.isLightboxZoomed()) return;
-    const touch = event.changedTouches?.[0];
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
     if (!touch) return;
     this.lightboxTouchStartX = touch.clientX;
     this.lightboxTouchStartY = touch.clientY;
+    this.lightboxDragMoved = false;
+    if (this.isLightboxZoomed() && (!event.touches || event.touches.length <= 1)) {
+      const vp = this.lightboxViewportRef?.nativeElement;
+      if (vp) {
+        this.lightboxDragScrollLeft = vp.scrollLeft;
+        this.lightboxDragScrollTop = vp.scrollTop;
+      }
+    }
+  }
+
+  onLightboxTouchMove(event: TouchEvent): void {
+    if (!this.isLightboxZoomed()) return;
+    if (event.touches && event.touches.length > 1) return;
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - this.lightboxTouchStartX;
+    const dy = touch.clientY - this.lightboxTouchStartY;
+    if (!this.lightboxDragMoved && Math.hypot(dx, dy) > 6) {
+      this.lightboxDragMoved = true;
+    }
+    if (this.lightboxDragMoved) {
+      const vp = this.lightboxViewportRef?.nativeElement;
+      if (vp) {
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+        vp.scrollLeft = Math.max(0, this.lightboxDragScrollLeft - dx);
+        vp.scrollTop = Math.max(0, this.lightboxDragScrollTop - dy);
+      }
+    }
   }
 
   onLightboxTouchEnd(event: TouchEvent): void {
-    if (this.isLightboxZoomed()) return;
+    if (this.isLightboxZoomed()) {
+      if (this.lightboxDragMoved) {
+        setTimeout(() => {
+          this.lightboxDragMoved = false;
+        }, 300);
+      }
+      return;
+    }
     const touch = event.changedTouches?.[0];
     if (!touch) return;
     const dx = touch.clientX - this.lightboxTouchStartX;
@@ -4146,7 +4433,20 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   openEditTags(): void {
     if (!this.canModerate()) return;
     const pkg = this.packageService.activePackage() || this.package;
-    const systemTagSet = new Set(['git', 'github', 'codeberg', 'gitlab', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+    const systemTagSet = new Set([
+      'git',
+      'github',
+      'codeberg',
+      'gitlab',
+      'mesehub',
+      'bitbucket',
+      'custom',
+      'contentdb',
+      'mod',
+      'game',
+      'txp',
+      'modpack'
+    ]);
     const currentCustom = (Array.isArray(pkg?.tags) ? pkg.tags : [])
       .map(t => String(t).toLowerCase())
       .filter(t => Boolean(t) && !systemTagSet.has(t));
@@ -4438,9 +4738,13 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const pkg = this.packageService.activePackage() || this.package;
     if (!pkg) return;
 
+    const targetPackageKey = this.loadedPackageKey;
     this.loadingReleaseNotesKey.set(key);
     const headRef = pkg.default_branch || 'main';
     const payload = await this.packageService.fetchReleaseNotesForRelease(pkg, headRef, undefined);
+    if (this.loadedPackageKey !== targetPackageKey) {
+      return;
+    }
     if (this.loadingReleaseNotesKey() === key) {
       this.loadingReleaseNotesKey.set(null);
     }
@@ -4493,6 +4797,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     const headRef = extractRef(rel) || pkg.default_branch || 'main';
     const baseRef = extractRef(olderRelease);
 
+    const targetPackageKey = this.loadedPackageKey;
     this.loadingReleaseNotesKey.set(key);
     const payload = await this.packageService.fetchReleaseNotesForRelease(
       pkg,
@@ -4501,6 +4806,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       this.getCleanReleaseNotes(rel),
       rel.released_at
     );
+    if (this.loadedPackageKey !== targetPackageKey) {
+      return;
+    }
     if (this.loadingReleaseNotesKey() === key) {
       this.loadingReleaseNotesKey.set(null);
     }

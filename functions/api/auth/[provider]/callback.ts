@@ -3,10 +3,12 @@ import {
   verifySessionToken,
   SessionTokenClaims,
   parseOAuthStateToken,
+  sanitizeRelativeReturnPath,
   buildSessionCookie,
   buildClearOAuthStateCookies,
   parseCookies,
   checkIsAdmin,
+  resolveUniqueCandidateUsername,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount,
   invalidateCachedAuthMePayload
@@ -61,12 +63,27 @@ function resolveRedirectUri(envValue: string | undefined, requestOrigin: string,
   return cleaned;
 }
 
-function getOAuthCodeEdgeCacheUrl(provider: string, code: string): string {
-  return `https://cache.luantihub.internal/__oauth_code/${encodeURIComponent(provider)}/${encodeURIComponent(code)}`;
+function pruneBoundedMap<K, V>(map: Map<K, V>, maxEntries = 500): void {
+  if (map.size <= maxEntries) return;
+  const excess = map.size - maxEntries;
+  let removed = 0;
+  for (const k of map.keys()) {
+    map.delete(k);
+    removed++;
+    if (removed >= excess) break;
+  }
 }
 
-async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: string): Promise<string | null> {
-  const cachedCodeKey = `${provider}:${code}`;
+function getOAuthCodeEdgeCacheUrl(provider: string, code: string, stateBinding: string): string {
+  return `https://cache.luantihub.internal/__oauth_code/${encodeURIComponent(provider)}/${encodeURIComponent(code)}/${encodeURIComponent(stateBinding)}`;
+}
+
+async function readCompletedOAuthCodeFromEdgeCache(
+  provider: string,
+  code: string,
+  stateBinding: string
+): Promise<string | null> {
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
   const inMemory = completedOAuthCodes.get(cachedCodeKey);
   if (inMemory && Date.now() < inMemory.expiresAt) {
     return inMemory.userId;
@@ -74,10 +91,13 @@ async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: strin
   try {
     const cacheStorage = (globalThis as any).caches?.default;
     if (!cacheStorage) return null;
-    const cachedRes = await cacheStorage.match(new Request(getOAuthCodeEdgeCacheUrl(provider, code)));
+    const cachedRes = await cacheStorage.match(
+      new Request(getOAuthCodeEdgeCacheUrl(provider, code, stateBinding))
+    );
     if (!cachedRes || !cachedRes.ok) return null;
     const data = await cachedRes.json() as { userId?: string };
     if (data?.userId) {
+      pruneBoundedMap(completedOAuthCodes, 500);
       completedOAuthCodes.set(cachedCodeKey, {
         userId: data.userId,
         expiresAt: Date.now() + 90_000
@@ -90,8 +110,14 @@ async function readCompletedOAuthCodeFromEdgeCache(provider: string, code: strin
   return null;
 }
 
-async function writeCompletedOAuthCodeToEdgeCache(provider: string, code: string, userId: string): Promise<void> {
-  const cachedCodeKey = `${provider}:${code}`;
+async function writeCompletedOAuthCodeToEdgeCache(
+  provider: string,
+  code: string,
+  stateBinding: string,
+  userId: string
+): Promise<void> {
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
+  pruneBoundedMap(completedOAuthCodes, 500);
   completedOAuthCodes.set(cachedCodeKey, {
     userId,
     expiresAt: Date.now() + 90_000
@@ -102,10 +128,10 @@ async function writeCompletedOAuthCodeToEdgeCache(provider: string, code: string
     const res = new Response(JSON.stringify({ userId }), {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=90'
+        'Cache-Control': 'private, max-age=90'
       }
     });
-    await cacheStorage.put(new Request(getOAuthCodeEdgeCacheUrl(provider, code)), res);
+    await cacheStorage.put(new Request(getOAuthCodeEdgeCacheUrl(provider, code, stateBinding)), res);
   } catch {
     // Ignore Cache API errors in local/non-Worker environments
   }
@@ -216,55 +242,17 @@ async function exchangeOAuthTokenWithRetry(
   throw rateLimitError;
 }
 
-function buildPopupCompletionHtml(
-  targetOrigin: string,
-  payload: { type: 'LH_OAUTH_COMPLETE'; success: boolean; provider: string; error?: string },
-  fallbackRedirectUrl: string
+function buildReturnRedirectUrl(
+  returnOrigin: string,
+  returnTo: string | undefined,
+  extraParams: Record<string, string>
 ): string {
-  const safePayloadJson = JSON.stringify(payload).replace(/</g, '\\u003c');
-  const safeOriginJson = JSON.stringify(targetOrigin).replace(/</g, '\\u003c');
-  const safeFallbackUrlJson = JSON.stringify(fallbackRedirectUrl).replace(/</g, '\\u003c');
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Completing Sign-In – LuantiHub</title>
-  <style>
-    body { background: #020617; color: #f8fafc; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .msg { font-size: 14px; color: #94a3b8; }
-  </style>
-</head>
-<body>
-  <div class="msg">Completing sign-in…</div>
-  <script>
-    (function () {
-      var msg = ${safePayloadJson};
-      var targetOrigin = ${safeOriginJson};
-      var fallbackUrl = ${safeFallbackUrlJson};
-      try {
-        if (typeof BroadcastChannel !== 'undefined') {
-          var bc = new BroadcastChannel('lh-auth-sync');
-          bc.postMessage(msg);
-          bc.close();
-        }
-      } catch (e) {}
-      try {
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage(msg, targetOrigin || '*');
-          window.close();
-          setTimeout(function () {
-            if (!window.closed) {
-              window.location.replace(fallbackUrl);
-            }
-          }, 350);
-          return;
-        }
-      } catch (e) {}
-      window.location.replace(fallbackUrl);
-    })();
-  </script>
-</body>
-</html>`;
+  const safePath = sanitizeRelativeReturnPath(returnTo) || '/';
+  const target = new URL(safePath, returnOrigin);
+  for (const [k, v] of Object.entries(extraParams)) {
+    target.searchParams.set(k, v);
+  }
+  return target.toString();
 }
 
 async function buildSuccessRedirectResponse(
@@ -272,28 +260,16 @@ async function buildSuccessRedirectResponse(
   requestUrl: URL,
   userId: string,
   sessionSecret?: string,
-  provider = 'github',
-  isPopup = false
+  returnTo?: string
 ): Promise<Response> {
   const claims = verifiedOAuthClaimsByUserId.get(userId);
   const sessionToken = await createSessionToken(userId, sessionSecret, claims);
   const headers = new Headers();
-  const redirectTarget = `${returnOrigin}/?auth_success=1`;
+  const redirectTarget = buildReturnRedirectUrl(returnOrigin, returnTo, { auth_success: '1' });
   headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   headers.append('Set-Cookie', buildSessionCookie(sessionToken, requestUrl, 86400 * 30));
   for (const clearCookie of buildClearOAuthStateCookies(requestUrl)) {
     headers.append('Set-Cookie', clearCookie);
-  }
-  if (isPopup) {
-    headers.set('Content-Type', 'text/html; charset=utf-8');
-    return new Response(
-      buildPopupCompletionHtml(
-        returnOrigin,
-        { type: 'LH_OAUTH_COMPLETE', success: true, provider },
-        redirectTarget
-      ),
-      { status: 200, headers }
-    );
   }
   headers.set('Location', redirectTarget);
   return new Response(null, { status: 302, headers });
@@ -303,25 +279,12 @@ function buildErrorRedirectResponse(
   returnOrigin: string,
   errorCode: string,
   provider: string,
-  isPopup = false
+  returnTo?: string
 ): Response {
-  const errorRedirectUrl = `${returnOrigin}/?auth_error=${encodeURIComponent(errorCode)}&provider=${encodeURIComponent(provider)}`;
-  if (isPopup) {
-    return new Response(
-      buildPopupCompletionHtml(
-        returnOrigin,
-        { type: 'LH_OAUTH_COMPLETE', success: false, provider, error: errorCode },
-        errorRedirectUrl
-      ),
-      {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store, no-cache, must-revalidate'
-        }
-      }
-    );
-  }
+  const errorRedirectUrl = buildReturnRedirectUrl(returnOrigin, returnTo, {
+    auth_error: errorCode,
+    provider
+  });
   return Response.redirect(errorRedirectUrl, 302);
 }
 
@@ -338,7 +301,7 @@ export async function onRequestGet(context: {
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
   const stateMeta = await parseOAuthStateToken(stateParam, provider, sessionSecret);
   const returnOrigin = stateMeta.origin || url.origin;
-  const isPopup = Boolean(stateMeta.popup);
+  const returnTo = stateMeta.valid ? stateMeta.returnTo : undefined;
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
     codeberg: resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
@@ -350,7 +313,7 @@ export async function onRequestGet(context: {
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 
   if (!code) {
-    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, returnTo);
   }
 
   const cookies = parseCookies(context.request);
@@ -358,33 +321,42 @@ export async function onRequestGet(context: {
   const isCookieStateValid = Boolean(stateParam && expectedState && stateParam === expectedState);
   const isHmacStateValid = stateMeta.valid;
 
-  if (!isCookieStateValid && !isHmacStateValid) {
-    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider, isPopup);
+  if (!isHmacStateValid) {
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
   }
 
   const existingSessionUserId = cookies['lh_session']
     ? await verifySessionToken(cookies['lh_session'], sessionSecret)
     : null;
+  const stateBinding = expectedState || stateParam || '';
 
-  // Fast-path: If this exact authorization code already completed moments ago (in-memory or Cloudflare Edge Cache)
-  const cachedCodeKey = `${provider}:${code}`;
-  const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
-  if (completedUserId) {
-    return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, provider, isPopup);
+  // Fast-path: If this exact authorization code + state already completed moments ago (in-memory or Cloudflare Edge Cache).
+  // When `lh_oauth_state` was already cleared by the initial callback response, only accept the replay if the browser
+  // already holds the matching `lh_session` for `completedUserId` (preventing cross-site Login CSRF).
+  const cachedCodeKey = `${provider}:${code}:${stateBinding}`;
+  const completedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
+  if (completedUserId && (isCookieStateValid || existingSessionUserId === completedUserId)) {
+    return buildSuccessRedirectResponse(returnOrigin, url, completedUserId, sessionSecret, returnTo);
   }
 
-  // Fast-path: If this exact authorization code is currently being processed by a concurrent request
+  // Require BOTH cryptographically valid HMAC state AND matching browser `lh_oauth_state` cookie
+  // to prevent OAuth Login CSRF and cross-site identity-linking account takeover.
+  if (!isCookieStateValid) {
+    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
+  }
+
+  // Fast-path: If this exact authorization code + state is currently being processed by a concurrent request
   const existingInFlight = inFlightOAuthCodes.get(cachedCodeKey);
   if (existingInFlight) {
     try {
       const resolvedUserId = await existingInFlight;
-      return buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
+      return buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, returnTo);
     } catch {
       // Fall through to standard flow if in-flight promise failed
     }
   }
 
-  const checkEdgeCacheBeforeRetry = () => readCompletedOAuthCodeFromEdgeCache(provider, code);
+  const checkEdgeCacheBeforeRetry = () => readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
 
   const processOAuthCallback = async (): Promise<string> => {
     let providerUserId = '';
@@ -512,7 +484,7 @@ export async function onRequestGet(context: {
         // check cross-isolate edge cache first, then fall back to existingSessionUserId if present
         if (tokenData.error === 'bad_verification_code') {
           await new Promise(resolve => setTimeout(resolve, 250));
-          const cachedFromOtherIsolate = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+          const cachedFromOtherIsolate = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
           if (cachedFromOtherIsolate) {
             return cachedFromOtherIsolate;
           }
@@ -585,6 +557,7 @@ export async function onRequestGet(context: {
     );
     const role = isAdmin ? 'admin' : 'user';
 
+    let dbPendingFallback = false;
     if (context.env.DB) {
       try {
         // Verify whether existingSessionUserId actually resolves to a live row in `users`
@@ -634,56 +607,82 @@ export async function onRequestGet(context: {
         if (shouldLinkToActiveSession && activeSessionUser?.id) {
           userId = String(activeSessionUser.id);
         } else {
-          // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username)
+          // Check if any matching identity points to a live row in `users` (preferring unsuffixed canonical username).
+          // Guard against legacy unverified identity claims attached to an already-verified user on another forge.
+          let hasOrphanedIdentityUserId: string | null = null;
           for (const ident of matchingIdentities) {
             const u = await context.env.DB.prepare(
-              `SELECT id, username FROM users WHERE id = ?`
-            ).bind(ident.user_id).first() as { id: string; username: string } | null;
-            if (u) {
-              userId = u.id;
-              if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
-                break;
+              `SELECT id, username, role FROM users WHERE id = ?`
+            ).bind(ident.user_id).first() as { id: string; username: string; role?: string } | null;
+            if (!u) {
+              if (!hasOrphanedIdentityUserId && ident.user_id) {
+                hasOrphanedIdentityUserId = String(ident.user_id);
               }
+              continue;
+            }
+            if (Number(ident.verified) !== 1) {
+              const otherVerified = await context.env.DB.prepare(
+                `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+              ).bind(u.id).first();
+              if (otherVerified || u.role === 'admin' || u.role === 'moderator') {
+                continue;
+              }
+            }
+            userId = u.id;
+            if (String(u.username || '').toLowerCase() === providerUsername.toLowerCase()) {
+              break;
             }
           }
 
-          // If no matching identity points to a live user row, check if a user with this username already exists
+          // If no trusted matching identity points to a live user row, check if a user with this username already exists
           if (!userId) {
             const existingUserByUsername = await context.env.DB.prepare(
-              `SELECT id FROM users WHERE LOWER(username) = LOWER(?)`
-            ).bind(providerUsername).first() as { id: string } | null;
+              `SELECT id, role FROM users WHERE LOWER(username) = LOWER(?)`
+            ).bind(providerUsername).first() as { id: string; role?: string } | null;
 
-            const conflictingSameProvider = existingUserByUsername
+            const existingVerifiedIdentity = existingUserByUsername
               ? await context.env.DB.prepare(
-                  `SELECT id FROM user_identities WHERE user_id = ? AND provider = ? AND LOWER(provider_username) != LOWER(?) LIMIT 1`
-                ).bind(existingUserByUsername.id, provider, providerUsername).first()
+                  `SELECT id FROM user_identities WHERE user_id = ? AND verified = 1 LIMIT 1`
+                ).bind(existingUserByUsername.id).first()
               : null;
 
-            if (existingUserByUsername && !conflictingSameProvider) {
+            const isPrivilegedExisting =
+              existingUserByUsername?.role === 'admin' || existingUserByUsername?.role === 'moderator';
+            const canClaimUnverifiedExtStub =
+              Boolean(existingUserByUsername) &&
+              !existingVerifiedIdentity &&
+              !isPrivilegedExisting &&
+              String(existingUserByUsername!.id).startsWith('ext_');
+
+            if (canClaimUnverifiedExtStub && existingUserByUsername) {
               userId = existingUserByUsername.id;
             } else {
               const candidateUsername = existingUserByUsername
-                ? `${providerUsername}_${provider.slice(0, 2)}`
+                ? await resolveUniqueCandidateUsername(context.env.DB, providerUsername, provider)
                 : providerUsername;
 
-              // Reuse orphaned identity's user_id if present so existing packages/favorites/downloads stay linked
-              userId = matchingIdentities.length > 0 && matchingIdentities[0].user_id
-                ? String(matchingIdentities[0].user_id)
-                : crypto.randomUUID();
+              // Reuse orphaned identity's user_id only when no live user owned it
+              userId = hasOrphanedIdentityUserId || crypto.randomUUID();
 
               await context.env.DB.prepare(`
-                INSERT OR REPLACE INTO users (id, username, display_name, avatar_url, role)
+                INSERT INTO users (id, username, display_name, avatar_url, role)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  display_name = excluded.display_name,
+                  avatar_url = excluded.avatar_url,
+                  role = CASE WHEN users.role = 'admin' THEN 'admin' ELSE excluded.role END
               `).bind(userId, candidateUsername, displayName || providerUsername, avatarUrl, role).run();
             }
           }
         }
 
-        // Merge any secondary or orphaned user_ids referenced by matchingIdentities into the resolved primary userId
+        // Merge any secondary or orphaned user_ids referenced by verified/ext_* matchingIdentities into the resolved primary userId
         if (userId) {
           const mergedSecondaryIds = new Set<string>();
           for (const ident of matchingIdentities) {
-            if (ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
+            const canMergeSecondary =
+              Number(ident.verified) === 1 || String(ident.user_id || '').startsWith('ext_');
+            if (canMergeSecondary && ident.user_id && ident.user_id !== userId && !mergedSecondaryIds.has(ident.user_id)) {
               mergedSecondaryIds.add(ident.user_id);
               await mergeSecondaryUserIntoPrimary(context.env.DB, userId, ident.user_id);
             }
@@ -748,12 +747,14 @@ export async function onRequestGet(context: {
         }
       } catch (dbErr) {
         console.error('[OAuth Callback] D1 error after verified OAuth profile, falling back to signed session claims:', dbErr);
+        dbPendingFallback = true;
         if (!userId) {
           userId = existingSessionUserId || `usr_${providerUsername.toLowerCase()}`;
         }
       }
     } else {
       // Fallback userId if D1 binding is not yet initialized locally
+      dbPendingFallback = true;
       userId = `usr_${provider}_${providerUsername}`;
     }
 
@@ -762,6 +763,7 @@ export async function onRequestGet(context: {
     }
 
     invalidateCachedAuthMePayload(userId);
+    pruneBoundedMap(verifiedOAuthClaimsByUserId, 500);
     verifiedOAuthClaimsByUserId.set(userId, {
       userId,
       username: providerUsername,
@@ -769,30 +771,32 @@ export async function onRequestGet(context: {
       avatarUrl: avatarUrl || `https://github.com/${providerUsername}.png`,
       provider,
       role,
-      verified: true
+      verified: true,
+      ...(dbPendingFallback ? { dbPending: true } : {})
     });
 
     return userId;
   };
 
   const inFlightPromise = processOAuthCallback();
+  pruneBoundedMap(inFlightOAuthCodes, 500);
   inFlightOAuthCodes.set(cachedCodeKey, inFlightPromise);
 
   try {
     const resolvedUserId = await inFlightPromise;
-    await writeCompletedOAuthCodeToEdgeCache(provider, code, resolvedUserId);
+    await writeCompletedOAuthCodeToEdgeCache(provider, code, stateBinding, resolvedUserId);
     context.waitUntil?.(
       syncVerifiedAuthorGitPackages(context.env, {
         userId: resolvedUserId,
         triggerProvider: provider
       })
     );
-    return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, provider, isPopup);
+    return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, returnTo);
   } catch (err: any) {
     // 1. Check if a concurrent Worker isolate completed the token exchange in Edge Cache
-    const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code);
+    const edgeResolvedUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
     if (edgeResolvedUserId) {
-      return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, provider, isPopup);
+      return await buildSuccessRedirectResponse(returnOrigin, url, edgeResolvedUserId, sessionSecret, returnTo);
     }
 
     // 2. If GitHub's front-end load balancer returned HTTP 429, the authorization code is still unconsumed.
@@ -807,9 +811,15 @@ export async function onRequestGet(context: {
       return Response.redirect(retryUrl.toString(), 302);
     }
 
-    // 3. If another isolate consumed the code and the user already has a valid session cookie, redirect to success
-    if (existingSessionUserId && !isRateLimited429) {
-      return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, provider, isPopup);
+    // 3. Only treat an already-consumed OAuth code (`bad_verification_code` / `invalid_grant`) as completed
+    // when the browser already holds a valid session cookie and matches Edge Cache.
+    const isCodeAlreadyConsumed =
+      /bad_verification_code|invalid_grant|authorization code.*expired/i.test(errMsg);
+    if (existingSessionUserId && isCodeAlreadyConsumed && !isRateLimited429) {
+      const recheckedEdgeUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
+      if (recheckedEdgeUserId && recheckedEdgeUserId === existingSessionUserId) {
+        return await buildSuccessRedirectResponse(returnOrigin, url, existingSessionUserId, sessionSecret, returnTo);
+      }
     }
 
     console.error('[OAuth Callback Error]:', provider, errMsg);
@@ -817,7 +827,7 @@ export async function onRequestGet(context: {
       ? 'provider_busy'
       : 'provider_unavailable';
 
-    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, isPopup);
+    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, returnTo);
   } finally {
     inFlightOAuthCodes.delete(cachedCodeKey);
   }

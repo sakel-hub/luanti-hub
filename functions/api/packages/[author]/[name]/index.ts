@@ -1,5 +1,6 @@
 import {
   fetchUpstreamJsonCached,
+  fetchWithAnubisSupport,
   safeDecodeParam,
   parseJsonArray,
   detectSpdxFromText,
@@ -36,6 +37,7 @@ import {
   sanitizeReleaseNotesText,
   fetchRepoReadmeCached,
   MAX_PACKAGE_RELEASES,
+  isUntrustedTunnelOrPrivateHost,
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
   sanitizePackageImageUrl,
@@ -61,7 +63,8 @@ import {
   parseScreenshotMetaArray,
   buildPackageDetailEdgeCacheKey,
   buildPackageCacheInvalidationKeys,
-  BOOT_CATALOG_EDGE_CACHE_KEY
+  BOOT_CATALOG_EDGE_CACHE_KEY,
+  isCreatedIn2026OrUnknown
 } from '../../../lib/upstream';
 import { fetchJam2026FallbackReadme } from '../../../lib/jam-2026';
 import {
@@ -70,7 +73,8 @@ import {
   checkIsAdmin,
   reconcileAndMergeUserAccount,
   verifyStrictPackageAuthorOwnership,
-  shouldHonorAuthenticatedNoCache
+  shouldHonorAuthenticatedNoCache,
+  verifySameOriginMutation
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -184,12 +188,15 @@ async function resolveArchiveSizeCached(downloadUrl?: string): Promise<string | 
     }
   }
 
+  if (isUntrustedTunnelOrPrivateHost(downloadUrl)) {
+    return undefined;
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 1800);
   try {
-    const res = await fetch(downloadUrl, {
+    const res = await fetchWithAnubisSupport(downloadUrl, {
       method: 'HEAD',
-      redirect: 'follow',
       signal: controller.signal,
       headers: {
         'User-Agent': 'LuantiHub-Proxy/1.0 (+https://luantihub.org)'
@@ -481,10 +488,33 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1Reviews: any[] = [];
   let d1DailyDownloadsSum = 0;
   let d1FavoritesCount = 0;
+  let d1PromoTags: string[] = [];
   if (context.env.DB) {
-    d1Pkg = await context.env.DB.prepare(
-      `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-    ).bind(pkgId, pkgId.toLowerCase(), author, name).first().catch(() => null);
+    const [fetchedD1Pkg, promoTagRows] = await Promise.all([
+      context.env.DB.prepare(
+        `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
+      ).bind(pkgId, pkgId.toLowerCase(), author, name).first().catch(() => null),
+      context.env.DB.prepare(
+        `SELECT tag_name FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(pkgId).all().catch(() => ({ results: [] }))
+    ]);
+    d1Pkg = fetchedD1Pkg;
+    d1PromoTags = Array.from(
+      new Set(
+        (promoTagRows?.results || [])
+          .map((r: any) => String(r?.tag_name || '').trim())
+          .filter(Boolean)
+      )
+    );
+    if (d1Pkg?.id && String(d1Pkg.id).toLowerCase() !== pkgId.toLowerCase()) {
+      const altPromoRows = await context.env.DB.prepare(
+        `SELECT tag_name FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`
+      ).bind(String(d1Pkg.id)).all().catch(() => ({ results: [] }));
+      for (const r of (altPromoRows?.results || [])) {
+        const t = String(r?.tag_name || '').trim();
+        if (t && !d1PromoTags.includes(t)) d1PromoTags.push(t);
+      }
+    }
 
     if (d1Pkg && (d1Pkg.status === 'flagged' || d1Pkg.status === 'delisted')) {
       return Response.json({
@@ -514,7 +544,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const effectivePkgIdLower = String(effectivePkgId).toLowerCase();
 
     // Fast path for ?lite=1 when D1 already holds hydrated ContentDB downloads & license
-    const d1TagsFast = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const d1TagsFast = Array.from(
+      new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
+    ).filter(Boolean);
     const isGitFast = Boolean(d1Pkg && (d1Pkg.provider !== 'contentdb' || d1TagsFast.includes('git')));
     const isOfficialFast = Boolean(
       d1Pkg && (d1Pkg.provider === 'contentdb' || Number(d1Pkg.contentdb_downloads || 0) > 0 || d1TagsFast.includes('contentdb'))
@@ -542,10 +574,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ) {
       const hasStoredGitShotLite =
         isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
-      const [revAvgFast, liteGitScan] = await Promise.all([
+      const [revAvgFast, dailyDlFast, liteGitScan] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
         ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
+        context.env.DB.prepare(
+          `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+        ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
         (!d1Pkg.video_url || !hasStoredGitShotLite) && d1Pkg.repo_url
           ? scanGitRepoMetadataCached(
               d1Pkg.author_name || author,
@@ -614,12 +649,23 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         fastRevAvgVal
       );
       const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
-      const lhDl = Number(d1Pkg.luantihub_downloads || 0);
+      const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), Number(dailyDlFast?.total_lh || 0));
       const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
       const fastSources: Array<'official' | 'git'> = [];
       if (isOfficialFast) fastSources.push('official');
       if (isGitFast) fastSources.push('git');
       if (fastSources.length === 0) fastSources.push('official');
+
+      const fastLiteTags = Array.from(
+        new Set([...d1TagsFast, ...(liteGitScan?.jam2026Tags || [])])
+      ).filter(Boolean);
+      const fastLiteBadgeTags = parseBadgeTagsArray(d1Pkg.badge_tags);
+      if (
+        (fastLiteTags.includes('jam_game_2026') || fastLiteTags.includes('gamejam')) &&
+        !fastLiteBadgeTags.includes('jam_game_2026')
+      ) {
+        fastLiteBadgeTags.push('jam_game_2026');
+      }
 
       const fastLitePayload = {
         id: d1Pkg.id,
@@ -654,8 +700,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         file_size: d1Pkg.file_size || formatByteSize(d1Pkg.download_size),
         video_url: liteVideo.video_url || undefined,
         video_thumbnail_url: liteVideo.video_thumbnail_url || undefined,
-        tags: d1TagsFast.length > 0 ? d1TagsFast : [d1Pkg.type || 'mod'],
-        badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
+        tags: fastLiteTags.length > 0 ? fastLiteTags : [d1Pkg.type || 'mod'],
+        badge_tags: fastLiteBadgeTags,
         source: isGitFast ? 'git' : 'official',
         sources: fastSources,
         git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified'
@@ -677,8 +723,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
           ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
           context.env.DB.prepare(
             `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
           ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))
@@ -705,8 +751,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             `SELECT * FROM releases WHERE package_id IN (?, ?) ORDER BY released_at DESC`
           ).bind(effectivePkgId, effectivePkgIdLower).all().catch(() => ({ results: [] })),
           context.env.DB.prepare(
-            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE package_id IN (?, ?)`
-          ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => ({ total_lh: 0 })),
+            `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
+          ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
           context.env.DB.prepare(
             `SELECT COUNT(*) as cnt FROM user_favorites WHERE LOWER(package_id) IN (?, ?)`
           ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ cnt: 0 }))
@@ -978,7 +1024,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                 .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
                 .filter(Boolean)
             : [];
-          const fastCombinedTags = Array.from(new Set([...d1TagsFast, ...fastDetailTags])).filter(Boolean);
+          const fastCombinedTags = Array.from(
+            new Set([...d1TagsFast, ...fastDetailTags, ...(fastGitScan?.jam2026Tags || [])])
+          ).filter(Boolean);
+          const fastFullBadgeTags = parseBadgeTagsArray(d1Pkg.badge_tags);
+          if (
+            (fastCombinedTags.includes('jam_game_2026') || fastCombinedTags.includes('gamejam')) &&
+            !fastFullBadgeTags.includes('jam_game_2026')
+          ) {
+            fastFullBadgeTags.push('jam_game_2026');
+          }
           const fastLongDesc =
             d1Pkg.long_desc ||
             extractLongDescriptionText(fastCdbDetail?.long_description) ||
@@ -1058,7 +1113,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             updated_at: resolvedFastUpdatedAt,
             latest_commit_sha: fastBundledReleases[0]?.commit_sha || d1Pkg.latest_commit_sha || undefined,
             tags: fastCombinedTags.length > 0 ? fastCombinedTags : [d1Pkg.type || 'mod'],
-            badge_tags: parseBadgeTagsArray(d1Pkg.badge_tags),
+            badge_tags: fastFullBadgeTags,
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
@@ -1331,7 +1386,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   // 3. Agnostic Resolution (Pure Git package OR when both ContentDB & Mirror APIs are offline):
   // Resolve directly from D1 + Server-side Git Repository Scanner (.conf + .cdb.json + README + Git Releases)
   if (!upstreamData) {
-    const d1Tags = d1Pkg ? parseJsonArray(d1Pkg.tags) : [];
+    const d1Tags = Array.from(
+      new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
+    ).filter(Boolean);
     const d1HardDeps = d1Pkg ? parseJsonArray(d1Pkg.dependencies) : [];
     const d1SoftDeps = d1Pkg ? parseJsonArray(d1Pkg.optional_dependencies) : [];
     const hasStoredGitShotPure =
@@ -1448,7 +1505,6 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               SET download_size = ?, file_size = ?
               WHERE LOWER(id) = LOWER(?)
             `).bind(repoEst.downloadSize, repoEst.fileSize, d1Pkg.id).run().catch(() => {});
-            await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY]).catch(() => {});
           }
         }
       }
@@ -1473,12 +1529,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         new Set([
           ...d1Tags,
           ...(gitScan?.cdbMeta?.tags || []),
-          ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) ? [resolvedType, 'git'] : [])
+          ...(gitScan?.jam2026Tags || []),
+          ...(d1Tags.length === 0 && !(gitScan?.cdbMeta?.tags?.length) && !(gitScan?.jam2026Tags?.length) ? [resolvedType, 'git'] : [])
         ])
       ).filter(Boolean);
       const pureGitBadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
       if (mergedTags.includes(ORGANIC_CODE_TAG) && !pureGitBadgeTags.includes(ORGANIC_CODE_TAG)) {
         pureGitBadgeTags.push(ORGANIC_CODE_TAG);
+      }
+      if (
+        (mergedTags.includes('jam_game_2026') || mergedTags.includes('gamejam')) &&
+        !pureGitBadgeTags.includes('jam_game_2026')
+      ) {
+        pureGitBadgeTags.push('jam_game_2026');
       }
       const mergedHardDeps = d1HardDeps.length > 0 ? d1HardDeps : (gitScan?.hardDeps || []);
       const mergedSoftDeps = d1SoftDeps.length > 0 ? d1SoftDeps : (gitScan?.softDeps || []);
@@ -1651,6 +1714,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         reviews_list: bundledReviews
       };
 
+      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, isLite ? 1800 : 600);
+
       return new Response(JSON.stringify(pureGitPayload), {
         headers: {
           'Content-Type': 'application/json',
@@ -1693,7 +1758,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   const hasResolvedVideo = Boolean(upstreamData.video_url || forClientData?.video_url || d1Pkg?.video_url);
   const hasStoredGitScreenshot =
     isGitRepositoryAssetUrl(d1Pkg?.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg?.banner_url);
-  const needsGitProbe = Boolean(repoUrl) && (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot);
+  const needsJam2026DetailProbe =
+    (upstreamData.type === 'game' || d1Pkg?.type === 'game') &&
+    isCreatedIn2026OrUnknown(upstreamData.created_at || d1Pkg?.created_at) &&
+    !d1PromoTags.includes('jam_game_2026');
+  const needsGitProbe =
+    Boolean(repoUrl) &&
+    (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot || needsJam2026DetailProbe);
   if (needsGitProbe) {
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
@@ -1771,6 +1842,18 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       : (cdbTags.length > 0 ? cdbTags : [upstreamData.type || 'mod']);
   } else if (probedCdbMeta?.tags && probedCdbMeta.tags.length > 0) {
     normalizedTags = Array.from(new Set([...normalizedTags, ...probedCdbMeta.tags]));
+  }
+  if (gitProbeScan?.jam2026Tags?.length) {
+    normalizedTags = Array.from(new Set([...normalizedTags, ...gitProbeScan.jam2026Tags]));
+    if (context.env.DB) {
+      for (const jt of gitProbeScan.jam2026Tags) {
+        context.env.DB.prepare(
+          `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+        ).bind(jt, canonicalId).run().catch(() => {});
+      }
+    }
   }
 
   // Normalize & merge screenshots array (preferring Git repository screenshot.png / .cdb.json first, followed by ContentDB gallery)
@@ -1851,11 +1934,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     (!isLite && wantsReadme) ? fetchRepoReadmeCached(repoUrl) : Promise.resolve<string | undefined>(undefined)
   ]);
 
-  const d1Tags = parseJsonArray(d1Pkg?.tags);
+  const d1Tags = Array.from(new Set([...parseJsonArray(d1Pkg?.tags), ...d1PromoTags])).filter(Boolean);
   const d1HardDeps = parseJsonArray(d1Pkg?.dependencies);
   const d1SoftDeps = parseJsonArray(d1Pkg?.optional_dependencies);
   const isRegisteredInGitCommunity = Boolean(
-    d1Pkg && (d1Pkg.provider !== 'contentdb' || d1Tags.includes('git'))
+    (d1Pkg && (d1Pkg.provider !== 'contentdb' || d1Tags.includes('git'))) ||
+    (Boolean(repoUrl) && (normalizedTags.includes('jam_game_2026') || d1Tags.includes('jam_game_2026')))
   );
   const sources: Array<'official' | 'git'> = isRegisteredInGitCommunity ? ['official', 'git'] : ['official'];
 
@@ -2028,12 +2112,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     normalizedLang
   );
 
-  const mergedTags = d1Tags.length > 0
-    ? Array.from(new Set([...d1Tags]))
-    : Array.from(new Set([...normalizedTags, ...d1Tags])).filter(Boolean);
+  const mergedTags = Array.from(new Set([...d1Tags, ...normalizedTags])).filter(Boolean);
   const d1BadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
   if (mergedTags.includes(ORGANIC_CODE_TAG) && !d1BadgeTags.includes(ORGANIC_CODE_TAG)) {
     d1BadgeTags.push(ORGANIC_CODE_TAG);
+  }
+  if (
+    (mergedTags.includes('jam_game_2026') || mergedTags.includes('gamejam')) &&
+    !d1BadgeTags.includes('jam_game_2026')
+  ) {
+    d1BadgeTags.push('jam_game_2026');
   }
   const resolvedScore = computeStarRating(
     { ...upstreamData, review_thread_counts: reviewThreadCounts, reviews_list: bundledReviews },
@@ -2052,7 +2140,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         : !(Number(d1Pkg.score) >= 1 && Number(d1Pkg.score) <= 5) && resolvedScore >= 1 && resolvedScore <= 5
           ? resolvedScore
           : null;
-    const newTagsJson = d1Tags.length === 0 && mergedTags.length > 0 ? JSON.stringify(mergedTags) : null;
+    const rawExistingD1TagsOnly = parseJsonArray(d1Pkg.tags);
+    const newTagsJson =
+      mergedTags.length > rawExistingD1TagsOnly.length ? JSON.stringify(mergedTags) : null;
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
@@ -2237,6 +2327,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
 // PATCH /api/packages/:author/:name — Allow package author or admin to edit package metadata & tags (LuantiHub-first)
 export async function onRequestPatch(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -2302,11 +2395,20 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     };
 
     // If package is not yet in D1 (e.g., ContentDB-sourced package being customized on LuantiHub),
-    // verify ownership against upstream metadata or verified identity and seed a D1 row (with offline fallback).
+    // verify ownership strictly against authoritative upstream metadata (never untrusted body.repo_url).
     if (!pkgRow) {
       const encodedAuthor = encodeURIComponent(author);
       const encodedName = encodeURIComponent(name);
-      const upstreamPkg = await fetchUpstreamJsonCached(`/api/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
+      const upstreamPkg = await fetchUpstreamJsonCached<any>(`/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
+      if (!upstreamPkg && !isAdmin) {
+        return Response.json({
+          error: 'Package not found in LuantiHub or official ContentDB registry.'
+        }, { status: 404 });
+      }
+      const trustedUpstreamRepo =
+        upstreamPkg && typeof (upstreamPkg.repo || upstreamPkg.repo_url) === 'string'
+          ? normalizeGitRepoInputUrl(String(upstreamPkg.repo || upstreamPkg.repo_url).trim()) || ''
+          : '';
       const seedPkg: any = upstreamPkg || {
         author,
         name,
@@ -2314,7 +2416,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         type: typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : 'mod',
         short_description: typeof body.short_desc === 'string' ? body.short_desc.trim() : '',
         long_description: '',
-        repo: typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
+        repo: isAdmin && typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
         license: typeof body.license === 'string' && body.license.trim() ? body.license.trim() : 'MIT',
         media_license: typeof body.media_license === 'string' && body.media_license.trim() ? body.media_license.trim() : 'CC-BY-SA-4.0',
         thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? (sanitizePackageImageUrl(body.thumbnail.trim()) || null) : null,
@@ -2324,8 +2426,9 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         id: `${seedPkg.author || author}/${seedPkg.name || name}`,
         author_name: seedPkg.author || author,
         name: seedPkg.name || name,
-        repo_url: seedPkg.repo || '',
+        repo_url: upstreamPkg ? trustedUpstreamRepo : (isAdmin ? seedPkg.repo || '' : ''),
         provider: 'contentdb',
+        has_contentdb: Boolean(upstreamPkg),
         type: seedPkg.type || 'mod',
         tags: JSON.stringify(Array.isArray(seedPkg.tags) ? seedPkg.tags : [])
       };
@@ -2374,9 +2477,24 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       return Response.json({ error: 'Package not found in D1 registry.' }, { status: 404 });
     }
 
-    const isOwner =
+    let isOwner =
       isAdmin ||
       verifyStrictPackageAuthorOwnership(user, identities, pkgRow, author);
+
+    if (!isOwner && identities.some((i: any) => i.verified && i.provider === 'contentdb')) {
+      const upstreamCheck = await fetchUpstreamJsonCached<any>(
+        `/packages/${encodeURIComponent(pkgRow.author_name || author)}/${encodeURIComponent(pkgRow.name || name)}/`,
+        300
+      ).catch(() => null);
+      if (upstreamCheck && typeof upstreamCheck === 'object' && upstreamCheck.name) {
+        isOwner = verifyStrictPackageAuthorOwnership(
+          user,
+          identities,
+          { ...pkgRow, has_contentdb: true },
+          author
+        );
+      }
+    }
 
     if (!isOwner) {
       return Response.json({
@@ -2389,7 +2507,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     let cleanedCustomTags: string[] = [];
 
     if (Array.isArray(body.tags)) {
-      const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
+      const systemTagSet = new Set(['git', 'github', 'codeberg', 'mesehub', 'gitlab', 'bitbucket', 'custom', 'contentdb', 'mod', 'game', 'txp', 'modpack']);
       cleanedCustomTags = body.tags
         .map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, ''))
         .filter(t => Boolean(t) && !systemTagSet.has(t))
@@ -2596,6 +2714,9 @@ export async function onRequestPatch(context: { request: Request; params: { auth
 
 // POST /api/packages/:author/:name?view=1 — Lightweight non-blocking web view beacon
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request, { allowSimpleBeacon: true });
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -2616,7 +2737,6 @@ export async function onRequestPost(context: { request: Request; params: { autho
       { recorded },
       {
         headers: {
-          'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'private, no-store'
         }
       }

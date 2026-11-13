@@ -1,5 +1,8 @@
 // Global Edge Security, Origin Guard & Per-IP Quota Protection Middleware
-import { EPHEMERAL_TUNNEL_HOST_PATTERN } from '../src/app/core/config/git-providers.config';
+import {
+  EPHEMERAL_TUNNEL_HOST_PATTERN,
+  INBOUND_TUNNEL_SUBSTRING_PATTERN
+} from '../src/app/core/config/git-providers.config';
 
 interface RateBucket {
   count: number;
@@ -15,13 +18,22 @@ const BLOCKED_BOT_PATTERN =
 const SCANNER_PROBE_PATTERN =
   /^\/(?:\.env|\.git|\.aws|\.docker|\.ssh|\.kube|wp-admin|wp-login|wp-content|wp-includes|phpmyadmin|xmlrpc\.php|vendor\/phpunit|actuator|server-status|cgi-bin|_ignition|cloudflared|etc\/passwd)(?:\/|$|\.)/i;
 
-const INBOUND_TUNNEL_SUBSTRING_PATTERN =
-  /(?:^|[./:@\s"=])(?:[a-z0-9-]+\.)*(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|webhook\.site|burpcollaborator\.net|oastify\.com|interact\.sh)\b/i;
-
 export function detectInboundEphemeralTunnelHeader(
   request: Request
 ): { header: string; value: string } | null {
-  const candidateHeaders = ['Origin', 'Referer', 'X-Forwarded-Host', 'Forwarded'];
+  const candidateHeaders = [
+    'Origin',
+    'Referer',
+    'X-Forwarded-Host',
+    'Forwarded',
+    'X-Original-Host',
+    'X-Host',
+    'X-Forwarded-Server',
+    'X-HTTP-Host-Override',
+    'True-Client-IP',
+    'Cf-Worker',
+    'Via'
+  ];
   for (const headerName of candidateHeaders) {
     const raw = request.headers.get(headerName);
     if (!raw) continue;
@@ -33,6 +45,7 @@ export function detectInboundEphemeralTunnelHeader(
         if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(parsed.hostname.toLowerCase())) {
           return { header: headerName, value: trimmed.slice(0, 200) };
         }
+        continue;
       }
     } catch {
       // Fall through to substring inspection
@@ -47,8 +60,14 @@ export function detectInboundEphemeralTunnelHeader(
   return null;
 }
 
-function withSecurityHeaders(res: Response): Response {
+export const ENFORCING_CSP_HEADER =
+  "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self' https://content.luanti.org https://github.com https://codeberg.org https://git.minetest.land https://gitlab.com; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' data:; media-src 'self' https: blob:; connect-src 'self' https:; frame-src https:; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests";
+
+function applyEdgeSecurityHeaders(res: Response, requestUrl?: URL): Response {
   try {
+    const isLocalHttpDev =
+      requestUrl?.protocol === 'http:' &&
+      (requestUrl.hostname === 'localhost' || requestUrl.hostname === '127.0.0.1');
     const headers = new Headers(res.headers);
     if (!headers.has('X-Content-Type-Options')) {
       headers.set('X-Content-Type-Options', 'nosniff');
@@ -61,6 +80,30 @@ function withSecurityHeaders(res: Response): Response {
     }
     if (!headers.has('Permissions-Policy')) {
       headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    }
+    if (!isLocalHttpDev && !headers.has('Strict-Transport-Security')) {
+      headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    if (!headers.has('Cross-Origin-Opener-Policy')) {
+      headers.set('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    }
+    if (!headers.has('X-Permitted-Cross-Domain-Policies')) {
+      headers.set('X-Permitted-Cross-Domain-Policies', 'none');
+    }
+    if (!headers.has('Content-Security-Policy')) {
+      const cspValue = isLocalHttpDev
+        ? ENFORCING_CSP_HEADER
+            .replace('; upgrade-insecure-requests', '')
+            .replace(
+              "connect-src 'self' https:;",
+              "connect-src 'self' https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;"
+            )
+            .replace(
+              "frame-src https:;",
+              "frame-src https: http://localhost:* http://127.0.0.1:*;"
+            )
+        : ENFORCING_CSP_HEADER;
+      headers.set('Content-Security-Policy', cspValue);
     }
     return new Response(res.body, {
       status: res.status,
@@ -89,7 +132,17 @@ function pruneRateLimitStore(now: number): void {
 
 export function checkEdgeRateLimit(
   ip: string,
-  bucketType: 'mutation' | 'download' | 'hydrate' | 'api_read',
+  bucketType:
+    | 'auth_verify'
+    | 'mutation'
+    | 'sandbox'
+    | 'download'
+    | 'hydrate'
+    | 'api_read'
+    | 'git_audit'
+    | 'sync'
+    | 'ssr'
+    | 'proxy_image',
   limit: number,
   windowMs: number,
   now = Date.now()
@@ -117,8 +170,7 @@ function isTrustedLuantiHost(host: string): boolean {
   return (
     h === 'luantihub.org' ||
     h.endsWith('.luantihub.org') ||
-    h === 'luanti-hub.pages.dev' ||
-    h.endsWith('.luanti-hub.pages.dev')
+    h === 'luanti-hub.pages.dev'
   );
 }
 
@@ -204,12 +256,130 @@ function escapeHtmlAttr(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
+const SUPPORTED_NON_EN_LOCALES: Record<
+  string,
+  { ogLocale: string; homeTitle: string; homeDesc: string }
+> = {
+  sk: {
+    ogLocale: 'sk_SK',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mody, hry a textúry pre Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) je otvorený katalóg balíčkov pre engine Luanti (bývalý Minetest). Stiahnite si tisíce hier, modov a textúr priamo ako .zip, z Gitu alebo priamo v hre.'
+  },
+  de: {
+    ogLocale: 'de_DE',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Spiele & Texturpakete für Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) ist das offene Paketverzeichnis für die Voxel-Engine Luanti (ehemals Minetest). Tausende Spiele, Mods und Texturpakete als .zip, Git-Paket oder per 1-Klick im Spiel.'
+  },
+  fr: {
+    ogLocale: 'fr_FR',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Jeux et Packs de Textures pour Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) est le registre ouvert de paquets pour le moteur voxel Luanti (anciennement Minetest). Téléchargez des milliers de jeux, mods et packs de textures en .zip, Git ou en jeu.'
+  },
+  es: {
+    ogLocale: 'es_ES',
+    homeTitle: 'Luanti Hub (LuantiHub) — Mods, Juegos y Paquetes de Texturas para Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) es el registro abierto de paquetes para el motor voxel Luanti (antes Minetest). Descarga miles de juegos, mods y paquetes de texturas en .zip, Git o con 1 clic en el juego.'
+  },
+  ru: {
+    ogLocale: 'ru_RU',
+    homeTitle: 'Luanti Hub (LuantiHub) — Моды, игры и текстурпаки для Luanti',
+    homeDesc:
+      'Luanti Hub (LuantiHub) — открытый каталог пакетов для воксельного движка Luanti (ранее Minetest). Тысячи игр, модов и текстурпаков в формате .zip, из Git или в 1 клик прямо в игре.'
+  }
+};
+
+function resolveNonEnLocale(searchParams: URLSearchParams): string | null {
+  const raw = (searchParams.get('lang') || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SUPPORTED_NON_EN_LOCALES, raw) ? raw : null;
+}
+
+function buildHreflangLinksHtml(baseCanonicalUrl: string): string {
+  const locales = ['en', 'sk', 'de', 'fr', 'es', 'ru'];
+  const lines = [
+    `<link rel="alternate" hreflang="x-default" href="${escapeHtmlAttr(baseCanonicalUrl)}" />`
+  ];
+  for (const loc of locales) {
+    const href = loc === 'en' ? baseCanonicalUrl : `${baseCanonicalUrl}?lang=${loc}`;
+    lines.push(`<link rel="alternate" hreflang="${loc}" href="${escapeHtmlAttr(href)}" />`);
+  }
+  return lines.join('\n    ');
+}
+
+function replaceHreflangBlock(html: string, baseCanonicalUrl: string): string {
+  const newBlock = buildHreflangLinksHtml(baseCanonicalUrl);
+  if (/<link\s+rel="alternate"\s+hreflang="/i.test(html)) {
+    let inserted = false;
+    return html.replace(/\s*<link\s+rel="alternate"\s+hreflang="[^"]*"[^>]*?>/gi, () => {
+      if (!inserted) {
+        inserted = true;
+        return `\n    ${newBlock}`;
+      }
+      return '';
+    });
+  }
+  return html.replace(
+    /(<link\s+rel="canonical"[^>]*?>)/i,
+    `$1\n    ${newBlock}`
+  );
+}
+
+function injectHomeLocaleSeoIntoHtml(html: string, locale: string): string {
+  const locMeta = SUPPORTED_NON_EN_LOCALES[locale];
+  if (!locMeta) return html;
+  const canonicalUrl = `https://luantihub.org/?lang=${locale}`;
+  const safeTitle = escapeHtmlAttr(locMeta.homeTitle);
+  const safeDesc = escapeHtmlAttr(locMeta.homeDesc);
+
+  return html
+    .replace(/<html\s+lang="en"/i, `<html lang="${escapeHtmlAttr(locale)}"`)
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
+    .replace(
+      /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<link\s+rel="canonical"[^>]*?>/i,
+      `<link rel="canonical" id="canonical-link" href="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:description" content="${safeDesc}" />`
+    )
+    .replace(
+      /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:url" content="${canonicalUrl}" />`
+    )
+    .replace(
+      /<meta\s+property="og:locale"\s+content="[^"]*"\s*\/?>/i,
+      `<meta property="og:locale" content="${locMeta.ogLocale}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:title" content="${safeTitle}" />`
+    )
+    .replace(
+      /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+      `<meta name="twitter:description" content="${safeDesc}" />`
+    );
+}
+
 function injectSectionSeoIntoHtml(
   html: string,
   sectionPath: string,
-  meta: { title: string; breadcrumbName: string; description: string }
+  meta: { title: string; breadcrumbName: string; description: string },
+  nonEnLocale: string | null = null
 ): string {
-  const canonicalUrl = `https://luantihub.org${sectionPath}`;
+  const baseCanonicalUrl = `https://luantihub.org${sectionPath}`;
+  const canonicalUrl = nonEnLocale ? `${baseCanonicalUrl}?lang=${nonEnLocale}` : baseCanonicalUrl;
+  const locMeta = nonEnLocale ? SUPPORTED_NON_EN_LOCALES[nonEnLocale] : null;
   const safeTitle = escapeHtmlAttr(meta.title);
   const safeDesc = escapeHtmlAttr(meta.description);
   const safeBreadcrumb = escapeHtmlAttr(meta.breadcrumbName);
@@ -219,6 +389,7 @@ function injectSectionSeoIntoHtml(
     name: meta.breadcrumbName,
     description: meta.description,
     url: canonicalUrl,
+    inLanguage: nonEnLocale || 'en',
     isPartOf: {
       '@type': 'WebSite',
       '@id': 'https://luantihub.org/#website',
@@ -237,13 +408,14 @@ function injectSectionSeoIntoHtml(
           '@type': 'ListItem',
           position: 2,
           name: meta.breadcrumbName,
-          item: canonicalUrl
+          item: baseCanonicalUrl
         }
       ]
     }
   });
 
-  return html
+  let transformed = html
+    .replace(/\s*<script[^>]*id="home-faq-jsonld"[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<title>[\s\S]*?<\/title>/i, `<title>${safeTitle}</title>`)
     .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
@@ -281,6 +453,19 @@ function injectSectionSeoIntoHtml(
       '</head>',
       `<script type="application/ld+json" id="luanti-pkg-jsonld">${breadcrumbJsonLd}</script></head>`
     );
+
+  transformed = replaceHreflangBlock(transformed, baseCanonicalUrl);
+
+  if (nonEnLocale && locMeta) {
+    transformed = transformed
+      .replace(/<html\s+lang="en"/i, `<html lang="${escapeHtmlAttr(nonEnLocale)}"`)
+      .replace(
+        /<meta\s+property="og:locale"\s+content="[^"]*"\s*\/?>/i,
+        `<meta property="og:locale" content="${locMeta.ogLocale}" />`
+      );
+  }
+
+  return transformed;
 }
 
 export async function onRequest(context: {
@@ -290,6 +475,7 @@ export async function onRequest(context: {
 }): Promise<Response> {
   const { request, next } = context;
   const url = new URL(request.url);
+  const withSecurityHeaders = (res: Response): Response => applyEdgeSecurityHeaders(res, url);
   const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
   const clientIp =
@@ -298,9 +484,25 @@ export async function onRequest(context: {
     'anonymous';
   const userAgent = request.headers.get('User-Agent') || '';
 
+  const isApiRoute = pathname.startsWith('/api/');
+  const isDownloadRoute = pathname.endsWith('/download');
+  const isDynamicSsrRoute =
+    !isDownloadRoute &&
+    (pathname.startsWith('/package/') ||
+      pathname.startsWith('/packages/') ||
+      pathname.startsWith('/author/') ||
+      pathname === '/sitemap.xml');
+
   // 0. Detect & block inbound Cloudflare Quick Tunnel (*.trycloudflare.com) or disposable reverse-tunnel proxying / spoofed forwarding headers
+  // (Allow normal top-level GET/HEAD HTML link clicks where only `Referer` came from a dev preview page)
   const matchedTunnelHeader = detectInboundEphemeralTunnelHeader(request);
-  if (matchedTunnelHeader) {
+  const isSafeTopLevelLinkNavigation =
+    !isApiRoute &&
+    !isDownloadRoute &&
+    (method === 'GET' || method === 'HEAD') &&
+    matchedTunnelHeader?.header === 'Referer' &&
+    request.headers.get('Sec-Fetch-Mode') === 'navigate';
+  if (matchedTunnelHeader && !isSafeTopLevelLinkNavigation) {
     console.warn(
       JSON.stringify({
         event: 'SECURITY_ALERT:EPHEMERAL_TUNNEL_BLOCKED',
@@ -336,18 +538,20 @@ export async function onRequest(context: {
   }
 
   if (
+    pathname === '/cdb-api' ||
     pathname.startsWith('/cdb-api/') ||
+    pathname === '/mirror-api' ||
     pathname.startsWith('/mirror-api/') ||
+    pathname === '/blog-api' ||
     pathname.startsWith('/blog-api/')
   ) {
-    return Response.json(
-      { error: 'Dev proxy route is only available on Angular CLI dev server.' },
-      { status: 404 }
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Dev proxy route is only available on Angular CLI dev server.' },
+        { status: 404 }
+      )
     );
   }
-
-  const isApiRoute = pathname.startsWith('/api/');
-  const isDownloadRoute = pathname.endsWith('/download') || pathname.endsWith('/download/');
 
   // Redirect legacy *.pages.dev and www.luantihub.org web/crawler requests to canonical https://luantihub.org
   // while keeping /api/* and /download endpoints active for legacy in-game Luanti clients.
@@ -364,12 +568,58 @@ export async function onRequest(context: {
     return Response.redirect(`https://luantihub.org${url.pathname}${url.search}`, 301);
   }
 
+  // Block known aggressive AI scrapers, automated SEO crawlers & offensive scanners across API, download, and dynamic SSR/D1 routes
+  if ((isApiRoute || isDownloadRoute || isDynamicSsrRoute) && BLOCKED_BOT_PATTERN.test(userAgent)) {
+    return withSecurityHeaders(
+      Response.json(
+        { error: 'Automated scraping of API and download endpoints is not permitted.' },
+        { status: 403 }
+      )
+    );
+  }
+
   if (!isApiRoute && !isDownloadRoute) {
+    if (isDynamicSsrRoute) {
+      const ssrRateCheck = checkEdgeRateLimit(clientIp, 'ssr', 90, 60_000);
+      if (!ssrRateCheck.allowed) {
+        return withSecurityHeaders(
+          new Response('Rate limit exceeded. Please wait a moment before making more requests.', {
+            status: 429,
+            headers: {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Retry-After': String(ssrRateCheck.retryAfterSeconds)
+            }
+          })
+        );
+      }
+    }
     const sectionMeta = SECTION_HUB_SEO_MAP[pathname];
+    const nonEnLocale = resolveNonEnLocale(url.searchParams);
+    const isKnownSpaRoute =
+      pathname === '/' ||
+      Boolean(sectionMeta) ||
+      pathname === '/profile' ||
+      pathname === '/analytics' ||
+      pathname.startsWith('/analytics/');
     const assetsBinding = context.env?.['ASSETS'];
     try {
       const res = await next();
       if (res.status === 404 && method === 'GET' && !pathname.includes('.') && assetsBinding && typeof assetsBinding.fetch === 'function') {
+        if (!isKnownSpaRoute) {
+          return withSecurityHeaders(
+            new Response(
+              '<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="robots" content="noindex" /><title>404 Not Found | Luanti Hub</title></head><body><h1>404 Not Found</h1><p><a href="/">Return to Luanti Hub</a></p></body></html>',
+              {
+                status: 404,
+                headers: {
+                  'Content-Type': 'text/html; charset=utf-8',
+                  'X-Robots-Tag': 'noindex',
+                  'Cache-Control': 'public, max-age=300, s-maxage=600'
+                }
+              }
+            )
+          );
+        }
         const rootUrl = new URL('/', url.origin);
         const spaRes = await assetsBinding.fetch(
           new Request(rootUrl.toString(), {
@@ -380,7 +630,19 @@ export async function onRequest(context: {
         if (sectionMeta) {
           const rawHtml = await spaRes.text();
           return withSecurityHeaders(
-            new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+            new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale), {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'public, max-age=300, s-maxage=900'
+              }
+            })
+          );
+        }
+        if (pathname === '/' && nonEnLocale) {
+          const rawHtml = await spaRes.text();
+          return withSecurityHeaders(
+            new Response(injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale), {
               status: 200,
               headers: {
                 'Content-Type': 'text/html; charset=utf-8',
@@ -402,7 +664,19 @@ export async function onRequest(context: {
       if (sectionMeta && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
         const rawHtml = await res.text();
         return withSecurityHeaders(
-          new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta), {
+          new Response(injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale), {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'public, max-age=300, s-maxage=900'
+            }
+          })
+        );
+      }
+      if (pathname === '/' && nonEnLocale && res.ok && (res.headers.get('content-type') || '').includes('text/html')) {
+        const rawHtml = await res.text();
+        return withSecurityHeaders(
+          new Response(injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale), {
             status: 200,
             headers: {
               'Content-Type': 'text/html; charset=utf-8',
@@ -427,31 +701,23 @@ export async function onRequest(context: {
           })
         );
         const rawHtml = await spaRes.text();
+        const fallbackHtml = sectionMeta
+          ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta, nonEnLocale)
+          : pathname === '/' && nonEnLocale
+            ? injectHomeLocaleSeoIntoHtml(rawHtml, nonEnLocale)
+            : rawHtml;
         return withSecurityHeaders(
-          new Response(
-            sectionMeta ? injectSectionSeoIntoHtml(rawHtml, pathname, sectionMeta) : rawHtml,
-            {
-              status: 200,
-              headers: {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Cache-Control': 'no-store, no-cache, must-revalidate'
-              }
+          new Response(fallbackHtml, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store, no-cache, must-revalidate'
             }
-          )
+          })
         );
       }
       throw err;
     }
-  }
-
-  // 1. Block known aggressive AI scrapers, automated SEO crawlers & offensive scanners from burning Function/D1 quotas
-  if (BLOCKED_BOT_PATTERN.test(userAgent)) {
-    return withSecurityHeaders(
-      Response.json(
-        { error: 'Automated scraping of API and download endpoints is not permitted.' },
-        { status: 403 }
-      )
-    );
   }
 
   // 2. Cross-Origin & Hotlink Protection
@@ -491,10 +757,19 @@ export async function onRequest(context: {
     pathname.endsWith('/moderate');
 
   if (isStateMutating || isInternalWebEndpoint) {
-    if (secFetchSite === 'cross-site') {
+    if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
       return withSecurityHeaders(
         Response.json(
           { error: 'Forbidden: Cross-site requests are blocked.' },
+          { status: 403 }
+        )
+      );
+    }
+    const secFetchMode = (request.headers.get('Sec-Fetch-Mode') || '').toLowerCase();
+    if (isStateMutating && !isOAuthFlow && secFetchMode === 'navigate') {
+      return withSecurityHeaders(
+        Response.json(
+          { error: 'Forbidden: Top-level navigation mutations are blocked.' },
           { status: 403 }
         )
       );
@@ -510,26 +785,43 @@ export async function onRequest(context: {
   }
 
   // 3. Per-IP Sliding-Window Edge Rate Limiting (protects Worker & D1 quotas before hitting DB/upstreams)
-  const isHydrateEndpoint = pathname.startsWith('/api/packages/hydrate');
-  const isHeavyEndpoint =
-    !isHydrateEndpoint && (
-      isStateMutating ||
-      pathname.startsWith('/api/packages/git') ||
-      pathname.startsWith('/api/users/') ||
-      pathname.startsWith('/api/admin/') ||
-      pathname.startsWith('/api/promotions')
-    );
-
   const isLocalDevHost =
     url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  const isAuthTokenVerifyEndpoint = pathname === '/api/auth/me' && method === 'POST';
+  const isGitAuditEndpoint = pathname.startsWith('/api/packages/git');
+  const isSyncContentDbEndpoint =
+    pathname.startsWith('/api/users/') && pathname.includes('/sync-contentdb');
+  const isSandboxEndpoint = pathname.startsWith('/api/sandbox/');
+  const isHydrateEndpoint = pathname.startsWith('/api/packages/hydrate');
+  const isProxyImageEndpoint = pathname === '/api/packages' && url.searchParams.has('proxy_image');
+  const isHeavyEndpoint =
+    !isAuthTokenVerifyEndpoint &&
+    !isGitAuditEndpoint &&
+    !isSyncContentDbEndpoint &&
+    !isSandboxEndpoint &&
+    !isHydrateEndpoint &&
+    (isStateMutating ||
+      pathname.startsWith('/api/users/') ||
+      pathname.startsWith('/api/admin/') ||
+      pathname.startsWith('/api/promotions'));
 
-  const rateCheck = isHeavyEndpoint
-    ? checkEdgeRateLimit(clientIp, 'mutation', 15, 60_000)
-    : isHydrateEndpoint
-      ? checkEdgeRateLimit(clientIp, 'hydrate', isLocalDevHost ? 600 : 45, 60_000)
-      : isDownloadRoute
-        ? checkEdgeRateLimit(clientIp, 'download', isLocalDevHost ? 120 : 30, 60_000)
-        : checkEdgeRateLimit(clientIp, 'api_read', isLocalDevHost ? 600 : 120, 60_000);
+  const rateCheck = isAuthTokenVerifyEndpoint
+    ? checkEdgeRateLimit(clientIp, 'auth_verify', 5, 60_000)
+    : isGitAuditEndpoint
+      ? checkEdgeRateLimit(clientIp, 'git_audit', isLocalDevHost ? 60 : 10, 60_000)
+      : isSyncContentDbEndpoint
+        ? checkEdgeRateLimit(clientIp, 'sync', 6, 60_000)
+        : isSandboxEndpoint
+          ? checkEdgeRateLimit(clientIp, 'sandbox', isLocalDevHost ? 300 : 60, 60_000)
+          : isHeavyEndpoint
+            ? checkEdgeRateLimit(clientIp, 'mutation', isLocalDevHost ? 120 : 15, 60_000)
+            : isHydrateEndpoint
+              ? checkEdgeRateLimit(clientIp, 'hydrate', isLocalDevHost ? 600 : 30, 60_000)
+              : isDownloadRoute
+                ? checkEdgeRateLimit(clientIp, 'download', 120, 60_000)
+                : isProxyImageEndpoint
+                  ? checkEdgeRateLimit(clientIp, 'proxy_image', isLocalDevHost ? 600 : 120, 60_000)
+                  : checkEdgeRateLimit(clientIp, 'api_read', isLocalDevHost ? 600 : 120, 60_000);
 
   if (!rateCheck.allowed) {
     return withSecurityHeaders(

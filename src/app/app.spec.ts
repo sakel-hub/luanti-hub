@@ -8,7 +8,7 @@ import { LuantiPackage } from './core/models/package.model';
 import { SettingsService } from './core/services/settings.service';
 import { SeoService } from './core/services/seo.service';
 import { AuthService, formatFriendlyAuthError, sanitizeUserFacingError } from './core/services/auth.service';
-import { TranslationService } from './core/i18n/translation.service';
+import { TranslationService, preloadAllTranslationLocales } from './core/i18n/translation.service';
 import { Top10RowComponent } from './features/top10/top10-row.component';
 import { CatalogComponent } from './features/catalog/catalog.component';
 import { PackageCardComponent } from './features/card/package-card.component';
@@ -88,12 +88,14 @@ describe('App & Core Services', () => {
   let defaultFetchRestore: typeof fetch | null = null;
 
   beforeEach(async () => {
+    await preloadAllTranslationLocales();
     defaultFetchRestore = globalThis.fetch;
     globalThis.fetch = (async () => {
       throw new Error('Network disabled in unit tests unless explicitly mocked');
     }) as unknown as typeof fetch;
     try {
       localStorage.removeItem('lh_last_app_update_notif_at_v1');
+      localStorage.removeItem('lh_recent_discovered_pkgs_v1');
       sessionStorage.removeItem('lh_pwa_auto_updated_version');
     } catch {
       // Ignore storage errors
@@ -128,7 +130,7 @@ describe('App & Core Services', () => {
     expect(compiled.textContent).toContain('LuantiHub');
     expect(compiled.textContent).toContain('DMCA');
     expect(compiled.textContent).toContain(`© ${new Date().getFullYear()}`);
-    expect(compiled.textContent).toContain('LGPL-2.1+');
+    expect(compiled.textContent).toContain('LGPL-2.1-or-later');
   });
 
   it('should provide In-Game Setup and GitHub issue tracker link inside header gear menu and footer', async () => {
@@ -1349,6 +1351,46 @@ description = Mob animation and spawning framework.
     expect(modpackPaths).toContain('x_pack/mod_alpha/init.lua');
     expect(modpackPaths).toContain('x_pack/mod_beta/init.lua');
 
+    // 2b. Multi-mod Game archive (`confspace`) with game.conf + mods/* must NEVER synthesize modpack.conf
+    // (even if erroneously invoked with packageType = 'modpack'), and must strip stray root modpack.conf
+    // while preserving nested modpacks inside `mods/<subpack>/modpack.conf` so Luanti `pkgmgr.get_folder_type`
+    // always classifies it as `game` instead of failing with "Unable to install a modpack as a game".
+    const rawGameZip = buildTestZip([
+      { path: 'confspace-main/game.conf', content: 'title = Configuration Space\n' },
+      { path: 'confspace-main/modpack.conf', content: 'name = stray_root_modpack\n' },
+      { path: 'confspace-main/mods/confspace_core/init.lua', content: '-- core' },
+      { path: 'confspace-main/mods/confspace_pack/modpack.conf', content: 'name = confspace_pack\n' },
+      { path: 'confspace-main/mods/confspace_pack/submod/init.lua', content: '-- submod' }
+    ]);
+    const normalizedGameZip = normalizeLuantiPackageZip(rawGameZip, 'confspace', 'game');
+    const gamePaths = listZipPaths(normalizedGameZip);
+    expect(gamePaths[0]).toBe('confspace/');
+    expect(gamePaths).toContain('confspace/game.conf');
+    expect(gamePaths).toContain('confspace/mods/confspace_core/init.lua');
+    expect(gamePaths).toContain('confspace/mods/confspace_pack/modpack.conf');
+    expect(gamePaths).not.toContain('confspace/modpack.conf');
+    expect(gamePaths).not.toContain('confspace/modpack.txt');
+
+    const rawCleanGameZip = buildTestZip([
+      { path: 'confspace-main/game.conf', content: 'title = Configuration Space\n' },
+      { path: 'confspace-main/mods/confspace_core/init.lua', content: '-- core' },
+      { path: 'confspace-main/mods/confspace_mapgen/init.lua', content: '-- mapgen' }
+    ]);
+    const defensiveGamePaths = listZipPaths(normalizeLuantiPackageZip(rawCleanGameZip, 'confspace', 'modpack'));
+    expect(defensiveGamePaths).toContain('confspace/game.conf');
+    expect(defensiveGamePaths).not.toContain('confspace/modpack.conf');
+
+    // 2c. Legacy game.conf-less Git game (`mods/*/init.lua`) keeps `mods/` intact and synthesizes root `game.conf`
+    const rawLegacyGameZip = buildTestZip([
+      { path: 'oldgame-main/mods/mod_one/init.lua', content: '-- one' },
+      { path: 'oldgame-main/mods/mod_two/init.lua', content: '-- two' }
+    ]);
+    const legacyGamePaths = listZipPaths(normalizeLuantiPackageZip(rawLegacyGameZip, 'oldgame', 'game'));
+    expect(legacyGamePaths).toContain('oldgame/game.conf');
+    expect(legacyGamePaths).toContain('oldgame/mods/mod_one/init.lua');
+    expect(legacyGamePaths).toContain('oldgame/mods/mod_two/init.lua');
+    expect(legacyGamePaths).not.toContain('oldgame/modpack.conf');
+
     // 3. Verify "Install App" buttons are hidden when PWA is already installed
     const pwaService = TestBed.inject(PwaService);
     const headerFixture = TestBed.createComponent(HeaderComponent);
@@ -2120,9 +2162,22 @@ description = Mob animation and spawning framework.
       // Vignette/shadow overlay is removed while hover video is playing to prevent bottom subpixel seam
       expect(cardFixture.nativeElement.querySelector('[data-testid="card-thumbnail-vignette"]')).toBeNull();
 
-      // Simulate YouTube IFrame API infoDelivery postMessage indicating playback at 14.7s
+      // Untrusted/empty postMessage origins are ignored when hover video is active
       cardComp.onWindowMessage(
         new MessageEvent('message', {
+          origin: 'https://evil.example',
+          data: JSON.stringify({
+            event: 'infoDelivery',
+            info: { playerState: 1, currentTime: 99 }
+          })
+        })
+      );
+      expect(cardComp.isEmbedVideoReady()).toBe(false);
+
+      // Simulate YouTube IFrame API infoDelivery postMessage from exact embed origin indicating playback at 14.7s
+      cardComp.onWindowMessage(
+        new MessageEvent('message', {
+          origin: 'https://www.youtube-nocookie.com',
           data: JSON.stringify({
             event: 'infoDelivery',
             info: { playerState: 1, currentTime: 14.7 }
@@ -5313,7 +5368,7 @@ supported_games = minetest_game, voxelibre
         url.includes('/icons/notif-') ||
         url.includes('/icons/icon-72x72.png') ||
         url.includes('blog.luanti.org/static/') ||
-        url.includes('/banners/luanti-5-18-0.png')
+        url.includes('/screenshot-desktop.png')
       ) {
         return new Response(onePixelPngBytes, {
           status: 200,
@@ -6108,10 +6163,11 @@ supported_games = minetest_game, voxelibre
     }
   });
 
-  it('should share lh_session cookies across .luantihub.org and preserve initiating PWA origin & popup mode across OAuth redirects', async () => {
+  it('should share lh_session cookies across .luantihub.org and preserve initiating PWA origin & validated returnTo path across OAuth redirects', async () => {
     const {
       createOAuthStateToken,
       parseOAuthStateToken,
+      sanitizeRelativeReturnPath,
       buildSessionCookie,
       buildClearSessionCookies
     } = await import('../../functions/api/auth/lib/session');
@@ -6128,23 +6184,31 @@ supported_games = minetest_game, voxelibre
     expect(clearCookies.length).toBe(2);
     expect(clearCookies.some(c => c.includes('Domain=.luantihub.org'))).toBe(true);
 
-    // 2. Verify HMAC OAuth state preserves trusted initiating origin (e.g. https://www.luantihub.org) and popup mode
+    // 2. Verify HMAC OAuth state preserves trusted initiating origin and validated relative returnTo path
     const stateWww = await createOAuthStateToken('github', 'test-secret', {
       origin: 'https://www.luantihub.org',
-      popup: true
+      returnTo: '/package/SaKeL/everness'
     });
     const parsedWww = await parseOAuthStateToken(stateWww, 'github', 'test-secret');
     expect(parsedWww.valid).toBe(true);
     expect(parsedWww.origin).toBe('https://www.luantihub.org');
-    expect(parsedWww.popup).toBe(true);
+    expect(parsedWww.returnTo).toBe('/package/SaKeL/everness');
 
-    // Reject untrusted origin in state token
+    // Reject untrusted origin and open-redirect returnTo payloads in state token
+    expect(sanitizeRelativeReturnPath('//evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/\\evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('https://evil.example.com/phish')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/valid\r\nHeader: injected')).toBeUndefined();
+    expect(sanitizeRelativeReturnPath('/profile?tab=account&auth_success=1')).toBe('/profile?tab=account');
+
     const stateEvil = await createOAuthStateToken('github', 'test-secret', {
-      origin: 'https://evil.example.com'
+      origin: 'https://evil.example.com',
+      returnTo: '//evil.example.com/steal'
     });
     const parsedEvil = await parseOAuthStateToken(stateEvil, 'github', 'test-secret');
     expect(parsedEvil.valid).toBe(true);
     expect(parsedEvil.origin).toBeUndefined();
+    expect(parsedEvil.returnTo).toBeUndefined();
   });
 
   it('should enforce strict package ownership via claimed author_id or verified forge ownership (without heuristic suffix stripping) and block self-reviews', async () => {
@@ -6334,7 +6398,7 @@ supported_games = minetest_game, voxelibre
     // Updating blog post with a payload that lacks a cover image must preserve the real hero cover image
     pkgService.setLatestBlogPost({
       ...parsedBlog!,
-      image_url: '/banners/luanti-5-18-0.png'
+      image_url: '/screenshot-desktop.png'
     });
     expect(pkgService.activeBlogArticle()?.image_url).toBe('https://blog.luanti.org/static/blog/5.17.0/cover.webp');
 
@@ -6425,9 +6489,9 @@ supported_games = minetest_game, voxelibre
     pkgService.setPromotions([
       {
         id: 'promo_keep_active',
-        title: 'Luanti 5.18.0 Released!',
-        short_desc: 'Official release promotion',
-        banner_url: '/banners/luanti-5-18-0.png',
+        title: 'Luanti Game Jam 2026!',
+        short_desc: 'Official Game Jam promotion',
+        banner_url: '/banners/gamejam_2026.png',
         cta_label: 'Download',
         cta_url: 'https://www.luanti.org',
         badge_text: 'PROMOTED',
@@ -6455,6 +6519,27 @@ supported_games = minetest_game, voxelibre
 
     expect(pkgService.activePromotions()[0]?.id).toBe('promo_keep_active');
     expect(pkgService.heroShowcasePackages().some(p => p.id === 'promo:promo_keep_active')).toBe(true);
+
+    // Disabling show_in_hero and row_enabled immediately prunes it from activeHeroPromotions, heroShowcasePackages, and localStorage
+    pkgService.setPromotions([
+      {
+        id: 'promo_keep_active',
+        title: 'Luanti Game Jam 2026!',
+        short_desc: 'Official Game Jam promotion',
+        banner_url: '/banners/gamejam_2026.png',
+        cta_label: 'Download',
+        cta_url: 'https://www.luanti.org',
+        badge_text: 'PROMOTED',
+        starts_at: new Date(Date.now() - 60_000).toISOString(),
+        expires_at: futureIso,
+        priority: 100,
+        show_in_hero: false,
+        row_enabled: false
+      }
+    ]);
+    expect(pkgService.activeHeroPromotions().length).toBe(0);
+    expect(pkgService.heroShowcasePackages().some(p => p.id === 'promo:promo_keep_active')).toBe(false);
+    expect(localStorage.getItem('lh_active_promotions_v1')).toBeNull();
 
     // Verify self-contained session token claims round-trip
     const token = await createSessionToken('usr_sakel', 'test-secret', {
@@ -6907,7 +6992,7 @@ supported_games = minetest_game, voxelibre
 
     const legalDeleteSection = appFixture.nativeElement.querySelector('[data-testid="legal-account-deletion-section"]') as HTMLElement;
     expect(legalDeleteSection).toBeTruthy();
-    expect(legalDeleteSection.textContent).toContain('4. Account & Data Deletion');
+    expect(legalDeleteSection.textContent).toContain('5. Account & Data Deletion');
     expect(legalDeleteSection.textContent).toContain('LuantiHub');
     expect(legalDeleteSection.textContent).toContain('from our databases');
 
@@ -7452,7 +7537,7 @@ supported_games = minetest_game, voxelibre
     expect(ssrHtml).toContain('href="https://luantihub.org/package/Hybrid%20Dog/technic"');
     expect(ssrHtml).not.toContain('Hybrid%2520Dog');
     expect(ssrHtml).toContain('window.__LUANTI_INITIAL_PACKAGE__=');
-    expect(ssrHtml).toContain('<\\/script>');
+    expect(ssrHtml).toContain('\\u003c/script\\u003e');
     expect(ssrHtml).not.toContain('</script><script>alert(1)</script>');
 
     // 4. Middleware blocks scanner probes (/.env, /wp-admin/*) with edge-cached 404 Not Found
@@ -8097,7 +8182,7 @@ supported_games = minetest_game, voxelibre
       const afterDetail = pkgService.packages().find(p => p.id === 'TenPlus1/mobs')!;
       expect(afterDetail.thumbnail).toBe('https://content.luanti.org/thumbnails/1/dc6e96f2d4.png');
       expect(afterDetail.banner).toBe(
-        'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png?width=1100&aspect_ratio=16:9&format=png'
+        'https://cdn.content.luanti.org/uploads/dc6e96f2d4.png?width=1100&aspect_ratio=16:9'
       );
 
       // Ensure fetchReviews is NOT blocked by `{positive:0,neutral:0,negative:0}` and fetches `/api/packages/TenPlus1/mobs/reviews`
@@ -8304,16 +8389,16 @@ supported_games = minetest_game, voxelibre
     const cdbLevel3 = 'https://content.luanti.org/thumbnails/3/8f7c4f97f4.png';
     const cdbDoubleExt = 'https://content.luanti.org/thumbnails/1/1486fdc7a4.jpg.png';
     const cdbUpload = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg';
-    const cdbUploadTile = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=500&aspect_ratio=3:2&format=png';
-    const cdbUploadBanner = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=1100&aspect_ratio=16:9&format=png';
-    const cdbUploadGallery = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=720&aspect_ratio=16:9&format=png';
+    const cdbUploadTile = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=500&aspect_ratio=3:2';
+    const cdbUploadBanner = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=1100&aspect_ratio=16:9';
+    const cdbUploadGallery = 'https://cdn.content.luanti.org/uploads/8f7c4f97f4.jpg?width=720&aspect_ratio=16:9';
 
     expect(removeContentDbPngHack('1486fdc7a4.jpg.png')).toBe('1486fdc7a4.jpg');
     expect(removeContentDbPngHack('1a204531fe.png.png')).toBe('1a204531fe.png');
     expect(toCanonicalContentDbUploadUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
     expect(upgradeContentDbThumbnailUrl(cdbDoubleExt)).toBe('https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg');
     expect(formatContentDbCdnUrl(cdbDoubleExt, 'tile')).toBe(
-      'https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg?width=500&aspect_ratio=3:2&format=png'
+      'https://cdn.content.luanti.org/uploads/1486fdc7a4.jpg?width=500&aspect_ratio=3:2'
     );
     expect(formatContentDbCdnUrl(cdbUpload, 'tile')).toBe(cdbUploadTile);
     expect(formatContentDbCdnUrl(cdbUpload, 'banner')).toBe(cdbUploadBanner);
@@ -9510,6 +9595,8 @@ supported_games = minetest_game, voxelibre
 
     // 1. Ensure ZERO <img> elements exist inside the oversized ambient glow container so Chromium/Lighthouse LCP never picks the glow layer
     expect(glowContainer.querySelectorAll('img').length).toBe(0);
+    // Ensure no hardcoded luanti-5-18-0 backdrop image exists in HeroBillboardComponent
+    expect(heroEl.querySelectorAll('img[src*="luanti-5-18-0"]').length).toBe(0);
 
     // 2. Ensure two full-size 32x18 <canvas> buffers are mounted for smooth crossfading with matching rectangular corners
     const canvases = glowContainer.querySelectorAll('canvas');
@@ -10065,16 +10152,15 @@ supported_games = minetest_game, voxelibre
     const bulkRes = await authService.bulkModerationAction('clear_closed');
     expect(bulkRes.success).toBe(false);
 
-    // 3. Untrusted postMessage origin is ignored by AuthService OAuth popup listener
-    const handlePopupSpy = vi.spyOn(authService as any, 'handleOAuthPopupMessage');
+    // 3. Synthetic postMessage OAuth events are completely inert (no cross-window postMessage auth surface)
+    (authService as any)._currentUser.set(null);
     window.dispatchEvent(
       new MessageEvent('message', {
         origin: 'https://evil.example.com',
         data: { type: 'LH_OAUTH_COMPLETE', success: true, provider: 'github' }
       })
     );
-    expect(handlePopupSpy).not.toHaveBeenCalled();
-    handlePopupSpy.mockRestore();
+    expect(authService.currentUser()).toBeNull();
   });
 
   it('should share warm boot catalog with in-game client (HIT-BOOT-SHARED), isolate release IDs across authors in /api/updates/, and refresh .zip archives on in-game ?reason=update', async () => {
@@ -10318,7 +10404,7 @@ supported_games = minetest_game, voxelibre
       const bootFarming = bootJson.packages.find((p: any) => p.name === 'farming' && p.author === 'TenPlus1');
       expect(bootFarming).toBeTruthy();
       expect(bootFarming.thumbnail).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png');
-      expect(bootFarming.banner).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png?width=1100&aspect_ratio=16:9&format=png');
+      expect(bootFarming.banner).toBe('https://cdn.content.luanti.org/uploads/farming_shot.png?width=1100&aspect_ratio=16:9');
       expect(bootFarming.downloads).toBe(120000);
 
       // 2. Subsequent in-game Luanti client request immediately hits HIT-BOOT-SHARED with compact slimList & legacy thumbnail URL
@@ -12130,13 +12216,75 @@ core.register_node(modname .. ":panel", {
     comp.openLightbox('https://luantihub.org/screenshots/pixie.png');
     fixture.detectChanges();
 
-    const lightboxDialog = fixture.nativeElement.querySelector('[role="dialog"].z-\\[70\\]');
+    const lightboxDialog = fixture.nativeElement.querySelector('[role="dialog"].z-\\[70\\]') as HTMLElement | null;
     expect(lightboxDialog).toBeTruthy();
-    const controlsContainer = lightboxDialog.querySelector('.luanti-wco-no-drag') as HTMLElement | null;
+    expect(lightboxDialog?.className).toContain('w-screen');
+    expect(lightboxDialog?.className).toContain('h-screen');
+
+    const controlsContainer = lightboxDialog!.querySelector('.luanti-wco-no-drag') as HTMLElement | null;
     expect(controlsContainer).toBeTruthy();
     expect(controlsContainer?.className).toContain('top-14');
     expect(controlsContainer?.className).toContain('sm:top-16');
     expect(controlsContainer?.getAttribute('style')).toContain('titlebar-area-height');
+
+    const viewportDiv = lightboxDialog!.querySelector('.overflow-auto') as HTMLElement | null;
+    expect(viewportDiv).toBeTruthy();
+    expect(viewportDiv?.className).toContain('w-full');
+    expect(viewportDiv?.className).toContain('h-full');
+    expect(viewportDiv?.className).not.toContain('max-w-6xl');
+    expect(viewportDiv?.className).not.toContain('items-center');
+    expect(viewportDiv?.className).not.toContain('justify-center');
+
+    const imgEl = viewportDiv!.querySelector('img') as HTMLImageElement | null;
+    expect(imgEl).toBeTruthy();
+    expect(imgEl?.className).toContain('m-auto');
+    expect(imgEl?.className).toContain('max-w-[96vw]');
+    expect(imgEl?.className).toContain('max-h-[92vh]');
+
+    // Toggle zoom to 2x and verify full-bleed uncropped scrollable classes + shrink-0 + min magnification width
+    comp.toggleLightboxZoom();
+    fixture.detectChanges();
+    expect(comp.isLightboxZoomed()).toBe(true);
+    expect(lightboxDialog?.className).toContain('p-0');
+    expect(imgEl?.className).toContain('m-auto');
+    expect(imgEl?.className).toContain('shrink-0');
+    expect(imgEl?.className).toContain('w-[180vw]');
+    expect(imgEl?.className).toContain('sm:w-[160vw]');
+    expect(imgEl?.getAttribute('draggable')).toBe('false');
+    expect(imgEl?.style.width).toBe('max(200vw, 1600px)');
+    expect(imgEl?.style.minWidth).toBe('max(200vw, 1600px)');
+
+    // Simulate click-and-drag panning on the zoomed viewport: should scroll and NOT zoom out on release click
+    viewportDiv!.scrollLeft = 100;
+    viewportDiv!.scrollTop = 80;
+    comp.onLightboxMouseDown(new MouseEvent('mousedown', { button: 0, clientX: 200, clientY: 200 }));
+    expect(comp.isLightboxDragging()).toBe(true);
+    comp.onLightboxMouseMove(new MouseEvent('mousemove', { clientX: 140, clientY: 150 }));
+    expect(viewportDiv!.scrollLeft).toBe(160);
+    expect(viewportDiv!.scrollTop).toBe(130);
+    comp.onLightboxMouseUp();
+    expect(comp.isLightboxDragging()).toBe(false);
+    // Subsequent click after drag > 5px is consumed without exiting zoom
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(true);
+
+    // Simulate single-finger touch-drag panning on the zoomed viewport: should scroll and ignore synthesized post-touch click
+    comp.onLightboxTouchStart({ touches: [{ clientX: 180, clientY: 160 }] } as unknown as TouchEvent);
+    comp.onLightboxTouchMove({
+      touches: [{ clientX: 120, clientY: 110 }],
+      cancelable: true,
+      preventDefault: () => {}
+    } as unknown as TouchEvent);
+    expect(viewportDiv!.scrollLeft).toBe(220);
+    expect(viewportDiv!.scrollTop).toBe(180);
+    comp.onLightboxTouchEnd({ changedTouches: [{ clientX: 120, clientY: 110 }] } as unknown as TouchEvent);
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(true);
+
+    // Clean click without drag exits zoom back to 1x
+    comp.toggleLightboxZoom(new MouseEvent('click'));
+    expect(comp.isLightboxZoomed()).toBe(false);
+
     packageService.closePackageModal(false);
   });
 
@@ -13319,7 +13467,7 @@ core.register_node(modname .. ":panel", {
       )
     );
     expect(safeRendered).toContain('<strong>world</strong>');
-    expect(safeRendered).toContain('href="https://luantihub.org/docs" target="_blank" rel="noopener noreferrer"');
+    expect(safeRendered).toContain('href="https://luantihub.org/docs" rel="noopener noreferrer"');
     expect(safeRendered).not.toContain('onerror');
     expect(safeRendered).not.toContain('<svg');
     expect(safeRendered).not.toContain('javascript:');
@@ -13570,10 +13718,26 @@ core.register_node(modname .. ":panel", {
     );
     expect(sendKeySpy).toHaveBeenCalledWith('TOGGLE_MOUSE_LOCK');
 
-    // Desktop shows the HUD mouse lock button; touch mode hides it
+    // Header renders the sandbox isolation security badge with tooltip
+    expect(
+      sandboxFixture.nativeElement.querySelector('[data-testid="sandbox-isolation-security-badge"]')
+    ).toBeTruthy();
+
+    // Desktop shows the HUD mouse lock button; untrusted postMessage origins are ignored, trusted origin switches touch mode
+    sandboxComp.activeStreamOrigin.set('http://localhost:6080');
     expect(sandboxFixture.nativeElement.querySelector('[data-testid="sandbox-mouse-lock-btn"]')).toBeTruthy();
     window.dispatchEvent(
       new MessageEvent('message', {
+        origin: 'https://evil.example',
+        data: { source: 'luanti-sandbox-container', type: 'SANDBOX_INPUT_MODE', touchMode: true }
+      })
+    );
+    sandboxFixture.detectChanges();
+    expect(sandboxComp.isTouchDevice()).toBe(false);
+
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        origin: 'http://localhost:6080',
         data: { source: 'luanti-sandbox-container', type: 'SANDBOX_INPUT_MODE', touchMode: true }
       })
     );
@@ -13714,5 +13878,1878 @@ core.register_node(modname .. ":panel", {
       env: {}
     });
     expect(tunnelGitArchiveRes.status).toBe(403);
+  });
+
+  it('should enforce canonicalized SSRF/tunnel blocking, hop-by-hop redirect validation, and extended Lua C2 tunnel detection', async () => {
+    const { fetchWithAnubisSupport } = await import('../../functions/api/lib/upstream');
+
+    // 1. WHATWG URL canonicalized IPv4 / IPv6 / userinfo / trailing-dot / wildcard DNS / tunnel checks
+    expect(isUntrustedTunnelOrPrivateHost('http://0177.0.0.1/')).toBe(true); // Octal loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://0x7f000001/')).toBe(true); // Hex loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://2130706433/')).toBe(true); // Integer loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://127.1/')).toBe(true); // Shorthand loopback
+    expect(isUntrustedTunnelOrPrivateHost('http://[::ffff:7f00:1]/')).toBe(true); // Hex IPv4-mapped IPv6
+    expect(isUntrustedTunnelOrPrivateHost('https://github.com@127.0.0.1/owner/repo')).toBe(true); // Userinfo spoof
+    expect(isUntrustedTunnelOrPrivateHost('https://evil.trycloudflare.com./owner/repo')).toBe(true); // Trailing dot FQDN
+    expect(isUntrustedTunnelOrPrivateHost('https://node1.tail9999.ts.net/owner/repo')).toBe(true); // Tailscale Funnel
+    expect(isUntrustedTunnelOrPrivateHost('https://147.185.221.20.ply.gg/owner/repo')).toBe(true); // playit.gg
+    expect(isUntrustedTunnelOrPrivateHost('https://tunnel.devtunnels.ms/owner/repo')).toBe(true); // VS Code Dev Tunnels
+    expect(isUntrustedTunnelOrPrivateHost('https://127.0.0.1.nip.io/owner/repo')).toBe(true); // DNS rebinding
+    expect(isUntrustedTunnelOrPrivateHost('https://169-254-169-254.sslip.io/latest/meta-data')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('https://203.0.113.42/owner/repo')).toBe(true); // Raw IPv4 literal
+
+    // Trusted public Git forges & ContentDB remain allowed
+    expect(isUntrustedTunnelOrPrivateHost('https://github.com/luanti-org/luanti')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://codeberg.org/Wuzzy/Lazarr')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('https://content.luanti.org/packages/Wuzzy/mineclone2/')).toBe(false);
+
+    // 2. Inbound tunnel header detection covers modern ephemeral tunnels (Tailscale, playit, devtunnels, cloudflared)
+    const tsReq = new Request('https://luantihub.org/api/packages', {
+      headers: { 'X-Original-Host': 'backdoor.ts.net' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(tsReq)).not.toBeNull();
+    const blockedTsRes = await edgeMiddleware({
+      request: tsReq,
+      next: async () => new Response('OK', { status: 200 }),
+      env: {}
+    });
+    expect(blockedTsRes.status).toBe(403);
+    expect(blockedTsRes.headers.get('Strict-Transport-Security')).toContain('max-age=31536000');
+
+    // 3. Hop-by-hop redirect validation blocks 302 redirects from a trusted forge to a tunnel or loopback target
+    const origFetch = globalThis.fetch;
+    let tunnelCalled = false;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr === 'https://github.com/evil/mod/releases/download/v1/mod.zip') {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: 'https://c2-drop.trycloudflare.com/payload.zip' }
+        });
+      }
+      if (urlStr.includes('trycloudflare.com')) {
+        tunnelCalled = true;
+      }
+      return new Response('OK', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const bounceRes = await fetchWithAnubisSupport('https://github.com/evil/mod/releases/download/v1/mod.zip');
+      expect(bounceRes.status).toBe(403);
+      expect(bounceRes.headers.get('X-LuantiHub-Redirect-Blocked')).toBe('1');
+      expect(tunnelCalled).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. Lua static audit catches extended C2 tunnel domains (ts.net / playit.gg / devtunnels.ms)
+    const c2Lua = 'local h = core.request_http_api()\nh.fetch({ url = "https://botnet.ts.net/beacon" }, function() end)';
+    const c2Diags = runLuacheckStaticAudit(c2Lua, 'c2_mod');
+    expect(c2Diags.some(d => d.code === 'LUA_SUSPICIOUS_TUNNEL_ENDPOINT (E902)')).toBe(true);
+  });
+
+  it('should block PATCH ownership hijack via spoofed repo_url, block ?repo= poisoning, and prevent unverified claims from 451-delisting ContentDB packages', async () => {
+    const { onRequestGet: readmeOnRequestGet } = await import('../../functions/api/packages/[author]/[name]/readme');
+    const { onRequestGet: releasesOnRequestGet } = await import('../../functions/api/packages/[author]/[name]/releases');
+    const secret = 'test-anti-hijack-secret-2026';
+
+    // Attacker owns github:attacker_user, tries to hijack Wuzzy/mineclone2 by sending body.repo_url = https://github.com/attacker_user/mineclone2
+    const attackerToken = await createSessionToken('usr_attacker', secret, {
+      username: 'attacker_user',
+      verified: true
+    });
+
+    const insertedPackages: any[] = [];
+    const mockDb: any = {
+      prepare(sql: string) {
+        return {
+          bind(...args: any[]) {
+            return {
+              async first() {
+                if (sql.includes('FROM users WHERE id = ?')) {
+                  return { id: 'usr_attacker', username: 'attacker_user', display_name: 'Attacker' };
+                }
+                return null;
+              },
+              async all() {
+                if (sql.includes('FROM user_identities')) {
+                  return {
+                    results: [
+                      {
+                        provider: 'github',
+                        provider_username: 'attacker_user',
+                        access_token: 'gho_verified_attacker'
+                      }
+                    ]
+                  };
+                }
+                return { results: [] };
+              },
+              async run() {
+                if (sql.includes('INSERT INTO packages')) {
+                  insertedPackages.push({ sql, args });
+                }
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('content.luanti.org/api/packages/Wuzzy/mineclone2')) {
+        return new Response(
+          JSON.stringify({
+            author: 'Wuzzy',
+            name: 'mineclone2',
+            title: 'VoxeLibre',
+            type: 'game',
+            repo: 'https://git.minetest.land/VoxeLibre/VoxeLibre'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/?')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Wuzzy',
+              name: 'mineclone2',
+              title: 'VoxeLibre',
+              type: 'game'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('api.github.com/repos/attacker_user/mineclone2')) {
+        return new Response(
+          JSON.stringify({ default_branch: 'main', owner: { login: 'attacker_user' }, name: 'mineclone2' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('raw.githubusercontent.com/attacker_user/mineclone2')) {
+        if (urlStr.endsWith('mod.conf')) {
+          return new Response('name = mineclone2\ntitle = Spoofed\ndescription = Spoofed mod\n', { status: 200 });
+        }
+        if (urlStr.endsWith('init.lua')) {
+          return new Response('-- clean lua\n', { status: 200 });
+        }
+        if (urlStr.endsWith('LICENSE')) {
+          return new Response('MIT License\nPermission is hereby granted, free of charge', { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      }
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. PATCH hijack attempt must be rejected with 403 and zero D1 package inserts
+      const hijackPatchRes = await packageDetailOnRequestPatch({
+        request: new Request('https://luantihub.org/api/packages/Wuzzy/mineclone2', {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: `lh_session=${attackerToken}`
+          },
+          body: JSON.stringify({
+            repo_url: 'https://github.com/attacker_user/mineclone2',
+            tags: ['pwned']
+          })
+        }),
+        params: { author: 'Wuzzy', name: 'mineclone2' },
+        env: { DB: mockDb, SESSION_SECRET: secret }
+      });
+      expect(hijackPatchRes.status).toBe(403);
+      expect(insertedPackages.length).toBe(0);
+
+      // 2. ?repo= pointing to an unrelated owner/repo must be ignored on readme.ts & releases.ts
+      const poisonedReadmeRes = await readmeOnRequestGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/UnknownUser/unknown_mod/readme?repo=' +
+            encodeURIComponent('https://github.com/attacker_user/evil_phishing_readme')
+        ),
+        params: { author: 'UnknownUser', name: 'unknown_mod' },
+        env: { DB: mockDb }
+      });
+      expect(poisonedReadmeRes.status).toBe(200);
+      const poisonedReadmeJson = await poisonedReadmeRes.json();
+      expect(poisonedReadmeJson.readme).toBeNull();
+
+      const poisonedReleasesRes = await releasesOnRequestGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/UnknownUser/unknown_mod/releases?repo=' +
+            encodeURIComponent('https://github.com/attacker_user/evil_phishing_readme')
+        ),
+        params: { author: 'UnknownUser', name: 'unknown_mod' },
+        env: { DB: mockDb }
+      });
+      expect(poisonedReleasesRes.status).toBe(200);
+      const poisonedReleasesJson = await poisonedReleasesRes.json();
+      expect(poisonedReleasesJson).toEqual([]);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should block SVG/HTML XSS payloads in ?proxy_image=, fail closed when SESSION_SECRET is unset, require OAuth state cookies, and sanitize ZipSlip paths', async () => {
+    const { onRequestGet: packagesIndexGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: oauthCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const { normalizeLuantiPackageZip } = await import('../../functions/api/lib/upstream');
+
+    // 1. Missing SESSION_SECRET fails closed across JWT, OAuth state, and Audit Proof tokens
+    await expect(createSessionToken('usr_1', undefined)).rejects.toThrow();
+    expect(await verifySessionToken('fake.sig', undefined)).toBeNull();
+    expect(await verifySessionTokenClaims('fake.sig', '')).toBeNull();
+    expect(await verifyOAuthStateToken('fake.sig', 'github', undefined)).toBe(false);
+    expect(await verifyAuditProofToken('fake.sig', 'github:a/b', undefined)).toBe(false);
+
+    // 2. OAuth callback rejects valid HMAC state when the browser lacks the matching lh_oauth_state cookie (login-CSRF / account-link defense)
+    const secret = 'oauth-cookie-bind-secret-2026';
+    const validState = await createOAuthStateToken('github', secret);
+    const missingCookieRes = await oauthCallbackGet({
+      params: { provider: 'github' },
+      request: new Request(
+        `https://luantihub.org/api/auth/github/callback?code=csrf_code&state=${encodeURIComponent(validState)}`
+      ),
+      env: {
+        GITHUB_CLIENT_ID: 'cid',
+        GITHUB_CLIENT_SECRET: 'csec',
+        SESSION_SECRET: secret
+      }
+    });
+    expect(missingCookieRes.status).toBe(302);
+    expect(missingCookieRes.headers.get('Location')).toContain('auth_error=session_expired');
+
+    // 3. GET /api/packages?proxy_image= blocks SVG XSS payloads (even with spoofed image/png header) and serves valid PNGs with strict CSP sandbox
+    const valid1x1Png = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82
+    ]);
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('evil.svg')) {
+        return new Response('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.cookie)"/>', {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
+      }
+      if (urlStr.includes('safe.png')) {
+        return new Response(valid1x1Png, {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const svgXssRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://raw.githubusercontent.com/owner/repo/main/evil.svg')
+        ),
+        env: {}
+      } as any);
+      expect(svgXssRes.status).toBe(404);
+      expect(await svgXssRes.text()).not.toContain('<svg');
+
+      const disallowedHostRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://untrusted-random-cdn.example.com/pic.png')
+        ),
+        env: {}
+      } as any);
+      expect(disallowedHostRes.status).toBe(403);
+
+      const safePngRes = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages?proxy_image=' +
+            encodeURIComponent('https://raw.githubusercontent.com/owner/repo/main/safe.png')
+        ),
+        env: {}
+      } as any);
+      expect(safePngRes.status).toBe(200);
+      expect(safePngRes.headers.get('Content-Type')).toBe('image/png');
+      expect(safePngRes.headers.get('Content-Security-Policy')).toContain("default-src 'none'");
+      expect(safePngRes.headers.get('Content-Security-Policy')).toContain('sandbox');
+      expect(safePngRes.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. ZipSlip path traversal entries (`../../etc/passwd`) are stripped/dropped during normalizeLuantiPackageZip
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const buildStoredZip = (files: Record<string, string>): Uint8Array => {
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let localOffset = 0;
+      const names = Object.keys(files);
+      for (const name of names) {
+        const nameBytes = enc.encode(name);
+        const dataBytes = enc.encode(files[name]);
+        const lfh = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lfhView = new DataView(lfh.buffer);
+        lfhView.setUint32(0, 0x04034b50, true);
+        lfhView.setUint16(4, 20, true);
+        lfhView.setUint32(18, dataBytes.length, true);
+        lfhView.setUint32(22, dataBytes.length, true);
+        lfhView.setUint16(26, nameBytes.length, true);
+        lfh.set(nameBytes, 30);
+        lfh.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(lfh);
+
+        const cdh = new Uint8Array(46 + nameBytes.length);
+        const cdhView = new DataView(cdh.buffer);
+        cdhView.setUint32(0, 0x02014b50, true);
+        cdhView.setUint16(4, 20, true);
+        cdhView.setUint16(6, 20, true);
+        cdhView.setUint32(20, dataBytes.length, true);
+        cdhView.setUint32(24, dataBytes.length, true);
+        cdhView.setUint16(28, nameBytes.length, true);
+        cdhView.setUint32(42, localOffset, true);
+        cdh.set(nameBytes, 46);
+        cdParts.push(cdh);
+
+        localOffset += lfh.length;
+      }
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const eocdView = new DataView(eocd.buffer);
+      eocdView.setUint32(0, 0x06054b50, true);
+      eocdView.setUint16(8, names.length, true);
+      eocdView.setUint16(10, names.length, true);
+      eocdView.setUint32(12, cdSize, true);
+      eocdView.setUint32(16, localOffset, true);
+
+      const out = new Uint8Array(localOffset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+    const listZipCentralDirPaths = (zip: Uint8Array): string[] => {
+      const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+      let eocdPos = -1;
+      for (let i = zip.length - 22; i >= 0; i--) {
+        if (view.getUint32(i, true) === 0x06054b50) {
+          eocdPos = i;
+          break;
+        }
+      }
+      if (eocdPos < 0) return [];
+      const count = view.getUint16(eocdPos + 10, true);
+      let pos = view.getUint32(eocdPos + 16, true);
+      const paths: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const fnLen = view.getUint16(pos + 28, true);
+        const exLen = view.getUint16(pos + 30, true);
+        const cmLen = view.getUint16(pos + 32, true);
+        paths.push(dec.decode(zip.subarray(pos + 46, pos + 46 + fnLen)));
+        pos += 46 + fnLen + exLen + cmLen;
+      }
+      return paths;
+    };
+
+    const maliciousZip = buildStoredZip({
+      'repo-main/mod.conf': 'name = safe_mod\n',
+      'repo-main/init.lua': '-- ok\n',
+      'repo-main/../../etc/cron.d/backdoor': '* * * * * root evil\n',
+      '../outside.lua': 'os.execute("evil")\n'
+    });
+    const normalizedZip = normalizeLuantiPackageZip(maliciousZip, 'safe_mod', 'mod');
+    const extractedEntries = listZipCentralDirPaths(normalizedZip);
+    expect(extractedEntries.some(p => p.includes('..') || p.includes('backdoor') || p.includes('outside.lua'))).toBe(false);
+    expect(extractedEntries).toContain('safe_mod/mod.conf');
+    expect(extractedEntries).toContain('safe_mod/init.lua');
+
+    const dotSlashZip = buildStoredZip({
+      './repo-main/mod.conf': 'name = dot_mod\n',
+      'repo-main//init.lua': '-- safe init\n'
+    });
+    const normalizedDotSlash = normalizeLuantiPackageZip(dotSlashZip, 'dot_mod', 'mod');
+    const dotSlashEntries = listZipCentralDirPaths(normalizedDotSlash);
+    expect(dotSlashEntries).toContain('dot_mod/mod.conf');
+    expect(dotSlashEntries).toContain('dot_mod/init.lua');
+  });
+
+  it('should reset modal transient state on package switch, preserve $& in translations, reconcile concurrent favorites, and keep DRY config utilities in parity', async () => {
+    const {
+      detectSpdxFromLicenseText,
+      parseLuantiConf,
+      stripAuthorForgeSuffix
+    } = await import('./core/config/package-utils.config');
+
+    // 1. Shared DRY utility parity
+    expect(stripAuthorForgeSuffix('sakel-github')).toBe('sakel');
+    expect(stripAuthorForgeSuffix('Wuzzy-codeberg')).toBe('Wuzzy');
+    expect(detectSpdxFromLicenseText('Permission is hereby granted, free of charge, to any person obtaining a copy')).toBe('MIT');
+    expect(detectSpdxFromLicenseText('GNU LESSER GENERAL PUBLIC LICENSE Version 2.1')).toBe('LGPL-2.1-only');
+    const parsedConf = parseLuantiConf('name = test_mod\ndescription = """\nMulti-line\nconf text\n"""\ndepends = default, farming\n');
+    expect(parsedConf['name']).toBe('test_mod');
+    expect(parsedConf['description']).toBe('Multi-line\nconf text');
+    expect(parsedConf['depends']).toBe('default, farming');
+
+    // 2. TranslationService parameter replacement must not corrupt `$&` or `$$` replacement tokens
+    const i18n = TestBed.inject(TranslationService);
+    expect(i18n.translate('modal.filterByTagTooltip', { tag: 'Price $& $$100' })).toContain('Price $& $$100');
+
+    // 3. SettingsService mergeServerFavorites preserves concurrent local toggles while server sync is in flight
+    const settings = TestBed.inject(SettingsService);
+    settings.toggleFavorite('Wuzzy/mineclone2'); // pending local add
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+    // Simulate stale server GET response arriving before POST /api/auth/favorites completes
+    settings.mergeServerFavorites(['TenPlus1/farming']);
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+    expect(settings.isFavorite('TenPlus1/farming')).toBe(true);
+
+    // 4. PackageDetailModalComponent resets transient edit/report/review/releaseNotes state when switching from Package A to Package B
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modal = modalFixture.componentInstance;
+    const pkgA: LuantiPackage = {
+      id: 'AuthorA/mod_a',
+      author: 'AuthorA',
+      name: 'mod_a',
+      title: 'Mod A',
+      type: 'mod',
+      short_desc: 'First mod',
+      thumbnail: 'logo.svg',
+      banner: 'logo.svg',
+      score: 5,
+      downloads: 100,
+      license: 'MIT',
+      media_license: 'CC0-1.0',
+      min_minetest_version: '5.0.0',
+      source: 'official',
+      tags: ['mod']
+    };
+    const pkgB: LuantiPackage = {
+      ...pkgA,
+      id: 'AuthorB/mod_b',
+      author: 'AuthorB',
+      name: 'mod_b',
+      title: 'Mod B'
+    };
+
+    modal.package = pkgA;
+    modal.ngOnInit();
+    modal.isEditingTags.set(true);
+    modal.isReportOpen.set(true);
+    modal.reportDetails = 'Broken link on Mod A';
+    modal.isConfirmingRemove.set(true);
+    modal.reviewTitle = 'Draft review for A';
+    modal.reviewComment = 'Draft comment for A';
+    modal.releaseNotesByKey.set(new Map([['rel-1', { commits: [], totalCommits: 1 } as any]]));
+
+    modal.package = pkgB;
+    modal.ngOnChanges();
+
+    expect(modal.isEditingTags()).toBe(false);
+    expect(modal.isReportOpen()).toBe(false);
+    expect(modal.reportDetails).toBe('');
+    expect(modal.isConfirmingRemove()).toBe(false);
+    expect(modal.reviewTitle).toBe('');
+    expect(modal.reviewComment).toBe('');
+    expect(modal.releaseNotesByKey().size).toBe(0);
+  });
+
+  it('should enforce post-audit review fixes across tunnel detection, SSRF host validation, lazy i18n reactivity, guest favorites, and custom-forge submission', async () => {
+    const { detectInboundEphemeralTunnelHeader } = await import('../../functions/_middleware');
+    const { isUntrustedTunnelOrPrivateHost } = await import('./core/config/git-providers.config');
+    const { classifyCandidateGitRepoUrl } = await import('../../functions/api/lib/author-git-sync');
+    const { TranslatePipe } = await import('./core/i18n/translate.pipe');
+
+    // 1. Tunnel header detector ignores query strings on legitimate origins while blocking tunnel origins
+    const legitSearchReq = new Request('https://luantihub.org/api/packages', {
+      headers: { Referer: 'https://luantihub.org/?q=playit.gg' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(legitSearchReq)).toBeNull();
+
+    const evilTunnelReq = new Request('https://luantihub.org/api/packages/git', {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.trycloudflare.com' }
+    });
+    expect(detectInboundEphemeralTunnelHeader(evilTunnelReq)).not.toBeNull();
+
+    // 2. SSRF host validator & custom Git classifier allow hex-prefixed public domains (git.0x7be.net) while blocking internal/hex IPs
+    expect(isUntrustedTunnelOrPrivateHost('https://git.0x7be.net/dirk/mymod')).toBe(false);
+    expect(isUntrustedTunnelOrPrivateHost('http://0x7f000001/latest/meta-data')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('http://metadata/computeMetadata/v1')).toBe(true);
+    expect(isUntrustedTunnelOrPrivateHost('not-a-valid-url')).toBe(true);
+
+    const classifiedCustom = classifyCandidateGitRepoUrl('https://git.0x7be.net/dirk/mymod');
+    expect(classifiedCustom).not.toBeNull();
+    expect(classifiedCustom?.provider).toBe('custom');
+
+    // 3. TranslatePipe invalidates cached translation once lazy locale dictionary finishes loading
+    const i18n = TestBed.inject(TranslationService);
+    const pipe = TestBed.runInInjectionContext(() => new TranslatePipe());
+    i18n.setLocale('sk');
+    await i18n.ensureLocaleLoaded('sk');
+    const translatedSk = pipe.transform('header.submitGit');
+    expect(typeof translatedSk).toBe('string');
+    expect(translatedSk.length).toBeGreaterThan(0);
+    i18n.setLocale('en');
+
+    // 5. Guest add+remove before login must not tombstone server favorites on mergeServerFavorites
+    const settings = TestBed.inject(SettingsService);
+    settings.isAuthenticatedSession.set(false);
+    settings.favorites.set([]);
+    settings.clearPendingFavoriteOps();
+    settings.toggleFavorite('Wuzzy/mineclone2'); // guest add
+    settings.toggleFavorite('Wuzzy/mineclone2'); // guest remove
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(false);
+    // User logs in and server reports Wuzzy/mineclone2 is saved on their account:
+    settings.mergeServerFavorites(['Wuzzy/mineclone2']);
+    expect(settings.isFavorite('Wuzzy/mineclone2')).toBe(true);
+
+    // 6. SubmitModalComponent classifies custom git host as 'custom' and passes requestAdminClaim on publish
+    const authService = TestBed.inject(AuthService);
+    const pkgService = TestBed.inject(PackageService);
+    (authService as any)._currentUser.set({
+      id: 'usr_custom',
+      username: 'dirk',
+      avatar_url: 'logo.svg',
+      identities: [{ provider: 'codeberg', username: 'dirk', verified: true }]
+    });
+    const submitFixture = TestBed.createComponent(SubmitModalComponent);
+    const submitComp = submitFixture.componentInstance;
+    submitComp.repoUrl = 'https://git.0x7be.net/dirk/mymod';
+    submitComp.onUrlChange();
+    expect(submitComp.parsedRepoTarget()?.provider).toBe('custom');
+    expect(submitComp.supportsDirectOwnerAuth(submitComp.parsedRepoTarget()?.provider)).toBe(false);
+
+    submitComp.warrantyOwnership = true;
+    submitComp.warrantyAssets = true;
+    submitComp.warrantyTakedown = true;
+    submitComp.auditReport.set({
+      valid: true,
+      auditToken: 'tok_custom_123',
+      ownershipVerified: false,
+      pendingAdminClaim: true,
+      configFound: 'mod.conf',
+      luacheckPassed: true,
+      licenseValid: true,
+      diagnostics: []
+    });
+    expect(submitComp.canPublish()).toBe(true);
+
+    const submitSpy = vi.spyOn(pkgService, 'auditOrSubmitGitPackage').mockResolvedValue({
+      success: true,
+      pendingModeration: true,
+      message: 'Queued for admin claim review.'
+    });
+    await submitComp.onPublish();
+    expect(submitSpy).toHaveBeenCalledWith(expect.objectContaining({
+      repoUrl: 'https://git.0x7be.net/dirk/mymod',
+      dryRun: false,
+      requestAdminClaim: true
+    }));
+  });
+
+  it('enforces brand-first SEO metadata, per-route hreflang & self-canonical ?lang, scoped FAQPage schema, 301 /packages/ redirect, 0-review AggregateRating guard, real 404s, and single H1 hierarchy', async () => {
+    const { onRequest: edgeMw } = await import('../../functions/_middleware');
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const { onRequestGet: pluralPackagesGet } = await import('../../functions/packages/[author]/[name]/index');
+    const { onRequestGet: authorSsrGet } = await import('../../functions/author/[username]');
+    const sitemapMod = await import('../../functions/sitemap.xml');
+
+    const richShellHtml = `<!doctype html><html lang="en" class="dark"><head><title>Luanti Hub (LuantiHub) — Mods, Games &amp; Texture Packs for Luanti</title><meta name="description" content="Default" /><meta name="keywords" content="luanti hub, luantihub" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><link rel="alternate" hreflang="x-default" href="https://luantihub.org/" /><link rel="alternate" hreflang="en" href="https://luantihub.org/" /><link rel="alternate" hreflang="de" href="https://luantihub.org/?lang=de" /><meta property="og:title" content="Default" /><meta property="og:description" content="Default" /><meta property="og:url" content="https://luantihub.org/" /><meta property="og:image" content="https://luantihub.org/screenshot-desktop.png" /><meta property="og:locale" content="en_US" /><meta name="twitter:title" content="Default" /><meta name="twitter:description" content="Default" /><meta name="twitter:image" content="https://luantihub.org/screenshot-desktop.png" /><script type="application/ld+json" id="home-faq-jsonld">{"@type":"FAQPage"}</script></head><body><h1>Home</h1><main class="sr-only"></main></body></html>`;
+
+    // 1. Plural /packages/:author/:name 301-redirects to canonical singular /package/:author/:name
+    const pluralRes = await pluralPackagesGet({
+      request: new Request('https://luantihub.org/packages/SaKeL/everness?utm_source=cdb'),
+      params: { author: 'SaKeL', name: 'everness' }
+    });
+    expect(pluralRes.status).toBe(301);
+    expect(pluralRes.headers.get('Location')).toBe('https://luantihub.org/package/SaKeL/everness?utm_source=cdb');
+
+    // 2. Section hub (/mods) rewrites hreflang to /mods (never leaking homepage /?lang=...), strips #home-faq-jsonld, and supports self-canonical ?lang=de
+    const modsDeRes = await edgeMw({
+      request: new Request('https://luantihub.org/mods?lang=de', { method: 'GET' }),
+      next: async () =>
+        new Response(richShellHtml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        }),
+      env: {}
+    });
+    expect(modsDeRes.status).toBe(200);
+    const modsDeHtml = await modsDeRes.text();
+    expect(modsDeHtml).toContain('<html lang="de"');
+    expect(modsDeHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/mods?lang=de" />');
+    expect(modsDeHtml).toContain('hreflang="x-default" href="https://luantihub.org/mods"');
+    expect(modsDeHtml).toContain('hreflang="en" href="https://luantihub.org/mods"');
+    expect(modsDeHtml).toContain('hreflang="de" href="https://luantihub.org/mods?lang=de"');
+    expect(modsDeHtml).not.toContain('href="https://luantihub.org/?lang=de"');
+    expect(modsDeHtml).not.toContain('id="home-faq-jsonld"');
+
+    // 3. Localized homepage (/?lang=sk) emits <html lang="sk">, self-referencing canonical, and Slovak metadata while keeping #home-faq-jsonld
+    const homeSkRes = await edgeMw({
+      request: new Request('https://luantihub.org/?lang=sk', { method: 'GET' }),
+      next: async () =>
+        new Response(richShellHtml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        }),
+      env: {}
+    });
+    const homeSkHtml = await homeSkRes.text();
+    expect(homeSkHtml).toContain('<html lang="sk"');
+    expect(homeSkHtml).toContain('<link rel="canonical" id="canonical-link" href="https://luantihub.org/?lang=sk" />');
+    expect(homeSkHtml).toContain('og:locale" content="sk_SK"');
+    expect(homeSkHtml).toContain('id="home-faq-jsonld"');
+
+    // 4. Unknown non-SPA paths hitting Edge middleware return real HTTP 404 with noindex instead of 200 Soft-404
+    const unknownRes = await edgeMw({
+      request: new Request('https://luantihub.org/nonexistent-random-page', { method: 'GET' }),
+      next: async () => new Response('Not Found', { status: 404 }),
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        }
+      }
+    });
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.headers.get('X-Robots-Tag')).toBe('noindex');
+
+    // 5. Package & Author SSR strip homepage hreflang & #home-faq-jsonld, and Package SSR omits AggregateRating when review count is 0
+    const zeroReviewPkgRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/ZeroRevAuthor/zero_rev_mod'),
+      params: { author: 'ZeroRevAuthor', name: 'zero_rev_mod' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('FROM packages')
+                  ? {
+                      title: 'Zero Rev Mod',
+                      author_name: 'ZeroRevAuthor',
+                      name: 'zero_rev_mod',
+                      provider: 'github',
+                      short_desc: 'Brand new mod with zero reviews',
+                      type: 'mod',
+                      license: 'MIT',
+                      score: 4.5,
+                      downloads_count: 10
+                    }
+                  : { avg_rating: null, cnt: 0 }
+            })
+          })
+        }
+      }
+    });
+    const zeroReviewHtml = await zeroReviewPkgRes.text();
+    expect(zeroReviewHtml).not.toContain('hreflang=');
+    expect(zeroReviewHtml).not.toContain('id="home-faq-jsonld"');
+    expect(zeroReviewHtml).not.toContain('AggregateRating');
+
+    const authorCleanRes = await authorSsrGet({
+      request: new Request('https://luantihub.org/author/SaKeL'),
+      params: { username: 'SaKeL' },
+      env: {
+        ASSETS: {
+          fetch: async () => new Response(richShellHtml, { status: 200 })
+        }
+      }
+    });
+    const authorCleanHtml = await authorCleanRes.text();
+    expect(authorCleanHtml).not.toContain('hreflang=');
+    expect(authorCleanHtml).not.toContain('id="home-faq-jsonld"');
+
+    // 6. Sitemap uses clean URL for hreflang="en" (no ?lang=en duplicate) while keeping ?lang=de, ?lang=sk, etc.
+    const smRes = await sitemapMod.onRequestGet({
+      request: new Request('https://luantihub.org/sitemap.xml', { method: 'GET' }),
+      env: {}
+    });
+    const smXml = await smRes.text();
+    expect(smXml).toContain('hreflang="en" href="https://luantihub.org/"');
+    expect(smXml).not.toContain('?lang=en');
+    expect(smXml).toContain('hreflang="de" href="https://luantihub.org/?lang=de"');
+
+    // 7. Single H1 hierarchy: HeaderComponent uses <span> (0 <h1>), CatalogComponent uses <h1> on Home and downgrades to <h2> when modal/author overlay is open
+    const headerFixture = TestBed.createComponent(HeaderComponent);
+    headerFixture.detectChanges();
+    expect(headerFixture.nativeElement.querySelectorAll('h1').length).toBe(0);
+    headerFixture.destroy();
+
+    const pkgService = TestBed.inject(PackageService);
+    pkgService.closePackageModal();
+    pkgService.closeAuthorDrawer();
+    const catalogFixture = TestBed.createComponent(CatalogComponent);
+    catalogFixture.detectChanges();
+    expect(catalogFixture.nativeElement.querySelectorAll('h1').length).toBe(1);
+    expect(catalogFixture.nativeElement.querySelector('h1')?.textContent).toContain('Luanti Hub (LuantiHub)');
+
+    pkgService.openPackageModal({
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Custom biomes',
+      thumbnail: 'logo.svg',
+      score: 5,
+      downloads: 50000,
+      license: 'LGPL-2.1-only',
+      source: 'official',
+      tags: ['biomes']
+    });
+    catalogFixture.detectChanges();
+    expect(catalogFixture.nativeElement.querySelectorAll('h1').length).toBe(0);
+    expect(catalogFixture.nativeElement.querySelector('h2#luanti-ecosystem-guide-heading')).toBeTruthy();
+    pkgService.closePackageModal();
+    catalogFixture.destroy();
+  });
+
+  it('prevents phantom ContentDB downloads & source badges on browser-tab SSR deep links and self-heals v14 localStorage', async () => {
+    const { onRequestGet: packageSsrGet } = await import('../../functions/package/[author]/[name]');
+    const shellHtml =
+      '<!doctype html><html lang="en"><head><title>Luanti Hub</title><meta name="description" content="" /><meta name="keywords" content="" /><link rel="canonical" id="canonical-link" href="https://luantihub.org/" /><meta property="og:title" content="" /><meta property="og:description" content="" /><meta property="og:url" content="" /><meta property="og:image" content="" /><meta name="twitter:title" content="" /><meta name="twitter:description" content="" /><meta name="twitter:image" content="" /></head><body><app-root><main class="sr-only"></main></app-root></body></html>';
+
+    // 1. Edge SSR for Git package emits exact split counters + Git provenance in __LUANTI_INITIAL_PACKAGE__
+    const ssrRes = await packageSsrGet({
+      request: new Request('https://luantihub.org/package/sakel-hub/terrarium_crucible'),
+      params: { author: 'sakel-hub', name: 'terrarium_crucible' },
+      env: {
+        ASSETS: { fetch: async () => new Response(shellHtml, { status: 200 }) },
+        DB: {
+          prepare: (sql: string) => ({
+            bind: () => ({
+              first: async () =>
+                sql.includes('SELECT status FROM packages')
+                  ? { status: 'active' }
+                  : sql.includes('FROM packages')
+                    ? {
+                        id: 'sakel-hub/terrarium_crucible',
+                        author_name: 'sakel-hub',
+                        name: 'terrarium_crucible',
+                        title: 'Terrarium Crucible',
+                        provider: 'github',
+                        short_desc: 'Action-puzzle gardening game for the 2026 Luanti Game Jam.',
+                        long_desc: 'Full README description',
+                        type: 'game',
+                        license: 'MIT',
+                        contentdb_downloads: 0,
+                        luantihub_downloads: 1,
+                        downloads_count: 1,
+                        tags: '["git","github","game","jam_game_2026"]'
+                      }
+                    : { avg_rating: null, cnt: 0 }
+            })
+          })
+        }
+      }
+    });
+    expect(ssrRes.status).toBe(200);
+    const ssrHtml = await ssrRes.text();
+    const seedMatch = ssrHtml.match(/window\.__LUANTI_INITIAL_PACKAGE__=(\{.*?\});<\/script>/);
+    expect(seedMatch).toBeTruthy();
+    const parsedSsrSeed = JSON.parse(seedMatch![1]);
+    expect(parsedSsrSeed.contentdb_downloads).toBe(0);
+    expect(parsedSsrSeed.luantihub_downloads).toBe(1);
+    expect(parsedSsrSeed.downloads).toBe(1);
+    expect(parsedSsrSeed.provider).toBe('github');
+    expect(parsedSsrSeed.source).toBe('git');
+    expect(parsedSsrSeed.sources).toEqual(['git']);
+
+    // 2. Self-heals poisoned lh_hydrated_meta_v14 in localStorage on reload while preserving Hub downloads
+    const pkgService = TestBed.inject(PackageService);
+    localStorage.removeItem('lh_hydrated_meta_v15');
+    localStorage.setItem(
+      'lh_hydrated_meta_v14',
+      JSON.stringify({
+        'sakel-hub/terrarium_crucible': {
+          contentdb_downloads: 1,
+          luantihub_downloads: 1,
+          downloads: 2,
+          sources: ['official', 'git'],
+          tags: ['git', 'game', 'jam_game_2026']
+        }
+      })
+    );
+    (pkgService as any).hydratedMetaCache.clear();
+    (pkgService as any).loadHydratedMetaCache();
+    expect(localStorage.getItem('lh_hydrated_meta_v14')).toBeNull();
+    const healedCached = (pkgService as any).hydratedMetaCache.get('sakel-hub/terrarium_crucible');
+    expect(healedCached?.contentdb_downloads).toBeUndefined();
+    expect(healedCached?.luantihub_downloads).toBe(1);
+    expect(healedCached?.downloads).toBe(1);
+    expect(healedCached?.sources).toEqual(['git']);
+
+    // 3. Even if a stale CDN edge serves legacy unsplit __LUANTI_INITIAL_PACKAGE__ ({ downloads: 1 }),
+    // cold browser-tab deep-link boot + API hydration resolves ContentDB: 0, Hub: 1, Total: 1, sources: ['git']
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/api/packages/sakel-hub/terrarium_crucible')) {
+        return new Response(
+          JSON.stringify({
+            id: 'sakel-hub/terrarium_crucible',
+            author: 'sakel-hub',
+            author_display_name: 'SaKeL',
+            name: 'terrarium_crucible',
+            title: 'Terrarium Crucible',
+            type: 'game',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            repo_url: 'https://github.com/SaKeL/terrarium_crucible',
+            license: 'MIT',
+            contentdb_downloads: 0,
+            luantihub_downloads: 1,
+            downloads: 1,
+            tags: ['git', 'game', 'jam_game_2026'],
+            badge_tags: ['jam_game_2026'],
+            releases: [],
+            reviews_list: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    try {
+      (pkgService as any).edgeApiAvailable = true;
+      (pkgService as any).initialUrlSynced = false;
+      (pkgService as any)._packages.set([]);
+      (pkgService as any)._activePackage.set(null);
+      (pkgService as any).deepHydratedIds.clear();
+      (window as any).__LUANTI_INITIAL_PACKAGE__ = {
+        author: 'sakel-hub',
+        name: 'terrarium_crucible',
+        title: 'Terrarium Crucible',
+        type: 'game',
+        downloads: 1
+      };
+
+      (pkgService as any).syncStateFromUrl('/package/sakel-hub/terrarium_crucible');
+      expect(pkgService.activePackage()?.contentdb_downloads).toBe(0);
+      expect(pkgService.activePackage()?.sources).toEqual(['git']);
+
+      (pkgService as any).applyBootPayload({
+        packages: [
+          {
+            id: 'sakel-hub/terrarium_crucible',
+            author: 'sakel-hub',
+            name: 'terrarium_crucible',
+            title: 'Terrarium Crucible',
+            type: 'game',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            contentdb_downloads: 0,
+            luantihub_downloads: 1,
+            downloads: 1,
+            tags: ['git', 'game', 'jam_game_2026']
+          }
+        ]
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 30));
+
+      const active = pkgService.activePackage();
+      expect(active?.contentdb_downloads).toBe(0);
+      expect(active?.luantihub_downloads).toBe(1);
+      expect(active?.downloads).toBe(1);
+      expect(active?.sources).toEqual(['git']);
+
+      // 4. ensureRecentlyAddedLoaded() does not copy aggregated detail.downloads into contentdb_downloads on ?lite=1
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes('sort=approved_at')) {
+          return new Response(
+            JSON.stringify([
+              {
+                author: 'SaKeL',
+                name: 'terrarium_crucible',
+                title: 'Terrarium Crucible',
+                type: 'game',
+                short_desc: 'Action-puzzle gardening game'
+              }
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('terrarium_crucible')) {
+          return new Response(
+            JSON.stringify({
+              id: 'SaKeL/terrarium_crucible',
+              author: 'SaKeL',
+              name: 'terrarium_crucible',
+              contentdb_downloads: 0,
+              luantihub_downloads: 1,
+              downloads: 1,
+              license: 'MIT',
+              created_at: '2026-11-12T00:00:00Z'
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response('{}', { status: 404 });
+      }) as any;
+      (pkgService as any).recentlyAddedInFlight = null;
+      (pkgService as any).ensureRecentlyAddedLoaded(true);
+      await (pkgService as any).recentlyAddedInFlight;
+      const recentItem = (pkgService as any)._serverRecentlyAdded().find(
+        (p: any) => p.name === 'terrarium_crucible' && p.author === 'SaKeL'
+      );
+      expect(recentItem?.contentdb_downloads).toBe(0);
+      expect(recentItem?.luantihub_downloads).toBe(1);
+      expect(recentItem?.downloads).toBe(1);
+    } finally {
+      globalThis.fetch = origFetch;
+      pkgService.closePackageModal();
+    }
+  });
+
+  it('should enforce zero-storage PAT security guarantees, reject write-scoped or mismatched tokens, block cross-provider username collision hijacking, rate-limit auth_verify, and wipe tokens from UI memory', async () => {
+    const {
+      verifyProviderToken,
+      hasExcessiveTokenScopes,
+      createSessionToken,
+      verifySessionTokenClaims,
+      createOAuthStateToken
+    } = await import('../../functions/api/auth/lib/session');
+    const { onRequestPost: onAuthMePost, onRequestPut: onAuthMePut } = await import('../../functions/api/auth/me');
+    const { onRequestGet: oauthCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const { onRequest: edgeMiddleware } = await import('../../functions/_middleware');
+    const { AuthModalComponent } = await import('./features/auth/auth-modal.component');
+
+    // 1. Scope ceiling helper unit checks
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': '' }), 'github')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': 'read:user, user:email' }), 'github')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-OAuth-Scopes': 'repo, read:user' }), 'github')).toBe(true);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-Gitea-Scopes': 'read:user' }), 'codeberg')).toBe(false);
+    expect(hasExcessiveTokenScopes(new Headers({ 'X-Gitea-Scopes': 'write:repository, read:user' }), 'codeberg')).toBe(true);
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    const seenRedirects: Array<RequestRedirect | undefined> = [];
+
+    try {
+      // 2. Reject short / CRLF-injected tokens before any network call
+      globalThis.fetch = (async () => {
+        fetchCalls++;
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+
+      const shortRes = await verifyProviderToken('github', 'short', 'alice');
+      const crlfRes = await verifyProviderToken('github', 'ghp_validlength\r\nX-Injected: 1', 'alice');
+      expect(shortRes).toEqual({ verified: false, failureReason: 'invalid_token' });
+      expect(crlfRes).toEqual({ verified: false, failureReason: 'invalid_token' });
+      expect(fetchCalls).toBe(0);
+
+      // 3. Reject username mismatch, write-scoped PATs, and HTTP 302 redirects
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        seenRedirects.push(init?.redirect);
+        const authHdr = new Headers(init?.headers || {}).get('Authorization') || '';
+
+        if (authHdr.includes('tok_redirect_302')) {
+          return new Response(null, { status: 302, headers: { Location: 'https://evil.example/steal' } });
+        }
+        if (authHdr.includes('tok_write_repo')) {
+          return new Response(JSON.stringify({ id: 101, login: 'alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-OAuth-Scopes': 'repo, workflow' }
+          });
+        }
+        if (authHdr.includes('tok_bob_readonly')) {
+          return new Response(JSON.stringify({ id: 202, login: 'bob' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-OAuth-Scopes': '' }
+          });
+        }
+        if (url === 'https://codeberg.org/api/v1/user' && authHdr.includes('tok_cb_attacker_alice')) {
+          return new Response(JSON.stringify({ id: 9001, login: 'alice', full_name: 'Codeberg Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-Gitea-Scopes': 'read:user' }
+          });
+        }
+        if (url === 'https://content.luanti.org/api/whoami/' && authHdr.includes('tok_cdb_victim_alice')) {
+          return new Response(JSON.stringify({ is_authenticated: true, username: 'alice', display_name: 'Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (url === 'https://gitlab.com/oauth/token') {
+          return new Response(JSON.stringify({ access_token: 'gl_oauth_attacker_alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (url === 'https://gitlab.com/api/v4/user') {
+          return new Response(JSON.stringify({ id: 7777, username: 'alice', name: 'GitLab Alice' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response('{}', { status: 401 });
+      }) as typeof fetch;
+
+      const redirCheck = await verifyProviderToken('github', 'tok_redirect_302_abcdef', 'alice');
+      expect(redirCheck.verified).toBe(false);
+      expect(redirCheck.failureReason).toBe('upstream_error');
+      expect(seenRedirects[0]).toBe('error');
+
+      const writeScopeRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_write_repo_abcdef' })
+        }),
+        env: { SESSION_SECRET: 'sec_pat_test_123456' }
+      } as any);
+      expect(writeScopeRes.status).toBe(400);
+      expect(writeScopeRes.headers.get('Cache-Control')).toContain('no-store');
+      const writeScopeJson = await writeScopeRes.json();
+      expect(writeScopeJson.error).toContain('only accepts zero-scope / read-only tokens');
+
+      const mismatchRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_bob_readonly_abcdef' })
+        }),
+        env: { SESSION_SECRET: 'sec_pat_test_123456' }
+      } as any);
+      expect(mismatchRes.status).toBe(401);
+      const mismatchJson = await mismatchRes.json();
+      expect(mismatchJson.error).toContain('different account than the username entered');
+
+      // 4. Cross-Provider Username Collision Account Takeover Blocked (PAT + OAuth), while Authenticated Linking Works
+      const usersTable: Array<{ id: string; username: string; display_name: string; avatar_url: string; role: string }> = [
+        {
+          id: 'usr_victim_alice',
+          username: 'alice',
+          display_name: 'Original Alice',
+          avatar_url: 'https://github.com/alice.png',
+          role: 'admin'
+        }
+      ];
+      let nextIdentityId = 2;
+      const identitiesTable: Array<{
+        id: number;
+        user_id: string;
+        provider: string;
+        provider_user_id: string;
+        provider_username: string;
+        profile_url: string;
+        avatar_url: string;
+        verified: number;
+      }> = [
+        {
+          id: 1,
+          user_id: 'usr_victim_alice',
+          provider: 'github',
+          provider_user_id: '101',
+          provider_username: 'alice',
+          profile_url: 'https://github.com/alice',
+          avatar_url: 'https://github.com/alice.png',
+          verified: 1
+        }
+      ];
+
+      const mockCollisionDb = {
+        prepare(sql: string) {
+          const norm = sql.replace(/\s+/g, ' ').trim();
+          return {
+            bind(...args: any[]) {
+              const execQuery = (): any[] => {
+                if (/FROM users WHERE id = \?/i.test(norm)) {
+                  return usersTable.filter(u => u.id === String(args[0]));
+                }
+                if (/FROM users WHERE LOWER\(username\) = LOWER\(\?\)\s*(AND id != \?)?/i.test(norm)) {
+                  const targetU = String(args[0] || '').toLowerCase();
+                  const exclId = args[1] ? String(args[1]) : null;
+                  return usersTable.filter(
+                    u => u.username.toLowerCase() === targetU && (!exclId || u.id !== exclId)
+                  );
+                }
+                if (/FROM user_identities WHERE provider = \? AND \(provider_user_id = \? OR LOWER\(provider_username\) = LOWER\(\?\)\)/i.test(norm)) {
+                  const prov = String(args[0] || '').toLowerCase();
+                  const puid = String(args[1] || '');
+                  const puname = String(args[2] || '').toLowerCase();
+                  return identitiesTable.filter(
+                    i =>
+                      i.provider.toLowerCase() === prov &&
+                      (i.provider_user_id === puid || i.provider_username.toLowerCase() === puname)
+                  );
+                }
+                if (/FROM user_identities WHERE user_id = \? AND verified = 1/i.test(norm)) {
+                  return identitiesTable.filter(i => i.user_id === String(args[0]) && i.verified === 1);
+                }
+                if (/FROM user_identities WHERE user_id = \? AND provider = \?/i.test(norm)) {
+                  return identitiesTable.filter(
+                    i => i.user_id === String(args[0]) && i.provider.toLowerCase() === String(args[1]).toLowerCase()
+                  );
+                }
+                if (/FROM user_identities WHERE user_id = \?/i.test(norm)) {
+                  return identitiesTable.filter(i => i.user_id === String(args[0]));
+                }
+                return [];
+              };
+              return {
+                first: async () => execQuery()[0] ?? null,
+                all: async () => ({ results: execQuery() }),
+                run: async () => {
+                  if (/INSERT INTO users/i.test(norm)) {
+                    const [id, username, display_name, avatar_url, role] = args;
+                    const existing = usersTable.find(u => u.id === String(id));
+                    if (existing) {
+                      existing.display_name = String(display_name);
+                      existing.avatar_url = String(avatar_url);
+                    } else {
+                      usersTable.push({
+                        id: String(id),
+                        username: String(username),
+                        display_name: String(display_name),
+                        avatar_url: String(avatar_url),
+                        role: String(role)
+                      });
+                    }
+                  } else if (/INSERT INTO user_identities/i.test(norm)) {
+                    const [user_id, provider, provider_user_id, provider_username, profile_url, avatar_url, verified] =
+                      args;
+                    identitiesTable.push({
+                      id: nextIdentityId++,
+                      user_id: String(user_id),
+                      provider: String(provider),
+                      provider_user_id: String(provider_user_id),
+                      provider_username: String(provider_username),
+                      profile_url: String(profile_url || ''),
+                      avatar_url: String(avatar_url || ''),
+                      verified: verified === undefined ? 1 : Number(verified)
+                    });
+                  } else if (/UPDATE user_identities/i.test(norm) && args.length >= 7) {
+                    const [user_id, provider_user_id, provider_username, profile_url, avatar_url, verified, rowId] =
+                      args;
+                    const row = identitiesTable.find(i => i.id === Number(rowId));
+                    if (row) {
+                      row.user_id = String(user_id);
+                      row.provider_user_id = String(provider_user_id);
+                      row.provider_username = String(provider_username);
+                      row.profile_url = String(profile_url || '');
+                      row.avatar_url = String(avatar_url || '');
+                      row.verified = Number(verified);
+                    }
+                  }
+                  return { success: true };
+                }
+              };
+            }
+          };
+        }
+      };
+
+      const secret = 'sec_collision_guard_secret_999';
+      // 4a. Unauthenticated Codeberg PAT login for 'alice' must NOT hijack 'usr_victim_alice'
+      const attackerPatRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+          body: JSON.stringify({
+            provider: 'codeberg',
+            username: 'alice',
+            token: 'tok_cb_attacker_alice_1234'
+          })
+        }),
+        env: { DB: mockCollisionDb, SESSION_SECRET: secret }
+      } as any);
+      expect(attackerPatRes.status).toBe(200);
+      const attackerPatJson = await attackerPatRes.json();
+      expect(attackerPatJson.userId).not.toBe('usr_victim_alice');
+      const attackerCookie = (attackerPatRes.headers.get('Set-Cookie') || '').match(/lh_session=([^;]+)/)?.[1] || '';
+      const attackerClaims = await verifySessionTokenClaims(attackerCookie, secret);
+      expect(attackerClaims?.userId).toBe(attackerPatJson.userId);
+      expect(attackerClaims?.username).toBe('alice_co');
+      expect(attackerClaims?.role).toBe('user');
+      expect(identitiesTable.filter(i => i.user_id === 'usr_victim_alice').length).toBe(1);
+
+      // 4b. Unauthenticated GitLab OAuth callback for 'alice' must ALSO isolate into 'alice_gl'
+      const glState = await createOAuthStateToken('gitlab', secret);
+      const attackerOAuthRes = await oauthCallbackGet({
+        params: { provider: 'gitlab' },
+        request: new Request(
+          `https://luantihub.org/api/auth/gitlab/callback?code=gl_collision_code&state=${encodeURIComponent(glState)}`,
+          { headers: { Cookie: `lh_oauth_state=${glState}` } }
+        ),
+        env: {
+          DB: mockCollisionDb,
+          GITLAB_CLIENT_ID: 'gl_cid',
+          GITLAB_CLIENT_SECRET: 'gl_csec',
+          SESSION_SECRET: secret
+        }
+      } as any);
+      expect(attackerOAuthRes.status).toBe(302);
+      const glCookie = (attackerOAuthRes.headers.get('Set-Cookie') || '').match(/lh_session=([^;]+)/)?.[1] || '';
+      const glClaims = await verifySessionTokenClaims(glCookie, secret);
+      expect(glClaims?.userId).not.toBe('usr_victim_alice');
+      expect(usersTable.some(u => u.username === 'alice_gl' && u.id === glClaims?.userId)).toBe(true);
+
+      // 4c. Authenticated Victim 'alice' linking ContentDB via PAT DOES link onto 'usr_victim_alice'
+      const victimSession = await createSessionToken('usr_victim_alice', secret, {
+        username: 'alice',
+        role: 'admin',
+        verified: true
+      });
+      const victimLinkRes = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'https://luantihub.org',
+            Cookie: `lh_session=${victimSession}`
+          },
+          body: JSON.stringify({
+            provider: 'contentdb',
+            username: 'alice',
+            token: 'tok_cdb_victim_alice_5678'
+          })
+        }),
+        env: { DB: mockCollisionDb, SESSION_SECRET: secret }
+      } as any);
+      expect(victimLinkRes.status).toBe(200);
+      const victimLinkJson = await victimLinkRes.json();
+      expect(victimLinkJson.userId).toBe('usr_victim_alice');
+      expect(
+        identitiesTable.some(i => i.user_id === 'usr_victim_alice' && i.provider === 'contentdb' && i.verified === 1)
+      ).toBe(true);
+
+      // 5. Defense-in-depth CSRF on POST & PUT /api/auth/me + Dedicated 5 req/min auth_verify rate limit
+      const crossSitePost = await onAuthMePost({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' },
+          body: JSON.stringify({ provider: 'github', username: 'alice', token: 'tok_12345678' })
+        }),
+        env: { SESSION_SECRET: secret }
+      } as any);
+      expect(crossSitePost.status).toBe(403);
+
+      const crossOriginPut = await onAuthMePut({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example' },
+          body: JSON.stringify({ bio: 'pwned' })
+        }),
+        env: { SESSION_SECRET: secret }
+      } as any);
+      expect(crossOriginPut.status).toBe(403);
+
+      const rateLimitIp = '198.51.100.219';
+      for (let i = 1; i <= 5; i++) {
+        const mwRes = await edgeMiddleware({
+          request: new Request('https://luantihub.org/api/auth/me', {
+            method: 'POST',
+            headers: { 'CF-Connecting-IP': rateLimitIp, Origin: 'https://luantihub.org' }
+          }),
+          next: async () => Response.json({ attempt: i }, { status: 401 }),
+          env: {}
+        });
+        expect(mwRes.status).toBe(401);
+      }
+      const sixthMwRes = await edgeMiddleware({
+        request: new Request('https://luantihub.org/api/auth/me', {
+          method: 'POST',
+          headers: { 'CF-Connecting-IP': rateLimitIp, Origin: 'https://luantihub.org' }
+        }),
+        next: async () => Response.json({ attempt: 6 }, { status: 401 }),
+        env: {}
+      });
+      expect(sixthMwRes.status).toBe(429);
+
+      // 6. AuthModalComponent UI: Security Guarantee Tooltip, Password-Manager Suppression & Immediate Memory Wipe
+      const authService = TestBed.inject(AuthService);
+      authService.setSelectedProvider('contentdb');
+      const modalFixture = TestBed.createComponent(AuthModalComponent);
+      const modalComp = modalFixture.componentInstance;
+      modalComp.isDirectSignInExpanded.set(true);
+      modalFixture.detectChanges();
+
+      const hostEl = modalFixture.nativeElement as HTMLElement;
+      const tokenInputEl = hostEl.querySelector('#auth-token-input') as HTMLInputElement;
+      expect(tokenInputEl).toBeTruthy();
+      expect(tokenInputEl.getAttribute('data-1p-ignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('data-lpignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('data-bwignore')).toBe('true');
+      expect(tokenInputEl.getAttribute('spellcheck')).toBe('false');
+
+      const scopeHintEl = hostEl.querySelector('[data-testid="auth-token-scope-hint"]') as HTMLElement;
+      expect(scopeHintEl?.textContent).toContain('ContentDB');
+      authService.setSelectedProvider('github');
+      modalFixture.detectChanges();
+      expect(scopeHintEl?.textContent).toContain('ZERO scopes');
+
+      // Clicking/tapping the security tooltip button renders zero-storage + revocation guarantees without Admin Secret
+      const tooltipBtn = hostEl.querySelector('[data-testid="auth-token-security-tooltip-btn"]') as HTMLButtonElement;
+      expect(tooltipBtn).toBeTruthy();
+      tooltipBtn.click();
+      modalFixture.detectChanges();
+      const bodyText = document.body.textContent || '';
+      expect(bodyText).toContain('Zero-Storage Security Guarantee');
+      expect(bodyText).toContain('write-scoped tokens are rejected');
+      expect(bodyText).toContain('revoke');
+      expect(bodyText).not.toContain('Admin Secret');
+      tooltipBtn.click();
+
+      // Submitting immediately wipes tokenInput & DOM value BEFORE network call resolves
+      let resolvePendingLogin!: (val: { success: boolean; message?: string }) => void;
+      const loginSpy = vi.spyOn(authService, 'loginWithHandle').mockImplementation(
+        () =>
+          new Promise(resolve => {
+            resolvePendingLogin = resolve;
+          })
+      );
+
+      modalComp.handleInput = 'alice';
+      modalComp.tokenInput = 'ghp_super_secret_ephemeral_token';
+      tokenInputEl.value = 'ghp_super_secret_ephemeral_token';
+
+      const signInPromise = modalComp.onDirectSignIn();
+      // While the network request is still in-flight, component RAM and DOM input are ALREADY wiped!
+      expect(modalComp.tokenInput).toBe('');
+      expect(tokenInputEl.value).toBe('');
+      expect(loginSpy).toHaveBeenCalledWith('github', 'alice', 'ghp_super_secret_ephemeral_token');
+
+      resolvePendingLogin({ success: false, message: 'Test error' });
+      await signInPromise;
+
+      // Destroying the modal also wipes any unsent token typed in the field
+      modalComp.tokenInput = 'unsent_secret_token';
+      modalFixture.destroy();
+      expect(modalComp.tokenInput).toBe('');
+      loginSpy.mockRestore();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('should enforce strict HTML/Markdown sanitization, 9-host allowlisted video embeds with zero rawUrl fallback, CSP/CSRF edge defenses, and 6-locale security UX tooltips', async () => {
+    const { sanitizeAndFormatBlogHtml } = await import('./core/models/package.model');
+    const { buildSafeVideoEmbedUrl, isSafeDirectVideoUrl, extractEmbeddedVideo } = await import(
+      './core/config/package-utils.config'
+    );
+    const { verifySameOriginMutation } = await import('../../functions/api/auth/lib/session');
+    const { onRequestPost: onFavoritesPost } = await import('../../functions/api/auth/favorites');
+    const { SetupGuideModalComponent } = await import(
+      './features/setup-guide/setup-guide-modal.component'
+    );
+
+    // 1. Blog HTML sanitization strips <svg>, <math>, event attributes, and non-HTTPS/private images without bypassSecurityTrustHtml
+    const cleanedBlog = sanitizeAndFormatBlogHtml(
+      '<p>Hello</p><svg onload="void(0)"><circle r="5"/></svg><math><mtext>m</mtext></math><img/onerror="void(0)" src="https://blog.luanti.org/assets/post.png"><img src="http://127.0.0.1/internal.png">',
+      'https://blog.luanti.org/2026/11/01/release/'
+    );
+    expect(cleanedBlog).toContain('https://blog.luanti.org/assets/post.png');
+    expect(cleanedBlog).not.toContain('<svg');
+    expect(cleanedBlog).not.toContain('<math');
+    expect(cleanedBlog).not.toContain('onerror');
+    expect(cleanedBlog).not.toContain('127.0.0.1');
+
+    // 2. Multi-host video allowlist supports 9 verified HTTPS ecosystems and NEVER falls back to rawUrl
+    expect(buildSafeVideoEmbedUrl('https://youtu.be/dQw4w9WgXcQ')).toContain(
+      'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+    );
+    expect(buildSafeVideoEmbedUrl('https://piped.video/watch?v=dQw4w9WgXcQ')).toContain(
+      'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+    );
+    expect(buildSafeVideoEmbedUrl('https://vimeo.com/123456789')).toContain(
+      'https://player.vimeo.com/video/123456789?dnt=1'
+    );
+    expect(
+      buildSafeVideoEmbedUrl('https://tilvids.com/w/12345678-1234-1234-1234-123456789abc')
+    ).toContain('https://tilvids.com/videos/embed/12345678-1234-1234-1234-123456789abc');
+    expect(
+      buildSafeVideoEmbedUrl('https://www.twitch.tv/videos/987654321', {
+        autoplay: false,
+        parentHostname: 'luantihub.org'
+      })
+    ).toBe('https://player.twitch.tv/?video=987654321&parent=luantihub.org&autoplay=false');
+    expect(
+      buildSafeVideoEmbedUrl('https://clips.twitch.tv/ImportantSlugName123', {
+        autoplay: false,
+        parentHostname: 'luantihub.org'
+      })
+    ).toBe('https://clips.twitch.tv/embed?clip=ImportantSlugName123&parent=luantihub.org&autoplay=false');
+    expect(buildSafeVideoEmbedUrl('https://dai.ly/x8abcde', { autoplay: false })).toBe(
+      'https://www.dailymotion.com/embed/video/x8abcde?autoplay=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://streamable.com/abc1234', { autoplay: false })).toBe(
+      'https://streamable.com/e/abc1234?autoplay=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://odysee.com/@luanti:1/showcase:2', { autoplay: false })).toBe(
+      'https://odysee.com/$/embed/@luanti:1/showcase:2?r=0'
+    );
+    expect(buildSafeVideoEmbedUrl('https://www.bilibili.com/video/BV1xx411c7mD', { autoplay: false })).toBe(
+      'https://player.bilibili.com/player.html?bvid=BV1xx411c7mD&autoplay=0'
+    );
+    expect(isSafeDirectVideoUrl('https://cdn.content.luanti.org/uploads/trailer.webm')).toBe(true);
+    expect(isSafeDirectVideoUrl('http://cdn.content.luanti.org/uploads/trailer.webm')).toBe(false);
+    expect(buildSafeVideoEmbedUrl('https://untrusted-iframe-host.example/embed/123')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('http://youtube.com/watch?v=dQw4w9WgXcQ')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('https://demo.trycloudflare.com/w/12345678-1234-1234-1234-123456789abc')).toBeNull();
+    expect(buildSafeVideoEmbedUrl('https://wiki.luanti.org/w/Main_Page')).toBeNull();
+    const extractedAfterRepoLink = extractEmbeddedVideo(
+      null,
+      null,
+      'Source: https://github.com/SaKeL/everness and docs https://wiki.luanti.org/w/Main_Page',
+      'Showcase clip: https://streamable.com/abc1234'
+    );
+    expect(extractedAfterRepoLink.video_url).toBe('https://streamable.com/abc1234');
+
+    // 3. PackageDetailModalComponent Markdown & external link guards
+    const pkgService = TestBed.inject(PackageService);
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    const samplePkg: LuantiPackage = {
+      id: 'SaKeL/everness',
+      author: 'SaKeL',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      short_desc: 'Biomes and structures',
+      desc: '![Valid](https://cdn.content.luanti.org/uploads/valid.png)\n![Insecure](http://example.com/bad.png)\n![Local](https://192.168.1.1/lan.png)',
+      readme:
+        '![Valid](https://cdn.content.luanti.org/uploads/valid.png)\n' +
+        '![Mesehub](shot.png)\n' +
+        '![BadProxy](/api/packages?proxy_image=http%3A%2F%2F127.0.0.1%2Fsecret.png&ngsw-bypass=true)\n' +
+        '![Insecure](http://example.com/bad.png)\n' +
+        '![Local](https://192.168.1.1/lan.png)\n' +
+        '[QueryLink](https://codeberg.org/SaKeL/everness?foo=1&bar=2)',
+      thumbnail: 'logo.svg',
+      score: 4.9,
+      downloads: 50000,
+      license: 'LGPL-2.1-or-later',
+      source: 'git',
+      repo_url: 'https://git.minetest.land/SaKeL/everness',
+      default_branch: 'main',
+      tags: ['worldgen'],
+      website: 'https://codeberg.org/SaKeL/everness'
+    };
+    modalComp.package = samplePkg;
+    (pkgService as any)._activePackage.set(samplePkg);
+    modalFixture.detectChanges();
+
+    const renderedMd = String(modalComp.renderedReadme());
+    expect(renderedMd).toContain('https://cdn.content.luanti.org/uploads/valid.png');
+    expect(renderedMd).toContain('/api/packages?proxy_image=https%3A%2F%2Fgit.minetest.land%2FSaKeL%2Feverness%2Fraw%2Fbranch%2Fmain%2Fshot.png&amp;ngsw-bypass=true');
+    expect(renderedMd).not.toContain('127.0.0.1');
+    expect(renderedMd).not.toContain('http://example.com/bad.png');
+    expect(renderedMd).not.toContain('192.168.1.1');
+    expect(renderedMd).toContain('href="https://codeberg.org/SaKeL/everness?foo=1&amp;bar=2"');
+    expect(renderedMd).not.toContain('&amp;amp;');
+
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const anchorEl = document.createElement('a');
+    anchorEl.setAttribute('href', 'https://codeberg.org/SaKeL/everness');
+    const clickEvt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    Object.defineProperty(clickEvt, 'target', { value: anchorEl });
+    modalComp.onMarkdownContentClick(clickEvt);
+    expect(clickEvt.defaultPrevented).toBe(true);
+    expect(openSpy).toHaveBeenCalledWith('https://codeberg.org/SaKeL/everness', '_blank', 'noopener,noreferrer');
+    openSpy.mockRestore();
+
+    expect(modalComp.getSafeExternalHref('https://codeberg.org/SaKeL')).toBe('https://codeberg.org/SaKeL');
+    expect(modalComp.getSafeExternalHref('http://insecure.example')).toBeNull();
+    expect(modalComp.getSafeExternalHref('https://quick.trycloudflare.com/test')).toBeNull();
+    expect(modalComp.getExternalHostLabel('https://www.codeberg.org/SaKeL')).toBe('codeberg.org');
+    (pkgService as any)._activePackage.set(null);
+    modalFixture.destroy();
+
+    // 4. Edge CSP headers & unified verifySameOriginMutation CSRF protection
+    const mwHtmlRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/api/tags', { method: 'GET' }),
+      next: async () => Response.json([]),
+      env: {}
+    });
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain("object-src 'none'");
+    expect(mwHtmlRes.headers.get('Content-Security-Policy')).toContain('upgrade-insecure-requests');
+    expect(mwHtmlRes.headers.get('Strict-Transport-Security')).toContain('max-age=31536000');
+    expect(mwHtmlRes.headers.get('Cross-Origin-Opener-Policy')).toBe('same-origin-allow-popups');
+    expect(mwHtmlRes.headers.get('X-Permitted-Cross-Domain-Policies')).toBe('none');
+
+    const mwLocalDevRes = await edgeMiddleware({
+      request: new Request('http://localhost:8788/api/tags', { method: 'GET' }),
+      next: async () => Response.json([]),
+      env: {}
+    });
+    expect(mwLocalDevRes.headers.get('Strict-Transport-Security')).toBeNull();
+    expect(mwLocalDevRes.headers.get('Content-Security-Policy')).not.toContain('upgrade-insecure-requests');
+    expect(mwLocalDevRes.headers.get('Content-Security-Policy')).toContain('ws://localhost:*');
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org', 'Sec-Fetch-Site': 'same-origin' }
+        })
+      )
+    ).toBeNull();
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { Origin: 'null' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Site': 'same-site' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Mode': 'navigate' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        })
+      )?.status
+    ).toBe(403);
+
+    expect(
+      verifySameOriginMutation(
+        new Request('https://luantihub.org/api/packages/SaKeL/everness?view=1', {
+          method: 'POST',
+          headers: {
+            Origin: 'https://luantihub.org',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Content-Type': 'text/plain;charset=UTF-8'
+          }
+        }),
+        { allowSimpleBeacon: true }
+      )
+    ).toBeNull();
+
+    // Guest empty/remove favorites calls do NOT insert orphan guest rows into D1 users
+    const executedSql: string[] = [];
+    const mockDb = {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          run: async () => {
+            executedSql.push(sql);
+            return { meta: { changes: 0 } };
+          },
+          all: async () => ({ results: [] })
+        })
+      })
+    };
+    const removeFavRes = await onFavoritesPost({
+      request: new Request('https://luantihub.org/api/auth/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://luantihub.org' },
+        body: JSON.stringify({ action: 'remove', packageId: 'SaKeL/everness', clientId: 'guest_1234567890' })
+      }),
+      env: { DB: mockDb }
+    });
+    expect(removeFavRes.status).toBe(200);
+    expect(executedSql.some(s => s.includes('INSERT OR IGNORE INTO users'))).toBe(false);
+
+    // 5. Installed PWA OAuth uses single-window 302 redirect (never window.open floating popup) and preserves return_to
+    const authService = TestBed.inject(AuthService);
+    const pwaService = TestBed.inject(PwaService);
+    pwaService.isInstalled.set(true);
+    (authService as any)._oauthProviders.set({ github: true });
+    (authService as any)._isOAuthRedirecting.set(false);
+    authService.selectProfileDrawerTab('account', false);
+    (authService as any)._isProfileDrawerOpen.set(true);
+
+    const winOpenSpy = vi.spyOn(window, 'open');
+    const navUrlSpy = vi.spyOn(authService as any, 'navigateToUrl').mockImplementation(() => {});
+
+    authService.loginWith('github', 'sakel-hub', true);
+    expect(winOpenSpy).not.toHaveBeenCalled();
+    expect(navUrlSpy).toHaveBeenCalledTimes(1);
+    const redirectLoginUrl = String(navUrlSpy.mock.calls[0][0]);
+    expect(redirectLoginUrl).toContain('/api/auth/github/login?');
+    expect(redirectLoginUrl).not.toContain('popup=1');
+    expect(redirectLoginUrl).toContain('return_to=%2Fprofile%3Ftab%3Daccount');
+
+    // Verify /api/auth/github/login -> /api/auth/github/callback round-trip preserves return_to via 302 redirect
+    const { onRequestGet: onLoginGet } = await import('../../functions/api/auth/[provider]/login');
+    const { onRequestGet: onCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const loginRes = await onLoginGet({
+      params: { provider: 'github' },
+      request: new Request(`https://luantihub.org${redirectLoginUrl}`),
+      env: {
+        GITHUB_CLIENT_ID: 'gh_client_test',
+        SESSION_SECRET: 'test-edge-secret-32chars-minimum!!'
+      }
+    });
+    expect(loginRes.status).toBe(302);
+    const ghAuthLoc = new URL(loginRes.headers.get('Location') || '');
+    const signedState = ghAuthLoc.searchParams.get('state') || '';
+    expect(signedState.length).toBeGreaterThan(10);
+
+    const cancelCbRes = await onCallbackGet({
+      params: { provider: 'github' },
+      request: new Request(
+        `https://luantihub.org/api/auth/github/callback?state=${encodeURIComponent(signedState)}`,
+        { headers: { Cookie: `lh_oauth_state=${encodeURIComponent(signedState)}` } }
+      ),
+      env: {
+        GITHUB_CLIENT_ID: 'gh_client_test',
+        GITHUB_CLIENT_SECRET: 'gh_secret_test',
+        SESSION_SECRET: 'test-edge-secret-32chars-minimum!!'
+      }
+    });
+    expect(cancelCbRes.status).toBe(302);
+    expect(cancelCbRes.headers.get('Location')).toBe(
+      'https://luantihub.org/profile?tab=account&auth_error=auth_cancelled&provider=github'
+    );
+
+    (authService as any)._isOAuthRedirecting.set(false);
+    (authService as any)._isProfileDrawerOpen.set(false);
+    pwaService.isInstalled.set(false);
+    winOpenSpy.mockRestore();
+    navUrlSpy.mockRestore();
+
+    // 6. Security UX badges/tooltips, Legal Modal Section 4 & Footer /LICENSE.txt link
+    const authModalFix = TestBed.createComponent(AuthModalComponent);
+    authModalFix.detectChanges();
+    expect(authModalFix.nativeElement.querySelector('[data-testid="oauth-security-pill"]')).toBeTruthy();
+    authModalFix.destroy();
+
+    const setupFix = TestBed.createComponent(SetupGuideModalComponent);
+    setupFix.detectChanges();
+    expect(setupFix.nativeElement.querySelector('[data-testid="setup-security-badge"]')).toBeTruthy();
+    setupFix.destroy();
+
+    const submitFix = TestBed.createComponent(SubmitModalComponent);
+    submitFix.componentInstance.auditReport.set({
+      valid: true,
+      configFound: 'mod.conf',
+      luacheckPassed: true,
+      licenseValid: true,
+      diagnostics: []
+    });
+    submitFix.detectChanges();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-conf"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-luacheck"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-license"]')).toBeTruthy();
+    expect(submitFix.nativeElement.querySelector('[data-testid="audit-pill-owner"]')).toBeTruthy();
+    submitFix.destroy();
+
+    (authService as any)._currentUser.set({
+      id: 'usr_sec_test',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [{ provider: 'codeberg', username: 'SaKeL', verified: true }]
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+    const profileFix = TestBed.createComponent(ProfileDrawerComponent);
+    profileFix.componentInstance.activeTab.set('account');
+    profileFix.detectChanges();
+    expect(
+      profileFix.nativeElement.querySelector('[data-testid="connected-accounts-security-btn"]')
+    ).toBeTruthy();
+    profileFix.destroy();
+    (authService as any)._isProfileDrawerOpen.set(false);
+    (authService as any)._currentUser.set(null);
+    (authService as any)._currentUser.set(null);
+
+    const appFix = TestBed.createComponent(App);
+    pkgService.openLegalModal();
+    appFix.detectChanges();
+    const appEl = appFix.nativeElement as HTMLElement;
+    expect(appEl.querySelector('[data-testid="legal-security-architecture-section"]')).toBeTruthy();
+    const footerLicenseLink = appEl.querySelector('[data-testid="footer-license-link"]') as HTMLAnchorElement;
+    expect(footerLicenseLink).toBeTruthy();
+    expect(footerLicenseLink.getAttribute('href')).toBe('/LICENSE.txt');
+    pkgService.closeLegalModal();
+    appFix.destroy();
+  });
+
+  it('should enforce sandbox CSRF same-origin guards, remove wildcard CORS, scope CSP frame-src, and provide complete 6-locale sandbox translations', async () => {
+    const { onRequestPost: onSandboxSessionPost, onRequestDelete: onSandboxSessionDelete } = await import(
+      '../../functions/api/sandbox/session'
+    );
+    const { onRequestGet: onSandboxQuotaGet } = await import('../../functions/api/sandbox/quota');
+    const { onRequestGet: onSandboxManifestGet } = await import('../../functions/api/sandbox/manifest');
+
+    // 1. Cross-site CSRF requests to /api/sandbox/session POST & DELETE are blocked (403) without wildcard CORS
+    const csrfPostRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://attacker.example',
+          'Sec-Fetch-Site': 'cross-site'
+        },
+        body: JSON.stringify({ action: 'boot', bundles: [] })
+      }),
+      env: {}
+    });
+    expect(csrfPostRes.status).toBe(403);
+    expect(csrfPostRes.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    expect(csrfPostRes.headers.get('Cache-Control')).toContain('no-store');
+
+    const csrfDeleteRes = await onSandboxSessionDelete({
+      request: new Request('https://luantihub.org/api/sandbox/session?id=sbx_test1234', {
+        method: 'DELETE',
+        headers: {
+          Origin: 'https://attacker.example',
+          'Sec-Fetch-Site': 'cross-site'
+        }
+      }),
+      env: {}
+    });
+    expect(csrfDeleteRes.status).toBe(403);
+    expect(csrfDeleteRes.headers.get('Access-Control-Allow-Origin')).toBeNull();
+
+    // 2. /api/sandbox/quota and /api/sandbox/manifest omit wildcard Access-Control-Allow-Origin
+    const quotaRes = await onSandboxQuotaGet({ env: {} });
+    expect(quotaRes.status).toBe(200);
+    expect(quotaRes.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    expect(quotaRes.headers.get('Cache-Control')).toBe('no-store');
+
+    const manifestMissingPkgRes = await onSandboxManifestGet({
+      request: new Request('https://luantihub.org/api/sandbox/manifest'),
+      env: {}
+    });
+    expect(manifestMissingPkgRes.status).toBe(400);
+    expect(manifestMissingPkgRes.headers.get('Access-Control-Allow-Origin')).toBeNull();
+
+    // 3. Same-origin POST rejects private SSRF IPs, protocol-relative URLs, and disallowed actions/commands
+    const ssrfRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          'Sec-Fetch-Site': 'same-origin'
+        },
+        body: JSON.stringify({
+          action: 'boot',
+          bundles: [{ downloadUrl: 'https://192.168.1.10/private.zip' }]
+        })
+      }),
+      env: {}
+    });
+    expect(ssrfRes.status).toBe(403);
+
+    const protoRelRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          'Sec-Fetch-Site': 'same-origin'
+        },
+        body: JSON.stringify({
+          action: 'boot',
+          bundles: [{ downloadUrl: '//evil.example/payload.zip' }]
+        })
+      }),
+      env: {}
+    });
+    expect(protoRelRes.status).toBe(403);
+
+    const badActionRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          'Sec-Fetch-Site': 'same-origin'
+        },
+        body: JSON.stringify({ action: 'exec_shell' })
+      }),
+      env: {}
+    });
+    expect(badActionRes.status).toBe(400);
+
+    const badCommandRes = await onSandboxSessionPost({
+      request: new Request('https://luantihub.org/api/sandbox/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          'Sec-Fetch-Site': 'same-origin'
+        },
+        body: JSON.stringify({ action: 'command', sessionId: 'sbx_valid1234', command: 'DROP_TABLES' })
+      }),
+      env: {}
+    });
+    expect(badCommandRes.status).toBe(400);
+
+    // 4. Edge CSP keeps strict `frame-src https:;` in production and scopes localhost noVNC only to local HTTP dev
+    const prodPageRes = await edgeMiddleware({
+      request: new Request('https://luantihub.org/'),
+      next: async () => new Response('<html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+      env: {}
+    });
+    const prodCsp = prodPageRes.headers.get('Content-Security-Policy') || '';
+    expect(prodCsp).toContain('frame-src https:;');
+    expect(prodCsp).not.toContain('http://localhost:*');
+
+    const localPageRes = await edgeMiddleware({
+      request: new Request('http://localhost:8788/'),
+      next: async () => new Response('<html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+      env: {}
+    });
+    const localCsp = localPageRes.headers.get('Content-Security-Policy') || '';
+    expect(localCsp).toContain('frame-src https: http://localhost:* http://127.0.0.1:*;');
+
+    // 5. All 6 locales define the complete sandbox translation dictionary & security UX tooltip
+    const [{ en }, { sk }, { de }, { fr }, { es }, { ru }] = await Promise.all([
+      import('./core/i18n/locales/en'),
+      import('./core/i18n/locales/sk'),
+      import('./core/i18n/locales/de'),
+      import('./core/i18n/locales/fr'),
+      import('./core/i18n/locales/es'),
+      import('./core/i18n/locales/ru')
+    ]);
+    const enSandboxKeys = Object.keys(en.sandbox).sort();
+    expect(enSandboxKeys.length).toBeGreaterThanOrEqual(45);
+    for (const localeDict of [en, sk, de, fr, es, ru]) {
+      expect(Object.keys(localeDict.sandbox).sort()).toEqual(enSandboxKeys);
+      for (const key of enSandboxKeys) {
+        expect((localeDict.sandbox as Record<string, string>)[key].trim().length).toBeGreaterThan(0);
+      }
+      expect(localeDict.modal.tryInBrowserTooltip.length).toBeGreaterThan(40);
+    }
   });
 });

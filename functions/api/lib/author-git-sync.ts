@@ -132,7 +132,7 @@ const NON_GIT_REPO_HOSTS = new Set([
 export function classifyCandidateGitRepoUrl(rawRepoUrl?: string | null): {
   kind: 'no_repo' | 'non_git' | 'git_candidate';
   normalizedUrl?: string;
-  provider?: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket';
+  provider?: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom';
   host?: string;
   owner?: string;
   repo?: string;
@@ -210,9 +210,15 @@ export function classifyCandidateGitRepoUrl(rawRepoUrl?: string | null): {
     return { kind: 'non_git' };
   }
 
-  let resolvedProvider: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' = target.provider;
-  if (target.host.includes('git.minetest.land')) {
+  let resolvedProvider: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom' = target.provider;
+  if (target.host.includes('git.minetest.land') || target.host.includes('mese.hub')) {
     resolvedProvider = 'mesehub';
+  } else if (
+    target.provider === 'codeberg' &&
+    target.host !== 'codeberg.org' &&
+    !target.host.endsWith('.codeberg.org')
+  ) {
+    resolvedProvider = 'custom';
   }
 
   return {
@@ -226,12 +232,13 @@ export function classifyCandidateGitRepoUrl(rawRepoUrl?: string | null): {
 }
 
 async function verifyOrgOrContributorMatch(
-  provider: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket',
+  provider: 'github' | 'codeberg' | 'mesehub' | 'gitlab' | 'bitbucket' | 'custom',
   host: string,
   owner: string,
   repo: string,
   verifiedHandle: string
 ): Promise<boolean> {
+  if (provider === 'custom') return false;
   return verifyGitOrgOrRepoMembership(provider, host, owner, repo, verifiedHandle);
 }
 
@@ -376,7 +383,7 @@ export async function syncVerifiedAuthorGitPackages(
       reconciledUsernameLower && !String(resolvedUserId).toLowerCase().startsWith('ext_')
     );
 
-    if (verifiedIdentities.length === 0 && !isCallerAdmin && !isRegisteredNonExtUser) {
+    if (verifiedIdentities.length === 0 && !isCallerAdmin) {
       return { ...emptyResult, userId: resolvedUserId };
     }
 
@@ -385,9 +392,6 @@ export async function syncVerifiedAuthorGitPackages(
         .filter((i: any) => i.provider === 'contentdb')
         .map((i: any) => i.username.toLowerCase())
     );
-    if (isRegisteredNonExtUser && (verifiedIdentities.length === 0 || verifiedCdbHandles.size === 0)) {
-      verifiedCdbHandles.add(reconciledUsernameLower);
-    }
     const verifiedGitByProvider = new Map<string, Set<string>>();
     for (const id of verifiedIdentities) {
       if (id.provider !== 'contentdb') {
@@ -397,15 +401,16 @@ export async function syncVerifiedAuthorGitPackages(
       }
     }
 
-    // Include explicitly requested authorHandles when caller is admin or when the handle belongs to the user's verified identities
+    // Include explicitly requested authorHandles when caller is admin or when the handle belongs to the user's verified ContentDB identities
     if (Array.isArray(options.authorHandles)) {
-      const ownedHandles = new Set<string>([
-        ...(reconciledUsernameLower ? [reconciledUsernameLower] : []),
-        ...verifiedIdentities.map((i: any) => i.username.toLowerCase())
-      ]);
+      const ownedCdbHandles = new Set<string>(
+        verifiedIdentities
+          .filter((i: any) => i.provider === 'contentdb')
+          .map((i: any) => i.username.toLowerCase())
+      );
       for (const h of options.authorHandles) {
         const clean = String(h || '').trim().toLowerCase();
-        if (clean && (isCallerAdmin || ownedHandles.has(clean))) {
+        if (clean && (isCallerAdmin || ownedCdbHandles.has(clean))) {
           verifiedCdbHandles.add(clean);
         }
       }
@@ -501,7 +506,7 @@ export async function syncVerifiedAuthorGitPackages(
     if (authorBindList.length > 0) {
       const authorPlaceholders = authorBindList.map(() => '?').join(', ');
       const d1PkgRes = await env.DB.prepare(
-        `SELECT * FROM packages WHERE LOWER(author_name) IN (${authorPlaceholders})`
+        `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, repo_url, provider, default_branch, latest_commit_sha, thumbnail_url, banner_url, screenshots, downloads_count, contentdb_downloads, luantihub_downloads, score, license, media_license, tags, min_minetest_version, donate_url, translation_url, forum_url, issue_tracker, dev_state, video_url, video_thumbnail_url, content_warnings, ai_disclosures, status, created_at FROM packages WHERE LOWER(author_name) IN (${authorPlaceholders})`
       ).bind(...authorBindList).all().catch(() => null);
 
       for (const row of d1PkgRes?.results || []) {
@@ -1300,19 +1305,26 @@ export async function inspectAuthorGitSyncStatus(
     }
 
     const verifiedIdentities = identities.filter(i => i.verified && i.username);
-    const isRegistered = Boolean(resolvedUserId && (verifiedIdentities.length > 0 || resolvedUsername));
+    const isRealUserId = Boolean(resolvedUserId && !resolvedUserId.toLowerCase().startsWith('ext_'));
+    const isRegistered = Boolean(isRealUserId && verifiedIdentities.length > 0);
+    if (!isRealUserId) {
+      resolvedUserId = '';
+    }
 
     const verifiedCdbHandles = new Set<string>(
       verifiedIdentities
         .filter(i => i.provider === 'contentdb')
         .map(i => i.username.toLowerCase())
     );
-    if (resolvedUsername && isRegistered) {
-      verifiedCdbHandles.add(resolvedUsername.toLowerCase());
-    }
-    for (const h of options.authorHandles || []) {
-      const clean = String(h || '').trim().toLowerCase();
-      if (clean) verifiedCdbHandles.add(clean);
+    if (!isRegistered) {
+      // Read-only diagnostic fallback for unregistered ContentDB authors (`autoTrigger` never runs when `!isRegistered`)
+      if (resolvedUsername) {
+        verifiedCdbHandles.add(resolvedUsername.toLowerCase());
+      }
+      for (const h of options.authorHandles || []) {
+        const clean = String(h || '').trim().toLowerCase();
+        if (clean) verifiedCdbHandles.add(clean);
+      }
     }
 
     const verifiedGitByProvider = new Map<string, Set<string>>();
@@ -1562,14 +1574,11 @@ export async function runOneTimeExistingUsersGitBackfill(
     }
 
     const verifiedUsersRes = await env.DB.prepare(
-      `SELECT DISTINCT user_id FROM user_identities WHERE verified = 1
-       UNION
-       SELECT id AS user_id FROM users
-       LIMIT 100`
+      `SELECT DISTINCT user_id FROM user_identities WHERE verified = 1 LIMIT 100`
     ).all().catch(() => null);
     const userIds = (verifiedUsersRes?.results || [])
       .map((r: any) => String(r?.user_id || '').trim())
-      .filter(Boolean);
+      .filter((uid: string) => Boolean(uid) && !uid.toLowerCase().startsWith('ext_'));
 
     let anyRemaining = false;
     let processedActiveBatch = false;

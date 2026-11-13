@@ -2,7 +2,8 @@ import {
   verifySessionToken,
   parseCookies,
   checkIsAdmin,
-  reconcileAndMergeUserAccount
+  reconcileAndMergeUserAccount,
+  verifySameOriginMutation
 } from '../auth/lib/session';
 import {
   ensureExtendedPackageColumns,
@@ -148,7 +149,13 @@ export function sanitizePromotionTranslations(raw: any): Record<string, Record<s
 
 export function normalizePromotionRow(r: any): any {
   if (!r || typeof r !== 'object') return r;
-  const showInHero = r.show_in_hero !== false && r.show_in_hero !== 0 && r.show_in_hero !== '0';
+  const bannerUrl = String(r.banner_url || '').trim();
+  const isRetiredHeroBanner = bannerUrl.includes('luanti-5-18-0');
+  const showInHero =
+    !isRetiredHeroBanner &&
+    r.show_in_hero !== false &&
+    r.show_in_hero !== 0 &&
+    r.show_in_hero !== '0';
   const rowEnabled = Boolean(r.row_enabled === true || r.row_enabled === 1 || r.row_enabled === '1');
   const rowShowEmptyCta = r.row_show_empty_cta !== false && r.row_show_empty_cta !== 0 && r.row_show_empty_cta !== '0';
   const rowFilterTags = parseJsonArray(r.row_filter_tags);
@@ -224,6 +231,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
 // POST /api/promotions: Create or update a Hero Carousel slide and/or Promotional Package Row #1 (Admin-only)
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
   const { isAdmin, username } = await resolveAdminSession(request, env);
   if (!isAdmin) {
@@ -481,6 +491,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
 // DELETE /api/promotions: Delete or end a promotion (Admin-only)
 export async function onRequestDelete(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
   const { isAdmin } = await resolveAdminSession(request, env);
   if (!isAdmin) {

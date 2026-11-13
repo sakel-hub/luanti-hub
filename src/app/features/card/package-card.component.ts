@@ -81,6 +81,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             (error)="onCardBannerError(cardBannerUrl, $event)"
             [alt]="seoImageAlt"
             loading="lazy"
+            decoding="async"
             class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-300"
           />
         </div>
@@ -110,6 +111,8 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
                 [src]="safeEmbed"
                 [title]="package.title + ' preview'"
                 (load)="onHoverIframeLoad()"
+                sandbox="allow-scripts allow-same-origin allow-presentation"
+                referrerpolicy="strict-origin-when-cross-origin"
                 tabindex="-1"
                 aria-hidden="true"
                 class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[108%] h-[240%] border-0 pointer-events-none select-none"
@@ -179,7 +182,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             <button
               type="button"
               (click)="onDownload($event)"
-              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '')"
+              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '') + ' — ' + ((package.source === 'git' ? 'card.downloadSecurityTooltipGit' : 'card.downloadSecurityTooltipContentDb') | translate)"
               [attr.aria-label]="'card.downloadZip' | translate"
               class="w-8 h-8 rounded-full glass-btn-primary text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
               <svg lucideDownload class="w-4 h-4 text-white"></svg>
@@ -317,10 +320,27 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   private embedReadyTimer: any = null;
   private isPointerHovering = false;
   private isMessageListenerAttached = false;
+  private hoverEmbedOrigin: string | null = null;
   private readonly boundWindowMessageHandler = (event: MessageEvent) => this.onWindowMessage(event);
   currentHoverSeconds = 0;
 
+  private cachedUrlPkgKey = '';
+  private cachedPackageUrl = '';
+  private cachedAuthorUrlSlug = '';
+  private cachedAuthorUrl = '';
+  private cachedSeoAltKey = '';
+  private cachedSeoAlt = '';
+  private cachedBannerRawKey = '';
+  private cachedBannerUrl = '';
+  private cachedFallbackRawKey = '';
+  private cachedFallbackThumb: string | undefined = undefined;
+
   ngOnChanges(): void {
+    this.cachedDisplayTagsPkgRef = null;
+    this.cachedUrlPkgKey = '';
+    this.cachedSeoAltKey = '';
+    this.cachedBannerRawKey = '';
+    this.cachedFallbackRawKey = '';
     if (this.package && this.packageService.needsTileHydration(this.package)) {
       this.packageService.ensurePackageHydrated(this.package);
     }
@@ -339,6 +359,8 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       imgEl?.getAttribute('data-lh-failed-src')?.trim() ||
       url;
     const normalized = this.packageService.toProxiedGitImageIfNeeded(actualFailedSrc) ?? actualFailedSrc;
+    this.cachedBannerRawKey = '';
+    this.cachedFallbackRawKey = '';
     this.failedBannerUrls.update(prev => {
       const next = new Set(prev);
       if (actualFailedSrc && actualFailedSrc !== 'logo.svg') next.add(actualFailedSrc);
@@ -347,8 +369,18 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     });
   }
 
+  private buildMediaCacheKey(failed: Set<string>): string {
+    const pkg = this.package;
+    const shots = pkg?.screenshots;
+    return `${pkg?.id || ''}|${pkg?.banner || ''}|${pkg?.thumbnail || ''}|${pkg?.video_thumbnail_url || ''}|${shots?.length || 0}:${shots?.[0] || ''}:${shots?.[1] || ''}|${failed.size}`;
+  }
+
   get cardBannerUrl(): string {
     const failed = this.failedBannerUrls();
+    const rawKey = this.buildMediaCacheKey(failed);
+    if (rawKey === this.cachedBannerRawKey && this.cachedBannerUrl) {
+      return this.cachedBannerUrl;
+    }
     const gitCandidates = [
       this.package?.banner,
       ...(this.package?.screenshots ?? []),
@@ -378,48 +410,71 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
         return formatContentDbCdnUrl(proxied, 'tile') || proxied;
       })
       .filter((u): u is string => Boolean(u) && u !== 'logo.svg');
-    return (
+    const resolved =
       candidates.find(u => !failed.has(u)) ||
       candidates.find(u => !this.packageService.isGitScreenshotUrl(u)) ||
-      'logo.svg'
-    );
+      'logo.svg';
+    this.cachedBannerRawKey = rawKey;
+    this.cachedBannerUrl = resolved;
+    return resolved;
   }
 
   get cardFallbackThumbnail(): string | undefined {
     const primary = this.cardBannerUrl;
     const failed = this.failedBannerUrls();
+    const rawKey = `${primary}|${this.buildMediaCacheKey(failed)}`;
+    if (rawKey === this.cachedFallbackRawKey) {
+      return this.cachedFallbackThumb;
+    }
     const rawThumb = this.package?.thumbnail;
     const proxiedThumbRaw = this.packageService.toProxiedGitImageIfNeeded(rawThumb) ?? rawThumb;
     const proxiedThumb =
       proxiedThumbRaw && !this.packageService.isGitScreenshotUrl(proxiedThumbRaw)
         ? formatContentDbCdnUrl(proxiedThumbRaw, 'tile') || proxiedThumbRaw
         : proxiedThumbRaw;
+    let resolved: string | undefined = undefined;
     if (proxiedThumb && proxiedThumb !== 'logo.svg' && proxiedThumb !== primary && !failed.has(proxiedThumb)) {
-      return proxiedThumb;
+      resolved = proxiedThumb;
+    } else {
+      const distinctShot = (this.package?.screenshots ?? [])
+        .map(url => {
+          const p = this.packageService.toProxiedGitImageIfNeeded(url) ?? url;
+          return p && !this.packageService.isGitScreenshotUrl(p)
+            ? formatContentDbCdnUrl(p, 'tile') || p
+            : p;
+        })
+        .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary && !failed.has(url));
+      if (distinctShot) {
+        resolved = distinctShot;
+      } else if (proxiedThumb && proxiedThumb !== 'logo.svg' && !this.packageService.isGitScreenshotUrl(proxiedThumb)) {
+        resolved = proxiedThumb;
+      }
     }
-    const distinctShot = (this.package?.screenshots ?? [])
-      .map(url => {
-        const p = this.packageService.toProxiedGitImageIfNeeded(url) ?? url;
-        return p && !this.packageService.isGitScreenshotUrl(p)
-          ? formatContentDbCdnUrl(p, 'tile') || p
-          : p;
-      })
-      .find(url => Boolean(url) && url !== 'logo.svg' && url !== primary && !failed.has(url));
-    if (distinctShot) {
-      return distinctShot;
-    }
-    if (proxiedThumb && proxiedThumb !== 'logo.svg' && !this.packageService.isGitScreenshotUrl(proxiedThumb)) {
-      return proxiedThumb;
-    }
-    return undefined;
+    this.cachedFallbackRawKey = rawKey;
+    this.cachedFallbackThumb = resolved;
+    return resolved;
   }
 
+  private cachedDisplayTagsPkgRef: LuantiPackage | null = null;
+  private cachedDisplayTagsTagsRef: string[] | undefined = undefined;
+  private cachedDisplayTagsList: string[] = [];
+
   get displayTags(): string[] {
-    const pkgType = this.package.type?.toLowerCase();
-    return (this.package.tags || []).filter(t => {
+    if (
+      this.cachedDisplayTagsPkgRef === this.package &&
+      this.cachedDisplayTagsTagsRef === this.package?.tags
+    ) {
+      return this.cachedDisplayTagsList;
+    }
+    const pkgType = this.package?.type?.toLowerCase();
+    const list = (this.package?.tags || []).filter(t => {
       const lower = t.toLowerCase();
       return lower !== pkgType && lower !== 'mod' && lower !== 'game' && lower !== 'txp' && lower !== 'texture_pack';
     }).slice(0, 3);
+    this.cachedDisplayTagsPkgRef = this.package;
+    this.cachedDisplayTagsTagsRef = this.package?.tags;
+    this.cachedDisplayTagsList = list;
+    return list;
   }
 
   isDirectVideo(url?: string): boolean {
@@ -474,11 +529,12 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onHoverIframeLoad(): void {
     const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
-    if (iframeWin) {
+    const targetOrigin = this.hoverEmbedOrigin;
+    if (iframeWin && targetOrigin) {
       try {
-        iframeWin.postMessage(JSON.stringify({ event: 'listening' }), '*');
-        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'play' }), '*');
-        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'playProgress' }), '*');
+        iframeWin.postMessage(JSON.stringify({ event: 'listening' }), targetOrigin);
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'play' }), targetOrigin);
+        iframeWin.postMessage(JSON.stringify({ method: 'addEventListener', value: 'playProgress' }), targetOrigin);
       } catch {
         // Ignore cross-origin postMessage restrictions
       }
@@ -497,6 +553,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   onWindowMessage(event: MessageEvent): void {
     if (!this.isHoverVideoActive()) return;
+    if (!this.hoverEmbedOrigin || event.origin !== this.hoverEmbedOrigin) return;
     const iframeWin = this.hoverIframeRef?.nativeElement?.contentWindow;
     if (iframeWin && event.source && event.source !== window && event.source !== iframeWin) {
       return;
@@ -560,9 +617,16 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
       if (!this.isDirectVideo(activeVideoUrl)) {
         const embed = this.buildHoverEmbedUrl(activeVideoUrl);
         if (!embed) return;
+        try {
+          this.hoverEmbedOrigin = new URL(embed).origin;
+        } catch {
+          this.hoverEmbedOrigin = null;
+          return;
+        }
         this.hoverEmbedSafeUrl.set(this.sanitizer.bypassSecurityTrustResourceUrl(embed));
         this.attachHoverMessageListener();
       } else {
+        this.hoverEmbedOrigin = null;
         this.hoverEmbedSafeUrl.set(null);
       }
       this.isHoverVideoActive.set(true);
@@ -575,6 +639,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   private clearHoverVideo(): void {
     this.isPointerHovering = false;
+    this.hoverEmbedOrigin = null;
     this.detachHoverMessageListener();
     if (this.hoverIntentTimer) {
       clearTimeout(this.hoverIntentTimer);
@@ -620,7 +685,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
     }
 
     const iframeEl = this.hoverIframeRef?.nativeElement;
-    if (iframeEl?.contentWindow) {
+    if (iframeEl?.contentWindow && this.hoverEmbedOrigin) {
       try {
         iframeEl.contentWindow.postMessage(
           JSON.stringify({
@@ -628,7 +693,7 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
             func: nextMuted ? 'mute' : 'unMute',
             args: []
           }),
-          '*'
+          this.hoverEmbedOrigin
         );
       } catch {
         // Ignore cross-origin postMessage restrictions
@@ -639,7 +704,13 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
   get packageUrl(): string {
     const author = this.package?.author || '';
     const name = this.package?.name || '';
-    return `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+    const key = `${author}/${name}`;
+    if (this.cachedUrlPkgKey === key && this.cachedPackageUrl) {
+      return this.cachedPackageUrl;
+    }
+    this.cachedUrlPkgKey = key;
+    this.cachedPackageUrl = `/package/${encodeURIComponent(author)}/${encodeURIComponent(name)}`;
+    return this.cachedPackageUrl;
   }
 
   get authorDisplayName(): string {
@@ -648,18 +719,30 @@ export class PackageCardComponent implements OnChanges, OnDestroy {
 
   get authorUrl(): string {
     const slug = this.authorDisplayName || this.package?.author || '';
-    return `/author/${encodeURIComponent(slug)}`;
+    if (this.cachedAuthorUrlSlug === slug && this.cachedAuthorUrl) {
+      return this.cachedAuthorUrl;
+    }
+    this.cachedAuthorUrlSlug = slug;
+    this.cachedAuthorUrl = `/author/${encodeURIComponent(slug)}`;
+    return this.cachedAuthorUrl;
   }
 
   get seoImageAlt(): string {
     if (!this.package) return 'Luanti Package';
+    const display = this.authorDisplayName;
+    const key = `${this.package.title}|${this.package.type}|${display}`;
+    if (this.cachedSeoAltKey === key && this.cachedSeoAlt) {
+      return this.cachedSeoAlt;
+    }
     const typeLabel =
       this.package.type === 'game'
         ? 'Game'
         : this.package.type === 'txp'
           ? 'Texture Pack'
           : 'Mod';
-    return `${this.package.title} – Luanti ${typeLabel} by ${this.authorDisplayName}`;
+    this.cachedSeoAltKey = key;
+    this.cachedSeoAlt = `${this.package.title} – Luanti ${typeLabel} by ${display}`;
+    return this.cachedSeoAlt;
   }
 
   onTitleLinkClick(event: MouseEvent): void {

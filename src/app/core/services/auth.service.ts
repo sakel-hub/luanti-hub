@@ -175,6 +175,7 @@ export class AuthService {
   readonly syncAuthorGitProgress = signal<{ processed: number; total: number } | null>(null);
   readonly packageSyncStatuses = signal<Record<string, PackageGitSyncStatus>>({});
   private lastModerationFetchAt = 0;
+  private lastModerationFetchKey = '';
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
 
@@ -225,7 +226,6 @@ export class AuthService {
   readonly openReportsCount = computed(() => this._currentUser()?.open_reports_count || 0);
   readonly linkedIdentities = computed(() => this._currentUser()?.identities || []);
   private backgroundAuthDigestTimer: ReturnType<typeof setInterval> | null = null;
-  private oauthPopupPollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.pwaService.registerNotificationClickHandler((data: any) => {
@@ -268,7 +268,7 @@ export class AuthService {
         const rawUrl = data.ctaUrl.trim();
         if (rawUrl) {
           this.closeProfileDrawer(false);
-          if (rawUrl.startsWith('/')) {
+          if (rawUrl.startsWith('/') && !rawUrl.startsWith('//') && !rawUrl.startsWith('/\\')) {
             if (this.router) {
               this.router.navigateByUrl(rawUrl).catch(() => {});
             } else if (typeof window !== 'undefined') {
@@ -276,15 +276,17 @@ export class AuthService {
             }
             return;
           }
-          if (typeof window !== 'undefined') {
+          if (typeof window !== 'undefined' && /^https:\/\//i.test(rawUrl)) {
             try {
               const parsed = new URL(rawUrl, window.location.origin);
-              if (parsed.origin === window.location.origin && this.router) {
-                this.router.navigateByUrl(parsed.pathname + parsed.search + parsed.hash).catch(() => {});
-              } else {
-                window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+              if (parsed.protocol === 'https:') {
+                if (parsed.origin === window.location.origin && this.router) {
+                  this.router.navigateByUrl(parsed.pathname + parsed.search + parsed.hash).catch(() => {});
+                } else {
+                  window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+                }
+                return;
               }
-              return;
             } catch {
               // Fall through
             }
@@ -293,62 +295,87 @@ export class AuthService {
       }
       this.openProfileDrawer();
     });
-    this.initOAuthPopupListener();
     this.handleUrlAuthParams();
     this.initAuth();
     this.initBackgroundAuthDigestRefresh();
   }
 
-  private handleOAuthPopupMessage(data: any): void {
-    if (!data || data.type !== 'LH_OAUTH_COMPLETE') return;
-    if (this.oauthPopupPollTimer) {
-      clearInterval(this.oauthPopupPollTimer);
-      this.oauthPopupPollTimer = null;
+  private sanitizeClientReturnPath(rawPath?: string | null): string | undefined {
+    if (!rawPath || typeof rawPath !== 'string') return undefined;
+    const trimmed = rawPath.trim();
+    if (
+      !trimmed.startsWith('/') ||
+      trimmed.startsWith('//') ||
+      trimmed.startsWith('/\\') ||
+      /[\r\n\0]/.test(trimmed) ||
+      trimmed.length > 240
+    ) {
+      return undefined;
     }
-    this._isOAuthRedirecting.set(false);
-    const providerParam = data.provider as GitProvider | undefined;
-    if (providerParam && ['codeberg', 'mesehub', 'gitlab', 'github', 'contentdb'].includes(providerParam)) {
-      this._selectedProvider.set(providerParam);
-    }
-    if (data.success) {
-      this.clearAuthCache();
-      this._authError.set(null);
-      this._isAuthModalOpen.set(false);
-      this._isCompletingOAuth.set(true);
-      this.initAuth(true).then(() => {
-        if (this._currentUser() && (typeof window === 'undefined' || !window.location.pathname.startsWith('/package/'))) {
-          this._isProfileDrawerOpen.set(true);
-        }
-      });
-    } else if (data.error) {
-      this.clearAuthCache();
-      this._isCompletingOAuth.set(false);
-      this._authError.set(formatFriendlyAuthError(String(data.error), providerParam || this._selectedProvider()));
-      this._isAuthModalOpen.set(true);
+    try {
+      const baseOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://luantihub.org';
+      const parsed = new URL(trimmed, baseOrigin);
+      if (parsed.origin !== baseOrigin) return undefined;
+      parsed.searchParams.delete('auth_success');
+      parsed.searchParams.delete('auth_error');
+      parsed.searchParams.delete('provider');
+      const qs = parsed.searchParams.toString();
+      return `${parsed.pathname}${qs ? `?${qs}` : ''}`;
+    } catch {
+      return undefined;
     }
   }
 
-  private initOAuthPopupListener(): void {
-    if (typeof window === 'undefined') return;
-    window.addEventListener('message', (event: MessageEvent) => {
-      if (event?.origin && event.origin !== window.location.origin) {
-        return;
-      }
-      if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
-        this.handleOAuthPopupMessage(event.data);
-      }
-    });
+  private isNonDrawerReturnRoute(path?: string | null): boolean {
+    if (!path) return false;
+    return (
+      path.startsWith('/package/') ||
+      path.startsWith('/packages/') ||
+      path.startsWith('/submit') ||
+      path.startsWith('/author/') ||
+      path.startsWith('/analytics') ||
+      path.startsWith('/setup')
+    );
+  }
+
+  private resolveOAuthReturnPath(explicitReturnTo?: string): string | undefined {
+    const cleanExplicit = this.sanitizeClientReturnPath(explicitReturnTo || this.pendingAuthReturnTo);
+    if (cleanExplicit && cleanExplicit !== '/') {
+      return cleanExplicit;
+    }
+
+    let isAccountDeleteFlow = this.requestAccountDeleteConfirm();
     try {
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('lh-auth-sync');
-        bc.onmessage = (event: MessageEvent) => {
-          if (event?.data?.type === 'LH_OAUTH_COMPLETE') {
-            this.handleOAuthPopupMessage(event.data);
-          }
-        };
+      if (!isAccountDeleteFlow && typeof sessionStorage !== 'undefined') {
+        isAccountDeleteFlow = sessionStorage.getItem('lh_oauth_account_delete') === '1';
       }
     } catch {
-      // Ignore BroadcastChannel errors
+      // Ignore storage error
+    }
+    if (isAccountDeleteFlow) {
+      return '/profile?tab=account&confirm_delete=1';
+    }
+
+    if (this.returnToProfileDrawerOnAuthClose || this._isProfileDrawerOpen()) {
+      const tab: ProfileDrawerTab = this.returnToProfileDrawerOnAuthClose
+        ? 'account'
+        : this._activeProfileTab();
+      return tab && tab !== 'packages' ? `/profile?tab=${encodeURIComponent(tab)}` : '/profile';
+    }
+
+    if (typeof window !== 'undefined') {
+      const currentPath = window.location.pathname || '/';
+      if (this.isNonDrawerReturnRoute(currentPath)) {
+        return this.sanitizeClientReturnPath(currentPath + (window.location.search || ''));
+      }
+    }
+
+    return undefined;
+  }
+
+  protected navigateToUrl(url: string): void {
+    if (typeof window !== 'undefined') {
+      window.location.href = url;
     }
   }
 
@@ -365,11 +392,29 @@ export class AuthService {
       if (this.backgroundAuthDigestTimer) {
         clearInterval(this.backgroundAuthDigestTimer);
       }
+      const DIGEST_INTERVAL_MS = 30 * 60 * 1000;
       this.backgroundAuthDigestTimer = setInterval(() => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          return;
+        }
         if (this.isLoggedIn() && this.pwaService.isOnline()) {
           this.initAuth(true).catch(() => {});
         }
-      }, 30 * 60 * 1000);
+      }, DIGEST_INTERVAL_MS);
+
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (
+            document.visibilityState === 'visible' &&
+            this.isLoggedIn() &&
+            this.pwaService.isOnline() &&
+            this.lastAuthFetchAt > 0 &&
+            Date.now() - this.lastAuthFetchAt >= DIGEST_INTERVAL_MS
+          ) {
+            this.initAuth(true).catch(() => {});
+          }
+        });
+      }
     }
   }
 
@@ -387,6 +432,8 @@ export class AuthService {
       const params = new URLSearchParams(window.location.search);
       const authError = params.get('auth_error');
       const authSuccess = params.get('auth_success');
+      const confirmDelete = params.get('confirm_delete') === '1';
+      const tabParam = params.get('tab');
       const providerParam = params.get('provider') as GitProvider | null;
       if (providerParam && ['codeberg', 'mesehub', 'gitlab', 'github', 'contentdb'].includes(providerParam)) {
         this._selectedProvider.set(providerParam);
@@ -399,27 +446,47 @@ export class AuthService {
       } else if (authSuccess) {
         this.clearAuthCache();
         this._isCompletingOAuth.set(true);
-        let returnedToPackage = false;
+        let returnedToNonDrawerRoute = this.isNonDrawerReturnRoute(window.location.pathname);
+
+        if (
+          window.location.pathname === '/profile' &&
+          tabParam &&
+          ['packages', 'favorites', 'account', 'moderation', 'promotions'].includes(tabParam)
+        ) {
+          this._activeProfileTab.set(tabParam as ProfileDrawerTab);
+          this._requestedDrawerTab.set(tabParam as ProfileDrawerTab);
+        }
+
+        if (confirmDelete) {
+          this._activeProfileTab.set('account');
+          this._requestedDrawerTab.set('account');
+          this.requestAccountDeleteConfirm.set(true);
+          returnedToNonDrawerRoute = false;
+        }
+
         try {
           if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('lh_oauth_account_delete') === '1') {
             sessionStorage.removeItem('lh_oauth_account_delete');
+            this._activeProfileTab.set('account');
             this._requestedDrawerTab.set('account');
             this.requestAccountDeleteConfirm.set(true);
+            returnedToNonDrawerRoute = false;
           }
           const savedPath = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('lh_oauth_return_path') : null;
           if (savedPath) {
             sessionStorage.removeItem('lh_oauth_return_path');
-            if (savedPath.startsWith('/package/') || savedPath.startsWith('/packages/')) {
-              returnedToPackage = true;
-              if (this.router) {
-                setTimeout(() => this.router?.navigateByUrl(savedPath), 0);
+            const cleanSaved = this.sanitizeClientReturnPath(savedPath);
+            if (cleanSaved && this.isNonDrawerReturnRoute(cleanSaved)) {
+              returnedToNonDrawerRoute = true;
+              if (window.location.pathname === '/' && this.router) {
+                setTimeout(() => this.router?.navigateByUrl(cleanSaved), 0);
               }
             }
           }
         } catch {
           // Ignore storage error
         }
-        if (!returnedToPackage && !window.location.pathname.startsWith('/package/')) {
+        if (!returnedToNonDrawerRoute) {
           this._isProfileDrawerOpen.set(true);
         }
       }
@@ -427,6 +494,7 @@ export class AuthService {
         params.delete('auth_error');
         params.delete('auth_success');
         params.delete('provider');
+        params.delete('confirm_delete');
         const cleanQuery = params.toString();
         const cleanUrl = window.location.pathname + (cleanQuery ? `?${cleanQuery}` : '');
         window.history.replaceState({}, '', cleanUrl);
@@ -639,6 +707,7 @@ export class AuthService {
 
   private returnToPackageOnAuthClose = false;
   private returnToProfileDrawerOnAuthClose = false;
+  private pendingAuthReturnTo: string | null = null;
 
   openAuthModal(
     fromPackageReview = false,
@@ -646,6 +715,7 @@ export class AuthService {
       allowWhenLoggedIn?: boolean;
       expandDirectSignIn?: boolean;
       returnToProfileDrawer?: boolean;
+      returnTo?: string;
     }
   ): void {
     if (this.isBusyAuthenticating()) {
@@ -665,6 +735,7 @@ export class AuthService {
     }
     this.returnToPackageOnAuthClose = fromPackageReview;
     this.returnToProfileDrawerOnAuthClose = Boolean(options?.returnToProfileDrawer);
+    this.pendingAuthReturnTo = this.sanitizeClientReturnPath(options?.returnTo) || null;
     this._expandDirectSignInOnOpen.set(Boolean(options?.expandDirectSignIn));
     this._authError.set(null);
     this._isAuthModalOpen.set(true);
@@ -678,6 +749,7 @@ export class AuthService {
     this._authError.set(null);
     this.returnToPackageOnAuthClose = false;
     this.returnToProfileDrawerOnAuthClose = false;
+    this.pendingAuthReturnTo = null;
     if (shouldReturnToDrawer) {
       this._requestedDrawerTab.set('account');
       this.openProfileDrawer();
@@ -770,7 +842,12 @@ export class AuthService {
     }
   }
 
-  loginWith(provider: GitProvider, loginHint?: string, forceAccountSelect = true): void {
+  loginWith(
+    provider: GitProvider,
+    loginHint?: string,
+    forceAccountSelect = true,
+    options?: { returnTo?: string }
+  ): void {
     this._selectedProvider.set(provider);
     this._authError.set(null);
     if (this.isOAuthConfigured(provider)) {
@@ -778,9 +855,10 @@ export class AuthService {
       this._isOAuthRedirecting.set(true);
       this.clearAuthCache();
       if (typeof window !== 'undefined') {
+        const returnPath = this.resolveOAuthReturnPath(options?.returnTo);
         try {
-          if (this.returnToPackageOnAuthClose && window.location.pathname.startsWith('/package/')) {
-            sessionStorage.setItem('lh_oauth_return_path', window.location.pathname);
+          if (typeof sessionStorage !== 'undefined' && returnPath && this.isNonDrawerReturnRoute(returnPath)) {
+            sessionStorage.setItem('lh_oauth_return_path', returnPath);
           }
         } catch {
           // Ignore storage error
@@ -789,42 +867,10 @@ export class AuthService {
         const query = new URLSearchParams();
         if (cleanHint) query.set('login', cleanHint);
         if (forceAccountSelect) query.set('prompt', 'select_account');
-
-        // When running as an installed standalone/WCO PWA, open OAuth in a centered popup window
-        // so the main PWA window never leaves scope or displays the browser's out-of-scope URL bar
-        if (this.pwaService.isInstalled() && typeof window.open === 'function') {
-          const popupQuery = new URLSearchParams(query);
-          popupQuery.set('popup', '1');
-          const popupUrl = `/api/auth/${provider}/login?${popupQuery.toString()}`;
-          const width = 560;
-          const height = 700;
-          const left = Math.max(0, Math.round((window.screenX || 0) + ((window.outerWidth || 1024) - width) / 2));
-          const top = Math.max(0, Math.round((window.screenY || 0) + ((window.outerHeight || 768) - height) / 2));
-          const popupWin = window.open(
-            popupUrl,
-            'lh_oauth_popup',
-            `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=yes,status=no,resizable=yes,scrollbars=yes`
-          );
-          if (popupWin) {
-            if (this.oauthPopupPollTimer) {
-              clearInterval(this.oauthPopupPollTimer);
-            }
-            this.oauthPopupPollTimer = setInterval(() => {
-              if (popupWin.closed) {
-                if (this.oauthPopupPollTimer) {
-                  clearInterval(this.oauthPopupPollTimer);
-                  this.oauthPopupPollTimer = null;
-                }
-                this._isOAuthRedirecting.set(false);
-                this.initAuth(true).catch(() => {});
-              }
-            }, 500);
-            return;
-          }
-        }
+        if (returnPath && returnPath !== '/') query.set('return_to', returnPath);
 
         const qs = query.toString();
-        window.location.href = `/api/auth/${provider}/login${qs ? `?${qs}` : ''}`;
+        this.navigateToUrl(`/api/auth/${provider}/login${qs ? `?${qs}` : ''}`);
       }
       setTimeout(() => {
         this._isOAuthRedirecting.set(false);
@@ -847,6 +893,8 @@ export class AuthService {
       this._isLoading.set(true);
       const res = await fetch('/api/auth/me', {
         method: 'POST',
+        cache: 'no-store',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
@@ -944,6 +992,7 @@ export class AuthService {
       this._isLoading.set(true);
       const res = await fetch('/api/auth/me', {
         method: 'POST',
+        cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({
@@ -1093,6 +1142,7 @@ export class AuthService {
       }
       this.clearAuthCache();
       this.requestAccountDeleteConfirm.set(false);
+      this.settingsService.clearPendingFavoriteOps();
       this.settingsService.favorites.set([]);
       this.settingsService.downloadedPackages.set({});
       this.settingsService.recentlyViewedPackages.set([]);
@@ -1120,6 +1170,7 @@ export class AuthService {
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_local_user');
       }
+      this.settingsService.clearPendingFavoriteOps();
       this.settingsService.isAuthenticatedSession.set(false);
       this._currentUser.set(null);
       this.closeProfileDrawer();
@@ -1137,15 +1188,16 @@ export class AuthService {
     const targetPage = page ?? this._moderationPage();
     const targetStatus = status ?? this._moderationStatusFilter();
     const targetReason = reason ?? this._moderationReasonFilter();
+    const fetchKey = `${targetPage}:${targetStatus}:${targetReason}`;
+    const keyChanged = fetchKey !== this.lastModerationFetchKey;
 
     this._moderationPage.set(targetPage);
     this._moderationStatusFilter.set(targetStatus);
     this._moderationReasonFilter.set(targetReason);
 
-    if (!force && this.lastModerationFetchAt > 0 && Date.now() - this.lastModerationFetchAt < 60_000) {
+    if (!force && !keyChanged && this.lastModerationFetchAt > 0 && Date.now() - this.lastModerationFetchAt < 60_000) {
       return;
     }
-    this.lastModerationFetchAt = Date.now();
     try {
       const apiStatus = targetStatus === 'delisted' ? 'open' : targetStatus;
       const params = new URLSearchParams({
@@ -1156,6 +1208,8 @@ export class AuthService {
       });
       const res = await fetch(`/api/admin/moderation?${params.toString()}`);
       if (res.ok) {
+        this.lastModerationFetchAt = Date.now();
+        this.lastModerationFetchKey = fetchKey;
         const data = await res.json();
         if (Array.isArray(data.reports)) {
           this._moderationReports.set(data.reports);
@@ -1599,7 +1653,7 @@ export class AuthService {
       }
     }
 
-    if (user.is_admin && Array.isArray(digest.admin_latest_open)) {
+    if (this.isAdmin() && Array.isArray(digest.admin_latest_open)) {
       for (const rep of digest.admin_latest_open) {
         const tag = `lh-mod-admin-${rep.id}-${rep.created_at}`;
         this.pwaService.sendNativeNotification({

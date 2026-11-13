@@ -1,5 +1,7 @@
-import { verifySessionToken, parseCookies } from './lib/session';
+import { verifySessionToken, parseCookies, verifySameOriginMutation } from './lib/session';
 import { sanitizePublicErrorMessage } from '../lib/upstream';
+
+const MAX_FAVORITES_PER_USER = 250;
 
 interface Env {
   DB?: any;
@@ -64,6 +66,9 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
 // POST /api/auth/favorites: Track add, remove, or bulk-sync user/guest favorites in Cloudflare D1
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const body = await context.request.json().catch(() => ({})) as {
       action: 'add' | 'remove' | 'sync';
@@ -85,34 +90,78 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       });
     }
 
-    // Ensure foreign-key parent row exists in `users` for anonymous client tracking
-    if (identity.isGuest) {
-      await context.env.DB.prepare(
-        `INSERT OR IGNORE INTO users (id, username, display_name, role) VALUES (?, ?, 'Guest Explorer', 'user')`
-      ).bind(identity.userId, identity.userId).run();
-    }
+    const VALID_PKG_ID_RE = /^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,100}$/;
+    const ensureGuestParentRow = async () => {
+      if (identity.isGuest) {
+        await context.env.DB.prepare(
+          `INSERT OR IGNORE INTO users (id, username, display_name, role) VALUES (?, ?, 'Guest Explorer', 'user')`
+        ).bind(identity.userId, identity.userId).run();
+      }
+    };
+
+    let didInsert = false;
 
     if (body.action === 'add' && body.packageId) {
+      const cleanId = String(body.packageId).trim();
+      if (!VALID_PKG_ID_RE.test(cleanId)) {
+        return Response.json({ error: 'Invalid package identifier.' }, { status: 400 });
+      }
+      await ensureGuestParentRow();
       await context.env.DB.prepare(
         `INSERT OR IGNORE INTO user_favorites (user_id, package_id) VALUES (?, ?)`
-      ).bind(identity.userId, body.packageId).run();
+      ).bind(identity.userId, cleanId).run();
+      didInsert = true;
     } else if (body.action === 'remove' && body.packageId) {
+      const cleanId = String(body.packageId).trim();
+      if (!VALID_PKG_ID_RE.test(cleanId)) {
+        return Response.json({ error: 'Invalid package identifier.' }, { status: 400 });
+      }
       await context.env.DB.prepare(
         `DELETE FROM user_favorites WHERE user_id = ? AND LOWER(package_id) = LOWER(?)`
-      ).bind(identity.userId, body.packageId).run();
+      ).bind(identity.userId, cleanId).run();
     } else if (body.action === 'sync' && Array.isArray(body.packageIds)) {
-      for (const pkgId of body.packageIds.slice(0, 200)) {
-        if (pkgId && typeof pkgId === 'string' && pkgId.includes('/')) {
-          await context.env.DB.prepare(
+      const validIds = Array.from(
+        new Set(
+          body.packageIds
+            .slice(0, MAX_FAVORITES_PER_USER)
+            .map((p) => (typeof p === 'string' ? p.trim() : ''))
+            .filter((p) => VALID_PKG_ID_RE.test(p))
+        )
+      );
+      if (validIds.length > 0) {
+        await ensureGuestParentRow();
+        const stmts = validIds.map((pkgId) =>
+          context.env.DB.prepare(
             `INSERT OR IGNORE INTO user_favorites (user_id, package_id) VALUES (?, ?)`
-          ).bind(identity.userId, pkgId).run();
+          ).bind(identity.userId, pkgId)
+        );
+        if (typeof context.env.DB.batch === 'function') {
+          await context.env.DB.batch(stmts);
+        } else {
+          for (const stmt of stmts) {
+            await stmt.run();
+          }
         }
+        didInsert = true;
       }
     }
 
+    if (didInsert) {
+      await context.env.DB.prepare(
+        `DELETE FROM user_favorites
+         WHERE user_id = ?
+           AND package_id NOT IN (
+             SELECT package_id FROM user_favorites
+             WHERE user_id = ?
+             ORDER BY created_at DESC
+             LIMIT ?
+           )`
+      ).bind(identity.userId, identity.userId, MAX_FAVORITES_PER_USER).run().catch(() => {});
+    }
+
     const updated = await context.env.DB.prepare(
-      `SELECT package_id FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC`
-    ).bind(identity.userId).all();
+      `SELECT package_id FROM user_favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`
+    ).bind(identity.userId, MAX_FAVORITES_PER_USER).all();
 
     return Response.json({
       success: true,

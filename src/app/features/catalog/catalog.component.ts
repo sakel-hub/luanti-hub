@@ -389,10 +389,10 @@ import {
               [class]="isTagsExpanded() ? 'bg-sky-500/20 text-sky-300 border-sky-400/40' : 'glass-pill text-sky-400 hover:text-sky-300'"
               class="px-3 py-1 rounded-full border text-xs font-bold flex items-center gap-1 transition whitespace-nowrap flex-shrink-0 cursor-pointer">
               @if (isTagsExpanded()) {
-                <span>Less</span>
+                <span>{{ 'catalog.lessTags' | translate }}</span>
                 <svg lucideChevronUp class="w-3.5 h-3.5"></svg>
               } @else {
-                <span>+{{ extraTags().length }} More</span>
+                <span>{{ 'catalog.moreTags' | translate: { count: extraTags().length } }}</span>
                 <svg lucideChevronDown class="w-3.5 h-3.5"></svg>
               }
             </button>
@@ -558,9 +558,15 @@ import {
             <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/30 text-sky-300 text-[11px] font-bold uppercase tracking-wider">
               Open-Source Voxel Engine Ecosystem
             </span>
-            <h1 id="luanti-ecosystem-guide-heading" class="text-lg sm:text-2xl font-black text-white tracking-tight">
-              Luanti — Open-Source Voxel Games, Mods &amp; Texture Packs on Luanti Hub
-            </h1>
+            @if (hasEntityOverlay()) {
+              <h2 id="luanti-ecosystem-guide-heading" class="text-lg sm:text-2xl font-black text-white tracking-tight">
+                {{ primarySeoHeading() }}
+              </h2>
+            } @else {
+              <h1 id="luanti-ecosystem-guide-heading" class="text-lg sm:text-2xl font-black text-white tracking-tight">
+                {{ primarySeoHeading() }}
+              </h1>
+            }
             <p class="text-xs sm:text-sm text-slate-300 leading-relaxed">
               <strong>Luanti</strong> (formerly known as <strong>Minetest</strong>) is a free, open-source C++ voxel game engine for Windows, Linux, macOS, Android, and iOS.
               <strong>Luanti Hub (LuantiHub)</strong> is the high-availability package registry and discovery hub where players and server administrators can explore, preview, and install thousands of community
@@ -617,8 +623,14 @@ import {
           </div>
         </div>
 
-        <!-- Frequently Asked Questions About Luanti & Luanti Hub -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-5 text-xs">
+        <!-- Frequently Asked Questions About Luanti Hub & Luanti -->
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 text-xs">
+          <div class="space-y-1.5">
+            <h2 class="text-sm font-bold text-white">What is Luanti Hub (LuantiHub)?</h2>
+            <p class="text-slate-400 leading-relaxed">
+              Luanti Hub (<strong>LuantiHub</strong>, at <code>luantihub.org</code>) is an open-source package registry, ContentDB mirror, and community discovery platform for the Luanti voxel engine, offering direct <code>.zip</code> downloads, automated Git repository packaging, and 1-click in-game installation.
+            </p>
+          </div>
           <div class="space-y-1.5">
             <h2 class="text-sm font-bold text-white">What is Luanti (formerly Minetest)?</h2>
             <p class="text-slate-400 leading-relaxed">
@@ -647,6 +659,27 @@ export class CatalogComponent {
   readonly settingsService = inject(SettingsService);
   private readonly router = inject(Router, { optional: true });
   readonly isTagsExpanded = signal(false);
+
+  readonly hasEntityOverlay = computed(() =>
+    Boolean(this.packageService.activePackage() || this.packageService.activeAuthorUsername())
+  );
+
+  readonly primarySeoHeading = computed(() => {
+    if (this.packageService.selectedSource() === 'git') {
+      return 'Decentralized Git Community Packages — Luanti Hub';
+    }
+    const type = this.packageService.selectedType();
+    if (type === 'game') {
+      return 'Luanti Games — Open-Source Voxel Games on Luanti Hub';
+    }
+    if (type === 'mod') {
+      return 'Luanti Mods — Gameplay, Worldgen & Mobs on Luanti Hub';
+    }
+    if (type === 'txp') {
+      return 'Luanti Texture Packs — HD & Pixel Art Resource Packs on Luanti Hub';
+    }
+    return 'Luanti Hub (LuantiHub) — Open-Source Voxel Games, Mods & Texture Packs for Luanti';
+  });
 
   private readonly PRIMARY_TAG_LIMIT = 8;
 
@@ -697,13 +730,18 @@ export class CatalogComponent {
     }
 
     let targetPath = raw;
+    if (raw.startsWith('//') || raw.startsWith('/\\') || /^(?:javascript|data|vbscript):/i.test(raw)) {
+      return;
+    }
     if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
       try {
         const parsed = new URL(raw);
         if (parsed.origin === window.location.origin) {
           targetPath = parsed.pathname + parsed.search + parsed.hash;
-        } else {
+        } else if (parsed.protocol === 'https:') {
           window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+          return;
+        } else {
           return;
         }
       } catch {
@@ -713,6 +751,9 @@ export class CatalogComponent {
 
     if (!targetPath.startsWith('/')) {
       targetPath = `/${targetPath}`;
+    }
+    if (targetPath.startsWith('//') || targetPath.startsWith('/\\')) {
+      return;
     }
 
     if (this.router) {

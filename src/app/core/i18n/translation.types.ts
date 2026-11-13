@@ -152,6 +152,8 @@ export interface TranslationDictionary {
     viewPackageDetails: string;
     organicCodeLabel?: string;
     organicCodeTooltip?: string;
+    downloadSecurityTooltipContentDb: string;
+    downloadSecurityTooltipGit: string;
   };
   modal: {
     close: string;
@@ -268,10 +270,17 @@ export interface TranslationDictionary {
     recentBranchCommits: string;
     noReleaseNotesFallback: string;
     viewFullDiffOnGit: string;
+    downloadSecurityTooltipContentDb: string;
+    downloadSecurityTooltipGit: string;
+    externalLinkSecurityTooltip: string;
+    reportSecurityTooltip: string;
+    reportConfidentialNotice: string;
   };
   auth: {
     title: string;
     subtitle: string;
+    oauthSecurityBadge: string;
+    oauthSecurityTooltip: string;
     codebergTitle: string;
     codebergSub: string;
     codebergDesc: string;
@@ -291,11 +300,20 @@ export interface TranslationDictionary {
     directLoginTitle: string;
     quickClaimDesc: string;
     directLoginDesc: string;
+    platformAndUsernameLabel: string;
     usernamePlaceholder: string;
     claimSignInBtn: string;
     directLoginBtn: string;
     footerNote: string;
     oauthNotConfiguredNotice: string;
+    tokenLabel: string;
+    tokenRequiredBadge: string;
+    tokenPlaceholder: string;
+    tokenSecurityTooltip: string;
+    tokenScopeHintContentdb: string;
+    tokenScopeHintGithub: string;
+    tokenScopeHintForgejo: string;
+    tokenScopeHintGitlab: string;
     signingIn?: string;
     redirectingToProvider?: string;
     preparingProfile?: string;
@@ -308,6 +326,7 @@ export interface TranslationDictionary {
     tabModeration: string;
     tabPromotions: string;
     connectedAccounts: string;
+    connectedAccountsSecurityTooltip: string;
     linkedCount: string;
     verified: string;
     linkCodeberg: string;
@@ -451,6 +470,8 @@ export interface TranslationDictionary {
     failoverNote: string;
     gotItBtn: string;
     doneBtn: string;
+    securityBadge: string;
+    securityTooltip: string;
   };
   submit: {
     title: string;
@@ -491,6 +512,23 @@ export interface TranslationDictionary {
     guideline3: string;
     close: string;
     cancel: string;
+    pillConfTooltip: string;
+    pillLicenseTooltip: string;
+    pillLuacheckTooltip: string;
+    pillOwnerTooltip: string;
+    pillMissingConf: string;
+    pillLicenseLabel: string;
+    pillLuacheckLabel: string;
+    pillOwnerVerified: string;
+    pillAdminClaimQueue: string;
+    pillVerifyOwner: string;
+    ownerVerifiedBanner: string;
+    verifyOwnerBanner: string;
+    moderatorOwnerBanner: string;
+    ownerTokenZeroStorageDesc: string;
+    connectViaOAuthBtn: string;
+    verifyingBtn: string;
+    moderatorOwnerDesc: string;
   };
   pwa: {
     updateAvailable: string;
@@ -532,6 +570,18 @@ export interface TranslationDictionary {
     legalTerms: string;
     termsPrivacy: string;
     legalModalTitle: string;
+    legalModalSubtitle: string;
+    colTrademarkTitle: string;
+    colSafeHarborTitle: string;
+    colPrivacyTitle: string;
+    legalSec1Title: string;
+    legalSec2Title: string;
+    legalSafeHarborAction: string;
+    legalTakedownLinkLabel: string;
+    legalSec3Title: string;
+    legalPrivacyDetail: string;
+    legalSec4Title: string;
+    legalSecurityDetail: string;
     disclaimer: string;
     trademarkNotice: string;
     safeHarborDetail: string;
@@ -542,6 +592,7 @@ export interface TranslationDictionary {
     accountDeletionDataSpec: string;
     accountDeletionBtn: string;
     copyright: string;
+    licenseLinkLabel: string;
   };
   author: {
     viewProfile: string;
@@ -607,6 +658,53 @@ export interface TranslationDictionary {
     packageBreakdownTitle: string;
     clickPackageToFilter: string;
   };
+  sandbox: {
+    badgeLabel: string;
+    isolationSecurityBadge: string;
+    isolationSecurityTooltip: string;
+    telemetryTooltip: string;
+    ramLabel: string;
+    modsLabel: string;
+    quotaLabel: string;
+    maximizeWindow: string;
+    restoreWindow: string;
+    closeSandboxAria: string;
+    exitBtn: string;
+    engineLabel: string;
+    resolvingClosureTitle: string;
+    checkingQuotaSubtitle: string;
+    verifyingArchiveSubtitle: string;
+    bootingContainerTitle: string;
+    mountingBundlesSubtitle: string;
+    connectingStreamTitle: string;
+    inventoryHintSubtitle: string;
+    guardBadgeSuffix: string;
+    retryConnectionBtn: string;
+    downloadForNativeBtn: string;
+    iframeTitle: string;
+    controlsLabel: string;
+    mouseLockBtn: string;
+    mouseLockTooltip: string;
+    inventoryBtn: string;
+    inventoryTooltip: string;
+    flyBtn: string;
+    flyTooltip: string;
+    fastBtn: string;
+    fastTooltip: string;
+    menuBtn: string;
+    menuTooltip: string;
+    restartWorldBtn: string;
+    restartWorldTooltip: string;
+    downloadPackageBtn: string;
+    faultGuardBlockedTitle: string;
+    faultContainerNotRunningTitle: string;
+    faultUnableToConnectTitle: string;
+    faultStartContainerHint: string;
+    faultUnsafeStreamTitle: string;
+    faultUnsafeStreamMessage: string;
+    faultQuotaExhaustedMessage: string;
+    dialogAriaLabel: string;
+  };
 }
 
 export type TranslationKey =
@@ -624,4 +722,5 @@ export type TranslationKey =
   | `common.${keyof TranslationDictionary['common']}`
   | `footer.${keyof TranslationDictionary['footer']}`
   | `author.${keyof TranslationDictionary['author']}`
-  | `analytics.${keyof TranslationDictionary['analytics']}`;
+  | `analytics.${keyof TranslationDictionary['analytics']}`
+  | `sandbox.${keyof TranslationDictionary['sandbox']}`;

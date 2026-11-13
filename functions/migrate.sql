@@ -64,6 +64,7 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE packages ADD COLUMN maintainers TEXT;
 -- ALTER TABLE packages ADD COLUMN max_minetest_version TEXT;
 -- ALTER TABLE packages ADD COLUMN screenshots TEXT;
+-- ALTER TABLE packages ADD COLUMN badge_tags TEXT;
 -- ALTER TABLE packages ADD COLUMN game_support TEXT;
 -- ALTER TABLE packages ADD COLUMN review_thread_counts TEXT;
 
@@ -172,7 +173,30 @@ CREATE TABLE IF NOT EXISTS promo_tag_packages (
 );
 CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_tag ON promo_tag_packages(LOWER(tag_name));
 
--- 11. Sandbox Monthly Quota Circuit Breaker Ledger (Idempotent)
+-- 11. Expression indexes for D1 read-quota optimization (zero-scan lookups)
+CREATE INDEX IF NOT EXISTS idx_promo_tag_pkgs_lower_pkg ON promo_tag_packages(LOWER(package_id));
+CREATE INDEX IF NOT EXISTS idx_packages_lower_repo_url ON packages(LOWER(TRIM(repo_url)));
+CREATE INDEX IF NOT EXISTS idx_packages_norm_slug ON packages(LOWER(author_name), LOWER(REPLACE(name, '-', '_')));
+CREATE INDEX IF NOT EXISTS idx_reports_lower_pkg_status ON moderation_reports(LOWER(package_id), status);
+CREATE INDEX IF NOT EXISTS idx_users_lower_trim_display ON users(LOWER(TRIM(display_name)));
+CREATE INDEX IF NOT EXISTS idx_reviews_lower_pkg_rating ON reviews(LOWER(package_id), rating);
+
+-- 12. One-time legacy ContentDB mirror cleanup (relocated out of hot /api/packages boot path)
+DELETE FROM packages
+WHERE provider = 'contentdb'
+  AND (author_id IS NULL OR author_id LIKE 'ext_%')
+  AND status = 'active'
+  AND COALESCE(luantihub_downloads, 0) = 0
+  AND (translations IS NULL OR TRIM(translations) = '' OR TRIM(translations) = '{}')
+  AND (dev_state IS NULL OR TRIM(dev_state) = '')
+  AND (tags IS NULL OR TRIM(tags) = '' OR TRIM(tags) = '[]')
+  AND LOWER(id) NOT IN (SELECT DISTINCT LOWER(package_id) FROM reviews)
+  AND LOWER(id) NOT IN (SELECT DISTINCT LOWER(package_id) FROM moderation_reports)
+  AND LOWER(id) NOT IN (SELECT DISTINCT LOWER(package_id) FROM promo_tag_packages)
+  AND LOWER(id) NOT IN (SELECT DISTINCT LOWER(package_id) FROM user_favorites)
+  AND LOWER(id) NOT IN (SELECT DISTINCT LOWER(package_id) FROM package_daily_downloads);
+
+-- 13. Sandbox Monthly Quota Circuit Breaker Ledger (Idempotent)
 CREATE TABLE IF NOT EXISTS sandbox_quota_usage (
     billing_cycle TEXT PRIMARY KEY,
     awake_seconds INTEGER NOT NULL DEFAULT 0,
@@ -182,6 +206,4 @@ CREATE TABLE IF NOT EXISTS sandbox_quota_usage (
     sessions_count INTEGER NOT NULL DEFAULT 0,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
-
 

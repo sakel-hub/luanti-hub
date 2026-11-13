@@ -22,14 +22,26 @@ import {
   readSharedEdgeRatingsMap,
   mergeSharedEdgeRatingsMap,
   SharedEdgeRatingEntry,
-  normalizeUtcIsoTimestamp
+  normalizeUtcIsoTimestamp,
+  isCreatedIn2026OrUnknown
 } from '../lib/upstream';
+import { verifySameOriginMutation } from '../auth/lib/session';
 
 interface Env {
   DB?: any;
 }
 
+export async function onRequestGet(context: { request: Request; env: Env }) {
+  const url = new URL(context.request.url, 'https://luantihub.local');
+  const idsParam = url.searchParams.get('ids') || '';
+  const candidateIds = idsParam ? idsParam.split(',') : [];
+  return handleHydrateRequest(candidateIds, context.env, true);
+}
+
 export async function onRequestPost(context: { request: Request; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const { request, env } = context;
 
   let body: { ids?: string[] } = {};
@@ -39,26 +51,37 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     return Response.json({ error: 'Invalid JSON payload' }, { status: 400 });
   }
 
+  return handleHydrateRequest(Array.isArray(body.ids) ? body.ids : [], env, false);
+}
+
+async function handleHydrateRequest(
+  candidateIds: unknown[],
+  env: Env,
+  isGetRequest: boolean
+): Promise<Response> {
   const hydratedMap: Record<string, any> = {};
+  const responseHeaders: Record<string, string> = isGetRequest
+    ? {
+        'Cache-Control': 'public, max-age=120, s-maxage=600, stale-while-revalidate=600'
+      }
+    : {};
 
   // Resolve requested package IDs in batch (D1 lookup + server-side upstream edge cache fallback)
   const seenLower = new Set<string>();
   const rawIds: string[] = [];
-  if (Array.isArray(body.ids)) {
-    for (const raw of body.ids) {
-      const id = String(raw || '').trim();
-      if (!/^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,80}$/.test(id)) continue;
-      const lower = id.toLowerCase();
-      if (seenLower.has(lower)) continue;
-      seenLower.add(lower);
-      rawIds.push(id);
-      if (rawIds.length >= 32) break;
-    }
+  for (const raw of candidateIds) {
+    const id = String(raw || '').trim();
+    if (!/^[a-zA-Z0-9_.-]{1,64}\/[a-zA-Z0-9_.-]{1,80}$/.test(id)) continue;
+    const lower = id.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    seenLower.add(lower);
+    rawIds.push(id);
+    if (rawIds.length >= 32) break;
   }
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v9_${encodeURIComponent(
+      ? `/__api_hydrate_v11_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -69,10 +92,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   if (hydrateCacheKey) {
     const cachedHydration = await readEdgeCacheJson<Record<string, any>>(hydrateCacheKey);
     if (cachedHydration && typeof cachedHydration === 'object') {
-      return Response.json({
-        success: true,
-        hydrated: cachedHydration
-      });
+      return Response.json(
+        {
+          success: true,
+          hydrated: cachedHydration
+        },
+        { headers: responseHeaders }
+      );
     }
   }
 
@@ -83,28 +109,71 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
   if (rawIds.length > 0) {
     const missingIds = new Set<string>(rawIds.map(id => id.toLowerCase()));
     const d1ById = new Map<string, any>();
+    const dailyDlByLowerId = new Map<string, number>();
+    const promoTagsByLowerId = new Map<string, string[]>();
 
     if (env.DB) {
       try {
-        const exactAndLowerIds = Array.from(new Set([...rawIds, ...rawIds.map(id => id.toLowerCase())]));
+        const lowerIds = rawIds.map(id => id.toLowerCase());
+        const exactAndLowerIds = Array.from(new Set([...rawIds, ...lowerIds]));
         const placeholders = exactAndLowerIds.map(() => '?').join(', ');
-        const d1Res = await env.DB.prepare(
-          `SELECT * FROM packages WHERE id IN (${placeholders}) AND status = 'active'`
-        ).bind(...exactAndLowerIds).all();
+        const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
+        const [d1Res, dailyDlRes, promoTagsRes] = await Promise.all([
+          env.DB.prepare(
+            `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, created_at, dev_state, tags, badge_tags, license, media_license, min_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, download_size, file_size, video_url, video_thumbnail_url FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+          ).bind(...exactAndLowerIds, ...lowerIds).all().catch(() =>
+            env.DB.prepare(
+              `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+            ).bind(...exactAndLowerIds, ...lowerIds).all()
+          ),
+          env.DB.prepare(
+            `SELECT LOWER(package_id) as pkg_id, SUM(downloads_count) as total_dl
+             FROM package_daily_downloads
+             WHERE LOWER(package_id) IN (${lowerPlaceholders})
+             GROUP BY LOWER(package_id)`
+          ).bind(...lowerIds).all().catch(() => ({ results: [] })),
+          env.DB.prepare(
+            `SELECT LOWER(package_id) as pkg_id, tag_name
+             FROM promo_tag_packages
+             WHERE LOWER(package_id) IN (${lowerPlaceholders})`
+          ).bind(...lowerIds).all().catch(() => ({ results: [] }))
+        ]);
+
+        for (const dlRow of (dailyDlRes?.results || [])) {
+          if (dlRow?.pkg_id && Number(dlRow.total_dl) > 0) {
+            dailyDlByLowerId.set(String(dlRow.pkg_id).toLowerCase(), Number(dlRow.total_dl));
+          }
+        }
+
+        for (const pRow of (promoTagsRes?.results || [])) {
+          const pKey = String(pRow?.pkg_id || '').toLowerCase();
+          const tName = String(pRow?.tag_name || '').trim();
+          if (!pKey || !tName) continue;
+          const arr = promoTagsByLowerId.get(pKey) || [];
+          if (!arr.includes(tName)) arr.push(tName);
+          promoTagsByLowerId.set(pKey, arr);
+        }
 
         const d1RepoScanRows: any[] = [];
         for (const row of (d1Res?.results || [])) {
           if (!row?.id) continue;
           const lowerKey = String(row.id).toLowerCase();
           d1ById.set(lowerKey, row);
-          const parsedTags = parseJsonArray(row.tags);
+          const d1PromoTags = promoTagsByLowerId.get(lowerKey) || [];
+          const parsedTags = Array.from(new Set([...parseJsonArray(row.tags), ...d1PromoTags])).filter(Boolean);
           const parsedBadgeTags = parseBadgeTagsArray(row.badge_tags);
+          if (
+            (parsedTags.includes('jam_game_2026') || parsedTags.includes('gamejam')) &&
+            !parsedBadgeTags.includes('jam_game_2026')
+          ) {
+            parsedBadgeTags.push('jam_game_2026');
+          }
           const hasRealTags = parsedTags.some(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
           const parsedRowRevCounts = parseNonZeroReviewThreadCounts(row.review_thread_counts);
           const cdbDl = Number(row.contentdb_downloads || 0);
-          const lhDl = Number(row.luantihub_downloads || 0);
+          const lhDl = Math.max(Number(row.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
           const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
           const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
           const rowScore = computeStarRatingFromData({
@@ -144,6 +213,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             tags: parsedTags.length > 0 ? parsedTags : undefined,
             badge_tags: parsedBadgeTags.length > 0 ? parsedBadgeTags : undefined,
             dev_state: row.dev_state || undefined,
+            download_size: typeof row.download_size === 'number' && row.download_size > 0 ? row.download_size : undefined,
             file_size: row.file_size || undefined,
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
@@ -169,9 +239,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             (!isOfficialD1Row || Boolean(parsedRowRevCounts))
           ) {
             missingIds.delete(lowerKey);
+            const needsD1Jam2026GameScan =
+              row.type === 'game' &&
+              isCreatedIn2026OrUnknown(row.created_at) &&
+              !parsedTags.includes('jam_game_2026');
             if (
-              row.provider !== 'contentdb' &&
-              (!row.video_url || !gitShotD1) &&
+              ((row.provider !== 'contentdb' && (!row.video_url || !gitShotD1)) ||
+                needsD1Jam2026GameScan) &&
               row.repo_url &&
               d1RepoScanRows.length < 6
             ) {
@@ -223,6 +297,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 }
                 if (mergedRowShots.length > 0) {
                   hydratedMap[lowerKey].screenshots = mergedRowShots;
+                }
+                if (gitScan?.jam2026Tags?.length) {
+                  hydratedMap[lowerKey].tags = Array.from(
+                    new Set([...(hydratedMap[lowerKey].tags || []), ...gitScan.jam2026Tags])
+                  );
+                  hydratedMap[lowerKey].badge_tags = Array.from(
+                    new Set([...(hydratedMap[lowerKey].badge_tags || []), 'jam_game_2026'])
+                  );
+                  for (const jt of gitScan.jam2026Tags) {
+                    repoUpdateStmts.push(
+                      env.DB.prepare(
+                        `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+                         VALUES (?, ?, CURRENT_TIMESTAMP)
+                         ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+                      ).bind(jt, row.id)
+                    );
+                  }
                 }
               }
 
@@ -313,7 +404,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           const rawUpstreamTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
-          let detailTags = Array.from(new Set([...(existing.tags || []), ...rawUpstreamTags])).filter(Boolean);
+          const d1PromoTagsForHydrate = promoTagsByLowerId.get(lowerKey) || [];
+          let detailTags = Array.from(
+            new Set([...(existing.tags || []), ...d1PromoTagsForHydrate, ...rawUpstreamTags])
+          ).filter(Boolean);
           let detailRevCounts =
             parseNonZeroReviewThreadCounts(detail?.reviews) ||
             parseNonZeroReviewThreadCounts(scoreEntry?.reviews) ||
@@ -355,7 +449,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             Number(detail?.downloads || 0),
             Number(scoreEntry?.downloads || 0)
           );
-          const lhDl = Number(existing.luantihub_downloads || 0);
+          const lhDl = Math.max(Number(existing.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
           const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
           const rawMinVer = detail?.min_minetest_version && typeof detail.min_minetest_version === 'object'
             ? detail.min_minetest_version.name
@@ -369,13 +463,23 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           let devState = detail?.dev_state || existing.dev_state || undefined;
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
-          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png)
-          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages or packages missing metadata.
+          // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png + JAM2026.md)
+          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages, packages missing metadata,
+          // or 2026 games whose Git repository has not yet been checked for JAM2026.md.
           let gitScanShot: string | undefined;
           let gitScanCdbShots: string[] = [];
+          let discoveredJam2026Tags: string[] = [];
           const isNativeGitPkg = Boolean(existingD1Row && existingD1Row.provider !== 'contentdb');
           const hasExistingBanner = Boolean(existing.banner && existing.banner !== 'logo.svg');
-          if ((!detail || !lic || (isNativeGitPkg && !hasExistingBanner)) && repoUrl && repoScanBudget > 0) {
+          const needsJam2026GameScan =
+            pkgType === 'game' &&
+            isCreatedIn2026OrUnknown(detail?.created_at || existingD1Row?.created_at) &&
+            !detailTags.includes('jam_game_2026');
+          if (
+            (!detail || !lic || (isNativeGitPkg && !hasExistingBanner) || needsJam2026GameScan) &&
+            repoUrl &&
+            repoScanBudget > 0
+          ) {
             repoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
             if (gitScan && gitScan.gitRepoStatus === 'verified') {
@@ -394,6 +498,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               if (gitScan.cdbMeta?.tags?.length) {
                 detailTags = Array.from(new Set([...detailTags, ...gitScan.cdbMeta.tags]));
               }
+              if (gitScan.jam2026Tags?.length) {
+                discoveredJam2026Tags = gitScan.jam2026Tags;
+                detailTags = Array.from(new Set([...detailTags, ...gitScan.jam2026Tags]));
+              }
               if (!videoUrl && gitScan.cdbMeta?.video_url) {
                 const extractedVid = extractEmbeddedVideo(gitScan.cdbMeta.video_url, videoThumbUrl);
                 videoUrl = extractedVid.video_url;
@@ -405,6 +513,17 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           if (!detail && !lic && !repoUrl && detailTags.length === 0) return;
 
           const canonicalId = `${detail?.author || author}/${detail?.name || name}`;
+          if (env.DB && discoveredJam2026Tags.length > 0) {
+            for (const jt of discoveredJam2026Tags) {
+              persistStatements.push(
+                env.DB.prepare(
+                  `INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+                   VALUES (?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
+                ).bind(jt, canonicalId)
+              );
+            }
+          }
           const sanitizedDetailThumb = upgradeContentDbThumbnailUrl(detail?.thumbnail);
           const mergedHydrateScreenshots = mergeScreenshotsPreferringGit(
             [gitScanShot, existing.banner, existing.thumbnail, sanitizedDetailThumb],
@@ -448,8 +567,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
               ? (detailApprovedMs >= detailCreatedMs ? normDetailApproved : normDetailCreated)
               : (normDetailApproved || normDetailCreated || undefined);
           const existingBadgeTags = parseBadgeTagsArray(existingD1Row?.badge_tags);
+          if (
+            (detailTags.includes('jam_game_2026') || detailTags.includes('gamejam')) &&
+            !existingBadgeTags.includes('jam_game_2026')
+          ) {
+            existingBadgeTags.push('jam_game_2026');
+          }
           hydratedMap[lowerKey] = {
             id: canonicalId,
+            ...(existing?.author_id ? { author_id: existing.author_id } : {}),
             license: lic,
             media_license: mediaLic,
             min_minetest_version: minVer,
@@ -464,7 +590,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             badge_tags: existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
             dev_state: devState || undefined,
             created_at: resolvedDetailCreatedAt,
-            download_size: typeof detail?.download_size === 'number' ? detail.download_size : undefined,
+            download_size:
+              typeof detail?.download_size === 'number'
+                ? detail.download_size
+                : existing?.download_size,
+            ...(existing?.file_size ? { file_size: existing.file_size } : {}),
             video_url: videoUrl,
             video_thumbnail_url: videoThumbUrl,
             repo_url: repoUrl || undefined,
@@ -488,8 +618,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
                 ? resolvedScore
                 : null;
             const existingD1Tags = parseJsonArray(existingD1Row.tags);
+            const mergedD1Tags = Array.from(new Set([...existingD1Tags, ...detailTags])).filter(Boolean);
             const newTagsJson =
-              detailTags.length > existingD1Tags.length ? JSON.stringify(detailTags) : null;
+              mergedD1Tags.length > existingD1Tags.length ? JSON.stringify(mergedD1Tags) : null;
             const newThumb =
               (!sanitizePackageImageUrl(existingD1Row.thumbnail_url) ||
                 String(existingD1Row.thumbnail_url || '').includes('/thumbnails/')) &&
@@ -583,12 +714,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       await mergeSharedEdgeRatingsMap(edgeRatingUpdates).catch(() => {});
     }
     if (hydrateCacheKey) {
-      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 3600);
+      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 600);
     }
   }
 
-  return Response.json({
-    success: true,
-    hydrated: hydratedMap
-  });
+  return Response.json(
+    {
+      success: true,
+      hydrated: hydratedMap
+    },
+    { headers: responseHeaders }
+  );
 }

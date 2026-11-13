@@ -125,8 +125,9 @@ function escapeHtml(value: string): string {
 
 function serializeInlineScriptJson(data: unknown): string {
   return JSON.stringify(data)
-    .replace(/<\//g, '<\\/')
-    .replace(/<!--/g, '<\\!--')
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
 }
@@ -211,6 +212,8 @@ export function injectAuthorSeoIntoHtml(
   const scriptBlock = `<script id="luanti-pkg-jsonld" type="application/ld+json">${opts.jsonLd}</script>`;
 
   return html
+    .replace(/\s*<link\s+rel="alternate"\s+hreflang="[^"]*"[^>]*?>/gi, '')
+    .replace(/\s*<script[^>]*id="home-faq-jsonld"[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${safeTitle}</title>`)
     .replace(
       /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,

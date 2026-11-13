@@ -82,9 +82,11 @@ const PWA_INSTALLED_STORAGE_KEY = 'lh_pwa_installed';
 export const AUTO_UPDATED_VERSION_SESSION_KEY = 'lh_pwa_auto_updated_version';
 export const JUST_AUTO_UPDATED_STORAGE_KEY = 'lh_pwa_just_auto_updated';
 const AUTO_RELOAD_INACTIVITY_MS = 45 * 1000;
-const MAX_SEEN_TAGS = 100;
+const MAX_SEEN_TAGS = 300;
+const MAX_SEEN_BLOG_POSTS = 100;
 
-export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
+export const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v2';
+export const LEGACY_BOOT_SYNC_CACHE_NAMES = ['lh-boot-sync-v1'];
 export const BOOT_SYNC_CACHE_URL = '/api/packages/?boot=1';
 export const PERIODIC_SYNC_TAG = 'lh-periodic-catalog-sync';
 export const PERIODIC_SYNC_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours suggested interval
@@ -678,7 +680,7 @@ export class PwaService {
         try {
           localStorage.setItem(
             SEEN_BLOG_POSTS_KEY,
-            JSON.stringify(merged.seenBlogPosts.slice(-50))
+            JSON.stringify(merged.seenBlogPosts.slice(-MAX_SEEN_BLOG_POSTS))
           );
         } catch {}
       }

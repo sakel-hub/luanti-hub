@@ -239,8 +239,8 @@ export async function onRequestGet(context: { env?: any }) {
   const status = await getSandboxQuotaStatus(context.env);
   return Response.json(status, {
     headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
     }
   });
 }

@@ -28,8 +28,10 @@ import {
   SortOption
 } from '../../core/models/package.model';
 import { LocaleId } from '../../core/i18n/translation.types';
+import { isEligibleGitRepoUrl as checkEligibleGitRepoUrl } from '../../core/config/git-providers.config';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { PackageBadgesComponent } from '../../shared/components/package-badges.component';
 import {
@@ -60,7 +62,8 @@ import {
   LucideChevronDown,
   LucideChevronUp,
   LucideTrendingUp,
-  LucideStar
+  LucideStar,
+  LucideShieldCheck
 } from '@lucide/angular';
 
 @Component({
@@ -72,6 +75,7 @@ import {
     FormsModule,
     CompactNumberPipe,
     TranslatePipe,
+    TooltipDirective,
     ImgFallbackDirective,
     PackageBadgesComponent,
     DrawerPaginationComponent,
@@ -95,7 +99,8 @@ import {
     LucideChevronDown,
     LucideChevronUp,
     LucideTrendingUp,
-    LucideStar
+    LucideStar,
+    LucideShieldCheck
   ],
   template: `
     @if (authService.currentUser(); as user) {
@@ -525,7 +530,7 @@ import {
 
                     <!-- Pagination Bar (8 per page, shared with AuthorDrawerComponent) -->
                     <app-drawer-pagination
-                      [currentPage]="packagesCurrentPage()"
+                      [currentPage]="clampedPackagesPage()"
                       [totalPages]="packagesTotalPages()"
                       [totalItems]="filteredUserPackages().length"
                       (pageChange)="setPackagesPage($event)">
@@ -573,7 +578,7 @@ import {
                         </button>
                         <button
                           type="button"
-                          (click)="settingsService.removeFavorite(pkg.id)"
+                          (click)="onRemoveFavorite(pkg)"
                           class="p-2 rounded-xl glass-icon-btn text-slate-400 hover:text-rose-400 transition cursor-pointer"
                           aria-label="Remove from favorites">
                           <svg lucideTrash class="w-3.5 h-3.5"></svg>
@@ -585,7 +590,7 @@ import {
 
                 <!-- Pagination Bar (8 per page) -->
                 <app-drawer-pagination
-                  [currentPage]="favoritesCurrentPage()"
+                  [currentPage]="clampedFavoritesPage()"
                   [totalPages]="favoritesTotalPages()"
                   [totalItems]="favoritePackages().length"
                   (pageChange)="setFavoritesPage($event)">
@@ -856,10 +861,21 @@ import {
               <!-- Connected Accounts & Forges -->
               <div class="space-y-3">
                 <div class="flex items-center justify-between">
-                  <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    {{ 'profile.connectedAccounts' | translate }}
-                  </h3>
-                  <span class="text-[11px] text-slate-500">{{ user.identities.length }} linked</span>
+                  <div class="flex items-center gap-1.5">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">
+                      {{ 'profile.connectedAccounts' | translate }}
+                    </h3>
+                    <button
+                      type="button"
+                      data-testid="connected-accounts-security-btn"
+                      [appTooltip]="'profile.connectedAccountsSecurityTooltip' | translate"
+                      [appTooltipTap]="true"
+                      [attr.aria-label]="'profile.connectedAccounts' | translate"
+                      class="text-emerald-400 hover:text-emerald-300 transition cursor-pointer inline-flex items-center">
+                      <svg lucideShieldCheck class="w-3.5 h-3.5"></svg>
+                    </button>
+                  </div>
+                  <span class="text-[11px] text-slate-500">{{ 'profile.linkedCount' | translate:{ count: user.identities.length } }}</span>
                 </div>
 
                 <div class="space-y-2">
@@ -2427,60 +2443,7 @@ export class ProfileDrawerComponent implements OnInit {
   });
 
   isEligibleGitRepoUrl(rawUrl?: string): boolean {
-    const trimmed = String(rawUrl || '').trim();
-    if (!trimmed || !/^https?:\/\//i.test(trimmed)) return false;
-    try {
-      const parsed = new URL(trimmed);
-      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-      const supportedHosts = [
-        'github.com',
-        'codeberg.org',
-        'gitlab.com',
-        'git.minetest.land',
-        'mese.hub',
-        'bitbucket.org',
-        'notabug.org',
-        'framagit.org',
-        'salsa.debian.org'
-      ];
-      const isSupportedForge =
-        supportedHosts.includes(host) ||
-        host.includes('gitlab') ||
-        host.includes('codeberg') ||
-        host.includes('gitea') ||
-        host.includes('forgejo');
-      if (!isSupportedForge) return false;
-      const cleanPath = parsed.pathname.replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
-      const segments = cleanPath.split('/').filter(Boolean);
-      if (segments.length < 2) return false;
-      if (segments.length >= 3) {
-        const seg2 = (segments[2] || '').toLowerCase();
-        const seg3 = (segments[3] || '').toLowerCase();
-        if (
-          ['wiki', 'wikis', 'issues', 'pulls', 'pull', 'merge_requests', 'discussions', 'blob', 'raw', 'releases', 'archive'].includes(seg2) ||
-          (seg2 === '-' && ['wikis', 'issues', 'merge_requests', 'blob', 'raw', 'releases', 'archive'].includes(seg3))
-        ) {
-          return false;
-        }
-        if (seg2 === 'tree' && segments.length > 4) {
-          return false;
-        }
-        if (seg2 === '-' && seg3 === 'tree' && segments.length > 5) {
-          return false;
-        }
-        if (seg2 === 'src') {
-          if ((seg3 === 'branch' || seg3 === 'commit' || seg3 === 'tag') && segments.length > 5) {
-            return false;
-          }
-          if (seg3 !== 'branch' && seg3 !== 'commit' && seg3 !== 'tag' && segments.length > 4) {
-            return false;
-          }
-        }
-      }
-      return true;
-    } catch {
-      return false;
-    }
+    return checkEligibleGitRepoUrl(rawUrl);
   }
 
   getPackageSyncStatus(packageId: string): PackageGitSyncStatus | null {
@@ -2512,17 +2475,37 @@ export class ProfileDrawerComponent implements OnInit {
     computeDrawerTotalPages(this.filteredUserPackages().length)
   );
 
+  readonly clampedPackagesPage = computed(() =>
+    Math.min(Math.max(1, this.packagesCurrentPage()), this.packagesTotalPages())
+  );
+
   readonly pagedUserPackages = computed<LuantiPackage[]>(() =>
-    sliceDrawerPage(this.filteredUserPackages(), this.packagesCurrentPage())
+    sliceDrawerPage(this.filteredUserPackages(), this.clampedPackagesPage())
   );
 
   readonly favoritesTotalPages = computed(() =>
     computeDrawerTotalPages(this.favoritePackages().length)
   );
 
-  readonly pagedFavoritePackages = computed<LuantiPackage[]>(() =>
-    sliceDrawerPage(this.favoritePackages(), this.favoritesCurrentPage())
+  readonly clampedFavoritesPage = computed(() =>
+    Math.min(Math.max(1, this.favoritesCurrentPage()), this.favoritesTotalPages())
   );
+
+  readonly pagedFavoritePackages = computed<LuantiPackage[]>(() =>
+    sliceDrawerPage(this.favoritePackages(), this.clampedFavoritesPage())
+  );
+
+  onRemoveFavorite(pkg: LuantiPackage): void {
+    if (this.settingsService.isFavorite(pkg.id)) {
+      this.packageService.togglePackageFavorite(pkg);
+    } else {
+      this.settingsService.removeFavorite(pkg.id);
+    }
+    const maxPage = this.favoritesTotalPages();
+    if (this.favoritesCurrentPage() > maxPage) {
+      this.favoritesCurrentPage.set(maxPage);
+    }
+  }
 
   selectPackageCategory(cat: DrawerPackageCategoryFilter): void {
     this.selectedPackageCategory.set(cat);

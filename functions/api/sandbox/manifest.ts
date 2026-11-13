@@ -219,7 +219,7 @@ export async function onRequestGet(context: {
   if (!rawAuthor || !rawName) {
     return Response.json(
       { error: 'Missing required query parameters: author and name.' },
-      { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 400, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }
     );
   }
 
@@ -247,8 +247,8 @@ export async function onRequestGet(context: {
       },
       {
         headers: {
-          'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
       }
@@ -295,7 +295,7 @@ export async function onRequestGet(context: {
         status: d1Pkg.status,
         reason: d1Pkg.status_reason || 'Policy / DMCA Takedown'
       },
-      { status: 451, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 451, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }
     );
   }
 
@@ -315,7 +315,7 @@ export async function onRequestGet(context: {
         compatible: false,
         incompatibleReason: 'UNVERIFIED_PACKAGE'
       },
-      { status: 403, headers: { 'Access-Control-Allow-Origin': '*' } }
+      { status: 403, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }
     );
   }
 
@@ -527,8 +527,8 @@ export async function onRequestGet(context: {
 
   return Response.json(manifest, {
     headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
     }
   });
 }

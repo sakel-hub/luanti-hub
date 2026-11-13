@@ -1,4 +1,4 @@
-import { Component, ChangeDetectionStrategy, inject, signal, effect, ViewChild, ElementRef } from '@angular/core';
+import { Component, ChangeDetectionStrategy, OnDestroy, inject, signal, effect, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AuthService } from '../../core/services/auth.service';
@@ -6,7 +6,7 @@ import { GitProvider } from '../../core/models/package.model';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
 import { FrostedPreloaderComponent } from '../../shared/components/frosted-preloader.component';
-import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, LucideGlobe, LucideUser, LucideInfo, LucideKeyRound } from '@lucide/angular';
+import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, LucideGlobe, LucideUser, LucideInfo, LucideKeyRound, LucideShieldCheck } from '@lucide/angular';
 
 @Component({
   selector: 'app-auth-modal',
@@ -25,7 +25,8 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
     LucideGlobe,
     LucideUser,
     LucideInfo,
-    LucideKeyRound
+    LucideKeyRound,
+    LucideShieldCheck
   ],
   template: `
     <div
@@ -65,7 +66,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
         @if (authService.authError() || localError()) {
           <div class="p-3 rounded-xl bg-amber-950/50 border border-amber-800/80 text-amber-300 text-xs">
             @if (authService.authError() === 'oauth_not_configured') {
-              OAuth Client ID is not configured on this server yet. Use Direct Author / Community Sign-In below!
+              {{ 'auth.oauthNotConfiguredNotice' | translate:{ provider: authService.selectedProvider() } }}
             } @else {
               {{ localError() || authService.authError() }}
             }
@@ -86,6 +87,18 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
           [class.opacity-50]="authService.isOAuthRedirecting() || authService.isLoading()"
           [class.pointer-events-none]="authService.isOAuthRedirecting() || authService.isLoading()"
           class="space-y-2.5">
+          <div class="flex items-center justify-between">
+            <button
+              type="button"
+              data-testid="oauth-security-pill"
+              [appTooltip]="'auth.oauthSecurityTooltip' | translate"
+              [appTooltipTap]="true"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-400/30 text-[10px] font-bold text-emerald-300 hover:text-emerald-200 transition cursor-pointer">
+              <svg lucideShieldCheck class="w-3 h-3 text-emerald-400 shrink-0"></svg>
+              <span>{{ 'auth.oauthSecurityBadge' | translate }}</span>
+              <svg lucideInfo class="w-3 h-3 text-emerald-400/80 shrink-0"></svg>
+            </button>
+          </div>
           <!-- 1. ContentDB Official (Luanti Sky Cyan) -->
           <button
             type="button"
@@ -214,7 +227,7 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
               <!-- Field 1: Provider & Username -->
               <div class="space-y-1.5">
                 <label for="auth-handle-input" class="block text-[11px] font-semibold text-slate-300">
-                  Platform &amp; {{ 'auth.usernamePlaceholder' | translate }}
+                  {{ 'auth.platformAndUsernameLabel' | translate }}
                 </label>
                 <div class="flex gap-2">
                   <select
@@ -236,43 +249,70 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
                     [(ngModel)]="handleInput"
                     name="handleInput"
                     required
+                    autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck="false"
+                    data-1p-ignore="true"
+                    data-lpignore="true"
+                    data-bwignore="true"
                     [placeholder]="'auth.usernamePlaceholder' | translate"
                     class="flex-1 min-w-0 glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                   />
                 </div>
               </div>
 
-              <!-- Field 2: Optional Access Token / API Key with Tooltip Explanation -->
+              <!-- Field 2: Required Access Token / API Key with Zero-Storage Security Guarantee Tooltip -->
               <div class="space-y-1.5">
                 <div class="flex items-center justify-between gap-2">
                   <label for="auth-token-input" class="flex items-center gap-1.5 text-[11px] font-semibold text-slate-300">
                     <svg lucideKeyRound class="w-3 h-3 text-slate-400"></svg>
-                    <span>Access Token / API Key</span>
-                    <span class="text-[10px] font-normal text-slate-500">(Optional)</span>
+                    <span>{{ 'auth.tokenLabel' | translate }}</span>
+                    <span class="text-[10px] font-normal text-amber-400">{{ 'auth.tokenRequiredBadge' | translate }}</span>
                   </label>
                   <button
                     type="button"
+                    data-testid="auth-token-security-tooltip-btn"
                     (click)="$event.stopPropagation()"
-                    appTooltip="Optional: Provide a read-only Personal Access Token or API key from your selected platform (or your Admin Secret) to verify creator ownership or sign in as an Administrator."
-                    aria-label="Why provide an access token?"
+                    [appTooltip]="'auth.tokenSecurityTooltip' | translate"
+                    [appTooltipTap]="true"
+                    aria-label="How is my access token handled securely?"
                     class="text-slate-400 hover:text-sky-300 transition flex items-center gap-1 text-[10px] cursor-help">
                     <svg lucideInfo class="w-3.5 h-3.5"></svg>
                   </button>
                 </div>
                 <input
+                  #tokenInputEl
                   id="auth-token-input"
                   type="password"
                   [(ngModel)]="tokenInput"
                   name="tokenInput"
+                  required
                   autocomplete="off"
-                  placeholder="Access token or API key"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  spellcheck="false"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-bwignore="true"
+                  data-form-type="other"
+                  [placeholder]="'auth.tokenPlaceholder' | translate"
                   class="w-full glass-input rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none font-mono"
                 />
+                <p data-testid="auth-token-scope-hint" class="text-[10.5px] text-slate-400 leading-snug">
+                  @switch (authService.selectedProvider()) {
+                    @case ('github') { {{ 'auth.tokenScopeHintGithub' | translate }} }
+                    @case ('codeberg') { {{ 'auth.tokenScopeHintForgejo' | translate }} }
+                    @case ('mesehub') { {{ 'auth.tokenScopeHintForgejo' | translate }} }
+                    @case ('gitlab') { {{ 'auth.tokenScopeHintGitlab' | translate }} }
+                    @default { {{ 'auth.tokenScopeHintContentdb' | translate }} }
+                  }
+                </p>
               </div>
 
               <button
                 type="submit"
-                [disabled]="authService.isLoading() || authService.isOAuthRedirecting() || !handleInput.trim()"
+                [disabled]="authService.isLoading() || authService.isOAuthRedirecting() || !handleInput.trim() || !tokenInput.trim()"
                 class="w-full py-2.5 rounded-xl glass-btn-sky disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer">
                 @if (authService.isLoading()) {
                   <app-frosted-preloader variant="inline" size="sm" [label]="'auth.signingIn' | translate"></app-frosted-preloader>
@@ -293,10 +333,11 @@ import { LucideX, LucideChevronRight, LucideChevronDown, LucideGitBranch, Lucide
     </div>
   `
 })
-export class AuthModalComponent {
+export class AuthModalComponent implements OnDestroy {
   readonly authService = inject(AuthService);
 
   @ViewChild('handleInputEl') handleInputEl?: ElementRef<HTMLInputElement>;
+  @ViewChild('tokenInputEl') tokenInputEl?: ElementRef<HTMLInputElement>;
 
   handleInput = '';
   tokenInput = '';
@@ -316,6 +357,17 @@ export class AuthModalComponent {
     });
   }
 
+  ngOnDestroy(): void {
+    this.clearSensitiveTokenFromMemory();
+  }
+
+  private clearSensitiveTokenFromMemory(): void {
+    this.tokenInput = '';
+    if (this.tokenInputEl?.nativeElement) {
+      this.tokenInputEl.nativeElement.value = '';
+    }
+  }
+
   toggleDirectSignIn(): void {
     this.isDirectSignInExpanded.update(v => !v);
   }
@@ -326,13 +378,14 @@ export class AuthModalComponent {
 
     // If OAuth Client ID is configured on Cloudflare for this provider, redirect to 1-click OAuth
     if (this.authService.isOAuthConfigured(provider)) {
+      this.clearSensitiveTokenFromMemory();
       this.authService.loginWith(provider, this.handleInput.trim() || undefined);
       return;
     }
 
     // If OAuth Client ID is not configured, seamlessly expand Direct Provider Sign-In without a broken redirect:
     this.isDirectSignInExpanded.set(true);
-    if (this.handleInput.trim()) {
+    if (this.handleInput.trim() && this.tokenInput.trim()) {
       await this.onDirectSignIn();
     } else {
       setTimeout(() => {
@@ -342,12 +395,18 @@ export class AuthModalComponent {
   }
 
   async onDirectSignIn(): Promise<void> {
-    if (!this.handleInput.trim()) return;
+    const cleanHandle = this.handleInput.trim();
+    const oneTimeToken = this.tokenInput.trim();
+    if (!cleanHandle || !oneTimeToken) return;
+
+    // Immediately wipe the one-time token from component memory & DOM before awaiting network I/O
+    this.clearSensitiveTokenFromMemory();
     this.localError.set(null);
+
     const res = await this.authService.loginWithHandle(
       this.authService.selectedProvider(),
-      this.handleInput.trim(),
-      this.tokenInput.trim() || undefined
+      cleanHandle,
+      oneTimeToken
     );
     if (!res.success && res.message) {
       this.localError.set(res.message);

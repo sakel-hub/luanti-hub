@@ -20,7 +20,8 @@ import {
   checkIsAdmin,
   verifyStrictPackageAuthorOwnership,
   reconcileAndMergeUserAccount,
-  shouldHonorAuthenticatedNoCache
+  shouldHonorAuthenticatedNoCache,
+  verifySameOriginMutation
 } from '../../../auth/lib/session';
 
 interface Env {
@@ -278,6 +279,9 @@ async function recalculateAndPersistPackageScore(db: any, packageId: string): Pr
 
 // POST: Submit a Community Review, Flag an Inappropriate Comment, or Remove a Comment (Admin/Author)
 export async function onRequestPost(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   try {
     const author = safeDecodeParam(context.params.author);
     const name = safeDecodeParam(context.params.name);
@@ -443,6 +447,12 @@ export async function onRequestPost(context: { request: Request; params: { autho
   if (!numericRating || numericRating < 1 || numericRating > 5 || !comment?.trim()) {
     return Response.json({ error: 'Rating (1-5) and comment are required.' }, { status: 400 });
   }
+  if (typeof title === 'string' && title.trim().length > 160) {
+    return Response.json({ error: 'Review title must be 160 characters or fewer.' }, { status: 400 });
+  }
+  if (comment.trim().length > 5000) {
+    return Response.json({ error: 'Review comment must be 5,000 characters or fewer.' }, { status: 400 });
+  }
 
   let savedReviewId = `lh_${Date.now()}`;
   let authorUsername = reconciledUser?.username || 'community_user';
@@ -572,11 +582,16 @@ export async function onRequestPost(context: { request: Request; params: { autho
 
 // DELETE /api/packages/:author/:name/reviews?reviewId=...
 export async function onRequestDelete(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+  const csrfBlock = verifySameOriginMutation(context.request);
+  if (csrfBlock) return csrfBlock;
+
   const url = new URL(context.request.url);
   const reviewId = url.searchParams.get('reviewId') || '';
+  const headers = new Headers(context.request.headers);
+  headers.set('Content-Type', 'application/json');
   const syntheticReq = new Request(context.request.url, {
     method: 'POST',
-    headers: context.request.headers,
+    headers,
     body: JSON.stringify({ action: 'delete', reviewId })
   });
   return onRequestPost({ ...context, request: syntheticReq });

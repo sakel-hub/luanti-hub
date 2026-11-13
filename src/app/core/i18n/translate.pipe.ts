@@ -1,6 +1,6 @@
 import { Pipe, PipeTransform, inject } from '@angular/core';
 import { TranslationService } from './translation.service';
-import { TranslationKey, LocaleId } from './translation.types';
+import { TranslationDictionary, TranslationKey, LocaleId } from './translation.types';
 
 @Pipe({
   name: 'translate',
@@ -12,17 +12,20 @@ export class TranslatePipe implements PipeTransform {
 
   private lastKey = '';
   private lastLocale: LocaleId | '' = '';
+  private lastDict: TranslationDictionary | null = null;
   private lastParamsSig = '';
   private lastValue = '';
 
   transform(key: TranslationKey | string, params?: Record<string, string | number>): string {
     if (!key) return '';
     const locale = this.translationService.currentLocale();
+    const dict = this.translationService.currentDictionary();
     const paramsSig = params ? JSON.stringify(params) : '';
 
     if (
       key === this.lastKey &&
       locale === this.lastLocale &&
+      dict === this.lastDict &&
       paramsSig === this.lastParamsSig
     ) {
       return this.lastValue;
@@ -30,6 +33,7 @@ export class TranslatePipe implements PipeTransform {
 
     this.lastKey = key;
     this.lastLocale = locale;
+    this.lastDict = dict;
     this.lastParamsSig = paramsSig;
     this.lastValue = this.translationService.t(key as TranslationKey, params);
     return this.lastValue;

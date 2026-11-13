@@ -535,18 +535,67 @@ function stopLuantiProcess() {
 }
 
 const EPHEMERAL_TUNNEL_HOST_PATTERN =
-  /(?:^|\.)(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|serveousercontent\.com|localhost\.run|lhr\.life|pinggy\.io|pinggy\.link|bore\.pub|zrok\.io|playit\.gg|telebit\.io|expose\.sh|pagekite\.me|pktriot\.net|tailscale\.com|ts\.net|webhook\.site|pipedream\.net|requestbin\.com|beeceptor\.com|oastify\.com|interact\.sh|burpcollaborator\.net)$/i;
+  /(?:^|\.)(?:trycloudflare\.com|cfargotunnel\.com|ngrok(?:-free)?\.(?:app|io|dev)|loca\.lt|localtunnel\.me|serveo\.net|serveousercontent\.com|localhost\.run|lhr\.life|pinggy\.(?:io|link|online)|bore\.pub|zrok\.io|playit\.gg|telebit\.io|expose\.sh|pagekite\.me|pktriot\.net|tailscale\.com|ts\.net|webhook\.site|pipedream\.net|requestbin\.com|beeceptor\.com|oastify\.com|interact\.sh|burpcollaborator\.net|nip\.io|sslip\.io)$/i;
 
 function isBlockedSandboxDownloadUrl(rawUrl) {
   try {
     const parsed = new URL(String(rawUrl || ''));
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
-    const host = parsed.hostname.toLowerCase();
+    if (parsed.username || parsed.password) return true;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (EPHEMERAL_TUNNEL_HOST_PATTERN.test(host)) return true;
-    if (host === '169.254.169.254' || host === 'metadata.google.internal') return true;
+    if (
+      host === '0.0.0.0' ||
+      host === '169.254.169.254' ||
+      host === '100.100.100.200' ||
+      host === 'fd00:ec2::254' ||
+      host === 'metadata.google.internal' ||
+      host.startsWith('169.254.')
+    ) {
+      return true;
+    }
     return false;
   } catch {
     return true;
+  }
+}
+
+function isSafeSandboxZipArchive(zipPath) {
+  try {
+    const rawNames = execFileSync('unzip', ['-Z1', zipPath], {
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024
+    });
+    const entries = rawNames.split(/\r?\n/).filter(Boolean);
+    if (entries.length === 0 || entries.length > 20000) return false;
+    for (const entry of entries) {
+      if (
+        entry.includes('\0') ||
+        entry.includes('\\') ||
+        entry.startsWith('/') ||
+        /^[a-zA-Z]:/.test(entry)
+      ) {
+        return false;
+      }
+      const segments = entry.split('/');
+      if (segments.some(seg => seg === '..')) {
+        return false;
+      }
+    }
+
+    const detailedListing = execFileSync('unzip', ['-Z', '-l', zipPath], {
+      encoding: 'utf8',
+      maxBuffer: 12 * 1024 * 1024
+    });
+    for (const line of detailedListing.split(/\r?\n/)) {
+      // Reject POSIX symlinks (`lrw-r--r--`) inside untrusted archives
+      if (/^l[rwx-]{9}\s/.test(line.trim())) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -575,6 +624,10 @@ async function downloadAndExtractBundle(bundle, originBaseUrl) {
     try {
       execFileSync('curl', [
         '-L',
+        '--proto',
+        '=http,https',
+        '--max-redirs',
+        '5',
         '--fail',
         '--silent',
         '--max-time',
@@ -592,7 +645,7 @@ async function downloadAndExtractBundle(bundle, originBaseUrl) {
           const sig = Buffer.alloc(2);
           fs.readSync(fd, sig, 0, 2, 0);
           fs.closeSync(fd);
-          if (sig[0] === 0x50 && sig[1] === 0x4b) {
+          if (sig[0] === 0x50 && sig[1] === 0x4b && isSafeSandboxZipArchive(tmpZip)) {
             downloaded = true;
             break;
           }
@@ -635,6 +688,11 @@ async function downloadAndExtractBundle(bundle, originBaseUrl) {
     .replace(/[^a-z0-9_]/g, '_');
 
   if (bundle.type === 'game') {
+    // Prevent stray modpack.conf from corrupting multi-mod game detection (aligned with main fa18a7f)
+    if (fs.existsSync(path.join(contentRoot, 'game.conf'))) {
+      fs.rmSync(path.join(contentRoot, 'modpack.conf'), { force: true });
+      fs.rmSync(path.join(contentRoot, 'modpack.txt'), { force: true });
+    }
     const targetGameDir = path.join(GAMES_DIR, safeFallbackName);
     fs.rmSync(targetGameDir, { recursive: true, force: true });
     fs.cpSync(contentRoot, targetGameDir, { recursive: true });

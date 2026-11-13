@@ -5,11 +5,9 @@ interface Env {
 }
 
 export async function onRequestGet(context: { request: Request; env: Env }) {
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const query = url.searchParams.toString();
-  const upstreamPath = `/updates/${query ? `?${query}` : ''}`;
-  const edgeCacheKey = `https://cache.luantihub.internal/__api_updates_v3_${encodeURIComponent(query)}`;
+  const { env } = context;
+  const upstreamPath = '/updates/';
+  const edgeCacheKey = 'https://cache.luantihub.internal/__api_updates_v3';
 
   const cachedUpdates = await readEdgeCacheJson<Record<string, number>>(edgeCacheKey);
   if (cachedUpdates && typeof cachedUpdates === 'object') {

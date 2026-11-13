@@ -91,19 +91,6 @@ import {
         [attr.aria-label]="currentPkg()?.title || 'Featured showcase'"
         class="relative z-10 w-full aspect-video min-h-[400px] sm:min-h-[500px] lg:min-h-[600px] max-h-[820px] xl:max-h-[860px] rounded-2xl sm:rounded-3xl overflow-hidden select-none bg-slate-950 shadow-[0_28px_80px_-15px_rgba(0,0,0,0.85)] border border-white/15 focus:outline-none focus:ring-2 focus:ring-sky-500/50">
 
-        <!-- Persistent High-Priority Hero Backdrop (Paints on FCP and Remains Mounted Across Catalog Load for Sub-Second LCP) -->
-        <img
-          #backdropImg
-          src="/banners/luanti-5-18-0.png"
-          alt=""
-          aria-hidden="true"
-          fetchpriority="high"
-          loading="eager"
-          decoding="sync"
-          (load)="onBackdropImageLoad($event)"
-          class="absolute inset-0 w-full h-full object-cover object-center pointer-events-none select-none z-0"
-        />
-
         @if (showcase().length > 0 && currentPkg(); as pkg) {
           <!-- Hardware-Accelerated Horizontal Slide Track (Smooth Slide-In/Out without Image Flash) -->
           <div
@@ -111,12 +98,12 @@ import {
             [style.transform]="'translate3d(-' + (currentIndex() * 100) + '%, 0, 0)'">
             @for (slidePkg of showcase(); track slidePkg.id; let idx = $index) {
               <div
-                class="w-full h-full flex-shrink-0 relative overflow-hidden"
+                class="w-full h-full flex-shrink-0 relative overflow-hidden bg-slate-950"
                 [attr.aria-hidden]="idx !== currentIndex()"
                 [attr.inert]="idx !== currentIndex() ? '' : null">
 
                 <!-- Slide Background Image with Subtle Ken-Burns Scale Transition -->
-                <div class="absolute inset-0">
+                <div class="absolute inset-0 bg-slate-950">
                   <img
                     #slideImg
                     [src]="getSlideBanner(slidePkg)"
@@ -124,7 +111,7 @@ import {
                     appImgFallback
                     [alt]="slidePkg.title"
                     [attr.fetchpriority]="idx === 0 ? 'high' : 'low'"
-                    [attr.loading]="idx === 0 || idx === currentIndex() ? 'eager' : 'lazy'"
+                    [attr.loading]="idx === currentIndex() || idx === (currentIndex() + 1) % showcase().length ? 'eager' : 'lazy'"
                     [attr.decoding]="idx === 0 ? 'sync' : 'async'"
                     (load)="onSlideImageLoad($event, idx)"
                     [class]="idx === currentIndex() ? 'w-full h-full object-cover object-center scale-100 transition-transform duration-1000 ease-out' : 'w-full h-full object-cover object-center scale-105 transition-transform duration-1000 ease-out'"
@@ -380,7 +367,6 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
 
   @ViewChild('glowCanvasA') glowCanvasARef?: ElementRef<HTMLCanvasElement>;
   @ViewChild('glowCanvasB') glowCanvasBRef?: ElementRef<HTMLCanvasElement>;
-  @ViewChild('backdropImg') backdropImgRef?: ElementRef<HTMLImageElement>;
   @ViewChildren('slideImg') slideImgRefs?: QueryList<ElementRef<HTMLImageElement>>;
 
   readonly showcase = this.packageService.heroShowcasePackages;
@@ -449,12 +435,6 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
     this.syncActiveSlideGlow();
   }
 
-  onBackdropImageLoad(event: Event): void {
-    if (this.showcase().length === 0 || this.lastGlowSrc === '') {
-      this.paintGlowFromImage(event.target as HTMLImageElement | null);
-    }
-  }
-
   onSlideImageLoad(event: Event, idx: number): void {
     if (idx === this.currentIndex()) {
       this.paintGlowFromImage(event.target as HTMLImageElement | null);
@@ -465,11 +445,8 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
     const slides = this.slideImgRefs?.toArray() || [];
     const activeIdx = this.currentIndex();
     const activeSlideImg = slides[activeIdx]?.nativeElement;
-    if (activeSlideImg && this.paintGlowFromImage(activeSlideImg)) {
-      return;
-    }
-    if (this.lastGlowSrc === '' && this.backdropImgRef?.nativeElement) {
-      this.paintGlowFromImage(this.backdropImgRef.nativeElement);
+    if (activeSlideImg) {
+      this.paintGlowFromImage(activeSlideImg);
     }
   }
 
@@ -540,13 +517,18 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
     if (!raw) return;
 
     let targetPath = raw;
+    if (raw.startsWith('//') || raw.startsWith('/\\') || /^(?:javascript|data|vbscript):/i.test(raw)) {
+      return;
+    }
     if (typeof window !== 'undefined' && (raw.startsWith('https://') || raw.startsWith('http://'))) {
       try {
         const parsed = new URL(raw);
         if (parsed.origin === window.location.origin) {
           targetPath = parsed.pathname + parsed.search + parsed.hash;
-        } else {
+        } else if (parsed.protocol === 'https:') {
           window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+          return;
+        } else {
           return;
         }
       } catch {
@@ -556,6 +538,9 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
 
     if (!targetPath.startsWith('/')) {
       targetPath = `/${targetPath}`;
+    }
+    if (targetPath.startsWith('//') || targetPath.startsWith('/\\')) {
+      return;
     }
 
     if (this.router) {

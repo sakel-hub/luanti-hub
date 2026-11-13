@@ -173,6 +173,7 @@ import {
                   appImgFallback
                   [alt]="getSeoImageAlt(pkg)"
                   loading="lazy"
+                  decoding="async"
                   class="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                 />
 
@@ -403,7 +404,7 @@ export class Top10RowComponent implements AfterViewInit, OnDestroy {
 
   onFavoriteClick(event: MouseEvent, pkg: LuantiPackage): void {
     event.stopPropagation();
-    this.settingsService.toggleFavorite(pkg.id);
+    this.packageService.togglePackageFavorite(pkg);
   }
 
   scrollLeft(): void {

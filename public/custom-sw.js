@@ -12,8 +12,15 @@
   }
   self.__lhCustomSwSyncInstalled = true;
 
-  const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v1';
+  const BOOT_SYNC_CACHE_NAME = 'lh-boot-sync-v2';
+  const LEGACY_BOOT_SYNC_CACHE_NAMES = ['lh-boot-sync-v1'];
   const BOOT_SYNC_CACHE_URL = '/api/packages/?boot=1';
+
+  if (typeof caches !== 'undefined' && caches && typeof caches.delete === 'function') {
+    for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+      caches.delete(legacyName).catch(() => {});
+    }
+  }
   const OUTBOX_DB_NAME = 'lh_sync_outbox_db';
   const OUTBOX_STORE_NAME = 'outbox';
   const NOTIF_STATE_DB_NAME = 'lh_pwa_notif_state_db';
@@ -1670,6 +1677,23 @@
           if (!prefs || prefs.notificationsEnabled !== false) {
             const title = String(payload.title || 'LuantiHub');
             const tag = String(payload.tag || `lh-push-${Date.now()}`);
+            const existingSeenTags = Array.isArray(state.seenTags) ? state.seenTags : [];
+            if (payload.tag && existingSeenTags.includes(tag)) {
+              const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+              const hasVisibleWindow = allClients.some((c) => Boolean(c && (c.focused || c.visibilityState === 'visible')));
+              if (!hasVisibleWindow) {
+                await self.registration.showNotification(title, {
+                  body: String(payload.body || ''),
+                  icon: payload.icon || '/icons/icon-192x192.png',
+                  badge: payload.badge || '/icons/icon-72x72.png',
+                  tag,
+                  renotify: false,
+                  silent: true,
+                  data: payload.data || { packageId: payload.packageId, ctaUrl: payload.url }
+                });
+              }
+              return;
+            }
             await self.registration.showNotification(title, {
               body: String(payload.body || ''),
               icon: payload.icon || '/icons/icon-192x192.png',
@@ -1677,8 +1701,12 @@
               tag,
               data: payload.data || { packageId: payload.packageId, ctaUrl: payload.url }
             });
+            const nextSeenTags = Array.from(new Set([...existingSeenTags, tag])).slice(-300);
             const nextBadgeCount = Math.max(0, Number(state.unreadBadgeCount || 0)) + 1;
-            await writeNotifStateFromSw({ unreadBadgeCount: nextBadgeCount });
+            await writeNotifStateFromSw({
+              unreadBadgeCount: nextBadgeCount,
+              seenTags: nextSeenTags
+            });
             await setSwAppBadge(nextBadgeCount);
           }
         } else {
@@ -1792,7 +1820,19 @@
         }
       }
     } else if (notifData.ctaUrl && typeof notifData.ctaUrl === 'string') {
-      targetPath = notifData.ctaUrl;
+      const candidateCta = notifData.ctaUrl.trim();
+      if (candidateCta.startsWith('/') && !candidateCta.startsWith('//') && !candidateCta.startsWith('/\\')) {
+        targetPath = candidateCta;
+      } else if (/^https:\/\//i.test(candidateCta)) {
+        try {
+          const parsedSwUrl = new URL(candidateCta, self.location ? self.location.origin : 'https://luantihub.org');
+          if (parsedSwUrl.protocol === 'https:') {
+            targetPath = parsedSwUrl.toString();
+          }
+        } catch {
+          targetPath = '/';
+        }
+      }
     } else if (notifData.targetTab) {
       targetPath = '/profile';
     }

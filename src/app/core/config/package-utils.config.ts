@@ -1,3 +1,5 @@
+import { isUntrustedTunnelOrPrivateHost } from './git-providers.config';
+
 /**
  * Shared pure package normalization, sizing, rating, and video extraction utilities
  * used across both Cloudflare Pages Edge Functions (`functions/`) and Angular (`src/app/`).
@@ -273,10 +275,295 @@ export function computeStarRatingFromData(
   return fallbackScore;
 }
 
+const YOUTUBE_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'music.youtube.com',
+  'youtu.be',
+  'youtube-nocookie.com',
+  'www.youtube-nocookie.com',
+  'yewtu.be',
+  'piped.video',
+  'piped.kavin.rocks',
+  'inv.nadeko.net',
+  'invidious.nerdvpn.de'
+]);
+
+const VIMEO_HOSTS = new Set(['vimeo.com', 'www.vimeo.com', 'player.vimeo.com']);
+const TWITCH_HOSTS = new Set(['twitch.tv', 'www.twitch.tv', 'clips.twitch.tv', 'player.twitch.tv']);
+const DAILYMOTION_HOSTS = new Set([
+  'dailymotion.com',
+  'www.dailymotion.com',
+  'dai.ly',
+  'geo.dailymotion.com'
+]);
+const STREAMABLE_HOSTS = new Set(['streamable.com', 'www.streamable.com']);
+const ODYSEE_HOSTS = new Set(['odysee.com', 'www.odysee.com']);
+const BILIBILI_HOSTS = new Set(['bilibili.com', 'www.bilibili.com', 'player.bilibili.com']);
+
+const PEERTUBE_ID_RE =
+  /^(?:[A-Za-z0-9]{22}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+/**
+ * Returns true strictly when `rawUrl` is a verified `https://` direct HTML5 open video file
+ * (`.mp4`, `.webm`, `.ogg`, `.ogv`) on a public non-tunnel host.
+ */
+export function isSafeDirectVideoUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  try {
+    const u = new URL(rawUrl.trim());
+    if (u.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(u.hostname)) {
+      return false;
+    }
+    const cleanPath = u.pathname.toLowerCase();
+    return (
+      cleanPath.endsWith('.mp4') ||
+      cleanPath.endsWith('.webm') ||
+      cleanPath.endsWith('.ogg') ||
+      cleanPath.endsWith('.ogv')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Builds a reconstructed, strictly allowlisted `https://` iframe embed URL for verified video ecosystems:
+ * YouTube (including Invidious/Piped -> `youtube-nocookie.com`), Vimeo (`dnt=1`), PeerTube UUIDs,
+ * Twitch VODs/Clips, Dailymotion, Streamable, Odysee, and Bilibili.
+ *
+ * Security invariant: NEVER falls back to returning `rawUrl`. Unknown, non-HTTPS, or private/tunnel URLs
+ * always return `null`.
+ */
+export function buildSafeVideoEmbedUrl(
+  rawUrl?: string | null,
+  options: {
+    autoplay?: boolean;
+    mute?: boolean;
+    minimalControls?: boolean;
+    startSeconds?: number;
+    parentHostname?: string;
+  } = {}
+): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  try {
+    const u = new URL(rawUrl.trim());
+    if (u.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(u.hostname)) {
+      return null;
+    }
+    const host = u.hostname.toLowerCase();
+    const autoplay = options.autoplay !== false ? '1' : '0';
+    const mute = options.mute ? '1' : '0';
+    const minimal = Boolean(options.minimalControls);
+    const startSec =
+      Number.isFinite(options.startSeconds) && (options.startSeconds || 0) > 0
+        ? Math.floor(Number(options.startSeconds))
+        : 0;
+
+    // 1. YouTube & Privacy Frontends (normalized to youtube-nocookie.com)
+    if (YOUTUBE_HOSTS.has(host)) {
+      let ytCandidate: string | null = null;
+      if (host === 'youtu.be') {
+        ytCandidate = u.pathname.split('/').filter(Boolean)[0] || null;
+      } else {
+        const v = u.searchParams.get('v');
+        if (v) {
+          ytCandidate = v;
+        } else {
+          const parts = u.pathname.split('/').filter(Boolean);
+          if (parts.length >= 2 && ['embed', 'shorts', 'live', 'v'].includes(parts[0].toLowerCase())) {
+            ytCandidate = parts[1];
+          }
+        }
+      }
+      if (ytCandidate && /^[A-Za-z0-9_-]{6,20}$/.test(ytCandidate)) {
+        const enc = encodeURIComponent(ytCandidate);
+        const startParam = startSec > 0 ? `&start=${startSec}` : '';
+        if (minimal) {
+          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}${startParam}`;
+        }
+        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1${startParam}`;
+      }
+      return null;
+    }
+
+    // 2. Vimeo (with Do-Not-Track dnt=1 enabled)
+    if (VIMEO_HOSTS.has(host)) {
+      const parts = u.pathname.split('/').filter(Boolean);
+      const id = parts.length > 0 ? parts[parts.length - 1] : null;
+      if (id && /^\d{6,20}$/.test(id)) {
+        const vimeoHash = startSec > 0 ? `#t=${startSec}s` : '';
+        if (minimal) {
+          return `https://player.vimeo.com/video/${id}?dnt=1&autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0${vimeoHash}`;
+        }
+        return `https://player.vimeo.com/video/${id}?dnt=1&autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${vimeoHash}`;
+      }
+      return null;
+    }
+
+    // 3. Twitch VODs & Clips
+    if (TWITCH_HOSTS.has(host)) {
+      const safeParent =
+        String(options.parentHostname || 'luantihub.org').replace(/[^A-Za-z0-9.-]/g, '') ||
+        'luantihub.org';
+      const autoBool = autoplay === '1' ? 'true' : 'false';
+      const muteParam = options.mute ? '&muted=true' : '';
+      const parts = u.pathname.split('/').filter(Boolean);
+
+      if (host === 'clips.twitch.tv') {
+        const clipSlug = parts[0] === 'embed' ? u.searchParams.get('clip') : parts[0];
+        if (clipSlug && /^[A-Za-z0-9_-]{6,100}$/.test(clipSlug)) {
+          return `https://clips.twitch.tv/embed?clip=${encodeURIComponent(clipSlug)}&parent=${encodeURIComponent(safeParent)}&autoplay=${autoBool}${muteParam}`;
+        }
+        return null;
+      }
+
+      if (host === 'player.twitch.tv') {
+        const rawVid = (u.searchParams.get('video') || '').replace(/^v/i, '');
+        if (/^\d{6,20}$/.test(rawVid)) {
+          const timeParam = startSec > 0 ? `&time=${startSec}s` : '';
+          return `https://player.twitch.tv/?video=${rawVid}&parent=${encodeURIComponent(safeParent)}&autoplay=${autoBool}${muteParam}${timeParam}`;
+        }
+        return null;
+      }
+
+      if (parts[0]?.toLowerCase() === 'videos' && parts[1] && /^\d{6,20}$/.test(parts[1])) {
+        const timeParam = startSec > 0 ? `&time=${startSec}s` : '';
+        return `https://player.twitch.tv/?video=${parts[1]}&parent=${encodeURIComponent(safeParent)}&autoplay=${autoBool}${muteParam}${timeParam}`;
+      }
+      if (parts[1]?.toLowerCase() === 'clip' && parts[2] && /^[A-Za-z0-9_-]{6,100}$/.test(parts[2])) {
+        return `https://clips.twitch.tv/embed?clip=${encodeURIComponent(parts[2])}&parent=${encodeURIComponent(safeParent)}&autoplay=${autoBool}${muteParam}`;
+      }
+      return null;
+    }
+
+    // 4. Dailymotion
+    if (DAILYMOTION_HOSTS.has(host)) {
+      let dmId: string | null = null;
+      if (host === 'dai.ly') {
+        dmId = u.pathname.split('/').filter(Boolean)[0] || null;
+      } else if (host === 'geo.dailymotion.com') {
+        dmId = u.searchParams.get('video');
+      } else {
+        const parts = u.pathname.split('/').filter(Boolean);
+        if (parts[0]?.toLowerCase() === 'video' && parts[1]) {
+          dmId = parts[1].split('_')[0];
+        } else if (parts[0]?.toLowerCase() === 'embed' && parts[1]?.toLowerCase() === 'video' && parts[2]) {
+          dmId = parts[2].split('_')[0];
+        }
+      }
+      if (dmId && /^[A-Za-z0-9]{5,12}$/.test(dmId)) {
+        const startParam = startSec > 0 ? `&start=${startSec}` : '';
+        const minParams = minimal ? '&controls=0&ui-logo=0&ui-start-screen-info=0' : '';
+        return `https://www.dailymotion.com/embed/video/${dmId}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}${minParams}${startParam}`;
+      }
+      return null;
+    }
+
+    // 5. Streamable
+    if (STREAMABLE_HOSTS.has(host)) {
+      const parts = u.pathname.split('/').filter(Boolean);
+      const id = parts[0]?.toLowerCase() === 'e' ? parts[1] : parts[0];
+      if (id && /^[A-Za-z0-9]{4,16}$/.test(id)) {
+        return `https://streamable.com/e/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${minimal ? '&nocontrols=1' : ''}`;
+      }
+      return null;
+    }
+
+    // 6. Odysee (supports both $/embed/... and standard @channel/video watch paths)
+    if (ODYSEE_HOSTS.has(host)) {
+      const odyseeMatch = u.pathname.match(
+        /^(?:\/\$\/embed)?\/([A-Za-z0-9@_.:-]+(?:\/[A-Za-z0-9@_.:-]+)?)\/?$/
+      );
+      if (
+        odyseeMatch?.[1] &&
+        !odyseeMatch[1].startsWith('$') &&
+        !odyseeMatch[1].includes('..') &&
+        !odyseeMatch[1].includes('//')
+      ) {
+        return `https://odysee.com/$/embed/${odyseeMatch[1]}?r=0${autoplay === '1' ? '&autoplay=true' : ''}`;
+      }
+      return null;
+    }
+
+    // 7. Bilibili
+    if (BILIBILI_HOSTS.has(host)) {
+      let bvid = u.searchParams.get('bvid');
+      if (!bvid) {
+        const parts = u.pathname.split('/').filter(Boolean);
+        const bvPart = parts.find(p => /^BV[A-Za-z0-9]{10}$/.test(p));
+        if (bvPart) bvid = bvPart;
+      }
+      if (bvid && /^BV[A-Za-z0-9]{10}$/.test(bvid)) {
+        const startParam = startSec > 0 ? `&t=${startSec}` : '';
+        return `https://player.bilibili.com/player.html?bvid=${bvid}&autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${startParam}`;
+      }
+      return null;
+    }
+
+    // 8. PeerTube (decentralized Fediverse instances over HTTPS with strict video watch/embed ID paths)
+    const isMediaWikiHost =
+      host.startsWith('wiki.') ||
+      host.endsWith('.wikipedia.org') ||
+      host.endsWith('.wikimedia.org') ||
+      host.endsWith('.wiktionary.org');
+    if (!isMediaWikiHost) {
+      const ptMatch = u.pathname.match(
+        /^\/(?:w|videos\/watch|videos\/embed)\/([A-Za-z0-9_-]{6,36})\/?$/
+      );
+      if (ptMatch?.[1]) {
+        const safePtId = encodeURIComponent(ptMatch[1]);
+        const embedBase = `${u.origin}/videos/embed/${safePtId}`;
+        const startParam = startSec > 0 ? `&start=${startSec}s` : '';
+        if (minimal) {
+          return `${embedBase}?autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0${startParam}`;
+        }
+        return `${embedBase}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${startParam}`;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalizes and validates an incoming candidate video URL: upgrades safe `http://` URLs on known
+ * platforms to `https://` and rejects any URL that is neither a safe direct HTTPS video file nor
+ * a verified allowlisted video embed provider.
+ */
+function normalizeVerifiedVideoCandidate(rawCandidate?: string | null): string | undefined {
+  if (!rawCandidate || typeof rawCandidate !== 'string') return undefined;
+  const trimmed = rawCandidate.trim();
+  if (!trimmed) return undefined;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol === 'http:') {
+      u.protocol = 'https:';
+    }
+    if (u.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(u.hostname)) {
+      return undefined;
+    }
+    const candidateHref = u.toString();
+    if (isSafeDirectVideoUrl(candidateHref)) {
+      return candidateHref;
+    }
+    if (buildSafeVideoEmbedUrl(candidateHref, { autoplay: false })) {
+      return candidateHref;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolves `video_url` and `video_thumbnail_url` from explicit ContentDB/D1 fields,
- * falling back to extracting embedded YouTube, Vimeo, or direct `.mp4`/`.webm` showcase
- * links from `long_description` or `README.md` when `video_url` is not explicitly set.
+ * falling back to extracting verified showcase video links (YouTube/Invidious/Piped, Vimeo,
+ * PeerTube, Streamable, Dailymotion, Twitch, Bilibili, or direct HTTPS `.mp4`/`.webm`)
+ * from `long_description` or `README.md` when `video_url` is not explicitly set.
  */
 export function extractEmbeddedVideo(
   videoUrl?: string | null,
@@ -284,15 +571,25 @@ export function extractEmbeddedVideo(
   longDesc?: string | null,
   readme?: string | null
 ): { video_url?: string; video_thumbnail_url?: string } {
-  let resolvedVideo = typeof videoUrl === 'string' && videoUrl.trim() ? videoUrl.trim() : undefined;
-  let resolvedThumb =
-    typeof videoThumbUrl === 'string' && videoThumbUrl.trim() ? videoThumbUrl.trim() : undefined;
+  let resolvedVideo = normalizeVerifiedVideoCandidate(videoUrl);
+  let resolvedThumb: string | undefined;
+  if (typeof videoThumbUrl === 'string' && videoThumbUrl.trim()) {
+    try {
+      const thumbUrl = new URL(videoThumbUrl.trim());
+      if (thumbUrl.protocol === 'http:') thumbUrl.protocol = 'https:';
+      if (thumbUrl.protocol === 'https:' && !isUntrustedTunnelOrPrivateHost(thumbUrl.hostname)) {
+        resolvedThumb = thumbUrl.toString();
+      }
+    } catch {
+      resolvedThumb = undefined;
+    }
+  }
 
   if (!resolvedVideo) {
     const combinedText = `${longDesc || ''}\n${readme || ''}`;
     if (combinedText.trim()) {
       const ytMatch = combinedText.match(
-        /https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i
+        /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/|yewtu\.be\/(?:watch\?v=|embed\/)|piped\.video\/watch\?v=)([A-Za-z0-9_-]{11})/i
       );
       if (ytMatch && ytMatch[1]) {
         resolvedVideo = `https://www.youtube.com/watch?v=${ytMatch[1]}`;
@@ -301,16 +598,49 @@ export function extractEmbeddedVideo(
         }
       } else {
         const directMatch = combinedText.match(
-          /https?:\/\/[^\s"'<>)\]]+\.(?:mp4|webm)(?:\?[^\s"'<>)\]]*)?/i
+          /https:\/\/[^\s"'<>)\]]+\.(?:mp4|webm|ogv)(?:\?[^\s"'<>)\]]*)?/i
         );
-        if (directMatch && directMatch[0]) {
-          resolvedVideo = directMatch[0];
+        const verifiedDirect = directMatch?.[0] ? normalizeVerifiedVideoCandidate(directMatch[0]) : undefined;
+        if (verifiedDirect) {
+          resolvedVideo = verifiedDirect;
         } else {
           const vimeoMatch = combinedText.match(
             /https?:\/\/(?:www\.|player\.)?vimeo\.com\/(?:video\/)?(\d{6,12})/i
           );
           if (vimeoMatch && vimeoMatch[1]) {
             resolvedVideo = `https://vimeo.com/${vimeoMatch[1]}`;
+          } else {
+            const urlMatches = combinedText.matchAll(/https?:\/\/[^\s"'<>)\]]+/gi);
+            let checked = 0;
+            for (const m of urlMatches) {
+              if (++checked > 50) break;
+              const rawToken = m[0].replace(/[.,;:!?]+$/, '');
+              try {
+                const candidateUrl = new URL(rawToken);
+                const ch = candidateUrl.hostname.toLowerCase();
+                const isKnownEmbedHost =
+                  STREAMABLE_HOSTS.has(ch) ||
+                  DAILYMOTION_HOSTS.has(ch) ||
+                  ODYSEE_HOSTS.has(ch) ||
+                  TWITCH_HOSTS.has(ch) ||
+                  BILIBILI_HOSTS.has(ch);
+                const ptPathMatch = candidateUrl.pathname.match(
+                  /^\/(?:(videos\/(?:watch|embed))|w)\/([A-Za-z0-9_-]{6,36})\/?$/
+                );
+                const isUnambiguousPeerTubePath =
+                  Boolean(ptPathMatch) &&
+                  (Boolean(ptPathMatch?.[1]) || PEERTUBE_ID_RE.test(ptPathMatch?.[2] || ''));
+                if (isKnownEmbedHost || isUnambiguousPeerTubePath) {
+                  const verifiedOther = normalizeVerifiedVideoCandidate(rawToken);
+                  if (verifiedOther) {
+                    resolvedVideo = verifiedOther;
+                    break;
+                  }
+                }
+              } catch {
+                // Skip malformed URL token
+              }
+            }
           }
         }
       }
@@ -361,44 +691,59 @@ export function buildReverseDependencyCountMap(packages: Iterable<any>): Map<str
  * shared library, or pure dependency mod that does not add standalone gameplay on its own
  * (e.g. `TenPlus1/mobs` "Mobs Redo API", `modlib`, `futil`, `signs_lib`, `biome_lib`).
  */
+const API_LIB_PKG_CACHE = new WeakMap<object, { sig: string; val: boolean }>();
+
 export function isApiOrLibraryPackage(pkg: any): boolean {
   if (!pkg || typeof pkg !== 'object') return false;
   const type = String(pkg.type || 'mod').toLowerCase();
   if (type === 'game' || type === 'txp') return false;
 
-  const rawTags = Array.isArray(pkg.tags) ? pkg.tags : parseJsonArray(pkg.tags);
-  for (const t of rawTags) {
-    const tagLower = String(t || '').trim().toLowerCase();
-    if (tagLower === 'library' || tagLower === 'api' || tagLower === 'dev_tools') {
+  const tagSig = Array.isArray(pkg.tags) ? pkg.tags.join(',') : String(pkg.tags ?? '');
+  const sig = `${type}|${pkg.name ?? ''}|${pkg.title ?? ''}|${tagSig}|${pkg.short_desc ?? pkg.short_description ?? ''}|${String(pkg.desc ?? pkg.long_description ?? '').slice(0, 120)}`;
+  const cached = API_LIB_PKG_CACHE.get(pkg);
+  if (cached && cached.sig === sig) {
+    return cached.val;
+  }
+
+  const compute = (): boolean => {
+    const rawTags = Array.isArray(pkg.tags) ? pkg.tags : parseJsonArray(pkg.tags);
+    for (const t of rawTags) {
+      const tagLower = String(t || '').trim().toLowerCase();
+      if (tagLower === 'library' || tagLower === 'api' || tagLower === 'dev_tools') {
+        return true;
+      }
+    }
+
+    const title = String(pkg.title || '').trim();
+    const shortDesc = String(pkg.short_desc || pkg.short_description || '').trim();
+    const desc = String(pkg.desc || pkg.long_description || '').trim();
+    const combinedDesc = `${shortDesc}\n${desc.slice(0, 600)}`;
+
+    // Title explicitly ends with or features standalone API / Library / Lib indicator
+    if (/\b(?:api|library|modlib|futil)\b/i.test(title)) {
       return true;
     }
-  }
+    if (/(?:^|[\s_-])lib(?:$|[\s_-])/i.test(title) || /(?:^|_)(?:api|lib)$/i.test(String(pkg.name || ''))) {
+      return true;
+    }
 
-  const title = String(pkg.title || '').trim();
-  const shortDesc = String(pkg.short_desc || pkg.short_description || '').trim();
-  const desc = String(pkg.desc || pkg.long_description || '').trim();
-  const combinedDesc = `${shortDesc}\n${desc.slice(0, 600)}`;
+    // Description explicitly states the mod is an API/library or requires other mods to do anything
+    if (
+      /\byou\s+need\s+to\s+install\s+some\s+other\s+mods\b/i.test(combinedDesc) ||
+      /\bdoes\s+nothing\s+(?:on\s+its\s+own|by\s+itself)\b/i.test(combinedDesc) ||
+      /\b(?:simple\s+and\s+feature[- ]rich|lightweight|shared|helper|utility|modding)\s+(?:api|library)\b/i.test(combinedDesc) ||
+      /\bapi\s+(?:to\s+add|for\s+adding|for\s+other\s+mods|used\s+by\s+other\s+mods)\b/i.test(combinedDesc) ||
+      /\b(?:library|framework)\s+(?:for|used\s+by)\s+(?:other\s+)?mods\b/i.test(combinedDesc)
+    ) {
+      return true;
+    }
 
-  // Title explicitly ends with or features standalone API / Library / Lib indicator
-  if (/\b(?:api|library|modlib|futil)\b/i.test(title)) {
-    return true;
-  }
-  if (/(?:^|[\s_-])lib(?:$|[\s_-])/i.test(title) || /(?:^|_)(?:api|lib)$/i.test(String(pkg.name || ''))) {
-    return true;
-  }
+    return false;
+  };
 
-  // Description explicitly states the mod is an API/library or requires other mods to do anything
-  if (
-    /\byou\s+need\s+to\s+install\s+some\s+other\s+mods\b/i.test(combinedDesc) ||
-    /\bdoes\s+nothing\s+(?:on\s+its\s+own|by\s+itself)\b/i.test(combinedDesc) ||
-    /\b(?:simple\s+and\s+feature[- ]rich|lightweight|shared|helper|utility|modding)\s+(?:api|library)\b/i.test(combinedDesc) ||
-    /\bapi\s+(?:to\s+add|for\s+adding|for\s+other\s+mods|used\s+by\s+other\s+mods)\b/i.test(combinedDesc) ||
-    /\b(?:library|framework)\s+(?:for|used\s+by)\s+(?:other\s+)?mods\b/i.test(combinedDesc)
-  ) {
-    return true;
-  }
-
-  return false;
+  const val = compute();
+  API_LIB_PKG_CACHE.set(pkg, { sig, val });
+  return val;
 }
 
 /**
@@ -561,7 +906,10 @@ export const LUANTIHUB_BADGE_TAGS: Array<{
  */
 export function parseBadgeTagsArray(val: unknown): string[] {
   const raw = parseJsonArray(val);
-  const validSet = new Set(LUANTIHUB_BADGE_TAGS.map(b => b.name.toLowerCase()));
+  const validSet = new Set([
+    ...LUANTIHUB_BADGE_TAGS.map(b => b.name.toLowerCase()),
+    'jam_game_2026'
+  ]);
   const out: string[] = [];
   const seen = new Set<string>();
   for (const item of raw) {
@@ -1069,5 +1417,169 @@ export function findReverseDependenciesForPackage<T extends { id?: string; name?
     totalCount: hardDependents.length + optionalDependents.length
   };
 }
+
+/**
+ * Strips trailing LuantiHub forge disambiguation suffixes (`-gh`, `-gl`, `-cb`, `-bb`, `-mh`, `-cdb`
+ * or underscore variants) from an author handle.
+ */
+export function stripAuthorForgeSuffix(handle?: string | null): string {
+  return String(handle || '')
+    .trim()
+    .replace(/[-_](?:gh|gl|cb|bb|mh|cdb|github|gitlab|codeberg|bitbucket|mesehub|contentdb|hub)$/i, '');
+}
+
+/**
+ * Strips trailing forge and community display suffixes (`-hub`, `-git`, `-dev`, `-lab`, `-mod(s)`, `-gh`, etc.)
+ * for matching cross-source author display names in the UI.
+ */
+export function stripAuthorDisplaySuffix(handle?: string | null): string {
+  return stripAuthorForgeSuffix(handle).replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+}
+
+/**
+ * Splits a comma-separated `.conf` value (`depends`, `optional_depends`, `supported_games`, `unsupported_games`),
+ * stripping quotes, legacy trailing `?` optional markers, and inline `#` comments.
+ */
+export function parseLuantiConfList(rawList?: string | null): string[] {
+  if (!rawList || typeof rawList !== 'string') return [];
+  return rawList
+    .split(',')
+    .map(s =>
+      s
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .replace(/\?$/, '')
+        .split(/\s+#/)[0]
+        .trim()
+    )
+    .filter(Boolean);
+}
+
+/**
+ * Alias for `parseJsonArray` for semantic clarity when parsing string array columns.
+ */
+export const parsePackageStringArray = parseJsonArray;
+
+/**
+ * Normalizes SQLite `YYYY-MM-DD HH:MM:SS` or ISO-8601 timestamps into canonical UTC ISO-8601 strings (`...Z`).
+ */
+export function normalizeUtcIsoTimestamp(raw?: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    return new Date(ms).toISOString();
+  }
+  const str = String(raw).trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str.replace(' ', 'T')}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(str)) {
+    return `${str}Z`;
+  }
+  return str;
+}
+
+/**
+ * Unified heuristic SPDX license identifier detection from `LICENSE` / `COPYING` / `README` text.
+ */
+export function detectSpdxFromLicenseText(raw?: string | null): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  const text = raw.slice(0, 4000);
+  if (/MIT License|Permission is hereby granted, free of charge|\bMIT\b/i.test(text)) return 'MIT';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2\.1|\bLGPL-2\.1\b/i.test(text)) return 'LGPL-2.1-only';
+  if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bLGPL-3\.0\b/i.test(text)) return 'LGPL-3.0-only';
+  if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bAGPL-3\.0\b/i.test(text)) return 'AGPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 3|\bGPL-3\.0\b/i.test(text)) return 'GPL-3.0-only';
+  if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,200}Version 2|\bGPL-2\.0\b/i.test(text)) return 'GPL-2.0-only';
+  if (/Apache License[\s\S]{0,150}Version 2\.0|\bApache-2\.0\b/i.test(text)) return 'Apache-2.0';
+  if (/Mozilla Public License[\s\S]{0,100}2\.0|\bMPL-2\.0\b/i.test(text)) return 'MPL-2.0';
+  if (/Creative Commons Attribution-ShareAlike 4\.0|\bCC-BY-SA-4\.0\b/i.test(text)) return 'CC-BY-SA-4.0';
+  if (/Creative Commons Attribution-ShareAlike 3\.0|\bCC-BY-SA-3\.0\b/i.test(text)) return 'CC-BY-SA-3.0';
+  if (/Creative Commons Attribution 4\.0|\bCC-BY-4\.0\b/i.test(text)) return 'CC-BY-4.0';
+  if (/Creative Commons Zero|CC0 1\.0 Universal|Public Domain Dedication|\bCC0-1\.0\b/i.test(text)) return 'CC0-1.0';
+  if (/The Unlicense|unlicense\.org|\bUnlicense\b/i.test(text)) return 'Unlicense';
+  if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|\bWTFPL\b/i.test(text)) return 'WTFPL';
+  if (/zlib License|altered source versions must be plainly marked|\bZlib\b/i.test(text)) return 'Zlib';
+  if (/\bBSD 3-Clause\b/i.test(text)) return 'BSD-3-Clause';
+  if (/\bBSD 2-Clause\b/i.test(text)) return 'BSD-2-Clause';
+  if (/Redistribution and use in source and binary forms/i.test(text)) {
+    return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
+  }
+  if (/\bISC License\b|Permission to use, copy, modify, and\/or distribute this software/i.test(text)) return 'ISC';
+  if (/\b0BSD\b|Zero-Clause BSD/i.test(text)) return '0BSD';
+  return undefined;
+}
+
+/**
+ * Parses Luanti `.conf` files (`mod.conf`, `game.conf`, `texture_pack.conf`, `modpack.conf`)
+ * following `luanti-org/contentdb` `app/tasks/luanticheck/config.py` rules, including
+ * multiline `"""..."""` string values and `#` comments.
+ */
+export function parseLuantiConf(confText: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!confText || typeof confText !== 'string') return result;
+
+  const lines = confText.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+    i++;
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+
+    const key = trimmed.slice(0, eqIdx).trim().toLowerCase();
+    if (!key) continue;
+
+    let val = trimmed.slice(eqIdx + 1).trim();
+    if (val.startsWith('"""')) {
+      const afterOpen = val.slice(3);
+      const closeSameLine = afterOpen.indexOf('"""');
+      if (closeSameLine !== -1) {
+        result[key] = afterOpen.slice(0, closeSameLine).trim();
+      } else {
+        const chunks: string[] = [afterOpen];
+        while (i < lines.length) {
+          const nextLine = lines[i++];
+          const closeIdx = nextLine.indexOf('"""');
+          if (closeIdx !== -1) {
+            chunks.push(nextLine.slice(0, closeIdx));
+            break;
+          }
+          chunks.push(nextLine);
+        }
+        result[key] = chunks.join('\n').trim();
+      }
+      continue;
+    }
+
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1).trim();
+    }
+    result[key] = val;
+  }
+
+  return result;
+}
+
+/**
+ * Computes `short_description` from a `.conf` or `description.txt` description string
+ * using `luanti-org/contentdb` `app/tasks/luanticheck/tree.py:234-241` rules.
+ */
+export function computeConfShortDescription(description?: string): string | undefined {
+  if (!description || typeof description !== 'string') return undefined;
+  const clean = description.replace(/\s+/g, ' ').trim();
+  if (!clean) return undefined;
+  if (clean.length <= 200) return clean;
+  const firstSentenceIdx = clean.indexOf('.');
+  if (firstSentenceIdx > 0 && firstSentenceIdx < 200) {
+    return clean.slice(0, firstSentenceIdx).trim();
+  }
+  return clean.slice(0, 200).trim();
+}
+
 
 

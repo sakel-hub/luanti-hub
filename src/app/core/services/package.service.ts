@@ -1,4 +1,4 @@
-import { Injectable, computed, signal, inject, effect } from '@angular/core';
+import { Injectable, computed, signal, inject, effect, untracked } from '@angular/core';
 import { Router, NavigationEnd } from '@angular/router';
 import { Title, Meta } from '@angular/platform-browser';
 import { filter } from 'rxjs/operators';
@@ -27,11 +27,20 @@ import {
   enrichLuantiBlogPostFromArticleHtml
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
-import { PwaService, BOOT_SYNC_CACHE_NAME, BOOT_SYNC_CACHE_URL } from './pwa.service';
+import {
+  PwaService,
+  BOOT_SYNC_CACHE_NAME,
+  BOOT_SYNC_CACHE_URL,
+  LEGACY_BOOT_SYNC_CACHE_NAMES
+} from './pwa.service';
 import { AuthService, ProfileDrawerTab, sanitizeUserFacingError } from './auth.service';
 import { SeoService } from './seo.service';
 import { TranslationService } from '../i18n/translation.service';
-import { syncJam2026ClientRowTagIfNeeded } from './jam-2026-sync.helper';
+import {
+  isJam2026PromoTag,
+  syncJam2026ClientRowTagIfNeeded,
+  getJam2026TagsForRepoUrl
+} from './jam-2026-sync.helper';
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
@@ -48,6 +57,7 @@ import {
   mergeScreenshotsPreferringGit,
   isPackageDeprecated,
   normalizeRepoComparisonKey,
+  isUntrustedTunnelOrPrivateHost,
   GitProviderId
 } from '../config/git-providers.config';
 import {
@@ -57,6 +67,8 @@ import {
   parseNonZeroReviewThreadCounts,
   deriveReviewThreadCountsFromList,
   extractEmbeddedVideo as sharedExtractEmbeddedVideo,
+  isSafeDirectVideoUrl,
+  buildSafeVideoEmbedUrl,
   buildReverseDependencyCountMap,
   isApiOrLibraryPackage,
   computeDependencyPrioritizationMultiplier,
@@ -76,7 +88,12 @@ import {
   parsePackageTranslations,
   resolveLocalizedPackageText,
   parseScreenshotMetaArray,
-  findReverseDependenciesForPackage
+  findReverseDependenciesForPackage,
+  stripAuthorForgeSuffix,
+  stripAuthorDisplaySuffix,
+  detectSpdxFromLicenseText as sharedDetectSpdxFromLicenseText,
+  parseLuantiConf,
+  parseLuantiConfList
 } from '../config/package-utils.config';
 
 const PAGE_SIZE = 32;
@@ -169,6 +186,54 @@ export class PackageService {
 
   private readonly _isLoading = signal<boolean>(true);
   private readonly _isLoadingDetails = signal<boolean>(false);
+  private activeDeepFetchCount = 0;
+  private authorDrawerRequestSeq = 0;
+
+  private beginLoadingDetails(): void {
+    this.activeDeepFetchCount++;
+    if (!this._isLoadingDetails()) {
+      this._isLoadingDetails.set(true);
+    }
+  }
+
+  private endLoadingDetails(): void {
+    this.activeDeepFetchCount = Math.max(0, this.activeDeepFetchCount - 1);
+    if (this.activeDeepFetchCount === 0 && this._isLoadingDetails()) {
+      this._isLoadingDetails.set(false);
+    }
+  }
+
+  private readonly authorBaseDisplayMap = computed<Map<string, string>>(() => {
+    const map = new Map<string, string>();
+    const officialSet = new Set<string>();
+    for (const p of this._packages()) {
+      const base = stripAuthorDisplaySuffix(p.author || '').toLowerCase();
+      if (!base) continue;
+      const isOfficial = Boolean(p.sources?.includes('official') || p.source === 'official');
+      if (p.author_display_name && p.author_display_name.trim()) {
+        if (isOfficial || !officialSet.has(base)) {
+          map.set(base, p.author_display_name.trim());
+          if (isOfficial) officialSet.add(base);
+        }
+      } else if (isOfficial && !officialSet.has(base)) {
+        map.set(base, p.author);
+        officialSet.add(base);
+      }
+    }
+    return map;
+  });
+
+  private readonly updatedTsCache = new WeakMap<LuantiPackage, { raw: string; ms: number }>();
+
+  private getCachedUpdatedMs(pkg: LuantiPackage): number {
+    const raw = pkg.updated_at || pkg.created_at || '';
+    if (!raw) return 0;
+    const hit = this.updatedTsCache.get(pkg);
+    if (hit && hit.raw === raw) return hit.ms;
+    const ms = Date.parse(String(raw)) || 0;
+    this.updatedTsCache.set(pkg, { raw, ms });
+    return ms;
+  }
   private readonly _activePackage = signal<LuantiPackage | null>(null);
   private readonly _pendingModalFocus = signal<PackageModalFocusRequest | null>(null);
   private readonly _isSubmitModalOpen = signal<boolean>(false);
@@ -276,21 +341,24 @@ export class PackageService {
   });
 
   readonly activeHeroPromotions = computed<HeroPromotion[]>(() => {
-    // Depend on currentLocale so Hero slide titles/descriptions/badges re-evaluate on language switch
+    // Depend on currentLocale & currentDictionary so Hero slide titles/descriptions/badges re-evaluate on lazy locale load
     this.i18n.currentLocale();
+    this.i18n.currentDictionary();
     return this.activePromotions()
       .filter(promo => {
         const showInHero =
           promo.show_in_hero !== false &&
           promo.show_in_hero !== 0 &&
           (promo.show_in_hero as any) !== '0';
-        return showInHero && Boolean(promo.title && promo.banner_url);
+        const bannerUrl = String(promo.banner_url || '').trim();
+        return showInHero && Boolean(promo.title && bannerUrl && !bannerUrl.includes('luanti-5-18-0'));
       })
       .map(promo => this.localizeHeroPromotion(promo));
   });
 
   readonly activePromotionalRows = computed<PromotionalPackageRow[]>(() => {
     this.i18n.currentLocale();
+    this.i18n.currentDictionary();
     const activePromos = this.activePromotions();
     const rowPromos = activePromos.filter(promo =>
       Boolean(
@@ -477,8 +545,8 @@ export class PackageService {
           if (sortBy === 'rating') {
             return (b.score || 0) - (a.score || 0) || (b.contentdb_score || 0) - (a.contentdb_score || 0) || (b.downloads || 0) - (a.downloads || 0);
           }
-          const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
-          const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+          const timeA = this.getCachedUpdatedMs(a);
+          const timeB = this.getCachedUpdatedMs(b);
           if (timeB !== timeA) return timeB - timeA;
           const relA = Number(a.release_id || 0) || 0;
           const relB = Number(b.release_id || 0) || 0;
@@ -680,7 +748,10 @@ export class PackageService {
       id: `blog:${post.id || post.url}`,
       title: post.title,
       short_desc: post.summary || 'Read the latest official announcement and development update on the Luanti Blog.',
-      banner_url: post.image_url && post.image_url !== '/promo.png' ? post.image_url : '/banners/luanti-5-18-0.png',
+      banner_url:
+        post.image_url && post.image_url !== '/promo.png' && !post.image_url.includes('luanti-5-18-0')
+          ? post.image_url
+          : '/screenshot-desktop.png',
       cta_label: 'Read Article',
       cta_url: post.url,
       badge_text: badgeText,
@@ -695,7 +766,10 @@ export class PackageService {
 
   private isValidActivePromotion(promo: HeroPromotion | null | undefined, nowMs = Date.now()): boolean {
     if (!promo || !promo.expires_at) return false;
+    const bannerUrl = String(promo.banner_url || '').trim();
+    const isRetiredHeroBanner = bannerUrl.includes('luanti-5-18-0');
     const showInHero =
+      !isRetiredHeroBanner &&
       promo.show_in_hero !== false &&
       promo.show_in_hero !== 0 &&
       (promo.show_in_hero as any) !== '0';
@@ -705,7 +779,7 @@ export class PackageService {
         (promo.row_enabled as any) === '1'
     );
     if (!showInHero && !rowEnabled) return false;
-    if (showInHero && (!promo.title || !promo.banner_url)) return false;
+    if (showInHero && (!promo.title || !bannerUrl)) return false;
     if (!showInHero && rowEnabled && !promo.title && !promo.row_title) return false;
 
     const expMs = Date.parse(String(promo.expires_at));
@@ -1020,6 +1094,133 @@ export class PackageService {
     this.syncQueryParamsToUrl(false, true);
   }
 
+  private promoSyncGeneration = 0;
+  private readonly promoTagSyncInFlight = new Set<string>();
+  private readonly promoTagSyncInFlightGen = new Map<string, number>();
+  private readonly pendingPromoTagResync = new Set<string>();
+  private readonly lastPromoTagSyncAt = new Map<string, number>();
+  private readonly lastPromoTagSyncGen = new Map<string, number>();
+  private readonly hasCatalogPackages = computed(() => this._packages().length > 0);
+
+  private resolveJam2026OverlayForHydratedRepo(
+    repoUrl?: string,
+    existingTags?: string[],
+    existingBadgeTags?: string[],
+    existingSources?: PackageSource[]
+  ): {
+    tags: string[];
+    badgeTags?: string[];
+    sources?: PackageSource[];
+    matchedJam: boolean;
+  } {
+    const jamTagsFromRepo = getJam2026TagsForRepoUrl(repoUrl);
+    const hasJamTagAlready = Boolean(
+      (existingTags || []).some(t => isJam2026PromoTag(t)) ||
+        (existingBadgeTags || []).some(bt => bt.toLowerCase() === 'jam_game_2026')
+    );
+    if (jamTagsFromRepo.length === 0 && !hasJamTagAlready) {
+      return {
+        tags: existingTags || [],
+        badgeTags: existingBadgeTags && existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
+        sources: existingSources,
+        matchedJam: false
+      };
+    }
+    const mergedTags = this.mergePackageTagsPreservingExisting(
+      existingTags,
+      jamTagsFromRepo.length > 0 ? jamTagsFromRepo : ['jam_game_2026', 'gamejam']
+    );
+    const mergedBadges = parseBadgeTagsArray([
+      ...(existingBadgeTags || []),
+      'jam_game_2026'
+    ]);
+    const baseSources = existingSources && existingSources.length > 0 ? existingSources : (['official'] as PackageSource[]);
+    const mergedSources: PackageSource[] = repoUrl
+      ? Array.from(new Set<PackageSource>([...baseSources, 'git']))
+      : baseSources;
+    return {
+      tags: mergedTags,
+      badgeTags: mergedBadges.length > 0 ? mergedBadges : undefined,
+      sources: mergedSources,
+      matchedJam: true
+    };
+  }
+
+  private persistPromotionalTagsForPackage(
+    lowerId: string,
+    tags: string[],
+    badgeTags?: string[],
+    extra?: { repoUrl?: string; sources?: PackageSource[] }
+  ): boolean {
+    if (!lowerId) return false;
+    const prevMeta = this.hydratedMetaCache.get(lowerId) || {};
+    const prevMetaTags = Array.isArray(prevMeta.tags) ? prevMeta.tags : [];
+    const prevMetaBadges = Array.isArray(prevMeta.badge_tags) ? prevMeta.badge_tags : [];
+    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMetaTags);
+    const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...prevMetaBadges]);
+    const nextRepoUrl = extra?.repoUrl || prevMeta.repo_url;
+    const nextSources = extra?.sources?.length
+      ? Array.from(new Set<PackageSource>([...(prevMeta.sources || []), ...extra.sources]))
+      : prevMeta.sources;
+    const prevLowerSet = new Set(prevMetaTags.map(t => t.toLowerCase()));
+    const prevBadgeSet = new Set(prevMetaBadges.map(t => t.toLowerCase()));
+    const prevSourceSet = new Set<PackageSource>(prevMeta.sources || []);
+    const metaChanged =
+      mergedTags.length !== prevMetaTags.length ||
+      mergedTags.some(t => !prevLowerSet.has(t.toLowerCase())) ||
+      mergedBadgeTags.length !== prevMetaBadges.length ||
+      mergedBadgeTags.some(t => !prevBadgeSet.has(t.toLowerCase())) ||
+      (Boolean(nextRepoUrl) && nextRepoUrl !== prevMeta.repo_url) ||
+      Boolean(nextSources?.some(s => !prevSourceSet.has(s)));
+    if (metaChanged) {
+      this.hydratedMetaCache.set(lowerId, {
+        ...prevMeta,
+        tags: mergedTags,
+        ...(mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {}),
+        ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
+        ...(nextSources && nextSources.length > 0 ? { sources: nextSources } : {})
+      });
+    }
+    this._serverRecentlyAdded.update(list => {
+      let listChanged = false;
+      const nextList = list.map(item => {
+        if ((item.id || `${item.author}/${item.name}`).toLowerCase() !== lowerId) return item;
+        const nextItemTags = this.mergePackageTagsPreservingExisting(mergedTags, item.tags);
+        const nextItemBadgeTags = parseBadgeTagsArray([
+          ...mergedBadgeTags,
+          ...(item.badge_tags || [])
+        ]);
+        const itemRepoUrl = extra?.repoUrl || item.repo_url;
+        const itemSources = extra?.sources?.length
+          ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...extra.sources]))
+          : item.sources;
+        const itemTagSet = new Set((item.tags || []).map(t => t.toLowerCase()));
+        const itemBadgeSet = new Set((item.badge_tags || []).map(t => t.toLowerCase()));
+        const itemSourceSet = new Set<PackageSource>(
+          item.sources && item.sources.length > 0 ? item.sources : [item.source]
+        );
+        const itemChanged =
+          nextItemTags.some(t => !itemTagSet.has(t.toLowerCase())) ||
+          nextItemBadgeTags.some(t => !itemBadgeSet.has(t.toLowerCase())) ||
+          (Boolean(itemRepoUrl) && itemRepoUrl !== item.repo_url) ||
+          Boolean(itemSources?.some(s => !itemSourceSet.has(s)));
+        if (!itemChanged) return item;
+        listChanged = true;
+        return {
+          ...item,
+          ...(itemRepoUrl ? { repo_url: itemRepoUrl } : {}),
+          ...(itemSources && itemSources.length > 0
+            ? { sources: itemSources, source: itemSources.includes('git') ? 'git' : item.source }
+            : {}),
+          tags: nextItemTags,
+          ...(nextItemBadgeTags.length > 0 ? { badge_tags: nextItemBadgeTags } : {})
+        };
+      });
+      return listChanged ? this.deduplicateCatalog(nextList) : list;
+    });
+    return metaChanged;
+  }
+
   private syncClientPromotionRowTags(activePromos: HeroPromotion[]): void {
     const rowPromos = activePromos.filter(p =>
       Boolean(p.row_enabled === true || p.row_enabled === 1 || (p.row_enabled as any) === '1')
@@ -1038,44 +1239,153 @@ export class PackageService {
 
     this.ensureTagsRegisteredInAvailableTags(allRowTags);
 
-    const isUnitTestEnv =
-      typeof (globalThis as any).describe === 'function' &&
-      typeof (globalThis as any).it === 'function';
-    if (isUnitTestEnv || typeof fetch !== 'function') return;
-
     const currentPkgs = this._packages();
     if (currentPkgs.length === 0) return;
 
+    let cachedMetaUpdated = false;
     for (const tag of allRowTags.slice(0, 3)) {
       const lowerTag = tag.toLowerCase();
-      if (this.syncedPromoTagsInSession.has(lowerTag)) continue;
-      // Check if catalog already has packages stamped with this tag from the Edge Worker
+      const stampedPkgs = currentPkgs.filter(p =>
+        (p.tags || []).some(t => t.toLowerCase() === lowerTag)
+      );
+      if (stampedPkgs.length > 0) {
+        if (!isJam2026PromoTag(lowerTag)) {
+          this.syncedPromoTagsInSession.add(lowerTag);
+        }
+        for (const sp of stampedPkgs) {
+          if (
+            this.persistPromotionalTagsForPackage(sp.id.toLowerCase(), sp.tags, sp.badge_tags, {
+              repoUrl: sp.repo_url,
+              sources: sp.sources
+            })
+          ) {
+            cachedMetaUpdated = true;
+          }
+        }
+      }
+    }
+    if (cachedMetaUpdated) {
+      this.scheduleHydratedMetaPersist();
+    }
+
+    const isUnitTestEnv =
+      typeof (globalThis as any).describe === 'function' &&
+      typeof (globalThis as any).it === 'function' &&
+      !(this as any).__allowPromoTagSyncInTests;
+    if (isUnitTestEnv || typeof fetch !== 'function') return;
+
+    for (const tag of allRowTags.slice(0, 3)) {
+      const lowerTag = tag.toLowerCase();
+      if (this.promoTagSyncInFlight.has(lowerTag)) {
+        if (this.promoTagSyncInFlightGen.get(lowerTag) !== this.promoSyncGeneration) {
+          this.pendingPromoTagResync.add(lowerTag);
+        }
+        continue;
+      }
+      const isJamTag = isJam2026PromoTag(lowerTag);
+      // Check if current catalog already has packages stamped with this tag
       const alreadyStampedCount = currentPkgs.filter(p =>
         (p.tags || []).some(t => t.toLowerCase() === lowerTag)
       ).length;
-      if (alreadyStampedCount > 0) {
+      if (!isJamTag && alreadyStampedCount > 0) {
         this.syncedPromoTagsInSession.add(lowerTag);
+        this.lastPromoTagSyncGen.set(lowerTag, this.promoSyncGeneration);
         continue;
       }
+      const lastSyncAt = this.lastPromoTagSyncAt.get(lowerTag) || 0;
+      const lastSyncGen = this.lastPromoTagSyncGen.get(lowerTag);
+      const nowMs = Date.now();
+      if (this.syncedPromoTagsInSession.has(lowerTag)) {
+        if (alreadyStampedCount > 0 && nowMs - lastSyncAt < 60_000) {
+          continue;
+        }
+        if (
+          alreadyStampedCount === 0 &&
+          lastSyncGen === this.promoSyncGeneration &&
+          nowMs - lastSyncAt < 60_000
+        ) {
+          continue;
+        }
+      }
 
-      this.syncedPromoTagsInSession.add(lowerTag);
+      const startGen = this.promoSyncGeneration;
+      this.promoTagSyncInFlight.add(lowerTag);
+      this.promoTagSyncInFlightGen.set(lowerTag, startGen);
       (async () => {
         try {
+          const stampedByLowerId = new Map<
+            string,
+            { tags: string[]; badgeTags: string[]; repoUrl?: string; sources?: PackageSource[] }
+          >();
           await syncJam2026ClientRowTagIfNeeded({
             tag,
             packagesSignal: this._packages,
             normalizePackage: (raw) => this.normalizePackage(raw),
             deduplicateCatalog: (pkgs) => this.deduplicateCatalog(pkgs),
-            buildSearchBlob: (pkg) => this.buildSearchBlob(pkg)
+            buildSearchBlob: (pkg) => this.buildSearchBlob(pkg),
+            onPackageStamped: (lowerId, tags, badgeTags, extra) => {
+              stampedByLowerId.set(lowerId, {
+                tags,
+                badgeTags,
+                repoUrl: extra?.repoUrl,
+                sources: extra?.sources
+              });
+              this.persistPromotionalTagsForPackage(lowerId, tags, badgeTags, extra);
+            }
           });
+          if (stampedByLowerId.size > 0) {
+            this._serverRecentlyAdded.update(list =>
+              this.deduplicateCatalog(
+                list.map(item => {
+                  const entry = stampedByLowerId.get(item.id.toLowerCase());
+                  if (!entry) return item;
+                  const mergedTags = this.mergePackageTagsPreservingExisting(entry.tags, item.tags);
+                  const mergedBadges = parseBadgeTagsArray([...entry.badgeTags, ...(item.badge_tags || [])]);
+                  const nextRepoUrl = entry.repoUrl || item.repo_url;
+                  const nextSources = entry.sources?.length
+                    ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...entry.sources]))
+                    : item.sources;
+                  return {
+                    ...item,
+                    ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
+                    ...(nextSources && nextSources.length > 0
+                      ? { sources: nextSources, source: nextSources.includes('git') ? 'git' : item.source }
+                      : {}),
+                    tags: mergedTags,
+                    ...(mergedBadges.length > 0 ? { badge_tags: mergedBadges } : {}),
+                    _searchBlob: this.buildSearchBlob({ ...item, tags: mergedTags, badge_tags: mergedBadges })
+                  };
+                })
+              )
+            );
+            this.scheduleHydratedMetaPersist();
+            this.scheduleBootCachePersist();
+          }
+
+          const postJamStampedCount = this._packages().filter(p =>
+            (p.tags || []).some(t => t.toLowerCase() === lowerTag)
+          ).length;
+
+          if ((postJamStampedCount > 0 && isJamTag) || alreadyStampedCount > 0) {
+            this.syncedPromoTagsInSession.add(lowerTag);
+            this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+            this.lastPromoTagSyncGen.set(lowerTag, startGen);
+            return;
+          }
           const list = await this.fetchUpstreamWithMirrorFallback(
             `/packages/?tag=${encodeURIComponent(tag)}&fmt=vcs`
           );
-          if (!Array.isArray(list) || list.length === 0) return;
+          if (!Array.isArray(list) || list.length === 0) {
+            this.syncedPromoTagsInSession.add(lowerTag);
+            this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+            this.lastPromoTagSyncGen.set(lowerTag, startGen);
+            return;
+          }
 
           const matchedLowerIds = new Set<string>();
           const newRawItems: any[] = [];
           const existingLowerIds = new Set(this._packages().map(p => p.id.toLowerCase()));
+          const extraBadgeTags = isJamTag ? ['jam_game_2026'] : undefined;
 
           for (const item of list) {
             if (!item?.author || !item?.name) continue;
@@ -1084,29 +1394,76 @@ export class PackageService {
             if (!existingLowerIds.has(lowerId)) {
               newRawItems.push({
                 ...item,
-                tags: Array.from(new Set([...(Array.isArray(item.tags) ? item.tags : []), tag]))
+                tags: Array.from(new Set([...(Array.isArray(item.tags) ? item.tags : []), tag])),
+                ...(extraBadgeTags
+                  ? {
+                      badge_tags: Array.from(
+                        new Set([...(Array.isArray(item.badge_tags) ? item.badge_tags : []), ...extraBadgeTags])
+                      )
+                    }
+                  : {})
               });
             }
           }
 
           this._packages.update(pkgs => {
+            let anyModified = false;
             const updated = pkgs.map(pkg => {
-              if (!matchedLowerIds.has(pkg.id.toLowerCase())) return pkg;
-              if ((pkg.tags || []).some(t => t.toLowerCase() === lowerTag)) return pkg;
-              const nextTags = [...(pkg.tags || []), tag];
+              const lowerId = pkg.id.toLowerCase();
+              if (!matchedLowerIds.has(lowerId)) return pkg;
+              const alreadyHasTag = (pkg.tags || []).some(t => t.toLowerCase() === lowerTag);
+              const nextBadgeTags = extraBadgeTags
+                ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...extraBadgeTags])
+                : pkg.badge_tags;
+              if (alreadyHasTag && (nextBadgeTags?.length || 0) === (pkg.badge_tags?.length || 0)) {
+                return pkg;
+              }
+              anyModified = true;
+              const nextTags = alreadyHasTag ? pkg.tags : [...(pkg.tags || []), tag];
+              this.persistPromotionalTagsForPackage(lowerId, nextTags, nextBadgeTags, {
+                repoUrl: pkg.repo_url,
+                sources: pkg.sources
+              });
               return {
                 ...pkg,
                 tags: nextTags,
-                _searchBlob: this.buildSearchBlob({ ...pkg, tags: nextTags })
+                ...(nextBadgeTags && nextBadgeTags.length > 0 ? { badge_tags: nextBadgeTags } : {}),
+                _searchBlob: this.buildSearchBlob({ ...pkg, tags: nextTags, badge_tags: nextBadgeTags })
               };
             });
             const normalizedNew = newRawItems.map(it => this.normalizePackage(it));
+            for (const np of normalizedNew) {
+              this.persistPromotionalTagsForPackage(np.id.toLowerCase(), np.tags, np.badge_tags, {
+                repoUrl: np.repo_url,
+                sources: np.sources
+              });
+            }
+            if (!anyModified && normalizedNew.length === 0) {
+              return pkgs;
+            }
             return normalizedNew.length > 0
               ? this.deduplicateCatalog([...normalizedNew, ...updated])
-              : updated;
+              : this.deduplicateCatalog(updated);
           });
+          this.syncedPromoTagsInSession.add(lowerTag);
+          this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+          this.lastPromoTagSyncGen.set(lowerTag, startGen);
+          this.scheduleHydratedMetaPersist();
+          this.scheduleBootCachePersist();
         } catch {
-          // Non-fatal fallback
+          this.syncedPromoTagsInSession.add(lowerTag);
+          this.lastPromoTagSyncAt.set(lowerTag, Date.now());
+          this.lastPromoTagSyncGen.set(lowerTag, startGen);
+        } finally {
+          this.promoTagSyncInFlight.delete(lowerTag);
+          this.promoTagSyncInFlightGen.delete(lowerTag);
+          if (this.pendingPromoTagResync.has(lowerTag)) {
+            this.pendingPromoTagResync.delete(lowerTag);
+            this.lastPromoTagSyncAt.delete(lowerTag);
+            queueMicrotask(() => {
+              this.syncClientPromotionRowTags(this.activePromotions());
+            });
+          }
         }
       })();
     }
@@ -1138,6 +1495,7 @@ export class PackageService {
 
   setPromotions(promotions: HeroPromotion[]): void {
     const validList = Array.isArray(promotions) ? promotions : [];
+    this.promoSyncGeneration++;
     this._promotions.set(validList);
     this.persistActivePromotionsCache(validList);
     this.refreshPromoClock();
@@ -1147,8 +1505,12 @@ export class PackageService {
   private persistActivePromotionsCache(promotions: HeroPromotion[]): void {
     if (typeof localStorage === 'undefined') return;
     try {
-      if (promotions.length > 0) {
-        localStorage.setItem('lh_active_promotions_v1', JSON.stringify(promotions));
+      const nowMs = Date.now();
+      const activeOnly = (Array.isArray(promotions) ? promotions : []).filter(p =>
+        this.isValidActivePromotion(p, nowMs)
+      );
+      if (activeOnly.length > 0) {
+        localStorage.setItem('lh_active_promotions_v1', JSON.stringify(activeOnly));
       } else {
         localStorage.removeItem('lh_active_promotions_v1');
       }
@@ -1163,14 +1525,16 @@ export class PackageService {
     overrideImageUrl?: string
   ): LuantiBlogPost {
     const isFallbackImg = (url?: string | null) =>
-      !url || url === '/banners/luanti-5-18-0.png' || url === '/promo.png';
+      !url || url === '/screenshot-desktop.png' || url === '/promo.png' || url.includes('luanti-5-18-0');
+    const sanitizeImg = (url?: string | null) =>
+      url && !url.includes('luanti-5-18-0') ? url : undefined;
     const bestImage =
       (!isFallbackImg(overrideImageUrl) ? overrideImageUrl : undefined) ||
       (!isFallbackImg(incoming.image_url) ? incoming.image_url : undefined) ||
       (!isFallbackImg(existing?.image_url) ? existing?.image_url : undefined) ||
-      incoming.image_url ||
-      existing?.image_url ||
-      '/banners/luanti-5-18-0.png';
+      sanitizeImg(incoming.image_url) ||
+      sanitizeImg(existing?.image_url) ||
+      '/screenshot-desktop.png';
     return {
       ...existing,
       ...incoming,
@@ -1471,8 +1835,8 @@ export class PackageService {
         return (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'updated') {
-        const timeA = Date.parse(a.updated_at || a.created_at || '') || 0;
-        const timeB = Date.parse(b.updated_at || b.created_at || '') || 0;
+        const timeA = this.getCachedUpdatedMs(a);
+        const timeB = this.getCachedUpdatedMs(b);
         return timeB - timeA || (b.downloads || 0) - (a.downloads || 0);
       }
       if (sortBy === 'title') {
@@ -1530,7 +1894,7 @@ export class PackageService {
 
     // 4. Release & commit freshness bonus
     if (pkg.updated_at) {
-      const updatedMs = Date.parse(String(pkg.updated_at)) || 0;
+      const updatedMs = this.getCachedUpdatedMs(pkg);
       if (updatedMs > 0) {
         const ageDays = (nowMs - updatedMs) / 86400000;
         if (ageDays <= 7) score += 24;
@@ -1790,10 +2154,7 @@ export class PackageService {
       }
       const inCandidates = candidatesById.get(lowerId);
       if (inCandidates?.created_at) {
-        const existingMs = Date.parse(String(inCandidates.created_at)) || 0;
-        if (existingMs > 0 && nowMs - existingMs <= maxDiscoveryAgeMs) {
-          continue;
-        }
+        continue;
       }
       const existing = inCandidates || byLowerId.get(lowerId);
       if (!existing || this.isPackageDeprecated(existing)) continue;
@@ -2077,9 +2438,11 @@ export class PackageService {
     // Ensure tags configured on active Promotional Package Rows are mirrored into availableTags and synced with ContentDB
     effect(() => {
       const promos = this.activePromotions();
-      const pkgsCount = this._packages().length;
-      if (promos.length > 0 && pkgsCount >= 0) {
-        this.syncClientPromotionRowTags(promos);
+      const hasPkgs = this.hasCatalogPackages();
+      if (promos.length > 0 && hasPkgs) {
+        untracked(() => {
+          this.syncClientPromotionRowTags(promos);
+        });
       }
     });
   }
@@ -2123,10 +2486,17 @@ export class PackageService {
             const validPromos = parsedPromos.filter((p: any) => this.isValidActivePromotion(p, nowMs));
             if (validPromos.length > 0) {
               this._promotions.set(validPromos);
+              if (validPromos.length !== parsedPromos.length) {
+                localStorage.setItem('lh_active_promotions_v1', JSON.stringify(validPromos));
+              }
+            } else {
+              localStorage.removeItem('lh_active_promotions_v1');
             }
           }
         }
       }
+      const rawV15 = localStorage.getItem('lh_hydrated_meta_v15');
+      const rawV14 = localStorage.getItem('lh_hydrated_meta_v14');
       const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
       const rawV12 = localStorage.getItem('lh_hydrated_meta_v12');
       const rawV11 = localStorage.getItem('lh_hydrated_meta_v11');
@@ -2144,9 +2514,16 @@ export class PackageService {
       if (rawV12) {
         localStorage.removeItem('lh_hydrated_meta_v12');
       }
-      const raw = rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      if (rawV13) {
+        localStorage.removeItem('lh_hydrated_meta_v13');
+      }
+      if (rawV14) {
+        localStorage.removeItem('lh_hydrated_meta_v14');
+      }
+      const raw = rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
       if (!raw) return;
-      const isMigratingLegacy = !rawV13 && Boolean(rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingLegacy = !rawV15 && Boolean(rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingPreV14 = !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -2182,9 +2559,24 @@ export class PackageService {
             if (entry.review_thread_counts) {
               entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
             }
-            if (isMigratingLegacy && !entry.review_thread_counts) {
+            if (isMigratingPreV14 && !entry.review_thread_counts) {
               entry.score = 0;
               entry.rating_checked = false;
+            }
+            if (isMigratingLegacy) {
+              // Heal any SSR deep-link phantom contentdb_downloads / 'official' source cached prior to v15
+              delete entry.contentdb_downloads;
+              if (typeof entry.luantihub_downloads === 'number' && entry.luantihub_downloads > 0) {
+                entry.downloads = entry.luantihub_downloads;
+              } else {
+                delete entry.downloads;
+              }
+              const lowerKeyAuthor = k.toLowerCase().split('/')[0] || '';
+              const hasCdbTag = Array.isArray(entry.tags) && entry.tags.some(t => String(t).toLowerCase() === 'contentdb');
+              if (Array.isArray(entry.sources) && !hasCdbTag && (lowerKeyAuthor.endsWith('-hub') || entry.sources.includes('git'))) {
+                const cleanedSources = entry.sources.filter(s => s !== 'official');
+                entry.sources = cleanedSources.length > 0 ? cleanedSources : ['git'];
+              }
             }
             this.hydratedMetaCache.set(k.toLowerCase(), entry);
           }
@@ -2210,7 +2602,7 @@ export class PackageService {
         for (const [k, v] of entries) {
           obj[k] = v;
         }
-        localStorage.setItem('lh_hydrated_meta_v13', JSON.stringify(obj));
+        localStorage.setItem('lh_hydrated_meta_v15', JSON.stringify(obj));
       } catch {
         // Ignore quota errors
       }
@@ -2280,25 +2672,96 @@ export class PackageService {
     return [];
   }
 
+  /**
+   * Merges incoming and existing package tag arrays case-insensitively without losing
+   * previously stamped promotional/event tags (such as `jam_game_2026` or `gamejam`)
+   * when background tile hydration (`/api/packages/hydrate`) or detail probing returns
+   * a subset of tags (e.g. `['git']`).
+   */
+  private mergePackageTagsPreservingExisting(
+    primaryTags?: string[] | null,
+    ...fallbackTagLists: Array<string[] | undefined | null>
+  ): string[] {
+    const result: string[] = [];
+    const seenLower = new Set<string>();
+    const pushTag = (raw: unknown) => {
+      if (typeof raw !== 'string') return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      const lower = trimmed.toLowerCase();
+      if (seenLower.has(lower)) return;
+      seenLower.add(lower);
+      result.push(trimmed);
+    };
+
+    if (Array.isArray(primaryTags)) {
+      for (const t of primaryTags) pushTag(t);
+    }
+    for (const list of fallbackTagLists) {
+      if (!Array.isArray(list)) continue;
+      for (const t of list) pushTag(t);
+    }
+
+    if (result.length > 1) {
+      const bareTypeFallbackTags = new Set(['mod', 'game', 'txp', 'texture_pack']);
+      const nonTypeTags = result.filter(t => !bareTypeFallbackTags.has(t.toLowerCase()));
+      if (nonTypeTags.length > 0) {
+        const primaryLower = new Set(
+          (Array.isArray(primaryTags) ? primaryTags : [])
+            .map(t => (typeof t === 'string' ? t.trim().toLowerCase() : ''))
+            .filter(Boolean)
+        );
+        const primaryHadNonType = Array.from(primaryLower).some(t => !bareTypeFallbackTags.has(t));
+        const filtered = result.filter(t => {
+          const lower = t.toLowerCase();
+          if (!bareTypeFallbackTags.has(lower)) return true;
+          return primaryHadNonType && primaryLower.has(lower);
+        });
+        if (filtered.length > 0) {
+          return filtered;
+        }
+      }
+    }
+    return result;
+  }
+
   private normalizePackage(item: any): LuantiPackage {
     const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
     const pkgId = item.id || `${resolvedAuthor}/${item.name}`;
-    const cachedMeta = this.hydratedMetaCache.get(String(pkgId).toLowerCase());
+    const lowerPkgId = String(pkgId).toLowerCase();
+    const cachedMeta = this.hydratedMetaCache.get(lowerPkgId);
+    const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerPkgId] || 0);
 
     const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
+    const isUnhydratedSeed = Boolean(item?._unhydratedSeed);
+    const inferredHubGitAuthor = String(resolvedAuthor || '').trim().toLowerCase().endsWith('-hub');
+    const isGitOnlyItem =
+      isGitProviderId(item?.provider) ||
+      (item?.source === 'git' && (!Array.isArray(item?.sources) || !item.sources.includes('official'))) ||
+      (inferredHubGitAuthor && !Array.isArray(item?.sources) && item?.source !== 'official' && item?.provider !== 'contentdb');
     const hasSplitDownloads = item?.contentdb_downloads !== undefined || item?.luantihub_downloads !== undefined;
     const rawCdbDl = Math.max(
       0,
       Number(
         item?.contentdb_downloads ??
-          (!isGitProviderId(item?.provider)
+          (!isUnhydratedSeed && !isGitOnlyItem
             ? item?.downloads
             : 0) ??
           0
       ) || 0
     );
-    const contentdbDownloads = Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
-    const luantihubDownloads = Math.max(0, Number(item?.luantihub_downloads ?? 0) || 0);
+    const contentdbDownloads = isGitOnlyItem && item?.contentdb_downloads === 0
+      ? 0
+      : Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
+    const luantihubDownloads = Math.max(
+      0,
+      Number(
+        item?.luantihub_downloads ??
+          (!hasSplitDownloads && isGitOnlyItem && !isUnhydratedSeed ? item?.downloads : 0)
+      ) || 0,
+      Number(cachedMeta?.luantihub_downloads || 0),
+      localUserDlCount
+    );
     const downloads = hasSplitDownloads
       ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
       : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
@@ -2414,9 +2877,10 @@ export class PackageService {
     const rawTagsFromItem = parsedTagList
       .map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || ''))
       .filter(Boolean);
-    const rawTags = rawTagsFromItem.length > 0
-      ? rawTagsFromItem
-      : (Array.isArray(cachedMeta?.tags) ? cachedMeta!.tags! : []);
+    const rawTags = this.mergePackageTagsPreservingExisting(
+      rawTagsFromItem,
+      Array.isArray(cachedMeta?.tags) ? cachedMeta!.tags! : undefined
+    );
 
     const lowerTags = rawTags.map((t: string) => t.toLowerCase());
     const explicitSources: PackageSource[] = Array.isArray(item.sources)
@@ -2428,7 +2892,10 @@ export class PackageService {
     const rawProvider = typeof item.provider === 'string' ? item.provider.toLowerCase() : '';
     const isGitProvider = !isExplicitOfficialOnly && isGitProviderId(rawProvider);
     const source: PackageSource =
-      explicitSources.includes('git') || item.source === 'git' || isGitProvider
+      explicitSources.includes('git') ||
+      item.source === 'git' ||
+      isGitProvider ||
+      (inferredHubGitAuthor && !isExplicitOfficialOnly && !rawProvider)
         ? 'git'
         : item.source === 'mirror'
           ? 'mirror'
@@ -2491,7 +2958,10 @@ export class PackageService {
       [...deps, ...optDeps]
     );
     const parsedScreenshotMeta = parseScreenshotMetaArray(item.screenshot_meta ?? cachedMeta?.screenshot_meta);
-    const parsedBadgeTags = parseBadgeTagsArray(item.badge_tags ?? cachedMeta?.badge_tags);
+    const parsedBadgeTags = parseBadgeTagsArray([
+      ...this.parseArrayField(item.badge_tags),
+      ...this.parseArrayField(cachedMeta?.badge_tags)
+    ]);
     if (lowerTags.includes(ORGANIC_CODE_TAG) && !parsedBadgeTags.includes(ORGANIC_CODE_TAG)) {
       parsedBadgeTags.push(ORGANIC_CODE_TAG);
     }
@@ -2587,6 +3057,7 @@ export class PackageService {
           ? cachedMeta?.created_at
           : (item.created_at || cachedMeta?.created_at)) || undefined,
       updated_at: item.updated_at || undefined,
+      ...(isUnhydratedSeed ? { _unhydratedSeed: true } : {}),
       status: item.status || 'active'
     };
 
@@ -2659,12 +3130,13 @@ export class PackageService {
       : (incomingIsOfficial && !existingIsOfficial ? incoming : existing);
     const secondary = primary === existing ? incoming : existing;
 
-    const mergedTags = Array.from(new Set([...(primary.tags || []), ...(secondary.tags || [])]));
+    const mergedTags = this.mergePackageTagsPreservingExisting(primary.tags, secondary.tags);
     const mergedBadgeTags = Array.from(
       new Set([
         ...parseBadgeTagsArray(primary.badge_tags),
         ...parseBadgeTagsArray(secondary.badge_tags),
-        ...(mergedTags.some(t => t.toLowerCase() === ORGANIC_CODE_TAG) ? [ORGANIC_CODE_TAG] : [])
+        ...(mergedTags.some(t => t.toLowerCase() === ORGANIC_CODE_TAG) ? [ORGANIC_CODE_TAG] : []),
+        ...(mergedTags.some(t => isJam2026PromoTag(t)) ? ['jam_game_2026'] : [])
       ])
     );
     const mergedDeps = Array.from(new Set([...(primary.dependencies || []), ...(secondary.dependencies || [])]));
@@ -2814,7 +3286,8 @@ export class PackageService {
 
   /**
    * Deduplicates a catalog list by case-insensitive ID, normalized Git repo URL,
-   * identical technical `name` + `title`, or unambiguous `name` + `type`, merging dual-source packages cleanly.
+   * identical technical `name` + `title`, unambiguous `name` + `type`, or cross-author
+   * dual-source (`official` + `git`) twins sharing `(name, type)` plus non-slug `title` or >=15-char `short_desc`.
    */
   private deduplicateCatalog(list: LuantiPackage[]): LuantiPackage[] {
     const result: LuantiPackage[] = [];
@@ -2822,27 +3295,68 @@ export class PackageService {
     const byRepo = new Map<string, number>();
     const byNameTitle = new Map<string, number>();
     const byNameType = new Map<string, number>();
+    const byCrossAuthorNameTypeTitle = new Map<string, number>();
+    const byCrossAuthorNameTypeDesc = new Map<string, number>();
     const nameTypeCounts = new Map<string, number>();
+    const crossAuthorNameTypeCounts = new Map<string, number>();
     const normalizeBaseAuthor = (author: string) =>
       String(author || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const normalizeComparableText = (val: unknown) =>
+      String(val || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
     for (const pkg of list) {
-      const ntKey = `${normalizeBaseAuthor(pkg.author)}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const nameLower = pkg.name.toLowerCase();
+      const typeLower = (pkg.type || 'mod').toLowerCase();
+      const ntKey = `${normalizeBaseAuthor(pkg.author)}::${nameLower}::${typeLower}`;
       nameTypeCounts.set(ntKey, (nameTypeCounts.get(ntKey) || 0) + 1);
+      const crossKey = `${nameLower}::${typeLower}`;
+      crossAuthorNameTypeCounts.set(crossKey, (crossAuthorNameTypeCounts.get(crossKey) || 0) + 1);
     }
+
+    const canCrossAuthorMerge = (candidateIdx: number | undefined, incoming: LuantiPackage): number | undefined => {
+      if (candidateIdx === undefined) return undefined;
+      const existing = result[candidateIdx];
+      if (!existing) return undefined;
+      const existingRepo = this.normalizeRepoComparisonKey(existing.repo_url);
+      const incomingRepo = this.normalizeRepoComparisonKey(incoming.repo_url);
+      if (existingRepo && incomingRepo && existingRepo !== incomingRepo) {
+        return undefined;
+      }
+      const existingSrcs = existing.sources || [existing.source];
+      const incomingSrcs = incoming.sources || [incoming.source];
+      const oneOfficialOneGit =
+        (existingSrcs.includes('official') && incomingSrcs.includes('git')) ||
+        (incomingSrcs.includes('official') && existingSrcs.includes('git'));
+      return oneOfficialOneGit ? candidateIdx : undefined;
+    };
 
     for (const pkg of list) {
       const idKey = pkg.id.toLowerCase();
       const repoKey = this.normalizeRepoComparisonKey(pkg.repo_url);
       const baseAuthor = normalizeBaseAuthor(pkg.author);
-      const nameTitleKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.title || '').trim().toLowerCase()}`;
-      const nameTypeKey = `${baseAuthor}::${pkg.name.toLowerCase()}::${(pkg.type || 'mod').toLowerCase()}`;
+      const nameLower = pkg.name.toLowerCase();
+      const typeLower = (pkg.type || 'mod').toLowerCase();
+      const titleNorm = normalizeComparableText(pkg.title);
+      const descNorm = normalizeComparableText(pkg.short_desc);
+      const nameTitleKey = `${baseAuthor}::${nameLower}::${titleNorm}`;
+      const nameTypeKey = `${baseAuthor}::${nameLower}::${typeLower}`;
+      const crossKey = `${nameLower}::${typeLower}`;
+      const allowCrossAuthor = (crossAuthorNameTypeCounts.get(crossKey) || 0) <= 2;
+      const crossTitleKey =
+        titleNorm && titleNorm !== nameLower ? `${crossKey}::${titleNorm}` : '';
+      const crossDescKey = descNorm.length >= 15 ? `${crossKey}::${descNorm}` : '';
 
       const matchIdx =
         byId.get(idKey) ??
         (repoKey ? byRepo.get(repoKey) : undefined) ??
         byNameTitle.get(nameTitleKey) ??
-        ((nameTypeCounts.get(nameTypeKey) || 0) <= 2 ? byNameType.get(nameTypeKey) : undefined);
+        ((nameTypeCounts.get(nameTypeKey) || 0) <= 2 ? byNameType.get(nameTypeKey) : undefined) ??
+        (allowCrossAuthor && crossTitleKey
+          ? canCrossAuthorMerge(byCrossAuthorNameTypeTitle.get(crossTitleKey), pkg)
+          : undefined) ??
+        (allowCrossAuthor && crossDescKey
+          ? canCrossAuthorMerge(byCrossAuthorNameTypeDesc.get(crossDescKey), pkg)
+          : undefined);
 
       if (matchIdx !== undefined) {
         const merged = this.mergeDualSourcePackage(result[matchIdx], pkg);
@@ -2852,8 +3366,18 @@ export class PackageService {
         const mergedRepoKey = this.normalizeRepoComparisonKey(merged.repo_url);
         if (mergedRepoKey) byRepo.set(mergedRepoKey, matchIdx);
         const mergedBaseAuthor = normalizeBaseAuthor(merged.author);
-        byNameTitle.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.title || '').trim().toLowerCase()}`, matchIdx);
-        byNameType.set(`${mergedBaseAuthor}::${merged.name.toLowerCase()}::${(merged.type || 'mod').toLowerCase()}`, matchIdx);
+        const mergedNameLower = merged.name.toLowerCase();
+        const mergedTypeLower = (merged.type || 'mod').toLowerCase();
+        const mergedTitleNorm = normalizeComparableText(merged.title);
+        const mergedDescNorm = normalizeComparableText(merged.short_desc);
+        byNameTitle.set(`${mergedBaseAuthor}::${mergedNameLower}::${mergedTitleNorm}`, matchIdx);
+        byNameType.set(`${mergedBaseAuthor}::${mergedNameLower}::${mergedTypeLower}`, matchIdx);
+        if (mergedTitleNorm && mergedTitleNorm !== mergedNameLower) {
+          byCrossAuthorNameTypeTitle.set(`${mergedNameLower}::${mergedTypeLower}::${mergedTitleNorm}`, matchIdx);
+        }
+        if (mergedDescNorm.length >= 15) {
+          byCrossAuthorNameTypeDesc.set(`${mergedNameLower}::${mergedTypeLower}::${mergedDescNorm}`, matchIdx);
+        }
       } else {
         const idx = result.length;
         result.push(pkg);
@@ -2861,6 +3385,8 @@ export class PackageService {
         if (repoKey) byRepo.set(repoKey, idx);
         byNameTitle.set(nameTitleKey, idx);
         byNameType.set(nameTypeKey, idx);
+        if (crossTitleKey) byCrossAuthorNameTypeTitle.set(crossTitleKey, idx);
+        if (crossDescKey) byCrossAuthorNameTypeDesc.set(crossDescKey, idx);
       }
     }
 
@@ -3700,12 +4226,17 @@ export class PackageService {
         sessionStorage.removeItem('lh_boot_cache_v22');
         sessionStorage.removeItem('lh_boot_cache_v23');
         sessionStorage.removeItem('lh_boot_cache_v24');
+        sessionStorage.removeItem('lh_boot_cache_v25');
+        sessionStorage.removeItem('lh_boot_cache_v26');
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.removeItem('lh_active_promotions_v1');
       }
       if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
         caches.delete(BOOT_SYNC_CACHE_NAME).catch(() => {});
+        for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+          caches.delete(legacyName).catch(() => {});
+        }
       }
     } catch {
       // Ignore storage errors
@@ -3768,10 +4299,34 @@ export class PackageService {
         this.ensureLatestBlogPostLoaded(false, true);
       }
     }
+    const prevPackages = this._packages();
+    const prevByLowerId = new Map<string, LuantiPackage>();
+    const activeRowTagSet = new Set([
+      'jam_game_2026',
+      'gamejam',
+      ...this.activePromotions()
+        .filter(p => Boolean(p.row_enabled === true || p.row_enabled === 1 || (p.row_enabled as any) === '1'))
+        .flatMap(p => this.parseStringList(p.row_filter_tags))
+        .map(t => t.trim().toLowerCase())
+        .filter(Boolean)
+    ]);
+    const preservedPromoPackages: LuantiPackage[] = [];
+    for (const prev of prevPackages) {
+      if (!prev?.id) continue;
+      prevByLowerId.set(prev.id.toLowerCase(), prev);
+      if (
+        activeRowTagSet.size > 0 &&
+        Array.isArray(prev.tags) &&
+        prev.tags.some(t => activeRowTagSet.has(String(t || '').toLowerCase()))
+      ) {
+        preservedPromoPackages.push(prev);
+      }
+    }
+
     const rawPackages = Array.isArray(payload.packages) ? payload.packages : [];
     const rawRecentlyAdded = Array.isArray(payload.recentlyAdded) ? payload.recentlyAdded : [];
     const userPkgs = this.authService.currentUser()?.packages || [];
-    const combinedRaw = [...rawPackages, ...rawRecentlyAdded, ...userPkgs];
+    const combinedRaw = [...rawPackages, ...rawRecentlyAdded, ...userPkgs, ...preservedPromoPackages];
     const deduplicated = this.deduplicateCatalog(
       combinedRaw
         .filter((item: any) => item && (item.author || item.author_name || item.id) && item.name && item.status !== 'delisted' && item.status !== 'flagged')
@@ -3781,17 +4336,36 @@ export class PackageService {
     const normalizeTop10Entry = (item: any): LuantiPackage => {
       const norm = this.normalizePackage(item);
       const revDepCount = reverseDepMap.get(String(norm.name || '').toLowerCase()) || norm.reverse_dep_count || 0;
-      return revDepCount !== norm.reverse_dep_count ? { ...norm, reverse_dep_count: revDepCount } : norm;
+      const prev = prevByLowerId.get(norm.id.toLowerCase());
+      const mergedTags = prev?.tags?.length
+        ? this.mergePackageTagsPreservingExisting(norm.tags, prev.tags)
+        : norm.tags;
+      const mergedBadgeTags = prev?.badge_tags?.length
+        ? parseBadgeTagsArray([...(norm.badge_tags || []), ...prev.badge_tags])
+        : norm.badge_tags;
+      const mergedCdbDl = Math.max(norm.contentdb_downloads || 0, prev?.contentdb_downloads || 0);
+      const mergedLhDl = Math.max(norm.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
+      const mergedTotalDl = Math.max(norm.downloads || 0, prev?.downloads || 0, mergedCdbDl + mergedLhDl);
+      return {
+        ...norm,
+        ...(revDepCount !== norm.reverse_dep_count ? { reverse_dep_count: revDepCount } : {}),
+        contentdb_downloads: mergedCdbDl,
+        luantihub_downloads: mergedLhDl,
+        downloads: mergedTotalDl,
+        tags: mergedTags,
+        ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+      };
     };
 
     let normalizedRecent: LuantiPackage[] = [];
     const recentCreatedById = new Map<string, string>();
     if (rawRecentlyAdded.length > 0) {
-      normalizedRecent = rawRecentlyAdded.map((item: any) => {
-        const norm = normalizeTop10Entry(item);
-        return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
-      });
-      this._serverRecentlyAdded.set(normalizedRecent);
+      normalizedRecent = this.deduplicateCatalog(
+        rawRecentlyAdded.map((item: any) => {
+          const norm = normalizeTop10Entry(item);
+          return item?.created_at && !norm.created_at ? { ...norm, created_at: item.created_at } : norm;
+        })
+      );
       for (const r of normalizedRecent) {
         if (r.id && r.created_at) {
           recentCreatedById.set(r.id.toLowerCase(), r.created_at);
@@ -3811,18 +4385,80 @@ export class PackageService {
     };
 
     const normalized = deduplicated.map(pkg => {
+      const lowerId = pkg.id.toLowerCase();
+      const prev = prevByLowerId.get(lowerId);
       const revDepCount = reverseDepMap.get(String(pkg.name || '').toLowerCase()) || pkg.reverse_dep_count || 0;
-      const stampedCreatedAt = pickNewerCreatedIso(pkg.created_at, recentCreatedById.get(pkg.id.toLowerCase()));
-      if (revDepCount !== pkg.reverse_dep_count || (stampedCreatedAt && stampedCreatedAt !== pkg.created_at)) {
-        return {
+      const stampedCreatedAt = pickNewerCreatedIso(pkg.created_at, recentCreatedById.get(lowerId));
+      const mergedTags = prev?.tags?.length
+        ? this.mergePackageTagsPreservingExisting(pkg.tags, prev.tags)
+        : pkg.tags;
+      const mergedBadgeTags = prev?.badge_tags?.length
+        ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...prev.badge_tags])
+        : pkg.badge_tags;
+      const isPureGitBootPkg =
+        pkg.source === 'git' && !pkg.sources?.includes('official') && (pkg.contentdb_downloads || 0) === 0;
+      const mergedCdbDl = isPureGitBootPkg
+        ? 0
+        : Math.max(pkg.contentdb_downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.contentdb_downloads || 0));
+      const mergedLhDl = Math.max(pkg.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
+      const mergedTotalDl = isPureGitBootPkg
+        ? Math.max(pkg.downloads || 0, mergedLhDl)
+        : Math.max(pkg.downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.downloads || 0), mergedCdbDl + mergedLhDl);
+      const tagsChanged =
+        mergedTags.length !== (pkg.tags?.length || 0) ||
+        (mergedBadgeTags?.length || 0) !== (pkg.badge_tags?.length || 0);
+      const downloadsChanged =
+        mergedCdbDl !== (pkg.contentdb_downloads || 0) ||
+        mergedLhDl !== (pkg.luantihub_downloads || 0) ||
+        mergedTotalDl !== (pkg.downloads || 0);
+      if (
+        revDepCount !== pkg.reverse_dep_count ||
+        (stampedCreatedAt && stampedCreatedAt !== pkg.created_at) ||
+        tagsChanged ||
+        downloadsChanged
+      ) {
+        const nextPkg: LuantiPackage = {
           ...pkg,
           reverse_dep_count: revDepCount,
-          ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {})
+          contentdb_downloads: mergedCdbDl,
+          luantihub_downloads: mergedLhDl,
+          downloads: mergedTotalDl,
+          ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {}),
+          tags: mergedTags,
+          ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
         };
+        if (tagsChanged) {
+          nextPkg._searchBlob = this.buildSearchBlob(nextPkg);
+        }
+        return nextPkg;
       }
       return pkg;
     });
 
+    if (normalizedRecent.length > 0) {
+      const normalizedByLowerId = new Map<string, LuantiPackage>();
+      const normalizedByRepoKey = new Map<string, LuantiPackage>();
+      for (const p of normalized) {
+        normalizedByLowerId.set(p.id.toLowerCase(), p);
+        const rk = this.normalizeRepoComparisonKey(p.repo_url);
+        if (rk) normalizedByRepoKey.set(rk, p);
+      }
+      normalizedRecent = this.deduplicateCatalog(
+        normalizedRecent.map(r => {
+          const rRepo = this.normalizeRepoComparisonKey(r.repo_url);
+          const catalogMatch =
+            normalizedByLowerId.get(r.id.toLowerCase()) ||
+            (rRepo ? normalizedByRepoKey.get(rRepo) : undefined);
+          if (!catalogMatch) return r;
+          const merged = this.mergeDualSourcePackage(catalogMatch, r);
+          const preservedCreated = pickNewerCreatedIso(r.created_at, merged.created_at);
+          return preservedCreated ? { ...merged, created_at: preservedCreated } : merged;
+        })
+      );
+      this._serverRecentlyAdded.set(normalizedRecent);
+    }
+
+    this.promoSyncGeneration++;
     this._packages.set(normalized);
     this.reconcileFavoritesWithCatalog(normalized);
     const notifCandidates =
@@ -3902,23 +4538,44 @@ export class PackageService {
             (curr.banner && curr.banner !== 'logo.svg' ? curr.banner : freshMatch.banner) ||
             mergedShots[0] ||
             resolvedThumb;
+          const isPureGitFresh =
+            freshMatch.source === 'git' &&
+            !freshMatch.sources?.includes('official') &&
+            (freshMatch.contentdb_downloads || 0) === 0;
+          const nextCdbDl = isPureGitFresh
+            ? 0
+            : Math.max(curr._unhydratedSeed ? 0 : (curr.contentdb_downloads || 0), freshMatch.contentdb_downloads || 0);
+          const nextLhDl = Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0);
+          const nextTotalDl = Math.max(
+            curr._unhydratedSeed ? 0 : (curr.downloads || 0),
+            freshMatch.downloads || 0,
+            nextCdbDl + nextLhDl
+          );
+          const { _unhydratedSeed: _dropSeed, ...cleanCurr } = curr;
           return {
-            ...curr,
+            ...cleanCurr,
+            ...(curr._unhydratedSeed
+              ? {
+                  provider: freshMatch.provider || curr.provider,
+                  source: freshMatch.source,
+                  sources: freshMatch.sources
+                }
+              : {}),
             title: curr.title === curr.name && freshMatch.title ? freshMatch.title : curr.title,
             thumbnail: resolvedThumb,
             banner: resolvedBanner,
             screenshots: mergedShots.length > 0 ? mergedShots : (curr.screenshots || freshMatch.screenshots),
-            downloads: Math.max(curr.downloads || 0, freshMatch.downloads || 0),
-            contentdb_downloads: Math.max(curr.contentdb_downloads || 0, freshMatch.contentdb_downloads || 0),
-            luantihub_downloads: Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0),
+            downloads: nextTotalDl,
+            contentdb_downloads: nextCdbDl,
+            luantihub_downloads: nextLhDl,
             score: freshMatch.score || curr.score,
             release_id: freshMatch.release_id || curr.release_id,
             latest_commit_sha: freshMatch.latest_commit_sha || curr.latest_commit_sha,
             updated_at: freshMatch.updated_at || curr.updated_at,
             download_size: freshMatch.download_size || curr.download_size,
             file_size: freshMatch.file_size || curr.file_size,
-            tags: freshMatch.tags?.length ? freshMatch.tags : curr.tags,
-            badge_tags: freshMatch.badge_tags?.length ? freshMatch.badge_tags : curr.badge_tags
+            tags: this.mergePackageTagsPreservingExisting(freshMatch.tags, curr.tags),
+            badge_tags: parseBadgeTagsArray([...(freshMatch.badge_tags || []), ...(curr.badge_tags || [])])
           };
         });
       }
@@ -4156,7 +4813,7 @@ export class PackageService {
    * (for example on `localhost:4200` before redeploying the Cloudflare Worker).
    */
   private ensureRecentlyAddedLoaded(forceInTest = false): void {
-    if (this._serverRecentlyAdded().length > 0 || this.recentlyAddedInFlight) return;
+    if ((!forceInTest && this._serverRecentlyAdded().length > 0) || this.recentlyAddedInFlight) return;
     const isUnitTestEnv =
       typeof (globalThis as any).__karma__ !== 'undefined' ||
       typeof (globalThis as any).jasmine !== 'undefined' ||
@@ -4251,9 +4908,26 @@ export class PackageService {
                   pkg.license = detail.license || detail.media_license || pkg.license;
                   pkg.media_license = detail.media_license || detail.license || pkg.media_license;
                 }
-                if (typeof detail.downloads === 'number') {
-                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detail.downloads);
-                  pkg.downloads = Math.max(pkg.downloads || 0, pkg.contentdb_downloads + (pkg.luantihub_downloads || 0));
+                const detailCdbDl =
+                  typeof detail.contentdb_downloads === 'number'
+                    ? detail.contentdb_downloads
+                    : detail.contentdb_downloads === undefined &&
+                        typeof detail.downloads === 'number' &&
+                        (pkg.source !== 'git' || pkg.sources?.includes('official'))
+                      ? detail.downloads
+                      : undefined;
+                if (typeof detail.luantihub_downloads === 'number') {
+                  pkg.luantihub_downloads = Math.max(pkg.luantihub_downloads || 0, detail.luantihub_downloads);
+                }
+                if (typeof detailCdbDl === 'number') {
+                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detailCdbDl);
+                }
+                if (typeof detail.downloads === 'number' || typeof detailCdbDl === 'number') {
+                  pkg.downloads = Math.max(
+                    pkg.downloads || 0,
+                    typeof detail.contentdb_downloads === 'number' ? Number(detail.downloads || 0) : 0,
+                    (pkg.contentdb_downloads || 0) + (pkg.luantihub_downloads || 0)
+                  );
                 }
                 if (Array.isArray(detail.screenshots) && detail.screenshots.length > 0) {
                   const mergedShots = this.mergePackageScreenshots([pkg.banner, pkg.thumbnail], detail.screenshots, pkg.screenshots);
@@ -4740,12 +5414,12 @@ export class PackageService {
         top10Week: this.top10WeekPackages().map(stripHeavyFields),
         top10Today: this.top10TodayPackages().map(stripHeavyFields),
         recentlyAdded: this.recentlyAddedPackages().map(stripHeavyFields),
-        promotions: this._promotions(),
+        promotions: this.activePromotions(),
         latestBlogPost: this._latestBlogPost()
       };
       let existingTs = this.lastCatalogSyncAt || Date.now();
       try {
-        const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
+        const rawCached = sessionStorage.getItem('lh_boot_cache_v26');
         if (rawCached) {
           existingTs = JSON.parse(rawCached)?.ts || existingTs;
         }
@@ -4757,7 +5431,7 @@ export class PackageService {
   }
 
   /**
-   * Reads the persistent Service Worker CacheStorage (`lh-boot-sync-v1`) populated by
+   * Reads the persistent Service Worker CacheStorage (`lh-boot-sync-v2`) populated by
    * Periodic Background Sync (`periodicsync`), One-Off Background Sync (`sync`), or previous sessions.
    */
   private async readWarmBootCache(): Promise<{ ts: number; edge: boolean; payload: any } | null> {
@@ -4765,6 +5439,11 @@ export class PackageService {
       return null;
     }
     try {
+      if (typeof caches.delete === 'function') {
+        for (const legacyName of LEGACY_BOOT_SYNC_CACHE_NAMES) {
+          caches.delete(legacyName).catch(() => {});
+        }
+      }
       const cache = await caches.open(BOOT_SYNC_CACHE_NAME);
       if (this.hadLegacyBootCache) {
         this.hadLegacyBootCache = false;
@@ -4818,7 +5497,7 @@ export class PackageService {
       payloadJson = JSON.stringify(bootPayload);
       if (typeof sessionStorage !== 'undefined') {
         sessionStorage.setItem(
-          'lh_boot_cache_v24',
+          'lh_boot_cache_v26',
           `{"ts":${ts},"edge":${Boolean(this.edgeApiAvailable)},"payload":${payloadJson}}`
         );
       }
@@ -4988,7 +5667,9 @@ export class PackageService {
               sessionStorage.getItem('lh_boot_cache_v20') ||
               sessionStorage.getItem('lh_boot_cache_v21') ||
               sessionStorage.getItem('lh_boot_cache_v22') ||
-              sessionStorage.getItem('lh_boot_cache_v23')
+              sessionStorage.getItem('lh_boot_cache_v23') ||
+              sessionStorage.getItem('lh_boot_cache_v24') ||
+              sessionStorage.getItem('lh_boot_cache_v25')
             ) {
               this.hadLegacyBootCache = true;
               sessionStorage.removeItem('lh_boot_cache_v14');
@@ -5001,8 +5682,10 @@ export class PackageService {
               sessionStorage.removeItem('lh_boot_cache_v21');
               sessionStorage.removeItem('lh_boot_cache_v22');
               sessionStorage.removeItem('lh_boot_cache_v23');
+              sessionStorage.removeItem('lh_boot_cache_v24');
+              sessionStorage.removeItem('lh_boot_cache_v25');
             }
-            const rawCached = sessionStorage.getItem('lh_boot_cache_v24');
+            const rawCached = sessionStorage.getItem('lh_boot_cache_v26');
             if (rawCached) {
               const parsed = JSON.parse(rawCached) as { ts: number; edge: boolean; payload: any };
               if (parsed && parsed.payload && Date.now() - parsed.ts < 300_000) {
@@ -5049,8 +5732,11 @@ export class PackageService {
 
       let response: Response | null = null;
       try {
+        const isLocalBootEndpoint = apiUrl.includes('/api/packages/?boot=1');
         response = await fetch(apiUrl, {
-          headers: { 'Accept': 'application/json' },
+          headers: isLocalBootEndpoint
+            ? { 'Accept': 'application/json', 'ngsw-bypass': 'true' }
+            : { 'Accept': 'application/json' },
           ...(forceRefresh ? { cache: 'no-store' as RequestCache } : {})
         });
       } catch {
@@ -5245,6 +5931,62 @@ export class PackageService {
     }
   }
 
+  private applyCatalogPatchToPackageItem(
+    item: LuantiPackage,
+    patch: Partial<LuantiPackage>,
+    preserveNewerCreatedAt = false
+  ): LuantiPackage {
+    const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
+    const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(key);
+    const mergedTags =
+      patch.tags !== undefined
+        ? (isRecentlyMutated ? patch.tags : this.mergePackageTagsPreservingExisting(patch.tags, item.tags))
+        : item.tags;
+    const mergedBadgeTags =
+      patch.badge_tags !== undefined
+        ? (isRecentlyMutated
+            ? patch.badge_tags
+            : parseBadgeTagsArray([...(patch.badge_tags || []), ...(item.badge_tags || [])]))
+        : item.badge_tags;
+    let resolvedCreatedAt = patch.created_at ?? item.created_at;
+    if (preserveNewerCreatedAt) {
+      const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
+      const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
+      resolvedCreatedAt =
+        Number.isFinite(itemMs) && Number.isFinite(patchMs)
+          ? (itemMs >= patchMs ? item.created_at : patch.created_at)
+          : (item.created_at || patch.created_at);
+    }
+    const resolvedCdbDl =
+      patch.contentdb_downloads !== undefined || item.contentdb_downloads !== undefined
+        ? Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0))
+        : undefined;
+    const resolvedLhDl =
+      patch.luantihub_downloads !== undefined || item.luantihub_downloads !== undefined
+        ? Math.max(Number(patch.luantihub_downloads || 0), Number(item.luantihub_downloads || 0))
+        : undefined;
+    const resolvedTotalDl =
+      patch.downloads !== undefined || item.downloads !== undefined || resolvedCdbDl !== undefined || resolvedLhDl !== undefined
+        ? Math.max(
+            Number(patch.downloads || 0),
+            Number(item.downloads || 0),
+            (resolvedCdbDl || 0) + (resolvedLhDl || 0)
+          )
+        : undefined;
+    const merged: LuantiPackage = {
+      ...item,
+      ...patch,
+      ...(resolvedCdbDl !== undefined ? { contentdb_downloads: resolvedCdbDl } : {}),
+      ...(resolvedLhDl !== undefined ? { luantihub_downloads: resolvedLhDl } : {}),
+      ...(resolvedTotalDl !== undefined ? { downloads: resolvedTotalDl } : {}),
+      ...(resolvedCreatedAt ? { created_at: resolvedCreatedAt } : {}),
+      tags: mergedTags,
+      ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
+    };
+    merged._searchBlob = this.buildSearchBlob(merged);
+    return merged;
+  }
+
   private flushCatalogPatches(): void {
     if (this.catalogPatchTimer) {
       clearTimeout(this.catalogPatchTimer);
@@ -5254,36 +5996,38 @@ export class PackageService {
     const batch = new Map(this.pendingCatalogPatches);
     this.pendingCatalogPatches.clear();
 
-    this._packages.update(list =>
-      list.map(item => {
+    let anyRepoPatched = false;
+    for (const p of batch.values()) {
+      if (p.repo_url) {
+        anyRepoPatched = true;
+        break;
+      }
+    }
+
+    this._packages.update(list => {
+      const mapped = list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
         if (!patch) return item;
-        const merged = { ...item, ...patch };
-        merged._searchBlob = this.buildSearchBlob(merged);
-        return merged;
-      })
-    );
+        return this.applyCatalogPatchToPackageItem(item, patch, false);
+      });
+      return anyRepoPatched ? this.deduplicateCatalog(mapped) : mapped;
+    });
 
     const syncTop10 = (list: LuantiPackage[]) =>
       list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
-        return patch ? { ...item, ...patch } : item;
+        return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
       });
-    const syncRecentlyAdded = (list: LuantiPackage[]) =>
-      list.map(item => {
+    const syncRecentlyAdded = (list: LuantiPackage[]) => {
+      const mapped = list.map(item => {
         const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
         const patch = batch.get(key);
-        if (!patch) return item;
-        const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
-        const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
-        const preservedCreatedAt =
-          Number.isFinite(itemMs) && Number.isFinite(patchMs)
-            ? (itemMs >= patchMs ? item.created_at : patch.created_at)
-            : (item.created_at || patch.created_at);
-        return { ...item, ...patch, created_at: preservedCreatedAt };
+        return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
       });
+      return anyRepoPatched ? this.deduplicateCatalog(mapped) : mapped;
+    };
     this._serverTop10Today.update(syncTop10);
     this._serverTop10Week.update(syncTop10);
     this._serverRecentlyAdded.update(syncRecentlyAdded);
@@ -5291,7 +6035,44 @@ export class PackageService {
 
   private queueCatalogPatch(targetIdLower: string, patch: Partial<LuantiPackage>, flushImmediately = false): void {
     const existing = this.pendingCatalogPatches.get(targetIdLower);
-    this.pendingCatalogPatches.set(targetIdLower, existing ? { ...existing, ...patch } : patch);
+    if (existing) {
+      const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(targetIdLower);
+      const mergedTags =
+        patch.tags !== undefined || existing.tags !== undefined
+          ? (isRecentlyMutated && patch.tags !== undefined
+              ? patch.tags
+              : this.mergePackageTagsPreservingExisting(patch.tags, existing.tags))
+          : undefined;
+      const mergedBadgeTags =
+        patch.badge_tags !== undefined || existing.badge_tags !== undefined
+          ? (isRecentlyMutated && patch.badge_tags !== undefined
+              ? patch.badge_tags
+              : parseBadgeTagsArray([...(patch.badge_tags || []), ...(existing.badge_tags || [])]))
+          : undefined;
+      const mergedCdbDl =
+        patch.contentdb_downloads !== undefined || existing.contentdb_downloads !== undefined
+          ? Math.max(Number(patch.contentdb_downloads || 0), Number(existing.contentdb_downloads || 0))
+          : undefined;
+      const mergedLhDl =
+        patch.luantihub_downloads !== undefined || existing.luantihub_downloads !== undefined
+          ? Math.max(Number(patch.luantihub_downloads || 0), Number(existing.luantihub_downloads || 0))
+          : undefined;
+      const mergedTotalDl =
+        patch.downloads !== undefined || existing.downloads !== undefined || mergedCdbDl !== undefined || mergedLhDl !== undefined
+          ? Math.max(Number(patch.downloads || 0), Number(existing.downloads || 0), (mergedCdbDl || 0) + (mergedLhDl || 0))
+          : undefined;
+      this.pendingCatalogPatches.set(targetIdLower, {
+        ...existing,
+        ...patch,
+        ...(mergedCdbDl !== undefined ? { contentdb_downloads: mergedCdbDl } : {}),
+        ...(mergedLhDl !== undefined ? { luantihub_downloads: mergedLhDl } : {}),
+        ...(mergedTotalDl !== undefined ? { downloads: mergedTotalDl } : {}),
+        ...(mergedTags !== undefined ? { tags: mergedTags } : {}),
+        ...(mergedBadgeTags !== undefined ? { badge_tags: mergedBadgeTags } : {})
+      });
+    } else {
+      this.pendingCatalogPatches.set(targetIdLower, patch);
+    }
     if (flushImmediately || this.activeHydrationWorkers === 0) {
       this.flushCatalogPatches();
       return;
@@ -5336,14 +6117,31 @@ export class PackageService {
 
   private async hydratePackageBatch(batch: LuantiPackage[]): Promise<void> {
     if (!batch || batch.length === 0) return;
-    const ids = batch.map(p => p.id || `${p.author}/${p.name}`).filter(Boolean);
+    const rawIds = batch.map(p => p.id || `${p.author}/${p.name}`).filter(Boolean);
+    const dedupedByLower = new Map<string, string>();
+    for (const id of rawIds) {
+      const lower = id.toLowerCase();
+      if (!dedupedByLower.has(lower)) {
+        dedupedByLower.set(lower, id);
+      }
+    }
+    const ids = Array.from(dedupedByLower.values()).sort((a, b) =>
+      a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+    const encodedIdsParam = encodeURIComponent(ids.join(','));
     const unresolved: LuantiPackage[] = [];
     try {
-      const res = await fetch('/api/packages/hydrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids })
-      });
+      const res =
+        encodedIdsParam.length > 0 && encodedIdsParam.length <= 1500
+          ? await fetch(`/api/packages/hydrate?ids=${encodedIdsParam}&ngsw-bypass=true`, {
+              method: 'GET',
+              headers: { Accept: 'application/json' }
+            })
+          : await fetch('/api/packages/hydrate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ids })
+            });
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const json = await res.json();
         const hydratedMap: Record<string, any> = (json && typeof json.hydrated === 'object' && json.hydrated) || {};
@@ -5456,6 +6254,10 @@ export class PackageService {
 
         const swRatingsUpdates: Record<string, { score?: number; review_thread_counts?: any; rating_checked?: boolean }> = {};
         let hasSwRatingsUpdates = false;
+        const liveByLowerId = new Map<string, LuantiPackage>();
+        for (const p of this._packages()) {
+          liveByLowerId.set((p.id || `${p.author}/${p.name}`).toLowerCase(), p);
+        }
 
         for (const pkg of batch) {
           const lowerKey = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
@@ -5465,16 +6267,43 @@ export class PackageService {
             continue;
           }
 
-          const cdbDl = Math.max(Number(pkg.contentdb_downloads || 0), Number(h.contentdb_downloads || 0));
-          const lhDl = Math.max(Number(pkg.luantihub_downloads || 0), Number(h.luantihub_downloads || 0));
-          const totalDl = Math.max(Number(pkg.downloads || 0), Number(h.downloads || 0), cdbDl + lhDl);
+          const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
+          const livePkgForHydrate = liveByLowerId.get(lowerKey);
+          const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerKey] || 0);
+          const cdbDl = Math.max(
+            Number(pkg.contentdb_downloads || 0),
+            Number(livePkgForHydrate?.contentdb_downloads || 0),
+            Number(prevMetaForHydrate?.contentdb_downloads || 0),
+            Number(h.contentdb_downloads || 0)
+          );
+          const lhDl = Math.max(
+            Number(pkg.luantihub_downloads || 0),
+            Number(livePkgForHydrate?.luantihub_downloads || 0),
+            Number(prevMetaForHydrate?.luantihub_downloads || 0),
+            Number(h.luantihub_downloads || 0),
+            localUserDlCount
+          );
+          const totalDl = Math.max(
+            Number(pkg.downloads || 0),
+            Number(livePkgForHydrate?.downloads || 0),
+            Number(prevMetaForHydrate?.downloads || 0),
+            Number(h.downloads || 0),
+            cdbDl + lhDl
+          );
           const lic = h.license || h.media_license || pkg.license || '';
           const mediaLic = h.media_license || h.license || pkg.media_license || '';
-          const tags = Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : pkg.tags;
-          const badgeTags =
-            Array.isArray(h.badge_tags) && h.badge_tags.length > 0
-              ? parseBadgeTagsArray(h.badge_tags)
-              : (pkg.badge_tags && pkg.badge_tags.length > 0 ? parseBadgeTagsArray(pkg.badge_tags) : undefined);
+          const baseTags = this.mergePackageTagsPreservingExisting(
+            Array.isArray(h.tags) && h.tags.length > 0 ? h.tags : undefined,
+            pkg.tags,
+            livePkgForHydrate?.tags,
+            prevMetaForHydrate?.tags
+          );
+          const mergedBadgeTags = parseBadgeTagsArray([
+            ...(Array.isArray(h.badge_tags) ? h.badge_tags : []),
+            ...(pkg.badge_tags || []),
+            ...(livePkgForHydrate?.badge_tags || []),
+            ...(prevMetaForHydrate?.badge_tags || [])
+          ]);
           const minVer = h.min_minetest_version || pkg.min_minetest_version || '5.0.0';
           const sizeFormatted = h.file_size || this.formatDownloadSize(h.download_size) || pkg.file_size;
           const resolvedVideo = this.extractEmbeddedVideo(
@@ -5484,6 +6313,20 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
+          const jamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+            repoUrl,
+            baseTags,
+            mergedBadgeTags,
+            pkg.sources || [pkg.source]
+          );
+          const tags = jamOverlay.tags;
+          const badgeTags = jamOverlay.badgeTags;
+          if (jamOverlay.matchedJam) {
+            this.persistPromotionalTagsForPackage(lowerKey, tags, badgeTags, {
+              repoUrl,
+              sources: jamOverlay.sources
+            });
+          }
           const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail]
             .map(u => sanitizePackageImageUrl(u))
             .find(u => Boolean(u) && this.isGitScreenshotUrl(u));
@@ -5565,6 +6408,12 @@ export class PackageService {
             ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
             tags,
             ...(badgeTags && badgeTags.length > 0 ? { badge_tags: badgeTags } : {}),
+            ...(jamOverlay.matchedJam && jamOverlay.sources?.length
+              ? {
+                  sources: jamOverlay.sources,
+                  source: jamOverlay.sources.includes('git') ? 'git' : pkg.source
+                }
+              : {}),
             min_minetest_version: minVer,
             file_size: sizeFormatted,
             video_url: resolvedVideo.video_url,
@@ -5619,35 +6468,30 @@ export class PackageService {
             typeof (globalThis as any).vi !== 'undefined' ||
             typeof (globalThis as any).__vitest_worker__ !== 'undefined';
           if (isUnitTestEnv) {
-            this._packages.update(list =>
-              list.map(item => {
+            const hasHydratedRepoPatch = Array.from(updatesByLowerId.values()).some(p => Boolean(p.repo_url));
+            this._packages.update(list => {
+              const mapped = list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
                 if (!patch) return item;
-                const merged = { ...item, ...patch };
-                merged._searchBlob = this.buildSearchBlob(merged);
-                return merged;
-              })
-            );
+                return this.applyCatalogPatchToPackageItem(item, patch, false);
+              });
+              return hasHydratedRepoPatch ? this.deduplicateCatalog(mapped) : mapped;
+            });
             const patchTopList = (list: LuantiPackage[]) =>
               list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
-                return patch ? { ...item, ...patch } : item;
+                return patch ? this.applyCatalogPatchToPackageItem(item, patch, false) : item;
               });
-            const patchRecentlyAddedList = (list: LuantiPackage[]) =>
-              list.map(item => {
+            const patchRecentlyAddedList = (list: LuantiPackage[]) => {
+              const mapped = list.map(item => {
                 const lowerKey = (item.id || `${item.author}/${item.name}`).toLowerCase();
                 const patch = updatesByLowerId.get(lowerKey);
-                if (!patch) return item;
-                const itemMs = item.created_at ? Date.parse(String(item.created_at)) : NaN;
-                const patchMs = patch.created_at ? Date.parse(String(patch.created_at)) : NaN;
-                const preservedCreatedAt =
-                  Number.isFinite(itemMs) && Number.isFinite(patchMs)
-                    ? (itemMs >= patchMs ? item.created_at : patch.created_at)
-                    : (item.created_at || patch.created_at);
-                return { ...item, ...patch, created_at: preservedCreatedAt };
+                return patch ? this.applyCatalogPatchToPackageItem(item, patch, true) : item;
               });
+              return hasHydratedRepoPatch ? this.deduplicateCatalog(mapped) : mapped;
+            };
             this._serverTop10Today.update(patchTopList);
             this._serverTop10Week.update(patchTopList);
             this._serverRecentlyAdded.update(patchRecentlyAddedList);
@@ -6391,23 +7235,109 @@ export class PackageService {
     this.settingsService.recordLocalDownload(pkg.id);
 
     const targetIdLower = (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
+    const nextSeq = ++this.mutationSeq;
+    this.recentlyMutatedPkgKeys.set(targetIdLower, { ts: Date.now(), seq: nextSeq });
+    this.deepHydratedIds.delete(targetIdLower);
+    this.inFlightDetailsCache.delete(targetIdLower);
+    this.inFlightDetailsCache.delete(`${targetIdLower}::deep`);
+    this.inFlightDetailsCache.delete(`${targetIdLower}::light`);
+
+    const localUserDlCount = Number(this.settingsService.downloadedPackages()[targetIdLower] || 0);
+    const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
+    const activeCurrent = this._activePackage();
+    const activeMatch =
+      activeCurrent &&
+      (activeCurrent.id || `${activeCurrent.author}/${activeCurrent.name}`).toLowerCase() === targetIdLower
+        ? activeCurrent
+        : null;
+    const catalogMatch = this._packages().find(
+      p => (p.id || `${p.author}/${p.name}`).toLowerCase() === targetIdLower
+    );
+    const baseLhDownloads = Math.max(
+      Number(pkg.luantihub_downloads || 0),
+      Number(activeMatch?.luantihub_downloads || 0),
+      Number(catalogMatch?.luantihub_downloads || 0),
+      Number(prevMeta.luantihub_downloads || 0)
+    );
+    const latestLhDownloads = Math.max(baseLhDownloads + 1, localUserDlCount);
+    const isPureGitTarget =
+      pkg.source === 'git' &&
+      !pkg.sources?.includes('official') &&
+      !activeMatch?.sources?.includes('official') &&
+      !catalogMatch?.sources?.includes('official');
+    const latestCdbDownloads = isPureGitTarget
+      ? 0
+      : Math.max(
+          0,
+          Number(
+            pkg.contentdb_downloads ??
+              activeMatch?.contentdb_downloads ??
+              catalogMatch?.contentdb_downloads ??
+              prevMeta.contentdb_downloads ??
+              Math.max(0, (pkg.downloads || 0) - (pkg.luantihub_downloads || 0))
+          ) || 0
+        );
+    const latestTotalDownloads = Math.max(
+      isPureGitTarget ? 0 : Number(pkg.downloads || 0),
+      isPureGitTarget ? 0 : Number(activeMatch?.downloads || 0),
+      isPureGitTarget ? 0 : Number(catalogMatch?.downloads || 0),
+      isPureGitTarget ? 0 : Number(prevMeta.downloads || 0),
+      latestCdbDownloads + latestLhDownloads
+    );
+
     const bumpCounters = (item: LuantiPackage): LuantiPackage => {
-      const nextLh = (item.luantihub_downloads || 0) + 1;
-      const cdb = item.contentdb_downloads ?? Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0));
+      const itemIsPureGit = item.source === 'git' && !item.sources?.includes('official');
+      const cdb = itemIsPureGit
+        ? 0
+        : Math.max(
+            latestCdbDownloads,
+            Number(
+              item.contentdb_downloads ??
+                Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0))
+            ) || 0
+          );
+      const total = itemIsPureGit
+        ? Math.max(latestTotalDownloads, latestLhDownloads)
+        : Math.max(item.downloads || 0, latestTotalDownloads, cdb + latestLhDownloads);
       return {
         ...item,
         contentdb_downloads: cdb,
-        luantihub_downloads: nextLh,
-        downloads: cdb + nextLh
+        luantihub_downloads: latestLhDownloads,
+        downloads: total
       };
     };
 
+    const bumpList = (list: LuantiPackage[]) =>
+      list.map(item => ((item.id || `${item.author}/${item.name}`).toLowerCase() === targetIdLower ? bumpCounters(item) : item));
+
     this._activePackage.update(current =>
-      current && (current.id || '').toLowerCase() === targetIdLower ? bumpCounters(current) : current
+      current && (current.id || `${current.author}/${current.name}`).toLowerCase() === targetIdLower
+        ? bumpCounters(current)
+        : current
     );
-    this._packages.update(list =>
-      list.map(item => ((item.id || '').toLowerCase() === targetIdLower ? bumpCounters(item) : item))
-    );
+    this._packages.update(bumpList);
+    this._serverRecentlyAdded.update(bumpList);
+    this._serverTop10Today.update(bumpList);
+    this._serverTop10Week.update(bumpList);
+
+    const pendingPatch = this.pendingCatalogPatches.get(targetIdLower);
+    if (pendingPatch) {
+      this.pendingCatalogPatches.set(targetIdLower, {
+        ...pendingPatch,
+        contentdb_downloads: Math.max(Number(pendingPatch.contentdb_downloads || 0), latestCdbDownloads),
+        luantihub_downloads: Math.max(Number(pendingPatch.luantihub_downloads || 0), latestLhDownloads),
+        downloads: Math.max(Number(pendingPatch.downloads || 0), latestTotalDownloads)
+      });
+    }
+
+    this.hydratedMetaCache.set(targetIdLower, {
+      ...prevMeta,
+      contentdb_downloads: Math.max(Number(prevMeta.contentdb_downloads || 0), latestCdbDownloads),
+      luantihub_downloads: latestLhDownloads,
+      downloads: latestTotalDownloads
+    });
+    this.scheduleHydratedMetaPersist();
+    this.scheduleBootCachePersist();
 
     if (!this.edgeApiAvailable) return;
     const url = `/api/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/download?reason=web`;
@@ -6873,6 +7803,7 @@ export class PackageService {
       let unwrapAuthor = false;
       const pkgDetailMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(?:for-client\/.*)?$/);
       const pkgSubMatch = cleanPath.match(/^\/packages\/([^/?#]+)\/([^/?#]+)\/(dependencies|releases|reviews)\/?$/);
+      const pkgListQueryMatch = cleanPath.match(/^\/packages\/?\?(.+)$/);
       const userMatch = cleanPath.match(/^\/users\/([^/?#]+)\/?$/);
 
       if (pkgDetailMatch) {
@@ -6880,6 +7811,15 @@ export class PackageService {
       } else if (pkgSubMatch) {
         const sub = pkgSubMatch[3];
         edgeRoute = `/api/packages/${pkgSubMatch[1]}/${pkgSubMatch[2]}/${sub}${sub === 'dependencies' ? '/' : ''}`;
+      } else if (pkgListQueryMatch) {
+        let queryParams = pkgListQueryMatch[1];
+        if (!queryParams.includes('client=')) {
+          queryParams += '&client=web';
+        }
+        if (!queryParams.includes('ngsw-bypass=')) {
+          queryParams += '&ngsw-bypass=true';
+        }
+        edgeRoute = `/api/packages/?${queryParams}`;
       } else if (userMatch) {
         edgeRoute = `/api/authors/${userMatch[1]}`;
         unwrapAuthor = true;
@@ -6891,7 +7831,12 @@ export class PackageService {
         return null;
       }
       try {
-        const res = await fetch(edgeRoute, { headers: { Accept: 'application/json' } });
+        const res = await fetch(edgeRoute, {
+          headers: {
+            Accept: 'application/json',
+            ...(pkgListQueryMatch ? { 'ngsw-bypass': 'true' } : {})
+          }
+        });
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
           const json = await res.json();
           return unwrapAuthor ? (json?.author || json) : json;
@@ -6952,85 +7897,27 @@ export class PackageService {
   }
 
   /**
-   * Shared DRY helper: returns true if `url` points to a direct HTML5 video file (`.mp4`, `.webm`, `.ogg`, `.ogv`).
+   * Shared DRY helper: returns true strictly when `url` is a verified `https://` direct HTML5 open video file
+   * (`.mp4`, `.webm`, `.ogg`, `.ogv`) on a public non-tunnel host.
    */
   isDirectVideoUrl(url?: string): boolean {
-    if (!url) return false;
-    const clean = url.split('?')[0].toLowerCase();
-    return clean.endsWith('.mp4') || clean.endsWith('.webm') || clean.endsWith('.ogg') || clean.endsWith('.ogv');
+    return isSafeDirectVideoUrl(url);
   }
 
   /**
-   * Shared DRY helper: builds an embeddable iframe URL for YouTube (`/watch`, `/shorts/`, `/live/`, `/embed/`, `youtu.be`),
-   * PeerTube (`/videos/watch/`, `/w/`, `/videos/embed/`), and Vimeo.
+   * Shared DRY helper: builds a strictly allowlisted `https://` embed URL for verified video providers
+   * (YouTube/Invidious/Piped -> `youtube-nocookie.com`, Vimeo `dnt=1`, PeerTube UUIDs, Twitch,
+   * Dailymotion, Streamable, Odysee, Bilibili). Never falls back to returning an unverified `rawUrl`.
    */
   buildVideoEmbedUrl(
     rawUrl?: string,
     options: { autoplay?: boolean; mute?: boolean; minimalControls?: boolean; startSeconds?: number } = {}
   ): string | null {
-    if (!rawUrl) return null;
-    try {
-      const u = new URL(rawUrl);
-      const host = u.hostname.toLowerCase();
-      const autoplay = options.autoplay !== false ? '1' : '0';
-      const mute = options.mute ? '1' : '0';
-      const minimal = Boolean(options.minimalControls);
-      const startSec = Number.isFinite(options.startSeconds) && (options.startSeconds || 0) > 0
-        ? Math.floor(Number(options.startSeconds))
-        : 0;
-
-      const extractYoutubeId = (): string | null => {
-        if (host === 'youtu.be') {
-          return u.pathname.split('/').filter(Boolean)[0] || null;
-        }
-        if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-          const v = u.searchParams.get('v');
-          if (v) return v;
-          const parts = u.pathname.split('/').filter(Boolean);
-          if (parts.length >= 2 && ['embed', 'shorts', 'live', 'v'].includes(parts[0].toLowerCase())) {
-            return parts[1];
-          }
-        }
-        return null;
-      };
-
-      const ytId = extractYoutubeId();
-      if (ytId) {
-        const enc = encodeURIComponent(ytId);
-        const startParam = startSec > 0 ? `&start=${startSec}` : '';
-        if (minimal) {
-          return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}&mute=${mute}&controls=0&disablekb=1&fs=0&iv_load_policy=3&cc_load_policy=0&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&loop=1&playlist=${enc}${startParam}`;
-        }
-        return `https://www.youtube-nocookie.com/embed/${enc}?autoplay=${autoplay}${options.mute ? '&mute=1' : ''}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1${startParam}`;
-      }
-
-      if (host.includes('vimeo.com')) {
-        const id = u.pathname.split('/').filter(Boolean).pop();
-        if (id && /^\d+$/.test(id)) {
-          const vimeoHash = startSec > 0 ? `#t=${startSec}s` : '';
-          if (minimal) {
-            return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}&muted=${mute}&background=1&controls=0&title=0&byline=0&portrait=0${vimeoHash}`;
-          }
-          return `https://player.vimeo.com/video/${id}?autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${vimeoHash}`;
-        }
-      }
-
-      if (u.pathname.includes('/videos/watch/') || u.pathname.startsWith('/w/') || u.pathname.includes('/videos/embed/')) {
-        const embedBase = u.pathname.startsWith('/w/')
-          ? `${u.origin}${u.pathname.replace(/^\/w\//, '/videos/embed/')}`
-          : rawUrl.replace('/videos/watch/', '/videos/embed/');
-        const sep = embedBase.includes('?') ? '&' : '?';
-        const startParam = startSec > 0 ? `&start=${startSec}s` : '';
-        if (minimal) {
-          return `${embedBase}${sep}autoplay=${autoplay}&muted=${mute}&controls=0&title=0&warningTitle=0&peertubeLink=0${startParam}`;
-        }
-        return `${embedBase}${sep}autoplay=${autoplay}${options.mute ? '&muted=1' : ''}${startParam}`;
-      }
-
-      return minimal ? null : rawUrl;
-    } catch {
-      return null;
-    }
+    const parentHostname =
+      typeof window !== 'undefined' && window.location?.hostname
+        ? window.location.hostname
+        : 'luantihub.org';
+    return buildSafeVideoEmbedUrl(rawUrl, { ...options, parentHostname });
   }
 
   private readonly warmedVideoOrigins = new Set<string>();
@@ -7038,14 +7925,19 @@ export class PackageService {
   private readonly preloadedVideoThumbs = new Set<string>();
 
   /**
-   * Pre-warms DNS/TCP/TLS connections (`<link rel="preconnect">`) for a package's video host,
-   * preloads its video thumbnail image, and (when `eagerDirectPreload` is true on `mouseenter`)
-   * injects a `<link rel="preload" as="video" fetchpriority="low">` for direct `.mp4`/`.webm` URLs.
+   * Pre-warms DNS/TCP/TLS connections (`<link rel="preconnect">`) for a package's verified HTTPS video host,
+   * preloads its HTTPS video thumbnail image, and (when `eagerDirectPreload` is true on `mouseenter`)
+   * injects a `<link rel="preload" as="video" fetchpriority="low">` for verified direct `.mp4`/`.webm` URLs.
    */
   warmUpVideoPreview(rawVideoUrl?: string, videoThumbUrl?: string, eagerDirectPreload = false): void {
     if (typeof document === 'undefined' || !document.head) return;
 
-    if (videoThumbUrl && /^https?:\/\//i.test(videoThumbUrl) && !this.preloadedVideoThumbs.has(videoThumbUrl)) {
+    if (
+      videoThumbUrl &&
+      /^https:\/\//i.test(videoThumbUrl) &&
+      !isUntrustedTunnelOrPrivateHost(videoThumbUrl) &&
+      !this.preloadedVideoThumbs.has(videoThumbUrl)
+    ) {
       if (this.preloadedVideoThumbs.size < 40) {
         this.preloadedVideoThumbs.add(videoThumbUrl);
         try {
@@ -7060,15 +7952,21 @@ export class PackageService {
 
     if (!rawVideoUrl) return;
     try {
-      const u = new URL(rawVideoUrl);
+      const isDirect = this.isDirectVideoUrl(rawVideoUrl);
+      const safeEmbedUrl = isDirect ? null : this.buildVideoEmbedUrl(rawVideoUrl, { autoplay: false });
+      const verifiedTarget = isDirect ? rawVideoUrl : safeEmbedUrl;
+      if (!verifiedTarget) return;
+
+      const u = new URL(verifiedTarget);
+      if (u.protocol !== 'https:' || isUntrustedTunnelOrPrivateHost(u.hostname)) return;
       const host = u.hostname.toLowerCase();
       const originsToWarm: string[] = [];
 
-      if (host === 'youtu.be' || host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-        originsToWarm.push('https://www.youtube-nocookie.com', 'https://i.ytimg.com', 'https://www.google.com');
-      } else if (host.includes('vimeo.com')) {
+      if (host === 'www.youtube-nocookie.com' || host === 'youtube-nocookie.com') {
+        originsToWarm.push('https://www.youtube-nocookie.com', 'https://i.ytimg.com');
+      } else if (host === 'player.vimeo.com') {
         originsToWarm.push('https://player.vimeo.com', 'https://f.vimeocdn.com');
-      } else if (u.origin && /^https?:\/\//i.test(u.origin)) {
+      } else if (u.origin && u.origin.startsWith('https://')) {
         originsToWarm.push(u.origin);
       }
 
@@ -7083,7 +7981,7 @@ export class PackageService {
         document.head.appendChild(link);
       }
 
-      if (eagerDirectPreload && this.isDirectVideoUrl(rawVideoUrl)) {
+      if (eagerDirectPreload && isDirect) {
         const cleanHref = u.href;
         if (!this.preloadedDirectVideos.has(cleanHref) && this.preloadedDirectVideos.size < 8) {
           this.preloadedDirectVideos.add(cleanHref);
@@ -7201,27 +8099,7 @@ export class PackageService {
   }
 
   private detectSpdxFromLicenseText(raw: string): string | undefined {
-    if (!raw) return undefined;
-    const text = raw.slice(0, 2000);
-    if (/MIT License|Permission is hereby granted, free of charge/i.test(text)) return 'MIT';
-    if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2\.1/i.test(text)) return 'LGPL-2.1-only';
-    if (/GNU LESSER GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'LGPL-3.0-only';
-    if (/GNU AFFERO GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'AGPL-3.0-only';
-    if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 3/i.test(text)) return 'GPL-3.0-only';
-    if (/GNU GENERAL PUBLIC LICENSE[\s\S]{0,120}Version 2/i.test(text)) return 'GPL-2.0-only';
-    if (/Apache License[\s\S]{0,80}Version 2\.0/i.test(text)) return 'Apache-2.0';
-    if (/Mozilla Public License[\s\S]{0,60}2\.0/i.test(text)) return 'MPL-2.0';
-    if (/Creative Commons Attribution-ShareAlike 4\.0|CC-BY-SA-4\.0/i.test(text)) return 'CC-BY-SA-4.0';
-    if (/Creative Commons Attribution-ShareAlike 3\.0|CC-BY-SA-3\.0/i.test(text)) return 'CC-BY-SA-3.0';
-    if (/Creative Commons Attribution 4\.0|CC-BY-4\.0/i.test(text)) return 'CC-BY-4\.0';
-    if (/CC0 1\.0 Universal|Public Domain Dedication/i.test(text)) return 'CC0-1.0';
-    if (/The Unlicense|unlicense\.org/i.test(text)) return 'Unlicense';
-    if (/DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE|WTFPL/i.test(text)) return 'WTFPL';
-    if (/zlib License|altered source versions must be plainly marked/i.test(text)) return 'Zlib';
-    if (/Redistribution and use in source and binary forms/i.test(text)) {
-      return /Neither the name of/i.test(text) ? 'BSD-3-Clause' : 'BSD-2-Clause';
-    }
-    return undefined;
+    return sharedDetectSpdxFromLicenseText(raw);
   }
 
   normalizeGitRepoUrl(rawUrl?: string): string | undefined {
@@ -7395,42 +8273,16 @@ export class PackageService {
           const confRes = await fetch(confUrl);
           if (confRes.ok) {
             const confText = await confRes.text();
-            const getVal = (key: string): string => {
-              for (const rawLine of confText.split(/\r?\n/)) {
-                const line = rawLine.trim();
-                if (!line || line.startsWith('#')) continue;
-                const eqIdx = line.indexOf('=');
-                if (eqIdx === -1) continue;
-                const k = line.slice(0, eqIdx).trim();
-                if (k.toLowerCase() === key.toLowerCase()) {
-                  let val = line.slice(eqIdx + 1).trim();
-                  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                    val = val.slice(1, -1).trim();
-                  }
-                  return val;
-                }
-              }
-              return '';
-            };
-            const cleanDep = (s: string): string => {
-              return s
-                .trim()
-                .replace(/^["']|["']$/g, '')
-                .replace(/\?$/, '')
-                .split(/\s+#/)[0]
-                .trim();
-            };
-            const depStr = getVal('depends');
-            const optStr = getVal('optional_depends');
-            if (depStr) {
-              depStr.split(',').map(cleanDep).filter(Boolean).forEach(d => deps.push(d));
+            const parsedConf = parseLuantiConf(confText);
+            for (const d of parseLuantiConfList(parsedConf['depends'])) {
+              deps.push(d);
             }
-            if (optStr) {
-              optStr.split(',').map(cleanDep).filter(Boolean).forEach(d => optDeps.push(d));
+            for (const d of parseLuantiConfList(parsedConf['optional_depends'])) {
+              optDeps.push(d);
             }
-            license = getVal('license') || undefined;
-            mediaLicense = getVal('media_license') || undefined;
-            minVersion = getVal('min_minetest_version') || undefined;
+            license = parsedConf['license'] || undefined;
+            mediaLicense = parsedConf['media_license'] || undefined;
+            minVersion = parsedConf['min_minetest_version'] || undefined;
           }
         } catch {
           // Ignore error reading conf file
@@ -7507,7 +8359,7 @@ export class PackageService {
     const startMutationSeq = this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0;
     const work = (async () => {
       if (deepFetch) {
-        this._isLoadingDetails.set(true);
+        this.beginLoadingDetails();
       }
       try {
         this.hydratedIds.add(cacheKey);
@@ -8011,20 +8863,58 @@ export class PackageService {
           }
         }
 
+        const cachedMetaForDownloads = this.hydratedMetaCache.get(cacheKey);
+        const liveCatalogPkgForDownloads = this._packages().find(
+          p =>
+            (p.id || `${p.author}/${p.name}`).toLowerCase() === cacheKey ||
+            (p.author.toLowerCase() === (pkg.author || '').toLowerCase() &&
+              p.name.toLowerCase() === (pkg.name || '').toLowerCase())
+        );
+        const dataSources: PackageSource[] = Array.isArray(data.sources)
+          ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
+          : [];
         const hasSplitDownloads = data.contentdb_downloads !== undefined || data.luantihub_downloads !== undefined;
-        const resolvedCdbDownloads = hasSplitDownloads
-          ? Math.max(0, Number(data.contentdb_downloads || 0))
-          : (pkg.source !== 'git' || pkg.sources?.includes('official')
-              ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
-              : (pkg.contentdb_downloads || 0));
+        const isAuthoritativePureGit =
+          hasSplitDownloads &&
+          Number(data.contentdb_downloads || 0) === 0 &&
+          ((dataSources.length > 0 && !dataSources.includes('official')) ||
+            (dataSources.length === 0 &&
+              data.source === 'git' &&
+              !liveCatalogPkgForDownloads?.sources?.includes('official')));
+        const resolvedCdbDownloads = isAuthoritativePureGit
+          ? 0
+          : Math.max(
+              hasSplitDownloads
+                ? Math.max(0, Number(data.contentdb_downloads || 0))
+                : (!pkg._unhydratedSeed && (pkg.source !== 'git' || pkg.sources?.includes('official'))
+                    ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
+                    : (pkg._unhydratedSeed ? 0 : (pkg.contentdb_downloads || 0))),
+              pkg._unhydratedSeed ? 0 : Number(pkg.contentdb_downloads || 0),
+              Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
+              Number(cachedMetaForDownloads?.contentdb_downloads || 0)
+            );
         const localUserDlCount = Number(this.settingsService.downloadedPackages()[cacheKey] || 0);
-        const resolvedLhDownloads = data.luantihub_downloads !== undefined
-          ? Math.max(0, Number(data.luantihub_downloads) || 0)
-          : Math.max(Number(pkg.luantihub_downloads ?? 0) || 0, localUserDlCount);
-        const hasAuthoritativeDownloads = data.downloads !== undefined || data.downloads_count !== undefined || hasSplitDownloads;
-        const resolvedDownloads = hasAuthoritativeDownloads
-          ? Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(data.downloads ?? data.downloads_count ?? 0) || 0)
-          : Math.max(resolvedCdbDownloads + resolvedLhDownloads, Number(pkg.downloads || 0));
+        const resolvedLhDownloads = Math.max(
+          0,
+          Number(data.luantihub_downloads ?? 0) || 0,
+          Number(pkg.luantihub_downloads ?? 0) || 0,
+          Number(liveCatalogPkgForDownloads?.luantihub_downloads ?? 0) || 0,
+          Number(cachedMetaForDownloads?.luantihub_downloads ?? 0) || 0,
+          localUserDlCount
+        );
+        const resolvedDownloads = isAuthoritativePureGit
+          ? Math.max(
+              resolvedLhDownloads,
+              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+              Number(liveCatalogPkgForDownloads?.downloads || 0)
+            )
+          : Math.max(
+              resolvedCdbDownloads + resolvedLhDownloads,
+              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+              pkg._unhydratedSeed ? 0 : Number(pkg.downloads || 0),
+              Number(liveCatalogPkgForDownloads?.downloads || 0),
+              Number(cachedMetaForDownloads?.downloads || 0)
+            );
 
         const reviewThreadCounts =
           parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
@@ -8113,12 +9003,10 @@ export class PackageService {
 
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
-        const dataSources: PackageSource[] = Array.isArray(data.sources)
-          ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
-          : [];
-        const mergedSources = Array.from(
-          new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources])
-        );
+        let mergedSources =
+          pkg._unhydratedSeed && dataSources.length > 0
+            ? Array.from(new Set<PackageSource>(dataSources))
+            : Array.from(new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources]));
 
         const forumUrl = this.normalizeForumUrl(data.forum_url || data.forums) || pkg.forum_url || pkg.forums;
         const providesList = this.parseArrayField(data.provides)
@@ -8162,12 +9050,40 @@ export class PackageService {
           : undefined;
         const pkgBadgeTags = parseBadgeTagsArray(pkg.badge_tags ?? liveCatalogPkg?.badge_tags);
         const dataBadgeTags = data.badge_tags !== undefined ? parseBadgeTagsArray(data.badge_tags) : undefined;
-        const badgeTags =
+        const baseDetailBadgeTags =
           isRecentlyMutated && cachedMetaBadgeTags !== undefined
             ? cachedMetaBadgeTags
-            : (dataBadgeTags !== undefined && (dataBadgeTags.length > 0 || (pkgBadgeTags.length === 0 && (!cachedMetaBadgeTags || cachedMetaBadgeTags.length === 0)))
-                ? dataBadgeTags
-                : (pkgBadgeTags.length > 0 ? pkgBadgeTags : (cachedMetaBadgeTags ?? [])));
+            : parseBadgeTagsArray([
+                ...(dataBadgeTags || []),
+                ...pkgBadgeTags,
+                ...(cachedMetaBadgeTags || [])
+              ]);
+        const baseDetailTags =
+          isRecentlyMutated && Array.isArray(cachedMetaEntry?.tags) && cachedMetaEntry.tags.length > 0
+            ? cachedMetaEntry.tags
+            : this.mergePackageTagsPreservingExisting(
+                rawTags.length > 0 ? rawTags : undefined,
+                pkg.tags,
+                liveCatalogPkg?.tags,
+                cachedMetaEntry?.tags
+              );
+        const detailJamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+          repoUrl,
+          baseDetailTags,
+          baseDetailBadgeTags,
+          mergedSources
+        );
+        const mergedDetailTags = detailJamOverlay.tags;
+        const badgeTags = detailJamOverlay.badgeTags || [];
+        if (detailJamOverlay.matchedJam && detailJamOverlay.sources?.length) {
+          mergedSources = detailJamOverlay.sources;
+          this.persistPromotionalTagsForPackage(
+            (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase(),
+            mergedDetailTags,
+            badgeTags,
+            { repoUrl, sources: mergedSources }
+          );
+        }
 
         const resolvedAuthorId =
           (data.author_id && !String(data.author_id).startsWith('ext_') ? String(data.author_id) : undefined) ||
@@ -8177,8 +9093,8 @@ export class PackageService {
           this.setBoundedCache(this.readmeCache, cacheKey, readmeText, 40);
         }
 
-        if (rawTags.length > 0 || badgeTags.length > 0) {
-          this.ensureTagsRegisteredInAvailableTags([...rawTags, ...badgeTags]);
+        if (mergedDetailTags.length > 0 || badgeTags.length > 0) {
+          this.ensureTagsRegisteredInAvailableTags([...mergedDetailTags, ...badgeTags]);
         }
 
         const resolvedCreatedAt =
@@ -8205,7 +9121,7 @@ export class PackageService {
           score_downloads: data.score_downloads !== undefined ? Number(data.score_downloads) || 0 : pkg.score_downloads,
           score_reviews: data.score_reviews !== undefined ? Number(data.score_reviews) || 0 : pkg.score_reviews,
           score: resolvedScore,
-          tags: rawTags.length > 0 ? rawTags : pkg.tags,
+          tags: mergedDetailTags.length > 0 ? mergedDetailTags : pkg.tags,
           ...(badgeTags.length > 0 || data.badge_tags !== undefined ? { badge_tags: badgeTags } : {}),
           screenshots,
           ...(screenshotMeta ? { screenshot_meta: screenshotMeta } : {}),
@@ -8256,15 +9172,20 @@ export class PackageService {
             license: resolvedLicense || prevMeta.license,
             media_license: resolvedMediaLicense || prevMeta.media_license,
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
-            contentdb_downloads: resolvedCdbDownloads || prevMeta.contentdb_downloads,
-            downloads: resolvedDownloads || prevMeta.downloads,
+            contentdb_downloads: isAuthoritativePureGit
+              ? 0
+              : Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
+            luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
+            downloads: isAuthoritativePureGit
+              ? Math.max(resolvedDownloads, resolvedLhDownloads)
+              : Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
             score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
             ...(reviewThreadCounts || prevMeta.review_thread_counts
               ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
               : {}),
             rating_checked: true,
             dev_state: data.dev_state ?? prevMeta.dev_state,
-            tags: rawTags.length > 0 ? rawTags : prevMeta.tags,
+            tags: mergedDetailTags.length > 0 ? mergedDetailTags : prevMeta.tags,
             ...(badgeTags.length > 0 ? { badge_tags: badgeTags } : prevMeta.badge_tags ? { badge_tags: prevMeta.badge_tags } : {}),
             download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
             file_size: sizeFormatted || prevMeta.file_size,
@@ -8290,9 +9211,32 @@ export class PackageService {
               ((current.author || '').toLowerCase() === targetAuthorLower &&
                 (current.name || '').toLowerCase() === targetNameLower))
           ) {
+            const mergedCdbDl = isAuthoritativePureGit
+              ? 0
+              : Math.max(
+                  current._unhydratedSeed ? 0 : Number(current.contentdb_downloads || 0),
+                  Number(updatedFields.contentdb_downloads || 0)
+                );
+            const mergedLhDl = Math.max(
+              Number(current.luantihub_downloads || 0),
+              Number(updatedFields.luantihub_downloads || 0)
+            );
+            const mergedTotalDl = isAuthoritativePureGit
+              ? Math.max(Number(updatedFields.downloads || 0), mergedLhDl)
+              : Math.max(
+                  current._unhydratedSeed ? 0 : Number(current.downloads || 0),
+                  Number(updatedFields.downloads || 0),
+                  mergedCdbDl + mergedLhDl
+                );
+            const { _unhydratedSeed: _dropSeed, ...cleanCurrent } = current;
             const merged = {
-              ...current,
+              ...cleanCurrent,
               ...updatedFields,
+              ...(data.source ? { source: data.source as PackageSource } : {}),
+              contentdb_downloads: mergedCdbDl,
+              luantihub_downloads: mergedLhDl,
+              downloads: mergedTotalDl,
+              tags: this.mergePackageTagsPreservingExisting(updatedFields.tags, current.tags),
               ...(readmeText ? { readme: readmeText } : {})
             };
             this.updateSeoMeta(merged);
@@ -8312,11 +9256,7 @@ export class PackageService {
         console.warn(`Could not load full metadata for package ${pkg.id}:`, err);
       } finally {
         if (deepFetch) {
-          if ((this.recentlyMutatedPkgKeys.get(cacheKey)?.seq || 0) === startMutationSeq) {
-            this.deepHydratedIds.add(cacheKey);
-            this._deepHydratedVersion.update(v => v + 1);
-          }
-          this._isLoadingDetails.set(false);
+          this.endLoadingDetails();
         }
       }
     })().finally(() => {
@@ -9394,9 +10334,6 @@ export class PackageService {
 
     this.startInEditTagsMode.set(editTags);
     const isAlreadyDeepHydrated = this.deepHydratedIds.has(targetId);
-    if (!isAlreadyDeepHydrated) {
-      this._isLoadingDetails.set(true);
-    }
     this._activePackage.set(hydratedPkg);
     this.updateSeoMeta(hydratedPkg);
     if (updateUrl && hydratedPkg.author && hydratedPkg.name) {
@@ -9660,10 +10597,23 @@ export class PackageService {
     if (typeof window !== 'undefined' && (window as any).__LUANTI_INITIAL_PACKAGE__) {
       delete (window as any).__LUANTI_INITIAL_PACKAGE__;
     }
-    const matchesSeed =
+    const matchesSeed = Boolean(
       edgeSeed &&
       String(edgeSeed.author || '').toLowerCase() === author.trim().toLowerCase() &&
-      String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase();
+      String(edgeSeed.name || '').toLowerCase() === name.trim().toLowerCase()
+    );
+    if (matchesSeed && this.edgeInitialPackageSeed === edgeSeed) {
+      this.edgeInitialPackageSeed = null;
+    }
+    const hasExplicitSeedProvenance = Boolean(
+      matchesSeed &&
+        (edgeSeed.provider ||
+          edgeSeed.source ||
+          (Array.isArray(edgeSeed.sources) && edgeSeed.sources.length > 0) ||
+          edgeSeed.contentdb_downloads !== undefined ||
+          edgeSeed.luantihub_downloads !== undefined)
+    );
+    const inferredHubGit = author.trim().toLowerCase().endsWith('-hub');
 
     const baseInitial = {
       id: `${author}/${name}`,
@@ -9672,15 +10622,18 @@ export class PackageService {
       title: name.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
       type: name.toLowerCase().endsWith('_game') ? 'game' : 'mod',
       short_desc: '',
-      thumbnail: 'logo.svg'
+      thumbnail: 'logo.svg',
+      ...(inferredHubGit ? { source: 'git', sources: ['git'] } : {}),
+      ...(!hasExplicitSeedProvenance ? { _unhydratedSeed: true } : {})
     };
     const initialPkg = this.normalizePackage(
       matchesSeed ? { ...baseInitial, ...edgeSeed } : baseInitial
     );
 
     const currentActive = this._activePackage();
-    if (!this.deepHydratedIds.has(initialPkg.id.toLowerCase())) {
-      this._isLoadingDetails.set(true);
+    const shouldHoldLoading = !this.deepHydratedIds.has(initialPkg.id.toLowerCase());
+    if (shouldHoldLoading) {
+      this.beginLoadingDetails();
     }
     if (!currentActive || currentActive.id.toLowerCase() !== initialPkg.id.toLowerCase()) {
       this._activePackage.set(initialPkg);
@@ -9722,6 +10675,10 @@ export class PackageService {
       }
     } catch {
       // Fallback handled when initCatalog() completes and checks pendingRoutePackage
+    } finally {
+      if (shouldHoldLoading) {
+        this.endLoadingDetails();
+      }
     }
   }
 
@@ -9831,22 +10788,11 @@ export class PackageService {
       return 'SaKeL';
     }
 
-    if (/[-_](?:hub|git|dev|lab|mods?)$/i.test(rawAuthor)) {
-      const base = rawAuthor.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      if (base) {
-        for (const p of this._packages()) {
-          const pBase = String(p.author || '')
-            .trim()
-            .toLowerCase()
-            .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-          if (pBase !== base) continue;
-          if (p.author_display_name && p.author_display_name.trim()) {
-            return p.author_display_name.trim();
-          }
-          if (p.sources?.includes('official') || p.source === 'official') {
-            return p.author;
-          }
-        }
+    const base = stripAuthorDisplaySuffix(rawAuthor).toLowerCase();
+    if (base && base !== rawAuthor.toLowerCase()) {
+      const mapped = this.authorBaseDisplayMap().get(base);
+      if (mapped) {
+        return mapped;
       }
     }
 
@@ -9856,8 +10802,11 @@ export class PackageService {
   getAuthorPackages(username: string): LuantiPackage[] {
     const clean = (username || '').trim().toLowerCase();
     if (!clean) return [];
-    const normalizeBase = (h: string) =>
-      String(h || '').trim().toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+    const normalizeBase = (h: string) => stripAuthorDisplaySuffix(String(h || '')).toLowerCase();
+    const hasDisplaySuffix = (h: string) => {
+      const trimmed = String(h || '').trim().toLowerCase();
+      return Boolean(trimmed && normalizeBase(trimmed) !== trimmed);
+    };
     const cleanBase = normalizeBase(clean);
 
     const currentUser = this.authService.currentUser();
@@ -9918,10 +10867,10 @@ export class PackageService {
         normalizeBase(p.author) === cleanBase
     );
     const hasForgeSuffixForBase =
-      /[-_](?:hub|git|dev|lab|mods?)$/i.test(clean) ||
+      hasDisplaySuffix(clean) ||
       catalog.some(
         p =>
-          /[-_](?:hub|git|dev|lab|mods?)$/i.test(p.author || '') &&
+          hasDisplaySuffix(p.author || '') &&
           normalizeBase(p.author) === cleanBase
       );
     const linkByBase = Boolean(cleanBase && hasOfficialForBase && hasForgeSuffixForBase);
@@ -9949,6 +10898,7 @@ export class PackageService {
   async openAuthorDrawer(username: string, updateUrl = true, returnToPkg?: LuantiPackage | null): Promise<void> {
     const clean = (username || '').trim();
     if (!clean) return;
+    const reqSeq = ++this.authorDrawerRequestSeq;
 
     if (returnToPkg !== undefined) {
       this.returnToPackageAfterAuthorDrawer = returnToPkg;
@@ -10039,7 +10989,11 @@ export class PackageService {
         apiAuthor = data?.author || null;
       }
 
-      if ((apiAuthor || cdbUser) && this._activeAuthorUsername()?.toLowerCase() === lower) {
+      if (
+        reqSeq === this.authorDrawerRequestSeq &&
+        (apiAuthor || cdbUser) &&
+        this._activeAuthorUsername()?.toLowerCase() === lower
+      ) {
         const latestPkgs = this.getAuthorPackages(clean);
         const latestDonate =
           cdbUser?.donate_url ||
@@ -10125,7 +11079,10 @@ export class PackageService {
     } catch {
       // Keep local catalog-derived profile
     } finally {
-      if (this._activeAuthorUsername()?.toLowerCase() === lower) {
+      if (
+        reqSeq === this.authorDrawerRequestSeq &&
+        this._activeAuthorUsername()?.toLowerCase() === lower
+      ) {
         this._isLoadingAuthorProfile.set(false);
       }
     }
@@ -10874,6 +11831,7 @@ export class PackageService {
     tags?: string[];
     badge_tags?: string[];
     auditToken?: string;
+    requestAdminClaim?: boolean;
   }): Promise<{
     success: boolean;
     message?: string;
@@ -11434,6 +12392,7 @@ export class PackageService {
           this._adminPromotions.set(data.promotions);
           this._promotions.set(data.promotions);
           this.refreshPromoClock();
+          this.persistActivePromotionsCache(this.activePromotions());
           this.scheduleBootCachePersist();
           return data.promotions;
         }
@@ -11459,12 +12418,14 @@ export class PackageService {
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const data = await res.json();
         const allPromos: HeroPromotion[] = Array.isArray(data?.promotions) ? data.promotions : [];
+        this.promoSyncGeneration++;
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         if (Array.isArray(draft.row_filter_tags) && draft.row_filter_tags.length > 0) {
           this.ensureTagsRegisteredInAvailableTags(draft.row_filter_tags);
         }
         this.refreshPromoClock();
+        this.persistActivePromotionsCache(this.activePromotions());
         this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();
@@ -11505,9 +12466,11 @@ export class PackageService {
         const allPromos: HeroPromotion[] = Array.isArray(data?.promotions)
           ? data.promotions
           : this._adminPromotions().filter(p => p.id !== cleanId);
+        this.promoSyncGeneration++;
         this._adminPromotions.set(allPromos);
         this._promotions.set(allPromos);
         this.refreshPromoClock();
+        this.persistActivePromotionsCache(this.activePromotions());
         this.syncClientPromotionRowTags(this.activePromotions());
         this.clearBootCache();
         this.scheduleBootCachePersist();
