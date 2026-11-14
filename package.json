@@ -13,9 +13,14 @@
     "deploy": "npm run build && wrangler pages deploy dist/luanti-hub/browser --project-name=luanti-hub",
     "db:schema:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/schema.sql",
     "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql",
-    "lighthouse:mcp": "node node_modules/lighthouse-mcp/build/index.js"
+    "lighthouse:mcp": "node node_modules/lighthouse-mcp/build/index.js",
+    "typecheck": "tsc --noEmit",
+    "angular:mcp": "ng mcp"
   },
   "private": true,
+  "engines": {
+    "node": ">=22.22.3 || >=24.15.0"
+  },
   "packageManager": "npm@11.13.0",
   "dependencies": {
     "@angular/common": "^22.2.0",
