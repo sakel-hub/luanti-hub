@@ -58,6 +58,7 @@ import { normalizePromotionRow } from '../promotions/index';
 import {
   isJam2026AllowedImageHost,
   isJam2026Tag,
+  resolveJam2026ClientScreenshotUrl,
   syncJam2026IntoPromoRowDelta,
   applyJam2026RepoOverlayOnCatalog,
   buildJam2026StandalonePromoDelta
@@ -1142,6 +1143,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     }
 
     const slimList = filtered.map((pkg: any) => {
+      let resolvedClientThumb: string | null = null;
+      for (const cand of [pkg.thumbnail, pkg.thumbnail_url, pkg.banner, pkg.banner_url]) {
+        const clientUrl =
+          toLegacyLuantiClientThumbnailUrl(cand) || resolveJam2026ClientScreenshotUrl(cand);
+        if (clientUrl) {
+          resolvedClientThumb = clientUrl;
+          break;
+        }
+      }
       const item: Record<string, any> = {
         author: pkg.author,
         name: pkg.name,
@@ -1149,7 +1159,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         type: pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod'),
         short_description: pkg.short_desc || pkg.short_description || '',
         release: Number(pkg.release) || 1,
-        thumbnail: toLegacyLuantiClientThumbnailUrl(pkg.thumbnail || pkg.thumbnail_url) || null
+        thumbnail: resolvedClientThumb
       };
       if (pkg.aliases) item['aliases'] = pkg.aliases;
       if (pkg.featured) item['featured'] = true;

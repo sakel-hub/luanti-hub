@@ -7,6 +7,9 @@ import {
   fetchJam2026BrewsCached,
   parseJam2026RepositoryUrl,
   buildJam2026BrewImageUrl,
+  buildJam2026CommitRawScreenshotUrl,
+  resolveJam2026ClientScreenshotUrl,
+  refreshJam2026D1PkgIfStale,
   normalizeJam2026BrewEntry,
   syncJam2026IntoPromoRowDelta,
   applyJam2026RepoOverlayOnCatalog,
@@ -2027,6 +2030,9 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     const matchedBrew = await findJam2026BrewBySlug('zenonseth', 'strata');
     expect(matchedBrew?.repo_url).toBe('https://github.com/zenonseth/strata');
     expect(toLegacyLuantiClientThumbnailUrl(matchedBrew?.thumbnail)).toBeUndefined();
+    expect(resolveJam2026ClientScreenshotUrl(matchedBrew?.thumbnail)).toBe(
+      `https://raw.githubusercontent.com/zenonseth/strata/${strataCommit}/screenshot.png`
+    );
 
     const synth = await resolveJam2026SyntheticD1Detail('zenonseth', 'strata', null, []);
     expect(synth.d1Pkg?.id).toBe('zenonseth/strata');
@@ -2058,7 +2064,9 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     const forClientJson = await forClientRes.json();
     expect(forClientJson.name).toBe('strata');
     expect(forClientJson.type).toBe('game');
-    expect(forClientJson.screenshots).toEqual([]);
+    expect(forClientJson.screenshots).toEqual([
+      { url: `https://raw.githubusercontent.com/zenonseth/strata/${strataCommit}/screenshot.png` }
+    ]);
   });
 
   const createInMemoryEdgeCaches = () => {
@@ -2932,6 +2940,234 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
         IN_GAME_CATALOG_CACHE_PREFIX,
         '/api/packages/DualDev/jam_on_cdb'
       ]);
+    }
+  });
+
+  it('resolves commit-pinned screenshot.png URLs across all 7 jam.luanti.org Git hosts for Luanti client catalog and /for-client while emitting null for hasScreenshot=false', async () => {
+    const sha = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+    const hostCases: Array<{ repo: string; expected: string }> = [
+      {
+        repo: 'https://github.com/zenonseth/strata',
+        expected: `https://raw.githubusercontent.com/zenonseth/strata/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://gitlab.com/my_org/sub_group/nested-game',
+        expected: `https://gitlab.com/my_org/sub_group/nested-game/-/raw/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://gitgud.io/group/team/jam-entry',
+        expected: `https://gitgud.io/group/team/jam-entry/-/raw/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://bitbucket.org/AliceDev/Bit-Game',
+        expected: `https://bitbucket.org/alicedev/bit-game/raw/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://codeberg.org/Builder/voxel_jam',
+        expected: `https://codeberg.org/Builder/voxel_jam/raw/commit/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://git.minetest.land/MeseDev/mese_quest',
+        expected: `https://git.minetest.land/MeseDev/mese_quest/raw/commit/${sha}/screenshot.png`
+      },
+      {
+        repo: 'https://git.gay/Creator/gay_jam',
+        expected: `https://git.gay/Creator/gay_jam/raw/commit/${sha}/screenshot.png`
+      }
+    ];
+
+    for (const tc of hostCases) {
+      expect(buildJam2026CommitRawScreenshotUrl(tc.repo, sha)).toBe(tc.expected);
+      const jamImgUrl = buildJam2026BrewImageUrl(tc.repo, sha);
+      const proxied = `/api/packages?proxy_image=${encodeURIComponent(jamImgUrl)}&ngsw-bypass=true`;
+      expect(toLegacyLuantiClientThumbnailUrl(proxied)).toBeUndefined();
+      expect(resolveJam2026ClientScreenshotUrl(jamImgUrl)).toBe(tc.expected);
+      expect(resolveJam2026ClientScreenshotUrl(proxied)).toBe(tc.expected);
+    }
+
+    expect(buildJam2026CommitRawScreenshotUrl('https://github.com/zenonseth/strata', 'not-a-sha')).toBeUndefined();
+    expect(resolveJam2026ClientScreenshotUrl('https://example.com/api/image?format=webp')).toBeUndefined();
+    expect(resolveJam2026ClientScreenshotUrl(null)).toBeUndefined();
+
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+    await invalidateEdgeCacheKeys([
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      `${FOR_CLIENT_CACHE_PREFIX}/en/zenonseth/strata/fsv=8`
+    ]);
+
+    const strataSha = 'fddfc86228fdcc6b6fc0a5010d35c5001ea1d028';
+    const noShotSha = '9999999abcdef9999999abcdef9999999abcdef9';
+    const gitlabSha = '8888888abcdef8888888abcdef8888888abcdef8';
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://github.com/zenonseth/strata',
+              commit: strataSha,
+              title: 'Strata',
+              description: 'Dig down through Strata.',
+              commitUrl: `https://github.com/zenonseth/strata/tree/${strataSha}`,
+              hasScreenshot: true,
+              publishedAt: '2026-11-13T22:24:52.623Z'
+            },
+            {
+              repository: 'https://gitlab.com/team_alpha/sub/void_runner',
+              commit: gitlabSha,
+              title: 'Void Runner',
+              description: 'Nested GitLab game with screenshot.',
+              hasScreenshot: true,
+              publishedAt: '2026-11-13T20:00:00.000Z'
+            },
+            {
+              repository: 'https://codeberg.org/PlainDev/no_shot_game',
+              commit: noShotSha,
+              title: 'No Shot Game',
+              description: 'Jam entry without screenshot.',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T19:00:00.000Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('content.luanti.org/api/updates')) {
+        return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const fkD1 = createFkEnforcingJamD1();
+
+    try {
+      const keysRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages?type=game&protocol_version=49&fmt=keys'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(keysRes.status).toBe(200);
+      const keysJson = await keysRes.json();
+      const thumbColIdx = keysJson.keys.indexOf('thumbnail');
+      expect(thumbColIdx).toBeGreaterThan(-1);
+
+      const strataKeyRow = keysJson.pkgs.find((r: any[]) => r[0] === 'zenonseth' && r[1] === 'strata');
+      expect(strataKeyRow?.[thumbColIdx]).toBe(
+        `https://raw.githubusercontent.com/zenonseth/strata/${strataSha}/screenshot.png`
+      );
+
+      const gitlabKeyRow = keysJson.pkgs.find((r: any[]) => r[0] === 'team_alpha' && r[1] === 'void_runner');
+      expect(gitlabKeyRow?.[thumbColIdx]).toBe(
+        `https://gitlab.com/team_alpha/sub/void_runner/-/raw/${gitlabSha}/screenshot.png`
+      );
+
+      const noShotKeyRow = keysJson.pkgs.find((r: any[]) => r[0] === 'PlainDev' && r[1] === 'no_shot_game');
+      expect(noShotKeyRow?.[thumbColIdx]).toBeNull();
+
+      const slimRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages?type=game&protocol_version=49'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(slimRes.status).toBe(200);
+      const slimJson = await slimRes.json();
+      const strataSlim = slimJson.find((p: any) => p.author === 'zenonseth' && p.name === 'strata');
+      expect(strataSlim?.thumbnail).toBe(
+        `https://raw.githubusercontent.com/zenonseth/strata/${strataSha}/screenshot.png`
+      );
+      const noShotSlim = slimJson.find((p: any) => p.author === 'PlainDev' && p.name === 'no_shot_game');
+      expect(noShotSlim?.thumbnail).toBeNull();
+    } finally {
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX,
+        `${FOR_CLIENT_CACHE_PREFIX}/en/zenonseth/strata/fsv=8`
+      ]);
+    }
+  });
+
+  it('refreshes thumbnail_url, banner_url, and screenshots in refreshJam2026D1PkgIfStale and /for-client when a Jam game advances commits', async () => {
+    const commit1 = 'aaaa111abcdefaaaa111abcdefaaaa111abcdef1';
+    const commit2 = 'bbbb222abcdefbbbb222abcdefbbbb222abcdef2';
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://github.com/zenonseth/strata',
+              commit: commit2,
+              title: 'Strata',
+              description: 'Dig down through Strata.',
+              hasScreenshot: true,
+              publishedAt: '2026-11-14T10:00:00.000Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const oldJamUrl = `/api/packages?proxy_image=${encodeURIComponent(
+      buildJam2026BrewImageUrl('https://github.com/zenonseth/strata', commit1)
+    )}`;
+    const staleRow = {
+      id: 'zenonseth/strata',
+      author_id: null,
+      author_name: 'zenonseth',
+      name: 'strata',
+      title: 'Strata',
+      type: 'game',
+      short_desc: 'Dig down through Strata.',
+      repo_url: 'https://github.com/zenonseth/strata',
+      provider: 'github',
+      default_branch: 'main',
+      thumbnail_url: oldJamUrl,
+      banner_url: oldJamUrl,
+      screenshots: JSON.stringify([oldJamUrl]),
+      tags: JSON.stringify(['jam_game_2026', 'gamejam', 'game']),
+      latest_commit_sha: commit1,
+      updated_at: '2026-11-13T22:24:52.623Z'
+    };
+
+    const refreshed = await refreshJam2026D1PkgIfStale(staleRow, undefined, true);
+    const expectedNewJamUrl = `/api/packages?proxy_image=${encodeURIComponent(
+      buildJam2026BrewImageUrl('https://github.com/zenonseth/strata', commit2)
+    )}`;
+    expect(refreshed.latest_commit_sha).toBe(commit2);
+    expect(refreshed.thumbnail_url).toBe(expectedNewJamUrl);
+    expect(refreshed.banner_url).toBe(expectedNewJamUrl);
+    expect(JSON.parse(refreshed.screenshots)).toEqual([expectedNewJamUrl]);
+
+    const fkD1 = createFkEnforcingJamD1();
+    fkD1.packages.set('zenonseth/strata', staleRow);
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+
+    try {
+      const fcRes = await getPackageForClient({
+        params: { author: 'zenonseth', name: 'strata' },
+        request: new Request(
+          'https://luantihub.org/api/packages/zenonseth/strata/for-client/?formspec_version=8&nocache=1'
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(fcRes.status).toBe(200);
+      const fcJson = await fcRes.json();
+      expect(fcJson.screenshots).toEqual([
+        { url: `https://raw.githubusercontent.com/zenonseth/strata/${commit2}/screenshot.png` }
+      ]);
+    } finally {
+      clearIsolateCachesForTests();
     }
   });
 });

@@ -9,6 +9,7 @@ import {
   writeEdgeCacheJson,
   resolveLocalizedPackageText,
   toLegacyLuantiClientThumbnailUrl,
+  getCanonicalScreenshotKey,
   computeLuantiClientReleaseId,
   fetchGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
@@ -18,7 +19,8 @@ import {
 } from '../../../lib/upstream';
 import {
   resolveJam2026SyntheticD1Detail,
-  refreshJam2026D1PkgIfStale
+  refreshJam2026D1PkgIfStale,
+  resolveJam2026ClientScreenshotUrl
 } from '../../../lib/jam-2026';
 
 interface Env {
@@ -281,7 +283,10 @@ export async function onRequestGet(context: {
           .map((s: any) => {
             const rawObj = typeof s === 'string' ? { url: s } : s;
             if (!rawObj?.url) return null;
-            const normalizedUrl = toLegacyLuantiClientThumbnailUrl(rawObj.url) || rawObj.url;
+            const normalizedUrl =
+              toLegacyLuantiClientThumbnailUrl(rawObj.url) ||
+              resolveJam2026ClientScreenshotUrl(rawObj.url) ||
+              rawObj.url;
             return { ...rawObj, url: normalizedUrl };
           })
           .filter((s: any) => Boolean(s?.url))
@@ -369,12 +374,19 @@ export async function onRequestGet(context: {
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
     const softDeps = parseJsonArray(d1Pkg.optional_dependencies);
     const screenshots: Array<{ url: string }> = [];
-    const d1BannerClientUrl = toLegacyLuantiClientThumbnailUrl(d1Pkg.banner_url);
-    const d1ThumbClientUrl = toLegacyLuantiClientThumbnailUrl(d1Pkg.thumbnail_url);
-    if (d1BannerClientUrl) {
-      screenshots.push({ url: d1BannerClientUrl });
-    } else if (d1ThumbClientUrl) {
-      screenshots.push({ url: d1ThumbClientUrl });
+    const seenScreenshotKeys = new Set<string>();
+    for (const rawShot of [
+      d1Pkg.banner_url,
+      d1Pkg.thumbnail_url,
+      ...parseJsonArray(d1Pkg.screenshots)
+    ]) {
+      const clientShotUrl =
+        toLegacyLuantiClientThumbnailUrl(rawShot) || resolveJam2026ClientScreenshotUrl(rawShot);
+      if (!clientShotUrl) continue;
+      const dedupKey = getCanonicalScreenshotKey(clientShotUrl) || clientShotUrl;
+      if (seenScreenshotKeys.has(dedupKey)) continue;
+      seenScreenshotKeys.add(dedupKey);
+      screenshots.push({ url: clientShotUrl });
     }
 
     const localizedD1 = resolveLocalizedPackageText(d1Pkg, normalizedLang);

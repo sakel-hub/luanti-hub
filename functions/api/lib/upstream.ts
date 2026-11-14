@@ -5680,8 +5680,8 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
 export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v25';
-export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v14_';
-export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v6';
+export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v15_';
+export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v7';
 export const UPDATES_EDGE_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v4';
 export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v23';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';

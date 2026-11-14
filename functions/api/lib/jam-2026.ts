@@ -23,7 +23,10 @@ import {
   UPDATES_EDGE_CACHE_KEY,
   computeLuantiClientReleaseId
 } from './upstream';
-import { isUntrustedTunnelOrPrivateHost } from '../../../src/app/core/config/git-providers.config';
+import {
+  isUntrustedTunnelOrPrivateHost,
+  unwrapProxiedImageUrl
+} from '../../../src/app/core/config/git-providers.config';
 
 export const JAM_2026_API_ORIGIN = 'https://jam.greenxenith.com';
 export const JAM_2026_BREWS_URL = `${JAM_2026_API_ORIGIN}/api/brews`;
@@ -192,6 +195,57 @@ export function buildJam2026BrewImageUrl(repository: string, commit: string): st
     repository: repository.trim(),
     commit: commit.trim().toLowerCase()
   }).toString()}`;
+}
+
+/**
+ * Builds a deterministic, query-free, commit-pinned raw `screenshot.png` URL for the Luanti C++ client
+ * across all 7 `jam.luanti.org` Git hosts (`content/hosts.json`).
+ * Safe without extra HTTP probes because `jam.luanti.org` (`server/inspection-worker.ts`) only sets
+ * `hasScreenshot: true` after verifying root `screenshot.png` at `commit` has valid PNG magic bytes.
+ */
+export function buildJam2026CommitRawScreenshotUrl(
+  repository: string,
+  commit: string
+): string | undefined {
+  const cleanCommit = typeof commit === 'string' ? commit.trim().toLowerCase() : '';
+  if (!/^[0-9a-f]{7,40}$/.test(cleanCommit)) return undefined;
+  const parsed = parseJam2026RepositoryUrl(repository);
+  if (!parsed) return undefined;
+
+  const { host, author, rawRepoName, canonicalRepoUrl } = parsed;
+  if (host === 'github.com') {
+    return `https://raw.githubusercontent.com/${author}/${rawRepoName}/${cleanCommit}/screenshot.png`;
+  }
+  if (host === 'gitlab.com' || host === 'gitgud.io' || host.includes('gitlab')) {
+    const repoPath = new URL(canonicalRepoUrl).pathname.replace(/^\/+|\/+$/g, '');
+    if (!repoPath) return undefined;
+    return `https://${host}/${repoPath}/-/raw/${cleanCommit}/screenshot.png`;
+  }
+  if (host === 'bitbucket.org') {
+    return `https://bitbucket.org/${author.toLowerCase()}/${rawRepoName.toLowerCase()}/raw/${cleanCommit}/screenshot.png`;
+  }
+  // Codeberg, MeseHub (git.minetest.land), git.gay, and Gitea/Forgejo instances
+  return `https://${host}/${author}/${rawRepoName}/raw/commit/${cleanCommit}/screenshot.png`;
+}
+
+/**
+ * Translates a `jam.greenxenith.com/api/brews/image?repository=...&commit=...` (or proxied `/api/packages?proxy_image=...`)
+ * WebP URL into a commit-pinned `https://.../screenshot.png` URL compatible with Luanti's C++ `screenshots.lua`.
+ */
+export function resolveJam2026ClientScreenshotUrl(rawUrl?: string | null): string | undefined {
+  const unwrapped = unwrapProxiedImageUrl(rawUrl);
+  if (!unwrapped || !/^https?:\/\//i.test(unwrapped)) return undefined;
+  try {
+    const u = new URL(unwrapped);
+    if (u.origin.toLowerCase() !== JAM_2026_API_ORIGIN || u.pathname !== '/api/brews/image') {
+      return undefined;
+    }
+    const repository = u.searchParams.get('repository') || '';
+    const commit = u.searchParams.get('commit') || '';
+    return buildJam2026CommitRawScreenshotUrl(repository, commit);
+  } catch {
+    return undefined;
+  }
 }
 
 export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | null {
@@ -1168,10 +1222,36 @@ export async function refreshJam2026D1PkgIfStale(
   }
   const delta = db ? await buildJam2026StandalonePromoDelta(db, noCache).catch(() => null) : null;
   const synced = delta?.items?.find((it: any) => String(it?.id || '').toLowerCase() === brew.id.toLowerCase()) || brew;
+  const isUnclaimedJamRow =
+    (!d1Pkg.author_id || String(d1Pkg.author_id).startsWith('ext_jam2026_')) &&
+    String(d1Pkg.provider || '') !== 'contentdb';
+  const hasExplicitJamImage =
+    String(d1Pkg.thumbnail_url || '').includes('jam.greenxenith.com') ||
+    String(d1Pkg.banner_url || '').includes('jam.greenxenith.com') ||
+    String(d1Pkg.thumbnail_url || '').includes('/api/brews/') ||
+    String(d1Pkg.banner_url || '').includes('/api/brews/');
+  const hasJamImage = hasExplicitJamImage || !d1Pkg.thumbnail_url;
+  const shouldRefreshScreenshots = isUnclaimedJamRow || hasJamImage;
+
   return {
     ...d1Pkg,
     latest_commit_sha: synced.latest_commit_sha || brew.latest_commit_sha,
-    updated_at: synced.updated_at || new Date().toISOString()
+    updated_at: synced.updated_at || new Date().toISOString(),
+    ...(shouldRefreshScreenshots
+      ? {
+          thumbnail_url:
+            hasExplicitJamImage && synced.thumbnail === null
+              ? null
+              : (synced.thumbnail ?? d1Pkg.thumbnail_url ?? null),
+          banner_url:
+            hasExplicitJamImage && synced.banner === null
+              ? null
+              : (synced.banner ?? d1Pkg.banner_url ?? null),
+          screenshots: synced.screenshots
+            ? JSON.stringify(synced.screenshots)
+            : (synced.thumbnail === null ? null : d1Pkg.screenshots)
+        }
+      : {})
   };
 }
 
