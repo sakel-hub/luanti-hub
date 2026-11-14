@@ -315,6 +315,7 @@ export const ru: TranslationDictionary = {
     linkMesehub: 'Привязать Mesehub',
     linkGitlab: 'Привязать GitLab',
     linkGithub: 'Привязать GitHub',
+    linkContentdb: 'Привязать ContentDB',
     syncCdbTitle: 'Привязать Портфолио Автора ContentDB',
     syncTitle: 'Привязать Портфолио Автора ContentDB',
     syncCdbDesc: 'Введите ваше имя автора на ContentDB для синхронизации всех ваших официальных модов, игр и текстур:',

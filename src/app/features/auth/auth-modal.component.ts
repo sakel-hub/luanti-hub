@@ -376,7 +376,11 @@ export class AuthModalComponent implements OnDestroy {
     this.authService.setSelectedProvider(provider);
     this.localError.set(null);
 
-    // If OAuth Client ID is configured on Cloudflare for this provider, redirect to 1-click OAuth
+    if (!this.authService.isOAuthConfigured(provider)) {
+      await this.authService.ensureOAuthConfigLoaded();
+    }
+
+    // If OAuth credentials are configured on Cloudflare for this provider, redirect to 1-click OAuth
     if (this.authService.isOAuthConfigured(provider)) {
       this.clearSensitiveTokenFromMemory();
       this.authService.loginWith(provider, this.handleInput.trim() || undefined);

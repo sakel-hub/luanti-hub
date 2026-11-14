@@ -11,9 +11,18 @@ import {
   resolveUniqueCandidateUsername,
   mergeSecondaryUserIntoPrimary,
   reconcileAndMergeUserAccount,
-  invalidateCachedAuthMePayload
+  invalidateCachedAuthMePayload,
+  cleanEnvValue,
+  resolveOAuthRedirectUri,
+  resolveContentDbOAuthConfig,
+  resolveContentDbUserProfile,
+  buildProviderFallbackProfileUrls
 } from '../lib/session';
-import { fetchWithAnubisSupport } from '../../lib/upstream';
+import {
+  fetchWithAnubisSupport,
+  buildAuthorProfileEdgeCacheKey,
+  invalidateEdgeCacheKeys
+} from '../../lib/upstream';
 import { syncVerifiedAuthorGitPackages } from '../../lib/author-git-sync';
 
 interface Env {
@@ -43,25 +52,6 @@ const USER_AGENT = 'LuantiHub/1.0 (+https://luantihub.org)';
 const inFlightOAuthCodes = new Map<string, Promise<string>>();
 const completedOAuthCodes = new Map<string, { userId: string; expiresAt: number }>();
 const verifiedOAuthClaimsByUserId = new Map<string, Partial<SessionTokenClaims>>();
-
-function cleanEnvValue(val?: string): string {
-  return (val || '').trim().replace(/^["']|["']$/g, '').trim();
-}
-
-function resolveRedirectUri(envValue: string | undefined, requestOrigin: string, provider: string): string {
-  const fallback = `${requestOrigin}/api/auth/${provider}/callback`;
-  const cleaned = cleanEnvValue(envValue);
-  if (!cleaned) return fallback;
-  if (
-    cleaned.includes('luanti-hub.pages.dev') &&
-    !requestOrigin.includes('luanti-hub.pages.dev') &&
-    !requestOrigin.includes('localhost') &&
-    !requestOrigin.includes('127.0.0.1')
-  ) {
-    return fallback;
-  }
-  return cleaned;
-}
 
 function pruneBoundedMap<K, V>(map: Map<K, V>, maxEntries = 500): void {
   if (map.size <= maxEntries) return;
@@ -222,6 +212,32 @@ async function exchangeOAuthTokenWithRetry(
         }
       }
 
+      // Fail fast on non-transient client/grant 400/401 responses (unless allowJsonRetry needs 1 JSON fallback)
+      if ((lastStatus === 400 || lastStatus === 401) && !(allowJsonRetry && attempt === 0)) {
+        const errText = await res.text().catch(() => '');
+        try {
+          const parsedErr = JSON.parse(errText);
+          if (parsedErr && (parsedErr.error || parsedErr.error_description || parsedErr.success === false)) {
+            return {
+              ...parsedErr,
+              error: parsedErr.error || 'invalid_grant',
+              error_description: parsedErr.error_description || parsedErr.message || parsedErr.error
+            };
+          }
+        } catch {
+          const parsedForm = new URLSearchParams(errText);
+          if (parsedForm.has('error')) {
+            return {
+              error: parsedForm.get('error') || 'invalid_grant',
+              error_description: parsedForm.get('error_description') || undefined
+            };
+          }
+        }
+        const authClientErr: any = new Error(`${providerLabel} token exchange failed (HTTP ${lastStatus})`);
+        authClientErr.httpStatus = lastStatus;
+        throw authClientErr;
+      }
+
       // Retry on 429 Too Many Requests, 403/408/5xx, or transient upstream proxy errors
       if (attempt < maxAttempts - 1) {
         const delayMs = computeOAuthRetryDelayMs(attempt, lastStatus, res.headers?.get?.('Retry-After') || null);
@@ -277,6 +293,7 @@ async function buildSuccessRedirectResponse(
 
 function buildErrorRedirectResponse(
   returnOrigin: string,
+  requestUrl: URL,
   errorCode: string,
   provider: string,
   returnTo?: string
@@ -285,7 +302,13 @@ function buildErrorRedirectResponse(
     auth_error: errorCode,
     provider
   });
-  return Response.redirect(errorRedirectUrl, 302);
+  const headers = new Headers();
+  headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  for (const clearCookie of buildClearOAuthStateCookies(requestUrl)) {
+    headers.append('Set-Cookie', clearCookie);
+  }
+  headers.set('Location', errorRedirectUrl);
+  return new Response(null, { status: 302, headers });
 }
 
 export async function onRequestGet(context: {
@@ -298,31 +321,43 @@ export async function onRequestGet(context: {
   const url = new URL(context.request.url);
   const code = url.searchParams.get('code');
   const stateParam = url.searchParams.get('state');
+  const cookies = parseCookies(context.request);
   const sessionSecret = cleanEnvValue(context.env.SESSION_SECRET) || undefined;
   const stateMeta = await parseOAuthStateToken(stateParam, provider, sessionSecret);
   const returnOrigin = stateMeta.origin || url.origin;
   const returnTo = stateMeta.valid ? stateMeta.returnTo : undefined;
+  const cdbOAuthCfg = resolveContentDbOAuthConfig(context.env, url.origin);
   const defaultRedirectUri = `${url.origin}/api/auth/${provider}/callback`;
   const redirectUriByProvider: Record<string, string | undefined> = {
-    codeberg: resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
-    mesehub: resolveRedirectUri(context.env.MESEHUB_REDIRECT_URI, url.origin, 'mesehub'),
-    gitlab: resolveRedirectUri(context.env.GITLAB_REDIRECT_URI, url.origin, 'gitlab'),
-    github: resolveRedirectUri(context.env.GITHUB_REDIRECT_URI, url.origin, 'github'),
-    contentdb: resolveRedirectUri(context.env.CONTENTDB_REDIRECT_URI, url.origin, 'contentdb')
+    codeberg: resolveOAuthRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, 'codeberg'),
+    mesehub: resolveOAuthRedirectUri(context.env.MESEHUB_REDIRECT_URI, url.origin, 'mesehub'),
+    gitlab: resolveOAuthRedirectUri(context.env.GITLAB_REDIRECT_URI, url.origin, 'gitlab'),
+    github: resolveOAuthRedirectUri(context.env.GITHUB_REDIRECT_URI, url.origin, 'github'),
+    contentdb: cdbOAuthCfg.redirectUri
   };
   const redirectUri = redirectUriByProvider[provider] || defaultRedirectUri;
 
   if (!code) {
-    return buildErrorRedirectResponse(returnOrigin, 'auth_cancelled', provider, returnTo);
+    let cancelOrigin = returnOrigin;
+    let cancelReturnTo = returnTo;
+    // ContentDB redirects to `/callback` with zero query params when the user cancels;
+    // recover `returnOrigin` and `returnTo` from the signed `lh_oauth_state` cookie if valid.
+    if (!stateMeta.valid && cookies['lh_oauth_state']) {
+      const cookieStateMeta = await parseOAuthStateToken(cookies['lh_oauth_state'], provider, sessionSecret);
+      if (cookieStateMeta.valid) {
+        cancelOrigin = cookieStateMeta.origin || cancelOrigin;
+        cancelReturnTo = cookieStateMeta.returnTo;
+      }
+    }
+    return buildErrorRedirectResponse(cancelOrigin, url, 'auth_cancelled', provider, cancelReturnTo);
   }
 
-  const cookies = parseCookies(context.request);
   const expectedState = cookies['lh_oauth_state'];
   const isCookieStateValid = Boolean(stateParam && expectedState && stateParam === expectedState);
   const isHmacStateValid = stateMeta.valid;
 
   if (!isHmacStateValid) {
-    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
+    return buildErrorRedirectResponse(returnOrigin, url, 'session_expired', provider);
   }
 
   const existingSessionUserId = cookies['lh_session']
@@ -342,7 +377,7 @@ export async function onRequestGet(context: {
   // Require BOTH cryptographically valid HMAC state AND matching browser `lh_oauth_state` cookie
   // to prevent OAuth Login CSRF and cross-site identity-linking account takeover.
   if (!isCookieStateValid) {
-    return buildErrorRedirectResponse(returnOrigin, 'session_expired', provider);
+    return buildErrorRedirectResponse(returnOrigin, url, 'session_expired', provider);
   }
 
   // Fast-path: If this exact authorization code + state is currently being processed by a concurrent request
@@ -510,11 +545,14 @@ export async function onRequestGet(context: {
       profileUrl = user.html_url || `https://github.com/${providerUsername}`;
 
     } else if (provider === 'contentdb') {
+      if (!cdbOAuthCfg.clientId || !cdbOAuthCfg.clientSecret) {
+        throw new Error('ContentDB OAuth client credentials not configured');
+      }
       const tokenData = await exchangeOAuthTokenWithRetry(
         'https://content.luanti.org/oauth/token/',
         {
-          client_id: cleanEnvValue(context.env.CONTENTDB_CLIENT_ID),
-          client_secret: cleanEnvValue(context.env.CONTENTDB_CLIENT_SECRET),
+          client_id: cdbOAuthCfg.clientId,
+          client_secret: cdbOAuthCfg.clientSecret,
           code,
           grant_type: 'authorization_code',
           redirect_uri: redirectUri
@@ -524,10 +562,10 @@ export async function onRequestGet(context: {
         checkEdgeCacheBeforeRetry
       );
       if (tokenData?.__resolvedUserId) return tokenData.__resolvedUserId;
-      if (tokenData.error || !tokenData.access_token) {
+      if (tokenData.success === false || tokenData.error || !tokenData.access_token) {
         throw new Error(tokenData.error_description || tokenData.error || 'ContentDB token exchange failed');
       }
-      const whoamiRes = await fetch('https://content.luanti.org/api/whoami/', {
+      const whoamiRes = await fetchWithAnubisSupport('https://content.luanti.org/api/whoami/', {
         headers: {
           Authorization: `Bearer ${tokenData.access_token}`,
           'User-Agent': USER_AGENT,
@@ -536,11 +574,16 @@ export async function onRequestGet(context: {
       });
       if (!whoamiRes.ok) throw new Error('ContentDB whoami fetch failed');
       const user = await whoamiRes.json() as any;
-      providerUserId = user.username || '';
-      providerUsername = user.username || '';
-      displayName = user.display_name || providerUsername;
-      avatarUrl = `https://content.luanti.org/users/${providerUsername}/avatar/`;
-      profileUrl = `https://content.luanti.org/users/${providerUsername}/`;
+      const verifiedCdbHandle = typeof user?.username === 'string' ? user.username.trim() : '';
+      if (!user?.is_authenticated || !verifiedCdbHandle) {
+        throw new Error('ContentDB whoami unauthenticated');
+      }
+      const cdbProfile = await resolveContentDbUserProfile(verifiedCdbHandle, user.display_name);
+      providerUserId = verifiedCdbHandle;
+      providerUsername = verifiedCdbHandle;
+      displayName = cdbProfile.displayName;
+      avatarUrl = cdbProfile.avatarUrl;
+      profileUrl = cdbProfile.profileUrl;
     }
 
     if (!providerUsername) {
@@ -721,6 +764,16 @@ export async function onRequestGet(context: {
             `).bind(userId, provider, providerUserId, providerUsername, profileUrl, avatarUrl).run();
           }
 
+          // Self-heal empty or legacy broken `/users/<handle>/avatar/` user avatar when a real provider avatar exists
+          if (avatarUrl) {
+            await context.env.DB.prepare(`
+              UPDATE users
+              SET avatar_url = ?
+              WHERE id = ?
+                AND (avatar_url IS NULL OR avatar_url = '' OR avatar_url LIKE '%/users/%/avatar%')
+            `).bind(avatarUrl, userId).run();
+          }
+
           // Reconcile & merge any duplicate suffixed accounts
           const reconciledUser = await reconcileAndMergeUserAccount(context.env.DB, userId, true);
           if (reconciledUser?.id) {
@@ -762,13 +815,14 @@ export async function onRequestGet(context: {
       userId = existingSessionUserId || `usr_${providerUsername.toLowerCase()}`;
     }
 
+    const fallbackProfileUrls = buildProviderFallbackProfileUrls(provider, providerUsername);
     invalidateCachedAuthMePayload(userId);
     pruneBoundedMap(verifiedOAuthClaimsByUserId, 500);
     verifiedOAuthClaimsByUserId.set(userId, {
       userId,
       username: providerUsername,
       displayName: displayName || providerUsername,
-      avatarUrl: avatarUrl || `https://github.com/${providerUsername}.png`,
+      avatarUrl: avatarUrl || fallbackProfileUrls.avatarUrl,
       provider,
       role,
       verified: true,
@@ -784,12 +838,22 @@ export async function onRequestGet(context: {
 
   try {
     const resolvedUserId = await inFlightPromise;
+    const resolvedClaims = verifiedOAuthClaimsByUserId.get(resolvedUserId);
+    const verifiedUsername = resolvedClaims?.username;
     await writeCompletedOAuthCodeToEdgeCache(provider, code, stateBinding, resolvedUserId);
     context.waitUntil?.(
       syncVerifiedAuthorGitPackages(context.env, {
         userId: resolvedUserId,
-        triggerProvider: provider
+        triggerProvider: provider,
+        verifiedUsername
       })
+        .then(() => {
+          if (verifiedUsername) {
+            return invalidateEdgeCacheKeys([buildAuthorProfileEdgeCacheKey(verifiedUsername.toLowerCase())]);
+          }
+          return null;
+        })
+        .catch(() => null)
     );
     return await buildSuccessRedirectResponse(returnOrigin, url, resolvedUserId, sessionSecret, returnTo);
   } catch (err: any) {
@@ -814,7 +878,7 @@ export async function onRequestGet(context: {
     // 3. Only treat an already-consumed OAuth code (`bad_verification_code` / `invalid_grant`) as completed
     // when the browser already holds a valid session cookie and matches Edge Cache.
     const isCodeAlreadyConsumed =
-      /bad_verification_code|invalid_grant|authorization code.*expired/i.test(errMsg);
+      /bad_verification_code|invalid_grant|invalid authorization code|authorization code.*expired/i.test(errMsg);
     if (existingSessionUserId && isCodeAlreadyConsumed && !isRateLimited429) {
       const recheckedEdgeUserId = await readCompletedOAuthCodeFromEdgeCache(provider, code, stateBinding);
       if (recheckedEdgeUserId && recheckedEdgeUserId === existingSessionUserId) {
@@ -827,7 +891,7 @@ export async function onRequestGet(context: {
       ? 'provider_busy'
       : 'provider_unavailable';
 
-    return buildErrorRedirectResponse(returnOrigin, publicErrorCode, provider, returnTo);
+    return buildErrorRedirectResponse(returnOrigin, url, publicErrorCode, provider, returnTo);
   } finally {
     inFlightOAuthCodes.delete(cachedCodeKey);
   }

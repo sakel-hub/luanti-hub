@@ -909,6 +909,16 @@ import {
                 </div>
 
                 <div class="pt-1 flex flex-wrap gap-2">
+                  @if (!hasProvider('contentdb')) {
+                    <button
+                      type="button"
+                      data-testid="link-contentdb-btn"
+                      (click)="authService.loginWith('contentdb', undefined, true)"
+                      class="px-3 py-1.5 rounded-xl glass-btn border border-sky-500/35 text-sky-200 hover:text-white text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer">
+                      <svg lucidePlus class="w-3.5 h-3.5 text-sky-400"></svg>
+                      <span>{{ 'profile.linkContentdb' | translate }}</span>
+                    </button>
+                  }
                   @if (!hasProvider('github')) {
                     <button type="button" (click)="authService.loginWith('github', undefined, true)" class="px-3 py-1.5 rounded-xl glass-btn text-slate-200 hover:text-white text-xs transition flex items-center gap-1.5 cursor-pointer">
                       <svg lucidePlus class="w-3.5 h-3.5 text-slate-200"></svg>

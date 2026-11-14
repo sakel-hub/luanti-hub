@@ -1,5 +1,178 @@
 // Secure session cookie & admin role management using Web Crypto API
-import { fetchWithAnubisSupport } from '../../lib/upstream';
+import { fetchWithAnubisSupport, fetchUpstreamJsonCached } from '../../lib/upstream';
+
+export const DEFAULT_CONTENTDB_CLIENT_ID = 'a29af0556e7fe4de6874ea09';
+
+const LEGACY_BROKEN_CONTENTDB_AVATAR_RE =
+  /^https?:\/\/content\.(?:luanti\.org|minetest\.net)\/users\/[^/]+\/avatar\/?$/i;
+
+export function cleanEnvValue(val?: string): string {
+  return (val || '').trim().replace(/^["']|["']$/g, '').trim();
+}
+
+export function resolveOAuthRedirectUri(
+  envValue: string | undefined,
+  requestOrigin: string,
+  provider: string
+): string {
+  const fallback = `${requestOrigin}/api/auth/${provider}/callback`;
+  const cleaned = cleanEnvValue(envValue);
+  if (!cleaned) return fallback;
+  if (
+    cleaned.includes('luanti-hub.pages.dev') &&
+    !requestOrigin.includes('luanti-hub.pages.dev') &&
+    !requestOrigin.includes('localhost') &&
+    !requestOrigin.includes('127.0.0.1')
+  ) {
+    return fallback;
+  }
+  return cleaned;
+}
+
+export function resolveContentDbOAuthConfig(
+  env: {
+    CONTENTDB_CLIENT_ID?: string;
+    CONTENTDB_CLIENT_SECRET?: string;
+    CONTENTDB_REDIRECT_URI?: string;
+  },
+  requestOrigin: string
+): { enabled: boolean; clientId: string; clientSecret: string; redirectUri: string } {
+  const clientSecret = cleanEnvValue(env.CONTENTDB_CLIENT_SECRET);
+  const explicitClientId = cleanEnvValue(env.CONTENTDB_CLIENT_ID);
+  const clientId = explicitClientId || (clientSecret ? DEFAULT_CONTENTDB_CLIENT_ID : '');
+  const explicitRedirect = cleanEnvValue(env.CONTENTDB_REDIRECT_URI);
+
+  // The official Luanti Hub ContentDB OAuth2 app (`a29af0556e7fe4de6874ea09`) has its
+  // Redirect URL locked to `https://luantihub.org/api/auth/contentdb/callback`.
+  const fallbackRedirect =
+    clientId === DEFAULT_CONTENTDB_CLIENT_ID && !explicitRedirect
+      ? 'https://luantihub.org/api/auth/contentdb/callback'
+      : `${requestOrigin}/api/auth/contentdb/callback`;
+  const redirectUri = explicitRedirect || fallbackRedirect;
+
+  let originCompatible = false;
+  try {
+    const redirectUrl = new URL(redirectUri);
+    const reqUrl = new URL(requestOrigin);
+    if (redirectUrl.origin === reqUrl.origin) {
+      originCompatible = true;
+    } else if (redirectUrl.protocol === 'https:' && reqUrl.protocol === 'https:') {
+      // `lh_oauth_state` and `lh_session` share `Domain=.luantihub.org` across `luantihub.org` and `*.luantihub.org`
+      const sharedRedirectDomain = getSharedCookieDomain(redirectUrl);
+      const sharedReqDomain = getSharedCookieDomain(reqUrl);
+      originCompatible = Boolean(sharedRedirectDomain && sharedRedirectDomain === sharedReqDomain);
+    }
+  } catch {
+    originCompatible = false;
+  }
+
+  return {
+    enabled: Boolean(clientId && clientSecret && originCompatible),
+    clientId,
+    clientSecret,
+    redirectUri
+  };
+}
+
+export function sanitizeStoredAvatarUrl(rawUrl?: string | null): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed || LEGACY_BROKEN_CONTENTDB_AVATAR_RE.test(trimmed)) {
+    return '';
+  }
+  return trimmed;
+}
+
+export function normalizeContentDbProfilePicUrl(rawUrl?: string | null): string {
+  const cleaned = sanitizeStoredAvatarUrl(rawUrl);
+  if (!cleaned) return '';
+  if (cleaned.startsWith('http://') || cleaned.startsWith('https://')) {
+    return cleaned;
+  }
+  return `https://content.luanti.org${cleaned.startsWith('/') ? '' : '/'}${cleaned}`;
+}
+
+export function resolveStoredUserAvatarUrl(
+  userAvatarUrl: string | null | undefined,
+  identities: Array<{ provider?: string; username?: string; avatar_url?: string | null }>
+): string {
+  const primaryStored = sanitizeStoredAvatarUrl(userAvatarUrl);
+  if (primaryStored) return primaryStored;
+  for (const id of identities) {
+    const idAvatar = sanitizeStoredAvatarUrl(id?.avatar_url);
+    if (idAvatar) return idAvatar;
+  }
+  const ghIdentity = identities.find(
+    i => String(i?.provider || '').trim().toLowerCase() === 'github' && String(i?.username || '').trim()
+  );
+  return ghIdentity?.username ? `https://github.com/${ghIdentity.username.trim()}.png` : '';
+}
+
+export function buildProviderFallbackProfileUrls(
+  provider: string,
+  username: string
+): { avatarUrl: string; profileUrl: string } {
+  const cleanProvider = String(provider || '').trim().toLowerCase();
+  const encodedUser = encodeURIComponent(username);
+  switch (cleanProvider) {
+    case 'github':
+      return {
+        avatarUrl: `https://github.com/${username}.png`,
+        profileUrl: `https://github.com/${username}`
+      };
+    case 'mesehub':
+      return {
+        avatarUrl: `https://git.minetest.land/${username}.png`,
+        profileUrl: `https://git.minetest.land/${username}`
+      };
+    case 'codeberg':
+      return {
+        avatarUrl: '',
+        profileUrl: `https://codeberg.org/${username}`
+      };
+    case 'gitlab':
+      return {
+        avatarUrl: '',
+        profileUrl: `https://gitlab.com/${username}`
+      };
+    case 'contentdb':
+      return {
+        avatarUrl: '',
+        profileUrl: `https://content.luanti.org/users/${encodedUser}/`
+      };
+    default:
+      return {
+        avatarUrl: '',
+        profileUrl: ''
+      };
+  }
+}
+
+export async function resolveContentDbUserProfile(
+  username: string,
+  fallbackDisplayName?: string
+): Promise<{
+  displayName: string;
+  avatarUrl: string;
+  profileUrl: string;
+}> {
+  const cleanUser = username.trim();
+  const profileUrl = `https://content.luanti.org/users/${encodeURIComponent(cleanUser)}/`;
+  const cdbUser = await fetchUpstreamJsonCached<any>(
+    `/users/${encodeURIComponent(cleanUser)}/`,
+    600
+  ).catch(() => null);
+
+  const displayName = String(cdbUser?.display_name || fallbackDisplayName || cleanUser).trim() || cleanUser;
+  const resolvedProfilePic = normalizeContentDbProfilePicUrl(cdbUser?.profile_pic_url);
+  const connectedGithub = cdbUser?.connections?.github ? String(cdbUser.connections.github).trim() : '';
+  const avatarUrl = resolvedProfilePic || (connectedGithub ? `https://github.com/${connectedGithub}.png` : '');
+
+  return {
+    displayName,
+    avatarUrl,
+    profileUrl: cdbUser?.links?.profile ? String(cdbUser.links.profile) : profileUrl
+  };
+}
 
 async function getKey(secret?: string): Promise<CryptoKey> {
   const normalizedSecret = typeof secret === 'string' ? secret.trim() : '';
@@ -1304,12 +1477,14 @@ export async function verifyProviderToken(
       if (!matchesExpectedHandle(login)) {
         return { verified: false, failureReason: 'username_mismatch' };
       }
+      const cdbProfile = await resolveContentDbUserProfile(login, profile.display_name);
       return {
         verified: true,
         providerUserId: login,
         username: login,
-        displayName: profile.display_name || login,
-        profileUrl: `https://content.luanti.org/users/${login}/`
+        displayName: cdbProfile.displayName,
+        avatarUrl: cdbProfile.avatarUrl || undefined,
+        profileUrl: cdbProfile.profileUrl
       };
     }
   } catch {

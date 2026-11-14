@@ -330,6 +330,7 @@ export interface TranslationDictionary {
     linkMesehub?: string;
     linkGitlab: string;
     linkGithub: string;
+    linkContentdb: string;
     syncCdbTitle: string;
     syncTitle: string;
     syncCdbDesc: string;

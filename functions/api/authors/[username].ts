@@ -7,7 +7,11 @@ import {
   sanitizePublicErrorMessage,
   buildAuthorProfileEdgeCacheKey
 } from '../lib/upstream';
-import { shouldHonorAuthenticatedNoCache } from '../auth/lib/session';
+import {
+  shouldHonorAuthenticatedNoCache,
+  normalizeContentDbProfilePicUrl,
+  sanitizeStoredAvatarUrl
+} from '../auth/lib/session';
 import {
   inspectAuthorGitSyncStatus,
   syncVerifiedAuthorGitPackages
@@ -90,11 +94,9 @@ export async function onRequestGet(context: {
 
   if (!context.env.DB) {
     const cdbUser = await cdbUserPromise;
-    const cdbAvatar = cdbUser?.profile_pic_url
-      ? (String(cdbUser.profile_pic_url).startsWith('http')
-          ? String(cdbUser.profile_pic_url)
-          : `https://content.luanti.org${String(cdbUser.profile_pic_url).startsWith('/') ? '' : '/'}${cdbUser.profile_pic_url}`)
-      : (cdbUser?.connections?.github ? `https://github.com/${cdbUser.connections.github}.png` : '');
+    const cdbAvatar =
+      normalizeContentDbProfilePicUrl(cdbUser?.profile_pic_url) ||
+      (cdbUser?.connections?.github ? `https://github.com/${cdbUser.connections.github}.png` : '');
     const cdbIdentities: any[] = [];
     if (cdbUser?.connections?.github) {
       cdbIdentities.push({
@@ -236,16 +238,12 @@ export async function onRequestGet(context: {
       }
     }
 
-    const cdbProfilePic = cdbUser?.profile_pic_url
-      ? (String(cdbUser.profile_pic_url).startsWith('http')
-          ? String(cdbUser.profile_pic_url)
-          : `https://content.luanti.org${String(cdbUser.profile_pic_url).startsWith('/') ? '' : '/'}${cdbUser.profile_pic_url}`)
-      : undefined;
+    const cdbProfilePic = normalizeContentDbProfilePicUrl(cdbUser?.profile_pic_url) || undefined;
     const githubIdentity = identities.find(i => i.provider.toLowerCase() === 'github');
     const resolvedAvatarUrl =
-      userRow?.avatar_url ||
+      sanitizeStoredAvatarUrl(userRow?.avatar_url) ||
       cdbProfilePic ||
-      identities.find(i => i.avatar_url)?.avatar_url ||
+      identities.map(i => sanitizeStoredAvatarUrl(i.avatar_url)).find(Boolean) ||
       (githubIdentity ? `https://github.com/${githubIdentity.username}.png` : '');
 
     let gitSyncSummary: {

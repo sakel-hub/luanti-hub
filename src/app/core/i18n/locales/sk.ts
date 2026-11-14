@@ -315,6 +315,7 @@ export const sk: TranslationDictionary = {
     linkMesehub: 'Prepojiť Mesehub',
     linkGitlab: 'Prepojiť GitLab',
     linkGithub: 'Prepojiť GitHub',
+    linkContentdb: 'Prepojiť ContentDB',
     syncCdbTitle: 'Prepojiť Portfólio Autora z ContentDB',
     syncTitle: 'Prepojiť Portfólio Autora z ContentDB',
     syncCdbDesc: 'Zadajte svoje autorské meno na ContentDB pre prepojenie a synchronizáciu všetkých vašich módov, hier a textúr:',

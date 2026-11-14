@@ -178,6 +178,7 @@ export class AuthService {
   private lastModerationFetchKey = '';
   private lastMyReportsFetchAt = 0;
   private lastAuthFetchAt = 0;
+  private inFlightInitAuth: Promise<void> | null = null;
 
   readonly currentUser = this._currentUser.asReadonly();
   readonly isAuthModalOpen = this._isAuthModalOpen.asReadonly();
@@ -426,6 +427,12 @@ export class AuthService {
     return Boolean(this._oauthProviders()[provider]);
   }
 
+  async ensureOAuthConfigLoaded(): Promise<void> {
+    if (this.inFlightInitAuth) {
+      await this.inFlightInitAuth;
+    }
+  }
+
   private handleUrlAuthParams(): void {
     if (typeof window === 'undefined' || !window.location?.search) return;
     try {
@@ -630,6 +637,18 @@ export class AuthService {
   }
 
   async initAuth(forceRefresh = false): Promise<void> {
+    const task = this.performInitAuth(forceRefresh);
+    this.inFlightInitAuth = task;
+    try {
+      await task;
+    } finally {
+      if (this.inFlightInitAuth === task) {
+        this.inFlightInitAuth = null;
+      }
+    }
+  }
+
+  private async performInitAuth(forceRefresh = false): Promise<void> {
     try {
       this._isLoading.set(true);
       this.clearLegacyBrowserAuthStorage();
@@ -714,6 +733,7 @@ export class AuthService {
     options?: {
       allowWhenLoggedIn?: boolean;
       expandDirectSignIn?: boolean;
+      preserveSelectedProvider?: boolean;
       returnToProfileDrawer?: boolean;
       returnTo?: string;
     }
@@ -725,7 +745,7 @@ export class AuthService {
       this.openProfileDrawer();
       return;
     }
-    if (options?.expandDirectSignIn) {
+    if (options?.expandDirectSignIn && !options?.preserveSelectedProvider) {
       const linked = new Set((this._currentUser()?.identities || []).map(i => i.provider));
       const unlinkedOrder: GitProvider[] = ['contentdb', 'github', 'codeberg', 'gitlab', 'mesehub'];
       const firstUnlinked = unlinkedOrder.find(p => !linked.has(p));
@@ -877,9 +897,37 @@ export class AuthService {
       }, 4000);
       return;
     }
-    // When OAuth Client ID is not configured on the server, open the Auth Modal pre-selected to this provider
-    this._isProfileDrawerOpen.set(false);
-    this._isAuthModalOpen.set(true);
+    const capturedReturnTo = options?.returnTo ?? this.resolveOAuthReturnPath();
+    if (this.inFlightInitAuth) {
+      void this.inFlightInitAuth.then(() => {
+        if (this.isOAuthConfigured(provider)) {
+          this.loginWith(provider, loginHint, forceAccountSelect, {
+            ...options,
+            returnTo: capturedReturnTo
+          });
+          return;
+        }
+        this.fallbackToDirectAuthModal(provider, capturedReturnTo);
+      });
+      return;
+    }
+    // When OAuth credentials are not configured for this origin/provider, open Auth Modal pre-selected to it
+    this.fallbackToDirectAuthModal(provider, capturedReturnTo);
+  }
+
+  private fallbackToDirectAuthModal(provider: GitProvider, explicitReturnTo?: string): void {
+    const wasInDrawer = this._isProfileDrawerOpen();
+    if (wasInDrawer) {
+      this.closeProfileDrawer(false);
+    }
+    this._selectedProvider.set(provider);
+    this.openAuthModal(false, {
+      allowWhenLoggedIn: true,
+      expandDirectSignIn: true,
+      preserveSelectedProvider: true,
+      returnToProfileDrawer: wasInDrawer,
+      returnTo: explicitReturnTo
+    });
   }
 
   async loginWithHandle(provider: GitProvider, username: string, token?: string): Promise<{ success: boolean; message?: string }> {

@@ -315,6 +315,7 @@ export const de: TranslationDictionary = {
     linkMesehub: 'Mesehub verknüpfen',
     linkGitlab: 'GitLab verknüpfen',
     linkGithub: 'GitHub verknüpfen',
+    linkContentdb: 'ContentDB verknüpfen',
     syncCdbTitle: 'ContentDB Autoren-Portfolio verknüpfen',
     syncTitle: 'ContentDB Autoren-Portfolio verknüpfen',
     syncCdbDesc: 'Geben Sie Ihren ContentDB-Benutzernamen ein, um alle Ihre offiziellen Mods, Spiele und Texturen zu synchronisieren:',

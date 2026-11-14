@@ -15292,4 +15292,239 @@ core.register_node(modname .. ":panel", {
     pkgService.closeLegalModal();
     appFix.destroy();
   });
+
+  it('supports 1-click ContentDB OAuth2 login, avatar resolution, parameterless cancel recovery, origin guard, and profile linking', async () => {
+    const { onRequestGet: onMeGet } = await import('../../functions/api/auth/me');
+    const { onRequestGet: onLoginGet } = await import('../../functions/api/auth/[provider]/login');
+    const { onRequestGet: onCallbackGet } = await import('../../functions/api/auth/[provider]/callback');
+    const {
+      verifySessionTokenClaims,
+      DEFAULT_CONTENTDB_CLIENT_ID,
+      resolveStoredUserAvatarUrl
+    } = await import('../../functions/api/auth/lib/session');
+
+    const testSecret = 'test-edge-secret-32chars-minimum!!';
+    const fullCdbEnv = {
+      CONTENTDB_CLIENT_ID: DEFAULT_CONTENTDB_CLIENT_ID,
+      CONTENTDB_CLIENT_SECRET: 'cdb_secret_prod',
+      CONTENTDB_REDIRECT_URI: 'https://luantihub.org/api/auth/contentdb/callback',
+      SESSION_SECRET: testSecret
+    };
+
+    // 1. Secret & Origin Guard on GET /api/auth/me (including www.luantihub.org shared cookie domain)
+    const noSecretMe = await onMeGet({
+      request: new Request('https://luantihub.org/api/auth/me'),
+      env: { CONTENTDB_CLIENT_ID: DEFAULT_CONTENTDB_CLIENT_ID, SESSION_SECRET: testSecret }
+    });
+    const noSecretData = await noSecretMe.json();
+    expect(noSecretData.oauthProviders.contentdb).toBe(false);
+
+    const previewOriginMe = await onMeGet({
+      request: new Request('https://preview-branch.luanti-hub.pages.dev/api/auth/me'),
+      env: fullCdbEnv
+    });
+    const previewOriginData = await previewOriginMe.json();
+    expect(previewOriginData.oauthProviders.contentdb).toBe(false);
+
+    const prodReadyMe = await onMeGet({
+      request: new Request('https://luantihub.org/api/auth/me'),
+      env: fullCdbEnv
+    });
+    const prodReadyData = await prodReadyMe.json();
+    expect(prodReadyData.oauthProviders.contentdb).toBe(true);
+
+    const wwwProdReadyMe = await onMeGet({
+      request: new Request('https://www.luantihub.org/api/auth/me'),
+      env: fullCdbEnv
+    });
+    const wwwProdReadyData = await wwwProdReadyMe.json();
+    expect(wwwProdReadyData.oauthProviders.contentdb).toBe(true);
+
+    // Avatar sanitizer strips legacy broken `/users/<handle>/avatar/` URLs and avoids unverified GitHub guesses
+    expect(
+      resolveStoredUserAvatarUrl('https://content.luanti.org/users/SaKeL/avatar/', [
+        { provider: 'contentdb', username: 'SaKeL', avatar_url: 'https://content.luanti.org/users/SaKeL/avatar/' }
+      ])
+    ).toBe('');
+    expect(
+      resolveStoredUserAvatarUrl('', [
+        { provider: 'contentdb', username: 'SaKeL', avatar_url: '' },
+        { provider: 'github', username: 'sakel-gh', avatar_url: '' }
+      ])
+    ).toBe('https://github.com/sakel-gh.png');
+
+    // 2. GET /api/auth/contentdb/login redirect contract
+    const loginRes = await onLoginGet({
+      params: { provider: 'contentdb' },
+      request: new Request('https://luantihub.org/api/auth/contentdb/login?return_to=%2Fprofile%3Ftab%3Daccount'),
+      env: {
+        CONTENTDB_CLIENT_SECRET: 'cdb_secret_prod',
+        SESSION_SECRET: testSecret
+      }
+    });
+    expect(loginRes.status).toBe(302);
+    const authUrl = new URL(loginRes.headers.get('Location') || '');
+    expect(authUrl.origin + authUrl.pathname).toBe('https://content.luanti.org/oauth/authorize/');
+    expect(authUrl.searchParams.get('response_type')).toBe('code');
+    expect(authUrl.searchParams.get('client_id')).toBe('a29af0556e7fe4de6874ea09');
+    expect(authUrl.searchParams.get('redirect_uri')).toBe('https://luantihub.org/api/auth/contentdb/callback');
+    const signedState = authUrl.searchParams.get('state') || '';
+    expect(signedState.length).toBeGreaterThan(10);
+
+    // 3. ContentDB parameterless cancel redirect recovers return_to from signed lh_oauth_state cookie
+    const cancelRes = await onCallbackGet({
+      params: { provider: 'contentdb' },
+      request: new Request('https://luantihub.org/api/auth/contentdb/callback', {
+        headers: { Cookie: `lh_oauth_state=${encodeURIComponent(signedState)}` }
+      }),
+      env: {
+        CONTENTDB_CLIENT_SECRET: 'cdb_secret_prod',
+        SESSION_SECRET: testSecret
+      }
+    });
+    expect(cancelRes.status).toBe(302);
+    expect(cancelRes.headers.get('Location')).toBe(
+      'https://luantihub.org/profile?tab=account&auth_error=auth_cancelled&provider=contentdb'
+    );
+    expect(cancelRes.headers.get('Set-Cookie') || '').toContain('lh_oauth_state=;');
+
+    // 4. Full ContentDB OAuth callback token exchange + whoami + /api/users/<username>/ avatar resolution
+    const originalFetch = globalThis.fetch;
+    const waitUntilPromises: Promise<any>[] = [];
+    let seenTokenBody = '';
+    try {
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (reqUrl === 'https://content.luanti.org/oauth/token/') {
+          seenTokenBody = String(init?.body || '');
+          return new Response(JSON.stringify({ access_token: 'cdb_oauth_tok_12345', token_type: 'Bearer' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (reqUrl === 'https://content.luanti.org/api/whoami/') {
+          const authHeader = new Headers(init?.headers).get('Authorization') || '';
+          expect(authHeader).toBe('Bearer cdb_oauth_tok_12345');
+          return new Response(JSON.stringify({ is_authenticated: true, username: 'SaKeL' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (reqUrl.includes('/api/users/SaKeL/')) {
+          return new Response(
+            JSON.stringify({
+              username: 'SaKeL',
+              display_name: 'SaKeL Official',
+              profile_pic_url: '/uploads/sakel_avatar.png'
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }) as typeof fetch;
+
+      const cbRes = await onCallbackGet({
+        params: { provider: 'contentdb' },
+        request: new Request(
+          `https://luantihub.org/api/auth/contentdb/callback?code=cdb_code_xyz&state=${encodeURIComponent(signedState)}`,
+          { headers: { Cookie: `lh_oauth_state=${encodeURIComponent(signedState)}` } }
+        ),
+        env: {
+          CONTENTDB_CLIENT_SECRET: 'cdb_secret_prod',
+          SESSION_SECRET: testSecret
+        },
+        waitUntil: p => waitUntilPromises.push(p)
+      });
+
+      expect(cbRes.status).toBe(302);
+      expect(cbRes.headers.get('Location')).toBe('https://luantihub.org/profile?tab=account&auth_success=1');
+      expect(seenTokenBody).toContain('grant_type=authorization_code');
+      expect(seenTokenBody).toContain('client_id=a29af0556e7fe4de6874ea09');
+      expect(seenTokenBody).toContain('client_secret=cdb_secret_prod');
+      expect(seenTokenBody).toContain('code=cdb_code_xyz');
+      expect(waitUntilPromises.length).toBe(1);
+      await Promise.all(waitUntilPromises);
+
+      const setCookieHeader = cbRes.headers.get('Set-Cookie') || '';
+      const sessionMatch = setCookieHeader.match(/lh_session=([^;]+)/);
+      expect(sessionMatch).toBeTruthy();
+      const claims = await verifySessionTokenClaims(decodeURIComponent(sessionMatch![1]), testSecret);
+      expect(claims?.provider).toBe('contentdb');
+      expect(claims?.username).toBe('SaKeL');
+      expect(claims?.displayName).toBe('SaKeL Official');
+      expect(claims?.avatarUrl).toBe('https://content.luanti.org/uploads/sakel_avatar.png');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // 5. Cold-boot race protection in AuthModalComponent + ProfileDrawer Link ContentDB button
+    const authService = TestBed.inject(AuthService);
+    (authService as any)._oauthProviders.set({});
+    (authService as any)._isOAuthRedirecting.set(false);
+
+    let resolvePendingInit!: () => void;
+    (authService as any).inFlightInitAuth = new Promise<void>(resolve => {
+      resolvePendingInit = () => {
+        (authService as any)._oauthProviders.set({ contentdb: true });
+        resolve();
+      };
+    });
+
+    const navSpy = vi.spyOn(authService as any, 'navigateToUrl').mockImplementation(() => {});
+    const modalFix = TestBed.createComponent(AuthModalComponent);
+    modalFix.detectChanges();
+
+    const signInPromise = modalFix.componentInstance.signIn('contentdb');
+    resolvePendingInit();
+    await signInPromise;
+    (authService as any).inFlightInitAuth = null;
+
+    expect(modalFix.componentInstance.isDirectSignInExpanded()).toBe(false);
+    expect(navSpy).toHaveBeenCalledWith('/api/auth/contentdb/login?prompt=select_account');
+    modalFix.destroy();
+    (authService as any)._isOAuthRedirecting.set(false);
+    navSpy.mockRestore();
+
+    // ProfileDrawer shows Link ContentDB when unlinked and hides it once linked
+    (authService as any)._currentUser.set({
+      id: 'usr_link_cdb',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [{ provider: 'github', username: 'SaKeL', verified: true }]
+    });
+    (authService as any)._isProfileDrawerOpen.set(true);
+    const drawerFix = TestBed.createComponent(ProfileDrawerComponent);
+    drawerFix.componentInstance.activeTab.set('account');
+    drawerFix.detectChanges();
+    expect(drawerFix.nativeElement.querySelector('[data-testid="link-contentdb-btn"]')).toBeTruthy();
+
+    (authService as any)._currentUser.set({
+      id: 'usr_link_cdb',
+      username: 'sakel',
+      display_name: 'SaKeL',
+      avatar_url: 'logo.svg',
+      role: 'user',
+      identities: [
+        { provider: 'github', username: 'SaKeL', verified: true },
+        { provider: 'contentdb', username: 'SaKeL', verified: true }
+      ]
+    });
+    drawerFix.detectChanges();
+    expect(drawerFix.nativeElement.querySelector('[data-testid="link-contentdb-btn"]')).toBeFalsy();
+
+    // Unconfigured-provider fallback from ProfileDrawer expands Direct Sign-In pre-selected to requested provider
+    (authService as any)._oauthProviders.set({ contentdb: false });
+    (authService as any)._isProfileDrawerOpen.set(true);
+    authService.loginWith('contentdb', undefined, true);
+    expect(authService.isAuthModalOpen()).toBe(true);
+    expect(authService.expandDirectSignInOnOpen()).toBe(true);
+    expect(authService.selectedProvider()).toBe('contentdb');
+    authService.closeAuthModal(false);
+
+    drawerFix.destroy();
+    (authService as any)._isProfileDrawerOpen.set(false);
+    (authService as any)._currentUser.set(null);
+  });
 });

@@ -315,6 +315,7 @@ export const fr: TranslationDictionary = {
     linkMesehub: 'Lier Mesehub',
     linkGitlab: 'Lier GitLab',
     linkGithub: 'Lier GitHub',
+    linkContentdb: 'Lier ContentDB',
     syncCdbTitle: 'Lier votre Portfolio Auteur ContentDB',
     syncTitle: 'Lier votre Portfolio Auteur ContentDB',
     syncCdbDesc: 'Entrez votre nom d\'auteur ContentDB pour synchroniser automatiquement tous vos mods, jeux et packs de textures :',

@@ -1,7 +1,10 @@
 import {
   createOAuthStateToken,
   buildOAuthStateCookie,
-  sanitizeRelativeReturnPath
+  sanitizeRelativeReturnPath,
+  cleanEnvValue,
+  resolveOAuthRedirectUri,
+  resolveContentDbOAuthConfig
 } from '../lib/session';
 
 interface Env {
@@ -14,27 +17,9 @@ interface Env {
   GITHUB_CLIENT_ID?: string;
   GITHUB_REDIRECT_URI?: string;
   CONTENTDB_CLIENT_ID?: string;
+  CONTENTDB_CLIENT_SECRET?: string;
   CONTENTDB_REDIRECT_URI?: string;
   SESSION_SECRET?: string;
-}
-
-function cleanEnvValue(val?: string): string {
-  return (val || '').trim().replace(/^["']|["']$/g, '').trim();
-}
-
-function resolveRedirectUri(envValue: string | undefined, requestOrigin: string, provider: string): string {
-  const fallback = `${requestOrigin}/api/auth/${provider}/callback`;
-  const cleaned = cleanEnvValue(envValue);
-  if (!cleaned) return fallback;
-  if (
-    cleaned.includes('luanti-hub.pages.dev') &&
-    !requestOrigin.includes('luanti-hub.pages.dev') &&
-    !requestOrigin.includes('localhost') &&
-    !requestOrigin.includes('127.0.0.1')
-  ) {
-    return fallback;
-  }
-  return cleaned;
 }
 
 export async function onRequestGet(context: { params: { provider: string }; request: Request; env: Env }) {
@@ -63,7 +48,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
   switch (provider) {
     case 'codeberg': {
       clientId = cleanEnvValue(context.env.CODEBERG_CLIENT_ID);
-      redirectUri = resolveRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, provider);
+      redirectUri = resolveOAuthRedirectUri(context.env.CODEBERG_REDIRECT_URI, url.origin, provider);
       if (clientId) {
         authUrl = `https://codeberg.org/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
       }
@@ -71,7 +56,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     }
     case 'mesehub': {
       clientId = cleanEnvValue(context.env.MESEHUB_CLIENT_ID);
-      redirectUri = resolveRedirectUri(context.env.MESEHUB_REDIRECT_URI, url.origin, provider);
+      redirectUri = resolveOAuthRedirectUri(context.env.MESEHUB_REDIRECT_URI, url.origin, provider);
       if (clientId) {
         authUrl = `https://git.minetest.land/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
       }
@@ -79,7 +64,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     }
     case 'gitlab': {
       clientId = cleanEnvValue(context.env.GITLAB_CLIENT_ID);
-      redirectUri = resolveRedirectUri(context.env.GITLAB_REDIRECT_URI, url.origin, provider);
+      redirectUri = resolveOAuthRedirectUri(context.env.GITLAB_REDIRECT_URI, url.origin, provider);
       if (clientId) {
         authUrl = `https://gitlab.com/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=read_user&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login_hint=${encodeURIComponent(loginHint)}` : ''}`;
       }
@@ -87,7 +72,7 @@ export async function onRequestGet(context: { params: { provider: string }; requ
     }
     case 'github': {
       clientId = cleanEnvValue(context.env.GITHUB_CLIENT_ID);
-      redirectUri = resolveRedirectUri(context.env.GITHUB_REDIRECT_URI, url.origin, provider);
+      redirectUri = resolveOAuthRedirectUri(context.env.GITHUB_REDIRECT_URI, url.origin, provider);
       if (clientId) {
         // GitHub honors `prompt=select_account` and `login` to always display the account chooser
         authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user&prompt=select_account&state=${encodeURIComponent(state)}${loginHint ? `&login=${encodeURIComponent(loginHint)}` : ''}`;
@@ -95,10 +80,11 @@ export async function onRequestGet(context: { params: { provider: string }; requ
       break;
     }
     case 'contentdb': {
-      clientId = cleanEnvValue(context.env.CONTENTDB_CLIENT_ID);
-      redirectUri = resolveRedirectUri(context.env.CONTENTDB_REDIRECT_URI, url.origin, provider);
-      if (clientId) {
-        authUrl = `https://content.luanti.org/oauth/authorize/?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${encodeURIComponent(state)}`;
+      const cdbCfg = resolveContentDbOAuthConfig(context.env, url.origin);
+      if (cdbCfg.enabled) {
+        clientId = cdbCfg.clientId;
+        redirectUri = cdbCfg.redirectUri;
+        authUrl = `https://content.luanti.org/oauth/authorize/?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
       }
       break;
     }

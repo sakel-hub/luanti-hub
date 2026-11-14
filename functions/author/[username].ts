@@ -4,6 +4,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../api/lib/upstream';
+import { normalizeContentDbProfilePicUrl } from '../api/auth/lib/session';
 
 interface Env {
   DB?: any;
@@ -419,11 +420,9 @@ export async function onRequestGet(context: {
         if (cdbUser.connections?.github) {
           sameAsSet.add(`https://github.com/${cdbUser.connections.github}`);
         }
-        if (cdbUser.profile_pic_url) {
-          const rawPic = String(cdbUser.profile_pic_url);
-          avatarUrl = rawPic.startsWith('http')
-            ? rawPic
-            : `https://content.luanti.org${rawPic.startsWith('/') ? '' : '/'}${rawPic}`;
+        const normalizedCdbPic = normalizeContentDbProfilePicUrl(cdbUser.profile_pic_url);
+        if (normalizedCdbPic) {
+          avatarUrl = normalizedCdbPic;
         }
       }
 

@@ -14,7 +14,12 @@ import {
   getCachedAuthMePayload,
   setCachedAuthMePayload,
   invalidateCachedAuthMePayload,
-  verifySameOriginMutation
+  verifySameOriginMutation,
+  cleanEnvValue,
+  resolveContentDbOAuthConfig,
+  buildProviderFallbackProfileUrls,
+  sanitizeStoredAvatarUrl,
+  resolveStoredUserAvatarUrl
 } from './lib/session';
 import {
   ensureModerationColumns,
@@ -39,15 +44,17 @@ interface Env {
   GITLAB_CLIENT_ID?: string;
   GITHUB_CLIENT_ID?: string;
   CONTENTDB_CLIENT_ID?: string;
+  CONTENTDB_CLIENT_SECRET?: string;
+  CONTENTDB_REDIRECT_URI?: string;
 }
 
-function getConfiguredOAuthProviders(env: Env): Record<string, boolean> {
+function getConfiguredOAuthProviders(env: Env, requestOrigin: string): Record<string, boolean> {
   return {
-    codeberg: Boolean(env.CODEBERG_CLIENT_ID && env.CODEBERG_CLIENT_ID.trim()),
-    mesehub: Boolean(env.MESEHUB_CLIENT_ID && env.MESEHUB_CLIENT_ID.trim()),
-    gitlab: Boolean(env.GITLAB_CLIENT_ID && env.GITLAB_CLIENT_ID.trim()),
-    github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_ID.trim()),
-    contentdb: Boolean(env.CONTENTDB_CLIENT_ID && env.CONTENTDB_CLIENT_ID.trim())
+    codeberg: Boolean(cleanEnvValue(env.CODEBERG_CLIENT_ID)),
+    mesehub: Boolean(cleanEnvValue(env.MESEHUB_CLIENT_ID)),
+    gitlab: Boolean(cleanEnvValue(env.GITLAB_CLIENT_ID)),
+    github: Boolean(cleanEnvValue(env.GITHUB_CLIENT_ID)),
+    contentdb: resolveContentDbOAuthConfig(env, requestOrigin).enabled
   };
 }
 
@@ -72,12 +79,13 @@ function buildFallbackUserFromClaims(
   }
 
   const provider = claims.provider || 'github';
-  const avatarUrl = claims.avatarUrl || `https://github.com/${inferredUsername}.png`;
+  const fallbackUrls = buildProviderFallbackProfileUrls(provider, inferredUsername);
+  const avatarUrl = claims.avatarUrl ?? fallbackUrls.avatarUrl;
   const identities = [
     {
       provider,
       username: inferredUsername,
-      profile_url: `https://github.com/${inferredUsername}`,
+      profile_url: fallbackUrls.profileUrl,
       avatar_url: avatarUrl,
       verified: claims.verified !== false
     }
@@ -118,9 +126,10 @@ function buildFallbackUserFromClaims(
 
 // GET /api/auth/me: Fetch current authenticated user profile, linked identities, packages, favorites & admin status
 export async function onRequestGet(context: { request: Request; env: Env; waitUntil?: (promise: Promise<any>) => void }) {
+  const url = new URL(context.request.url);
   const cookies = parseCookies(context.request);
   const sessionToken = cookies['lh_session'];
-  const oauthProviders = getConfiguredOAuthProviders(context.env);
+  const oauthProviders = getConfiguredOAuthProviders(context.env, url.origin);
 
   if (!sessionToken) {
     return Response.json({ user: null, oauthProviders }, { headers: { 'Cache-Control': 'no-store' } });
@@ -140,7 +149,6 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
     );
   }
 
-  const url = new URL(context.request.url);
   const wantFresh = url.searchParams.get('fresh') === '1';
   if (!wantFresh) {
     const cachedUser = getCachedAuthMePayload(userId, false);
@@ -187,6 +195,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
     ).bind(resolvedUserId).all();
     const identities = (identitiesRes.results || []).map((id: any) => ({
       ...id,
+      avatar_url: sanitizeStoredAvatarUrl(id.avatar_url) || undefined,
       verified: Boolean(id.verified)
     }));
 
@@ -342,6 +351,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
     }
 
     const primaryIdentity = identities.find((i: any) => i.verified) || identities[0];
+    const resolvedUserAvatarUrl = resolveStoredUserAvatarUrl(user.avatar_url, identities);
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
     if (resolvedUserId !== userId || !claims.username) {
       const refreshedToken = await createSessionToken(
@@ -350,7 +360,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
         {
           username: user.username,
           displayName: user.display_name || user.username,
-          avatarUrl: user.avatar_url || `https://github.com/${user.username}.png`,
+          avatarUrl: resolvedUserAvatarUrl,
           provider: primaryIdentity?.provider || 'github',
           role: isAdmin ? 'admin' : 'user',
           verified: true
@@ -363,7 +373,7 @@ export async function onRequestGet(context: { request: Request; env: Env; waitUn
       id: resolvedUserId,
       username: user.username,
       display_name: user.display_name || user.username,
-      avatar_url: user.avatar_url || `https://github.com/${user.username}.png`,
+      avatar_url: resolvedUserAvatarUrl,
       bio: user.bio || '',
       role: isAdmin ? 'admin' : 'user',
       is_admin: isAdmin,
@@ -499,8 +509,9 @@ export async function onRequestPost(context: { request: Request; env: Env; waitU
     const verifiedUsername = tokenCheck.username || rawUsername;
     const providerUserId = tokenCheck.providerUserId || verifiedUsername.toLowerCase();
     const displayName = tokenCheck.displayName || verifiedUsername;
-    const avatarUrl = tokenCheck.avatarUrl || `https://github.com/${rawUsername}.png`;
-    const profileUrl = tokenCheck.profileUrl || `https://github.com/${rawUsername}`;
+    const fallbackUrls = buildProviderFallbackProfileUrls(provider, verifiedUsername);
+    const avatarUrl = tokenCheck.avatarUrl ?? fallbackUrls.avatarUrl;
+    const profileUrl = tokenCheck.profileUrl || fallbackUrls.profileUrl;
 
     const verifiedFlag = 1;
     const isAdmin = checkIsAdmin(
