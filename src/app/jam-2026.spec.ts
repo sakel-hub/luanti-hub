@@ -27,7 +27,18 @@ import {
 import { onRequestPost as postPackagesHydrate } from '../../functions/api/packages/hydrate';
 import { onRequestGet as getPackageDetail } from '../../functions/api/packages/[author]/[name]/index';
 import { onRequestGet as getPackageForClient } from '../../functions/api/packages/[author]/[name]/for-client';
+import { onRequestGet as getPackageDependencies } from '../../functions/api/packages/[author]/[name]/dependencies';
 import { onRequest as handlePackageDownload } from '../../functions/api/packages/[author]/[name]/download';
+import { onRequest as handleReleaseDownload } from '../../functions/packages/[author]/[name]/releases/[release]/download';
+import { onRequestGet as getUpdatesEndpoint } from '../../functions/api/updates';
+import {
+  BOOT_CATALOG_EDGE_CACHE_KEY,
+  UPDATES_EDGE_CACHE_KEY,
+  IN_GAME_CATALOG_CACHE_PREFIX,
+  FOR_CLIENT_CACHE_PREFIX,
+  invalidateEdgeCacheKeys,
+  clearIsolateCachesForTests
+} from '../../functions/api/lib/upstream';
 import { toLegacyLuantiClientThumbnailUrl } from './core/config/git-providers.config';
 import {
   isJam2026PromoTag,
@@ -1918,7 +1929,9 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     const insertSql = capturedSqls.find((s) => s.includes('INSERT INTO packages'));
     expect(insertSql).toBeDefined();
     expect(insertSql).toContain("WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%'");
-    expect(insertSql).toContain("WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.thumbnail_url");
+    expect(insertSql).toContain(
+      "WHEN ((packages.author_id IS NULL OR packages.author_id LIKE 'ext_jam2026_%') AND COALESCE(packages.provider, '') != 'contentdb') THEN COALESCE(excluded.thumbnail_url"
+    );
     expect(insertSql).toContain('THEN excluded.thumbnail_url');
     expect(insertSql).toContain('THEN excluded.banner_url');
     expect(insertSql).toContain('THEN excluded.screenshots');
@@ -1946,6 +1959,7 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     )}`;
     const packageUpsertBind = capturedBinds.find((args) => args[0] === 'zenonseth/strata' && args.length >= 20);
     expect(packageUpsertBind).toBeDefined();
+    expect(packageUpsertBind?.[1]).toBeNull();
     expect(packageUpsertBind?.[9]).toBe(expectedCommit2Thumb);
     expect(packageUpsertBind?.[10]).toBe(expectedCommit2Thumb);
     expect(packageUpsertBind?.[16]).toBe(commit2);
@@ -2045,5 +2059,879 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(forClientJson.name).toBe('strata');
     expect(forClientJson.type).toBe('game');
     expect(forClientJson.screenshots).toEqual([]);
+  });
+
+  const createInMemoryEdgeCaches = () => {
+    const store = new Map<string, Response>();
+    return {
+      default: {
+        match: async (req: Request | string) => {
+          const key = typeof req === 'string' ? req : req.url;
+          const hit = store.get(key);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const key = typeof req === 'string' ? req : req.url;
+          store.set(key, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const key = typeof req === 'string' ? req : req.url;
+          return store.delete(key);
+        }
+      }
+    };
+  };
+
+  const buildCrcZip = (files: Array<{ path: string; content: string }>): Uint8Array => {
+    const encoder = new TextEncoder();
+    const crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c >>> 0;
+    }
+    const crc32 = (buf: Uint8Array) => {
+      let crc = 0xffffffff;
+      for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+      return (crc ^ 0xffffffff) >>> 0;
+    };
+    const localParts: Uint8Array[] = [];
+    const cdParts: Uint8Array[] = [];
+    let offset = 0;
+    for (const f of files) {
+      const nameBytes = encoder.encode(f.path);
+      const dataBytes = encoder.encode(f.content);
+      const crc = crc32(dataBytes);
+      const lh = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+      const lv = new DataView(lh.buffer);
+      lv.setUint32(0, 0x04034b50, true);
+      lv.setUint16(4, 20, true);
+      lv.setUint32(14, crc, true);
+      lv.setUint32(18, dataBytes.length, true);
+      lv.setUint32(22, dataBytes.length, true);
+      lv.setUint16(26, nameBytes.length, true);
+      lh.set(nameBytes, 30);
+      lh.set(dataBytes, 30 + nameBytes.length);
+      localParts.push(lh);
+
+      const ch = new Uint8Array(46 + nameBytes.length);
+      const cv = new DataView(ch.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint32(16, crc, true);
+      cv.setUint32(20, dataBytes.length, true);
+      cv.setUint32(24, dataBytes.length, true);
+      cv.setUint16(28, nameBytes.length, true);
+      cv.setUint32(42, offset, true);
+      ch.set(nameBytes, 46);
+      cdParts.push(ch);
+      offset += lh.length;
+    }
+    const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+    const eocd = new Uint8Array(22);
+    const ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, files.length, true);
+    ev.setUint16(10, files.length, true);
+    ev.setUint32(12, cdSize, true);
+    ev.setUint32(16, offset, true);
+    const out = new Uint8Array(offset + cdSize + 22);
+    let pos = 0;
+    for (const p of [...localParts, ...cdParts, eocd]) {
+      out.set(p, pos);
+      pos += p.length;
+    }
+    return out;
+  };
+
+  const readZipEntriesText = async (zip: Uint8Array): Promise<Record<string, string>> => {
+    const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+    const decoder = new TextDecoder();
+    let eocdPos = -1;
+    for (let p = zip.length - 22; p >= 0; p--) {
+      if (v.getUint32(p, true) === 0x06054b50) {
+        eocdPos = p;
+        break;
+      }
+    }
+    expect(eocdPos).toBeGreaterThanOrEqual(0);
+    const count = v.getUint16(eocdPos + 10, true);
+    let ptr = v.getUint32(eocdPos + 16, true);
+    const out: Record<string, string> = {};
+    for (let i = 0; i < count; i++) {
+      const compSize = v.getUint32(ptr + 20, true);
+      const nLen = v.getUint16(ptr + 28, true);
+      const eLen = v.getUint16(ptr + 30, true);
+      const cLen = v.getUint16(ptr + 32, true);
+      const lfhOffset = v.getUint32(ptr + 42, true);
+      const entryName = decoder.decode(zip.slice(ptr + 46, ptr + 46 + nLen));
+      const method = v.getUint16(lfhOffset + 8, true);
+      const lNLen = v.getUint16(lfhOffset + 26, true);
+      const lELen = v.getUint16(lfhOffset + 28, true);
+      const dataStart = lfhOffset + 30 + lNLen + lELen;
+      const payload = zip.slice(dataStart, dataStart + compSize);
+      if (method === 0) {
+        out[entryName] = decoder.decode(payload);
+      } else if (method === 8) {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        writer.write(payload);
+        writer.close();
+        const raw = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+        out[entryName] = decoder.decode(raw);
+      } else {
+        out[entryName] = '';
+      }
+      ptr += 46 + nLen + eLen + cLen;
+    }
+    return out;
+  };
+
+  const createFkEnforcingJamD1 = () => {
+    const users = new Map<string, any>();
+    const packages = new Map<string, any>();
+    const releases: Array<any> = [];
+    const promoPairs = new Set<string>();
+    let nextRelId = 1;
+
+    const executeSql = async (sql: string, args: any[], mode: 'run' | 'first' | 'all') => {
+      const clean = sql.trim();
+
+      if (/INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+users/i.test(clean)) {
+        const [id, username, display_name, avatar_url] = args;
+        const usernameTaken = Array.from(users.values()).some(
+          (u) => String(u.username || '').toLowerCase() === String(username || '').toLowerCase()
+        );
+        if (!usernameTaken && !users.has(id)) {
+          users.set(id, { id, username, display_name, avatar_url });
+        }
+        return mode === 'all' ? { results: [] } : { success: true };
+      }
+
+      if (/INSERT\s+INTO\s+packages/i.test(clean) && /SELECT\s+\?/i.test(clean)) {
+        const [
+          id,
+          author_id,
+          author_name,
+          name,
+          title,
+          short_desc,
+          long_desc,
+          repo_url,
+          provider,
+          thumbnail_url,
+          banner_url,
+          screenshots,
+          license,
+          media_license,
+          tags,
+          min_minetest_version,
+          latest_commit_sha,
+          created_at,
+          updated_at,
+          whereRepoUrl,
+          whereNotId
+        ] = args;
+
+        if (author_id !== null && author_id !== undefined && !users.has(String(author_id))) {
+          throw new Error('D1_ERROR: FOREIGN KEY constraint failed');
+        }
+        const conflictOther = Array.from(packages.values()).some(
+          (p) =>
+            p.repo_url &&
+            whereRepoUrl &&
+            String(p.repo_url).toLowerCase() === String(whereRepoUrl).toLowerCase() &&
+            String(p.id).toLowerCase() !== String(whereNotId).toLowerCase()
+        );
+        if (conflictOther) {
+          return mode === 'all' ? { results: [] } : { success: true };
+        }
+
+        const key = String(id).toLowerCase();
+        const existing = packages.get(key);
+        if (!existing) {
+          packages.set(key, {
+            id,
+            author_id: author_id ?? null,
+            author_name,
+            name,
+            title,
+            type: 'game',
+            short_desc,
+            long_desc,
+            repo_url,
+            provider,
+            default_branch: 'main',
+            thumbnail_url,
+            banner_url,
+            screenshots,
+            license,
+            media_license,
+            tags,
+            min_minetest_version,
+            latest_commit_sha,
+            status: 'active',
+            downloads_count: 0,
+            contentdb_downloads: 0,
+            luantihub_downloads: 0,
+            score: 0,
+            created_at,
+            updated_at
+          });
+        } else {
+          const shaChanged =
+            Boolean(existing.latest_commit_sha) &&
+            String(existing.latest_commit_sha).toLowerCase() !== String(latest_commit_sha || '').toLowerCase();
+          let nextUpdatedAt = updated_at;
+          if (shaChanged) {
+            const prevSec = Math.floor(Date.parse(existing.updated_at || existing.created_at || '2026-01-01T00:00:00Z') / 1000);
+            const nextSec = Math.max(Math.floor(Date.now() / 1000), prevSec + 1, Math.floor(Date.parse(updated_at) / 1000) || 1);
+            nextUpdatedAt = new Date(nextSec * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+          } else if (existing.updated_at && existing.updated_at > updated_at) {
+            nextUpdatedAt = existing.updated_at;
+          }
+          packages.set(key, {
+            ...existing,
+            title,
+            short_desc,
+            repo_url: existing.repo_url || repo_url,
+            thumbnail_url,
+            banner_url,
+            screenshots,
+            latest_commit_sha,
+            updated_at: nextUpdatedAt
+          });
+        }
+        return mode === 'all' ? { results: [] } : { success: true };
+      }
+
+      if (/DELETE\s+FROM\s+releases/i.test(clean)) {
+        const targetId = String(args[0] || '').toLowerCase();
+        for (let i = releases.length - 1; i >= 0; i--) {
+          const pkg = packages.get(targetId);
+          const isUnclaimedJam =
+            pkg &&
+            (pkg.author_id === null || String(pkg.author_id).startsWith('ext_jam2026_')) &&
+            String(pkg.provider || '') !== 'contentdb';
+          if (String(releases[i].package_id).toLowerCase() === targetId && isUnclaimedJam) {
+            releases.splice(i, 1);
+          }
+        }
+        return { success: true };
+      }
+
+      if (/INSERT\s+INTO\s+releases/i.test(clean)) {
+        const [pkgId, version, tag_name, commit_sha, download_url, min_minetest_version, , fallbackReleasedAt] = args;
+        const pkg = packages.get(String(pkgId).toLowerCase());
+        if (!pkg) throw new Error('D1_ERROR: FOREIGN KEY constraint failed');
+        const isUnclaimedJam =
+          (pkg.author_id === null || String(pkg.author_id).startsWith('ext_jam2026_')) &&
+          String(pkg.provider || '') !== 'contentdb';
+        if (isUnclaimedJam) {
+          releases.push({
+            id: nextRelId++,
+            package_id: pkg.id,
+            version,
+            tag_name,
+            commit_sha,
+            download_url,
+            min_minetest_version,
+            released_at: pkg.updated_at || fallbackReleasedAt
+          });
+        }
+        return { success: true };
+      }
+
+      if (/INSERT\s+INTO\s+promo_tag_packages/i.test(clean)) {
+        promoPairs.add(`${String(args[0]).toLowerCase()}::${String(args[1]).toLowerCase()}`);
+        return { success: true };
+      }
+
+      if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at\s+FROM\s+packages/i.test(clean)) {
+        const lowerIds = new Set(args.map((a) => String(a).toLowerCase()));
+        const results = Array.from(packages.entries())
+          .filter(([k]) => lowerIds.has(k))
+          .map(([k, p]) => ({ lower_id: k, updated_at: p.updated_at, created_at: p.created_at }));
+        return { results };
+      }
+
+      if (/FROM\s+releases/i.test(clean)) {
+        const pkgId = String(args[0] || '').toLowerCase();
+        const filtered = releases
+          .filter((r) => String(r.package_id).toLowerCase() === pkgId)
+          .sort((a, b) => String(b.released_at).localeCompare(String(a.released_at)) || b.id - a.id);
+        return mode === 'first' ? filtered[0] || null : { results: filtered };
+      }
+
+      if (/FROM\s+packages/i.test(clean)) {
+        if (/COUNT\(\*\)/i.test(clean)) {
+          return mode === 'first' ? { cnt: packages.size } : { results: [{ cnt: packages.size }] };
+        }
+        if (/status\s+IN\s*\(\s*'flagged'/i.test(clean)) {
+          const flagged = Array.from(packages.values()).filter(
+            (p) => p.status === 'flagged' || p.status === 'delisted'
+          );
+          return mode === 'first' ? flagged[0] || null : { results: flagged };
+        }
+        const allActive = Array.from(packages.values()).filter((p) => p.status === 'active');
+        if (mode === 'first') {
+          const arg0 = String(args[0] || '').toLowerCase();
+          const arg1 = args[2] !== undefined ? String(args[2]).toLowerCase() : undefined;
+          const found = allActive.find((p) => {
+            if (String(p.id).toLowerCase() === arg0) return true;
+            if (arg1 !== undefined) {
+              return String(p.author_name).toLowerCase() === arg0 && String(p.name).toLowerCase() === arg1;
+            }
+            return false;
+          });
+          return found || null;
+        }
+        return { results: allActive };
+      }
+
+      if (mode === 'first') return null;
+      return { results: [] };
+    };
+
+    const prepare = (sql: string) => {
+      const bound: any[] = [];
+      const stmt: any = {
+        bind: (...args: any[]) => {
+          bound.push(...args);
+          return stmt;
+        },
+        run: () => executeSql(sql, bound, 'run'),
+        first: () => executeSql(sql, bound, 'first'),
+        all: () => executeSql(sql, bound, 'all')
+      };
+      return stmt;
+    };
+
+    return {
+      users,
+      packages,
+      releases,
+      db: {
+        prepare,
+        batch: async (stmts: any[]) => {
+          for (const s of stmts) {
+            await s.run();
+          }
+          return [];
+        }
+      }
+    };
+  };
+
+  it('persists pure-Git Jam 2026 packages into FK-enforcing D1 without error and shows zenonseth/strata in all in-game client Content tab paths (MISS-EDGE, HIT-BOOT-SHARED, ?type=game, ?q=strata, &fmt=keys)', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    await invalidateEdgeCacheKeys([
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      UPDATES_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      'https://luantihub.internal/api/packages/?fmt=vcs',
+      'https://luantihub.internal/api/packages/?type=game&fmt=vcs',
+      'https://luantihub.internal/api/packages/?type=game&q=strata&fmt=vcs'
+    ]);
+
+    const strataCommit = 'abc1234567890abcdef1234567890abcdef12345';
+    const aliceCommit = 'def1234567890abcdef1234567890abcdef12345';
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://codeberg.org/zenonseth/strata',
+              commit: strataCommit,
+              title: 'Strata',
+              description: 'Dig deep and survive.',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T22:24:52.623Z'
+            },
+            {
+              repository: 'https://codeberg.org/alice/alice_jam',
+              commit: aliceCommit,
+              title: 'Alice Jam',
+              description: 'Cross-provider username FK safety entry.',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T20:00:00.000Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages')) {
+        // ContentDB does NOT have zenonseth/strata
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Minetest',
+              name: 'minetest_game',
+              title: 'Minetest Game',
+              type: 'game',
+              short_description: 'Classic sandbox game',
+              release: 15000,
+              thumbnail: null
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/tags')) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes('content.luanti.org/api/scores')) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes('blog.luanti.org')) {
+        return new Response('', { status: 404 });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const fkD1 = createFkEnforcingJamD1();
+    fkD1.users.set('usr_github_alice', {
+      id: 'usr_github_alice',
+      username: 'alice',
+      display_name: 'Alice',
+      avatar_url: ''
+    });
+
+    try {
+      // 1. Cold in-game Luanti client catalog request (MISS-EDGE) without prior ?boot=1 or ?tag=jam_game_2026
+      const coldClientRes = await getPackagesCatalog({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.18.0&hide=nonfree&hide=desktop_default'
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(coldClientRes.status).toBe(200);
+      expect(coldClientRes.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      const coldClientList = await coldClientRes.json();
+      expect(Array.isArray(coldClientList)).toBe(true);
+      const strataCold = coldClientList.find(
+        (p: any) => String(p.author).toLowerCase() === 'zenonseth' && String(p.name).toLowerCase() === 'strata'
+      );
+      expect(strataCold).toBeDefined();
+      expect(strataCold.type).toBe('game');
+      expect(Number(strataCold.release)).toBeGreaterThan(1700000000);
+
+      // Verify FK-enforced D1 persistence succeeded cleanly with author_id = null
+      const persistedPkg = fkD1.packages.get('zenonseth/strata');
+      expect(persistedPkg).toBeDefined();
+      expect(persistedPkg.author_id).toBeNull();
+      expect(fkD1.releases.some((r) => r.package_id === 'zenonseth/strata' && r.commit_sha === strataCommit)).toBe(true);
+      const persistedAlice = fkD1.packages.get('alice/alice_jam');
+      expect(persistedAlice).toBeDefined();
+      expect(persistedAlice.author_id).toBeNull();
+
+      // 2. Search by query (?type=game&q=strata)
+      const searchRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages/?type=game&q=strata'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(searchRes.status).toBe(200);
+      const searchList = await searchRes.json();
+      expect(
+        searchList.some((p: any) => String(p.author).toLowerCase() === 'zenonseth' && String(p.name).toLowerCase() === 'strata')
+      ).toBe(true);
+
+      // 3. Modern Luanti columnar fmt=keys includes aliases and zenonseth/strata
+      const keysRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages/?type=game&q=strata&fmt=keys'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(keysRes.status).toBe(200);
+      const keysPayload = await keysRes.json();
+      expect(keysPayload.keys).toContain('aliases');
+      const authorCol = keysPayload.keys.indexOf('author');
+      const nameCol = keysPayload.keys.indexOf('name');
+      expect(
+        keysPayload.pkgs.some(
+          (row: any[]) =>
+            String(row[authorCol]).toLowerCase() === 'zenonseth' &&
+            String(row[nameCol]).toLowerCase() === 'strata'
+        )
+      ).toBe(true);
+
+      // 4. Warm PWA boot bundle followed by in-game HIT-BOOT-SHARED
+      await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY, IN_GAME_CATALOG_CACHE_PREFIX]);
+      const bootRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages/?boot=1'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(bootRes.status).toBe(200);
+
+      const sharedRes = await getPackagesCatalog({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.18.0&hide=nonfree&hide=desktop_default'
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(sharedRes.status).toBe(200);
+      expect(sharedRes.headers.get('X-LuantiHub-Cache')).toBe('HIT-BOOT-SHARED');
+      const sharedList = await sharedRes.json();
+      expect(
+        sharedList.some((p: any) => String(p.author).toLowerCase() === 'zenonseth' && String(p.name).toLowerCase() === 'strata')
+      ).toBe(true);
+    } finally {
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        UPDATES_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX
+      ]);
+    }
+  });
+
+  it('maintains identical monotonic release IDs across catalog, /for-client, and /api/updates and installs/upgrades pure-Git Jam games (?reason=new -> commit bump with unchanged publishedAt -> ?reason=update)', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+    await invalidateEdgeCacheKeys([
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      UPDATES_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      '/api/packages/zenonseth/strata',
+      `${FOR_CLIENT_CACHE_PREFIX}/en/zenonseth/strata/fsv=8`
+    ]);
+
+    const commit1 = '1111111abcdef1111111abcdef1111111abcdef1';
+    const commit2 = '2222222abcdef2222222abcdef2222222abcdef2';
+    const unchangedPublishedAt = '2026-11-13T22:24:52.623Z';
+    let currentCommit = commit1;
+
+    const zipCommit1 = buildCrcZip([
+      { path: 'strata-git/game.conf', content: 'name = Strata\ntitle = Strata\nrelease_tag = v1\n' },
+      { path: 'strata-git/mods/strata_core/init.lua', content: '-- commit 1\n' }
+    ]);
+    const zipCommit2 = buildCrcZip([
+      { path: 'strata-git/game.conf', content: 'name = Strata\ntitle = Strata\nrelease_tag = v2\n' },
+      { path: 'strata-git/mods/strata_core/init.lua', content: '-- commit 2 updated gameplay!\n' }
+    ]);
+
+    const cdbDependencyCalls: string[] = [];
+    const zipFetchUrls: string[] = [];
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://codeberg.org/zenonseth/strata',
+              commit: currentCommit,
+              title: 'Strata',
+              description: 'Dig deep into Strata.',
+              hasScreenshot: false,
+              publishedAt: unchangedPublishedAt
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes(`/archive/${commit1}.zip`)) {
+        zipFetchUrls.push(url);
+        return new Response(zipCommit1 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (url.includes(`/archive/${commit2}.zip`)) {
+        zipFetchUrls.push(url);
+        return new Response(zipCommit2 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (url.includes('content.luanti.org/api/packages/zenonseth/strata/dependencies')) {
+        cdbDependencyCalls.push(url);
+        return new Response('Not found', { status: 404 });
+      }
+      if (url.includes('content.luanti.org/api/updates')) {
+        return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('content.luanti.org/api/packages')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const fkD1 = createFkEnforcingJamD1();
+    fkD1.users.set('usr_github_alice', {
+      id: 'usr_github_alice',
+      username: 'alice',
+      display_name: 'Alice',
+      avatar_url: ''
+    });
+
+    try {
+      const desktopCatalogUrl =
+        'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=45&engine_version=5.18.0&hide=nonfree&hide=desktop_default';
+
+      // 1. Initial in-game catalog, /for-client, /dependencies, /api/updates at commit1
+      const cat1Res = await getPackagesCatalog({
+        request: new Request(desktopCatalogUrl),
+        env: { DB: fkD1.db }
+      } as any);
+      const cat1Json = await cat1Res.json();
+      const cat1Pkg = cat1Json.find((p: any) => p.name === 'strata');
+      expect(cat1Pkg).toBeDefined();
+
+      const fc1Res = await getPackageForClient({
+        params: { author: 'zenonseth', name: 'strata' },
+        request: new Request(
+          'https://luantihub.org/api/packages/zenonseth/strata/for-client/?protocol_version=45&formspec_version=8'
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(fc1Res.status).toBe(200);
+      const fc1Json = await fc1Res.json();
+
+      const depsRes = await getPackageDependencies({
+        params: { author: 'zenonseth', name: 'strata' },
+        request: new Request('https://luantihub.org/api/packages/zenonseth/strata/dependencies/?only_hard=1'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(depsRes.status).toBe(200);
+      expect(depsRes.headers.get('X-LuantiHub-Source')).toBe('d1-git');
+      expect(await depsRes.json()).toEqual({ 'zenonseth/strata': [] });
+      expect(cdbDependencyCalls).toHaveLength(0);
+
+      const upd1Res = await getUpdatesEndpoint({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(upd1Res.status).toBe(200);
+      const upd1Json = await upd1Res.json();
+
+      expect(cat1Pkg.release).toBe(fc1Json.release);
+      expect(upd1Json['zenonseth/strata']).toBe(fc1Json.release);
+
+      // 2. Download & install commit1 (?reason=new)
+      const dl1Res = await handleReleaseDownload({
+        params: { author: 'zenonseth', name: 'strata', release: String(fc1Json.release) },
+        request: new Request(
+          `https://luantihub.org/packages/zenonseth/strata/releases/${fc1Json.release}/download/?reason=new`,
+          { headers: { 'User-Agent': 'Luanti/5.18.0' } }
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(dl1Res.status).toBe(200);
+      expect(dl1Res.headers.get('Content-Type')).toBe('application/zip');
+      const dl1Files = await readZipEntriesText(new Uint8Array(await dl1Res.arrayBuffer()));
+      expect(dl1Files['strata/game.conf']).toContain('release_tag = v1');
+      expect(zipFetchUrls.some((u) => u.includes(commit1))).toBe(true);
+
+      // 3. Moderator approves commit2 on jam.luanti.org WITH UNCHANGED publishedAt
+      currentCommit = commit2;
+      resetJam2026IsolateCacheForTests();
+
+      // Calling /api/updates/?nocache=1 persists commit2 and evicts BOTH canonical desktop catalog and /for-client Edge caches
+      const upd2Res = await getUpdatesEndpoint({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: { DB: fkD1.db }
+      } as any);
+      const upd2Json = await upd2Res.json();
+
+      // Simulate a separate cold Worker isolate reading shared caches.default after commit2 invalidation
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+
+      const fc2Res = await getPackageForClient({
+        params: { author: 'zenonseth', name: 'strata' },
+        request: new Request(
+          'https://luantihub.org/api/packages/zenonseth/strata/for-client/?protocol_version=45&formspec_version=8'
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(fc2Res.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      const fc2Json = await fc2Res.json();
+
+      const cat2Res = await getPackagesCatalog({
+        request: new Request(desktopCatalogUrl),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(cat2Res.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      const cat2Json = await cat2Res.json();
+      const cat2Pkg = cat2Json.find((p: any) => p.name === 'strata');
+
+      // Second uncached catalog variant when unsyncedBrews.length === 0 must ALSO read back bumped D1 updated_at
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+      const cat2FilteredRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages/?type=game&q=strata'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(cat2FilteredRes.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      const cat2FilteredJson = await cat2FilteredRes.json();
+      const cat2FilteredPkg = cat2FilteredJson.find((p: any) => p.name === 'strata');
+
+      // Strictly higher release integer across ALL 3 endpoints even though publishedAt stayed identical
+      expect(fc2Json.release).toBeGreaterThan(fc1Json.release);
+      expect(cat2Pkg.release).toBe(fc2Json.release);
+      expect(cat2FilteredPkg.release).toBe(fc2Json.release);
+      expect(upd2Json['zenonseth/strata']).toBe(fc2Json.release);
+
+      // 4. Download upgrade (?reason=update) must serve commit2 archive, NOT commit1
+      const dl2Res = await handleReleaseDownload({
+        params: { author: 'zenonseth', name: 'strata', release: String(fc2Json.release) },
+        request: new Request(
+          `https://luantihub.org/packages/zenonseth/strata/releases/${fc2Json.release}/download/?reason=update`,
+          { headers: { 'User-Agent': 'Luanti/5.18.0' } }
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(dl2Res.status).toBe(200);
+      const dl2Files = await readZipEntriesText(new Uint8Array(await dl2Res.arrayBuffer()));
+      expect(dl2Files['strata/game.conf']).toContain('release_tag = v2');
+      expect(dl2Files['strata/mods/strata_core/init.lua']).toContain('commit 2');
+      expect(zipFetchUrls.some((u) => u.includes(commit2))).toBe(true);
+    } finally {
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        UPDATES_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX,
+        '/api/packages/zenonseth/strata',
+        `${FOR_CLIENT_CACHE_PREFIX}/en/zenonseth/strata/fsv=8`
+      ]);
+    }
+  });
+
+  it('preserves ContentDB release IDs and prioritizes newer ContentDB commits over frozen Jam 2026 commits for dual ContentDB + Jam 2026 games', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+    await invalidateEdgeCacheKeys([
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      UPDATES_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      '/api/packages/DualDev/jam_on_cdb'
+    ]);
+
+    const frozenJamCommit = '1a11111abcdef1111111abcdef1111111abcdef1';
+    const newerCdbCommit = 'cdb9999abcdef9999999abcdef9999999abcdef9';
+    const zipJamOld = buildCrcZip([
+      { path: 'jam_on_cdb/game.conf', content: 'name = jam_on_cdb\ntitle = Jam On CDB\nrelease_tag = jam-old\n' }
+    ]);
+    const zipCdbNew = buildCrcZip([
+      { path: 'jam_on_cdb/game.conf', content: 'name = jam_on_cdb\ntitle = Jam On CDB\nrelease_tag = cdb-latest\n' }
+    ]);
+    const fetchedArchiveUrls: string[] = [];
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://codeberg.org/DualDev/jam_on_cdb',
+              commit: frozenJamCommit,
+              title: 'Jam On CDB',
+              description: 'Dual ContentDB and Jam 2026 entry.',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T22:24:52.623Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/updates')) {
+        return new Response(
+          JSON.stringify({ 'DualDev/jam_on_cdb': 36500 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/DualDev/jam_on_cdb/releases')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 36500,
+              title: 'v2.0 Post-Jam',
+              commit: newerCdbCommit,
+              url: '/packages/DualDev/jam_on_cdb/releases/36500/download/'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/DualDev/jam_on_cdb/for-client')) {
+        return new Response(
+          JSON.stringify({
+            author: 'DualDev',
+            name: 'jam_on_cdb',
+            title: 'Jam On CDB',
+            type: 'game',
+            release: 36500,
+            repo: 'https://codeberg.org/DualDev/jam_on_cdb'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('content.luanti.org/api/packages/DualDev/jam_on_cdb/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'DualDev',
+            name: 'jam_on_cdb',
+            title: 'Jam On CDB',
+            type: 'game',
+            repo: 'https://codeberg.org/DualDev/jam_on_cdb',
+            release: 36500
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes(`/archive/${newerCdbCommit}.zip`)) {
+        fetchedArchiveUrls.push(url);
+        return new Response(zipCdbNew as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (url.includes(`/archive/${frozenJamCommit}.zip`)) {
+        fetchedArchiveUrls.push(url);
+        return new Response(zipJamOld as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const fkD1 = createFkEnforcingJamD1();
+
+    try {
+      const updRes = await getUpdatesEndpoint({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(updRes.status).toBe(200);
+      const updJson = await updRes.json();
+      expect(updJson['DualDev/jam_on_cdb']).toBe(36500);
+
+      const dlRes = await handleReleaseDownload({
+        params: { author: 'DualDev', name: 'jam_on_cdb', release: '36500' },
+        request: new Request(
+          'https://luantihub.org/packages/DualDev/jam_on_cdb/releases/36500/download/?reason=update',
+          { headers: { 'User-Agent': 'Luanti/5.18.0' } }
+        ),
+        env: { DB: fkD1.db }
+      } as any);
+      expect(dlRes.status).toBe(200);
+      const dlFiles = await readZipEntriesText(new Uint8Array(await dlRes.arrayBuffer()));
+      expect(dlFiles['jam_on_cdb/game.conf']).toContain('release_tag = cdb-latest');
+      expect(fetchedArchiveUrls[0]).toContain(newerCdbCommit);
+    } finally {
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        UPDATES_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX,
+        '/api/packages/DualDev/jam_on_cdb'
+      ]);
+    }
   });
 });

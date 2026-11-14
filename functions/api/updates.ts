@@ -1,4 +1,11 @@
-import { fetchUpstreamJsonCached, readEdgeCacheJson, writeEdgeCacheJson } from './lib/upstream';
+import {
+  fetchUpstreamJsonCached,
+  readEdgeCacheJson,
+  writeEdgeCacheJson,
+  UPDATES_EDGE_CACHE_KEY,
+  computeLuantiClientReleaseId
+} from './lib/upstream';
+import { overlayJam2026UpdatesMap } from './lib/jam-2026';
 
 interface Env {
   DB?: any;
@@ -7,9 +14,16 @@ interface Env {
 export async function onRequestGet(context: { request: Request; env: Env }) {
   const { env } = context;
   const upstreamPath = '/updates/';
-  const edgeCacheKey = 'https://cache.luantihub.internal/__api_updates_v3';
+  const edgeCacheKey = UPDATES_EDGE_CACHE_KEY;
+  const reqUrl = context.request ? new URL(context.request.url) : null;
+  const noCache =
+    reqUrl?.searchParams.get('nocache') === '1' ||
+    reqUrl?.searchParams.get('nocache') === 'true' ||
+    (context.request?.headers?.get('Cache-Control') || '').toLowerCase().includes('no-cache');
 
-  const cachedUpdates = await readEdgeCacheJson<Record<string, number>>(edgeCacheKey);
+  const cachedUpdates = !noCache
+    ? await readEdgeCacheJson<Record<string, number>>(edgeCacheKey)
+    : null;
   if (cachedUpdates && typeof cachedUpdates === 'object') {
     return new Response(JSON.stringify(cachedUpdates), {
       headers: {
@@ -21,19 +35,32 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     });
   }
 
+  const queryD1Rows = async (): Promise<any[]> => {
+    if (!env.DB) return [];
+    try {
+      const res = await env.DB.prepare(
+        `SELECT author_name, name, type, repo_url, updated_at, created_at, latest_commit_sha FROM packages WHERE status = 'active'`
+      ).all();
+      return res?.results || [];
+    } catch {
+      try {
+        const fallbackRes = await env.DB.prepare(
+          `SELECT author_name, name, type, repo_url, updated_at, created_at FROM packages WHERE status = 'active'`
+        ).all();
+        return fallbackRes?.results || [];
+      } catch {
+        return [];
+      }
+    }
+  };
+
   const [upstreamUpdates, d1Rows] = await Promise.all([
     fetchUpstreamJsonCached<Record<string, number>>(upstreamPath, 300).catch(() => null),
-    env.DB
-      ? env.DB.prepare(
-          `SELECT author_name, name, type, repo_url, updated_at, created_at FROM packages WHERE status = 'active'`
-        )
-          .all()
-          .then((res: any) => res.results || [])
-          .catch(() => [])
-      : Promise.resolve<any[]>([])
+    queryD1Rows()
   ]);
 
   const merged: Record<string, number> = {};
+  const officialUpstreamKeysLower = new Set<string>();
   const upstreamByAuthorAndName = new Map<string, { rel: number; canonicalAuthor: string; canonicalName: string }>();
 
   const normalizeBaseAuthor = (raw: string): string =>
@@ -47,6 +74,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       if (typeof v === 'number' && v > 0) {
         merged[k] = v;
         merged[k.toLowerCase()] = v;
+        officialUpstreamKeysLower.add(k.toLowerCase());
         const slashIdx = k.indexOf('/');
         if (slashIdx > 0) {
           const canonicalAuthor = k.slice(0, slashIdx);
@@ -55,6 +83,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const baseAuthor = normalizeBaseAuthor(authorLower);
           const pkgName = canonicalName.toLowerCase();
           const safePkgName = pkgName.replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '') || pkgName;
+          officialUpstreamKeysLower.add(`${authorLower}/${safePkgName}`);
           const entry = { rel: v, canonicalAuthor, canonicalName };
           upstreamByAuthorAndName.set(`${authorLower}/${pkgName}`, entry);
           upstreamByAuthorAndName.set(`${authorLower}/${safePkgName}`, entry);
@@ -90,13 +119,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           upstreamByAuthorAndName.get(`${baseAuthor}/${safeName}`)
         : undefined);
 
-    const releaseId =
-      Number(matchedUpstream?.rel) > 0
-        ? Number(matchedUpstream!.rel)
-        : Math.max(
-            1,
-            Math.floor(new Date(row.updated_at || row.created_at || '2026-01-01T00:00:00Z').getTime() / 1000) || 1
-          );
+    const releaseId = computeLuantiClientReleaseId(
+      { updated_at: row.updated_at, created_at: row.created_at },
+      Number(matchedUpstream?.rel) > 0 ? Number(matchedUpstream!.rel) : undefined
+    );
 
     const keysToSet = [
       `${row.author_name}/${safeName}`,
@@ -115,20 +141,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     ];
 
     for (const key of keysToSet) {
-      if (!merged[key] || Number(merged[key]) <= 0) {
+      if (Number(matchedUpstream?.rel) > 0) {
+        officialUpstreamKeysLower.add(key.toLowerCase());
+      }
+      if (!merged[key] || Number(merged[key]) <= 0 || (!matchedUpstream && releaseId > Number(merged[key]))) {
         merged[key] = releaseId;
       }
     }
   }
 
-  await writeEdgeCacheJson(edgeCacheKey, merged, 180);
+  await overlayJam2026UpdatesMap(merged, noCache, env.DB, d1Rows, officialUpstreamKeysLower).catch(() => {});
+
+  if (!noCache) {
+    await writeEdgeCacheJson(edgeCacheKey, merged, 300);
+  }
 
   return new Response(JSON.stringify(merged), {
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-      'X-LuantiHub-Cache': 'MISS-EDGE'
+      'Cache-Control': !noCache
+        ? 'public, max-age=120, s-maxage=300, stale-while-revalidate=600'
+        : 'no-cache, no-store, must-revalidate',
+      'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
     }
   });
 }

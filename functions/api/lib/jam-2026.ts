@@ -18,7 +18,10 @@ import {
   fetchWithAnubisSupport,
   fetchUpstreamJsonCached,
   ensureExtendedPackageColumns,
-  ensurePromotionAndTagTables
+  ensurePromotionAndTagTables,
+  BOOT_CATALOG_EDGE_CACHE_KEY,
+  UPDATES_EDGE_CACHE_KEY,
+  computeLuantiClientReleaseId
 } from './upstream';
 import { isUntrustedTunnelOrPrivateHost } from '../../../src/app/core/config/git-providers.config';
 
@@ -30,7 +33,8 @@ export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as c
 
 const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v2';
 const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v2';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v3';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v4';
+const JAM_2026_STANDALONE_DELTA_CACHE_KEY = '/__jam_2026_standalone_delta_v1';
 const JAM_2026_BREWS_TTL_SECONDS = 300; // 5 minutes Edge + Isolate cache (aligned with jam.luanti.org shelfRefreshMs)
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
@@ -355,6 +359,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
   db?: any;
   noCache?: boolean;
   upstreamCatalog?: any[];
+  officialUpstreamKeysLower?: Set<string>;
 }): Promise<Record<string, string[]> | undefined> {
   const {
     uniqueTags,
@@ -365,7 +370,8 @@ export async function syncJam2026IntoPromoRowDelta(params: {
     d1UpsertPairs,
     db,
     noCache = false,
-    upstreamCatalog
+    upstreamCatalog,
+    officialUpstreamKeysLower
   } = params;
 
   if (!isJam2026TagList(uniqueTags)) {
@@ -406,6 +412,40 @@ export async function syncJam2026IntoPromoRowDelta(params: {
     }
   }
 
+  // Track Jam brews that already exist as official ContentDB packages (by author/name or repo_url)
+  // so Jam D1 persistence never creates synthetic pure-Git `packages` / `releases` rows that shadow ContentDB.
+  const officialBrewIdsLower = new Set<string>();
+  if (officialUpstreamKeysLower && officialUpstreamKeysLower.size > 0) {
+    for (const brew of brews) {
+      const keys = [brew.id, ...(Array.isArray(brew.aliases) ? brew.aliases : [])];
+      if (keys.some((k) => Boolean(k && officialUpstreamKeysLower.has(k.toLowerCase())))) {
+        officialBrewIdsLower.add(brew.id.toLowerCase());
+      }
+    }
+  }
+  if (Array.isArray(upstreamCatalog) && upstreamCatalog.length > 0) {
+    const officialSlugsLower = new Set<string>();
+    const officialRepoKeys = new Set<string>();
+    for (const c of upstreamCatalog) {
+      if (!c || !c.author || !c.name) continue;
+      const isOfficial =
+        !c.provider ||
+        c.provider === 'contentdb' ||
+        (Array.isArray(c.sources) && c.sources.includes('official'));
+      if (!isOfficial) continue;
+      officialSlugsLower.add(`${c.author}/${c.name}`.toLowerCase());
+      const cRepoKey = normalizeRepoKey(c.repo_url || c.repo);
+      if (cRepoKey) officialRepoKeys.add(cRepoKey);
+    }
+    for (const brew of brews) {
+      const bSlug = brew.id.toLowerCase();
+      const bRepoKey = normalizeRepoKey(brew.repo_url);
+      if (officialSlugsLower.has(bSlug) || (bRepoKey && officialRepoKeys.has(bRepoKey))) {
+        officialBrewIdsLower.add(bSlug);
+      }
+    }
+  }
+
   // Cross-author ContentDB canonical resolution (e.g. Git owner `sztest/confspace` -> ContentDB `Warr1024/confspace`):
   // Bulk ContentDB `/packages/?fmt=vcs` omits `repo`, so when a Jam 2026 game is published on ContentDB under a different
   // username with the same technical `name`, verify its ContentDB `detail.repo` (1h Edge-cached) and stamp the canonical ID.
@@ -431,6 +471,16 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           1800
         ).catch(() => null);
         if (Array.isArray(searchList)) {
+          const hasSameAuthorMatch = searchList.some(
+            (c) =>
+              c &&
+              String(c.type || 'mod').toLowerCase() === 'game' &&
+              String(c.name || '').toLowerCase() === lowerBrewName &&
+              String(c.author || '').toLowerCase() === lowerBrewAuthor
+          );
+          if (hasSameAuthorMatch) {
+            officialBrewIdsLower.add(brew.id.toLowerCase());
+          }
           candidates = searchList.filter(
             (c) =>
               c &&
@@ -448,6 +498,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
         ).catch(() => null);
         const detailRepoKey = normalizeRepoKey(detail?.repo || detail?.repo_url || cand.repo_url || cand.repo);
         if (detailRepoKey && detailRepoKey === rKey) {
+          officialBrewIdsLower.add(brew.id.toLowerCase());
           const canonicalId = `${detail?.author || cand.author}/${detail?.name || cand.name}`;
           const canonicalLowerId = canonicalId.toLowerCase();
           for (const tag of jamTagsToStamp) {
@@ -477,73 +528,89 @@ export async function syncJam2026IntoPromoRowDelta(params: {
 
       if (unsyncedBrews.length > 0) {
         const stmts: any[] = [];
+        const isUnclaimedJamRowSql = `((packages.author_id IS NULL OR packages.author_id LIKE 'ext_jam2026_%') AND COALESCE(packages.provider, '') != 'contentdb')`;
         for (const b of unsyncedBrews.slice(0, 40)) {
-          // 1. Upsert package into D1 `packages` only if no other D1 package with a different `id` already owns `b.repo_url`
-          stmts.push(
-            db
-              .prepare(`
-                INSERT INTO packages (
-                  id, author_id, author_name, name, title, type, short_desc, long_desc,
-                  repo_url, provider, default_branch, thumbnail_url, banner_url, screenshots,
-                  license, media_license, tags, min_minetest_version, latest_commit_sha,
-                  status, created_at, updated_at
+          const isOfficialUpstreamPkg = officialBrewIdsLower.has(b.id.toLowerCase());
+          // 1. Upsert package into D1 `packages` only if this brew is NOT already an official ContentDB package
+          // and no other D1 package with a different `id` already owns `b.repo_url`.
+          // Bind `NULL` for `author_id` so unclaimed pure-Git Jam rows satisfy `FOREIGN KEY (author_id) REFERENCES users(id)` in D1
+          // while keeping exact 21 positional bind indices intact.
+          if (!isOfficialUpstreamPkg) {
+            stmts.push(
+              db
+                .prepare(`
+                  INSERT INTO packages (
+                    id, author_id, author_name, name, title, type, short_desc, long_desc,
+                    repo_url, provider, default_branch, thumbnail_url, banner_url, screenshots,
+                    license, media_license, tags, min_minetest_version, latest_commit_sha,
+                    status, created_at, updated_at
+                  )
+                  SELECT ?, ?, ?, ?, ?, 'game', ?, ?, ?, ?, 'main', ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM packages p2
+                    WHERE LOWER(p2.repo_url) = LOWER(?) AND LOWER(p2.id) != LOWER(?)
+                  )
+                  ON CONFLICT(id) DO UPDATE SET
+                    title = CASE WHEN ${isUnclaimedJamRowSql} THEN excluded.title ELSE packages.title END,
+                    short_desc = CASE WHEN ${isUnclaimedJamRowSql} THEN excluded.short_desc ELSE COALESCE(packages.short_desc, excluded.short_desc) END,
+                    repo_url = COALESCE(NULLIF(packages.repo_url, ''), excluded.repo_url),
+                    thumbnail_url = CASE
+                      WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%' OR packages.thumbnail_url LIKE '%/api/brews/%' THEN excluded.thumbnail_url
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.thumbnail_url, NULLIF(packages.thumbnail_url, ''))
+                      ELSE COALESCE(NULLIF(packages.thumbnail_url, ''), excluded.thumbnail_url)
+                    END,
+                    banner_url = CASE
+                      WHEN packages.banner_url LIKE '%jam.greenxenith.com%' OR packages.banner_url LIKE '%/api/brews/%' THEN excluded.banner_url
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.banner_url, NULLIF(packages.banner_url, ''))
+                      ELSE COALESCE(NULLIF(packages.banner_url, ''), excluded.banner_url)
+                    END,
+                    screenshots = CASE
+                      WHEN packages.screenshots LIKE '%jam.greenxenith.com%' OR packages.screenshots LIKE '%/api/brews/%' THEN excluded.screenshots
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.screenshots, NULLIF(packages.screenshots, ''))
+                      ELSE COALESCE(NULLIF(packages.screenshots, ''), excluded.screenshots)
+                    END,
+                    latest_commit_sha = excluded.latest_commit_sha,
+                    tags = CASE
+                      WHEN packages.tags IS NULL OR packages.tags = '' OR packages.tags = '[]' THEN excluded.tags
+                      WHEN INSTR(LOWER(packages.tags), 'jam_game_2026') = 0 THEN json_insert(packages.tags, '$[#]', 'jam_game_2026', '$[#]', 'gamejam')
+                      ELSE packages.tags
+                    END,
+                    updated_at = CASE
+                      WHEN COALESCE(packages.latest_commit_sha, '') != '' AND LOWER(packages.latest_commit_sha) != LOWER(excluded.latest_commit_sha)
+                        THEN MAX(
+                          STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                          COALESCE(STRFTIME('%Y-%m-%dT%H:%M:%SZ', packages.updated_at, '+1 second'), excluded.updated_at),
+                          excluded.updated_at
+                        )
+                      WHEN packages.updated_at IS NOT NULL AND packages.updated_at > excluded.updated_at THEN packages.updated_at
+                      ELSE excluded.updated_at
+                    END
+                `)
+                .bind(
+                  b.id,
+                  null,
+                  b.author,
+                  b.name,
+                  b.title,
+                  b.short_desc,
+                  b.short_desc,
+                  b.repo_url,
+                  b.provider,
+                  b.thumbnail,
+                  b.banner,
+                  b.screenshots ? JSON.stringify(b.screenshots) : null,
+                  b.license,
+                  b.media_license,
+                  JSON.stringify(b.tags),
+                  b.min_minetest_version,
+                  b.latest_commit_sha,
+                  b.created_at,
+                  b.updated_at,
+                  b.repo_url,
+                  b.id
                 )
-                SELECT ?, ?, ?, ?, ?, 'game', ?, ?, ?, ?, 'main', ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM packages p2
-                  WHERE LOWER(p2.repo_url) = LOWER(?) AND LOWER(p2.id) != LOWER(?)
-                )
-                ON CONFLICT(id) DO UPDATE SET
-                  title = CASE WHEN packages.author_id LIKE 'ext_jam2026_%' THEN excluded.title ELSE packages.title END,
-                  short_desc = CASE WHEN packages.author_id LIKE 'ext_jam2026_%' THEN excluded.short_desc ELSE COALESCE(packages.short_desc, excluded.short_desc) END,
-                  repo_url = COALESCE(NULLIF(packages.repo_url, ''), excluded.repo_url),
-                  thumbnail_url = CASE
-                    WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%' OR packages.thumbnail_url LIKE '%/api/brews/%' THEN excluded.thumbnail_url
-                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.thumbnail_url, NULLIF(packages.thumbnail_url, ''))
-                    ELSE COALESCE(NULLIF(packages.thumbnail_url, ''), excluded.thumbnail_url)
-                  END,
-                  banner_url = CASE
-                    WHEN packages.banner_url LIKE '%jam.greenxenith.com%' OR packages.banner_url LIKE '%/api/brews/%' THEN excluded.banner_url
-                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.banner_url, NULLIF(packages.banner_url, ''))
-                    ELSE COALESCE(NULLIF(packages.banner_url, ''), excluded.banner_url)
-                  END,
-                  screenshots = CASE
-                    WHEN packages.screenshots LIKE '%jam.greenxenith.com%' OR packages.screenshots LIKE '%/api/brews/%' THEN excluded.screenshots
-                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.screenshots, NULLIF(packages.screenshots, ''))
-                    ELSE COALESCE(NULLIF(packages.screenshots, ''), excluded.screenshots)
-                  END,
-                  latest_commit_sha = excluded.latest_commit_sha,
-                  tags = CASE
-                    WHEN packages.tags IS NULL OR packages.tags = '' OR packages.tags = '[]' THEN excluded.tags
-                    WHEN INSTR(LOWER(packages.tags), 'jam_game_2026') = 0 THEN json_insert(packages.tags, '$[#]', 'jam_game_2026', '$[#]', 'gamejam')
-                    ELSE packages.tags
-                  END,
-                  updated_at = excluded.updated_at
-              `)
-              .bind(
-                b.id,
-                `ext_jam2026_${b.author.toLowerCase()}`,
-                b.author,
-                b.name,
-                b.title,
-                b.short_desc,
-                b.short_desc,
-                b.repo_url,
-                b.provider,
-                b.thumbnail,
-                b.banner,
-                b.screenshots ? JSON.stringify(b.screenshots) : null,
-                b.license,
-                b.media_license,
-                JSON.stringify(b.tags),
-                b.min_minetest_version,
-                b.latest_commit_sha,
-                b.created_at,
-                b.updated_at,
-                b.repo_url,
-                b.id
-              )
-          );
+            );
+          }
 
           // 2. Ensure any existing D1 package matching either `b.id` (case-insensitively) or `b.repo_url` has `jam_game_2026` & `gamejam` stamped onto it
           stmts.push(
@@ -561,37 +628,37 @@ export async function syncJam2026IntoPromoRowDelta(params: {
               .bind(b.id, b.repo_url)
           );
 
-          // 3. Ensure pure-Git `ext_jam2026_` package has its pinned commit release in D1 `releases` for 1-click `.zip` downloads
-          const shortSha = b.latest_commit_sha.slice(0, 7);
-          stmts.push(
-            db
-              .prepare(`
-                DELETE FROM releases
-                WHERE LOWER(package_id) = LOWER(?)
-                  AND EXISTS (
-                    SELECT 1 FROM packages p WHERE LOWER(p.id) = LOWER(?) AND p.author_id LIKE 'ext_jam2026_%'
-                  )
-              `)
-              .bind(b.id, b.id),
-            db
-              .prepare(`
-                INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, released_at)
-                SELECT ?, ?, ?, ?, ?, ?, ?
-                WHERE EXISTS (
-                  SELECT 1 FROM packages p WHERE LOWER(p.id) = LOWER(?) AND p.author_id LIKE 'ext_jam2026_%'
+          if (!isOfficialUpstreamPkg) {
+            // 3. Ensure pure-Git Jam package has its pinned commit release in D1 `releases` for 1-click `.zip` downloads
+            const shortSha = b.latest_commit_sha.slice(0, 7);
+            const isOwnJamPkgSql = `SELECT 1 FROM packages p WHERE LOWER(p.id) = LOWER(?) AND (p.author_id IS NULL OR p.author_id LIKE 'ext_jam2026_%') AND COALESCE(p.provider, '') != 'contentdb'`;
+            stmts.push(
+              db
+                .prepare(`
+                  DELETE FROM releases
+                  WHERE LOWER(package_id) = LOWER(?)
+                    AND EXISTS (${isOwnJamPkgSql})
+                `)
+                .bind(b.id, b.id),
+              db
+                .prepare(`
+                  INSERT INTO releases (package_id, version, tag_name, commit_sha, download_url, min_minetest_version, released_at)
+                  SELECT ?, ?, ?, ?, ?, ?, COALESCE((SELECT p.updated_at FROM packages p WHERE LOWER(p.id) = LOWER(?) LIMIT 1), ?)
+                  WHERE EXISTS (${isOwnJamPkgSql})
+                `)
+                .bind(
+                  b.id,
+                  shortSha,
+                  shortSha,
+                  b.latest_commit_sha,
+                  b.download_zip_url,
+                  b.min_minetest_version,
+                  b.id,
+                  b.updated_at,
+                  b.id
                 )
-              `)
-              .bind(
-                b.id,
-                shortSha,
-                shortSha,
-                b.latest_commit_sha,
-                b.download_zip_url,
-                b.min_minetest_version,
-                b.created_at,
-                b.id
-              )
-          );
+            );
+          }
         }
 
         const runBatch = async () => {
@@ -604,33 +671,64 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           }
         };
 
+        let batchSucceeded = false;
         try {
           await runBatch();
+          batchSucceeded = true;
         } catch (err: any) {
           if (/no such table|no such column/i.test(String(err?.message || ''))) {
             await ensureExtendedPackageColumns(db);
             await ensurePromotionAndTagTables(db, true);
-            await runBatch().catch(() => {});
+            await runBatch().then(() => { batchSucceeded = true; }).catch(() => {});
           }
         }
 
-        const nextDigestMap: Record<string, string> = { ...persistedDigestMap };
-        const cacheKeysToInvalidate: string[] = [];
-        for (const b of unsyncedBrews) {
-          nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
-          isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
-          const lowerId = b.id.toLowerCase();
-          cacheKeysToInvalidate.push(
-            ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
-            `/__api_hydrate_v9_${lowerId}`,
-            `/__api_hydrate_v10_${lowerId}`,
-            `/__api_hydrate_v11_${lowerId}`
-          );
+        if (batchSucceeded) {
+          const nextDigestMap: Record<string, string> = { ...persistedDigestMap };
+          const cacheKeysToInvalidate: string[] = [
+            BOOT_CATALOG_EDGE_CACHE_KEY,
+            UPDATES_EDGE_CACHE_KEY,
+            JAM_2026_STANDALONE_DELTA_CACHE_KEY
+          ];
+          for (const b of unsyncedBrews) {
+            nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
+            isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
+            const lowerId = b.id.toLowerCase();
+            cacheKeysToInvalidate.push(
+              ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
+              `/__api_hydrate_v9_${lowerId}`,
+              `/__api_hydrate_v10_${lowerId}`,
+              `/__api_hydrate_v11_${lowerId}`
+            );
+          }
+          await Promise.all([
+            writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {}),
+            invalidateEdgeCacheKeys(cacheKeysToInvalidate).catch(() => {})
+          ]);
         }
-        await Promise.all([
-          writeEdgeCacheJson(JAM_2026_D1_DIGEST_CACHE_KEY, nextDigestMap, 86400).catch(() => {}),
-          invalidateEdgeCacheKeys(cacheKeysToInvalidate).catch(() => {})
-        ]);
+      }
+
+      // Always read back authoritative D1 `updated_at` timestamps so monotonic commit bumps
+      // continue emitting the bumped release integer even when `unsyncedBrews.length === 0`.
+      try {
+        const lowerIds = brews.slice(0, 60).map((b) => b.id.toLowerCase());
+        if (lowerIds.length > 0) {
+          const placeholders = lowerIds.map(() => '?').join(', ');
+          const syncedRows = await db
+            .prepare(`SELECT LOWER(id) as lower_id, updated_at, created_at FROM packages WHERE LOWER(id) IN (${placeholders})`)
+            .bind(...lowerIds)
+            .all();
+          for (const row of syncedRows?.results || []) {
+            const lowerId = String(row?.lower_id || '').toLowerCase();
+            const disc = lowerId ? discoveredByKey.get(lowerId) : undefined;
+            if (disc && row?.updated_at) {
+              disc.updated_at = String(row.updated_at);
+              disc.release = computeLuantiClientReleaseId({ updated_at: row.updated_at, created_at: row.created_at, release: disc.release });
+            }
+          }
+        }
+      } catch {
+        // Optional read-back unsupported in minimal mock DBs
       }
     } catch {
       // Non-fatal D1 sync error; Edge PromoRowDelta still serves all jam entries
@@ -768,6 +866,13 @@ export function applyJam2026RepoOverlayOnCatalog(
         pkg.latest_commit_sha &&
         pkg.latest_commit_sha !== matchedJamBrew.latest_commit_sha
     );
+    const isOfficialPkg = Array.isArray(pkg.sources)
+      ? pkg.sources.includes('official')
+      : pkg.source === 'official' || pkg.provider === 'contentdb';
+    const nextJamRelease =
+      !isOfficialPkg && matchedJamBrew && Number(matchedJamBrew.release) > (Number(pkg.release) || 0)
+        ? Number(matchedJamBrew.release)
+        : undefined;
 
     if (
       nextTags ||
@@ -775,7 +880,8 @@ export function applyJam2026RepoOverlayOnCatalog(
       needsGitSource ||
       needsRepoBackfill ||
       needsJamScreenshotRefresh ||
-      needsJamCommitRefresh
+      needsJamCommitRefresh ||
+      nextJamRelease !== undefined
     ) {
       if (!clonedList) clonedList = [...packagesList];
       clonedList[i] = {
@@ -791,7 +897,13 @@ export function applyJam2026RepoOverlayOnCatalog(
               screenshots: nextJamShot ? [nextJamShot] : undefined
             }
           : {}),
-        ...(needsJamCommitRefresh ? { latest_commit_sha: matchedJamBrew.latest_commit_sha } : {})
+        ...(needsJamCommitRefresh
+          ? {
+              latest_commit_sha: matchedJamBrew.latest_commit_sha,
+              ...(matchedJamBrew.updated_at ? { updated_at: matchedJamBrew.updated_at } : {})
+            }
+          : {}),
+        ...(nextJamRelease !== undefined ? { release: nextJamRelease } : {})
       };
     }
   }
@@ -823,13 +935,14 @@ export function detectJam2026RootParticipationTags(
  */
 export async function findJam2026BrewBySlug(
   author: string,
-  name: string
+  name: string,
+  noCache = false
 ): Promise<Jam2026NormalizedPackage | undefined> {
   if (!author || !name) return undefined;
   const targetSlug = `${author}/${name}`.toLowerCase();
   const targetAuthorLower = author.toLowerCase();
   const targetNormName = name.toLowerCase().replace(/-/g, '_');
-  const brews = await fetchJam2026BrewsCached(false);
+  const brews = await fetchJam2026BrewsCached(noCache);
   for (const brew of brews) {
     if (brew.id.toLowerCase() === targetSlug) {
       return brew;
@@ -860,6 +973,209 @@ export async function findJam2026BrewRepoBySlug(
 }
 
 /**
+ * Builds a standalone Game Jam 2026 delta (with D1 package persistence and promo-tag stamp)
+ * directly from `jam.luanti.org` without requiring an active `hero_promotions` row or ContentDB tag query.
+ */
+export async function buildJam2026StandalonePromoDelta(
+  db?: any,
+  noCache = false,
+  upstreamCatalog?: any[],
+  officialUpstreamKeysLower?: Set<string>
+): Promise<{ tagMap: Record<string, string[]>; repoTagMap?: Record<string, string[]>; items: any[] } | null> {
+  if (!noCache) {
+    const cachedDelta = await readEdgeCacheJson<{
+      tagMap: Record<string, string[]>;
+      repoTagMap?: Record<string, string[]>;
+      items: any[];
+    }>(JAM_2026_STANDALONE_DELTA_CACHE_KEY).catch(() => null);
+    if (cachedDelta && cachedDelta.tagMap && Array.isArray(cachedDelta.items)) {
+      return cachedDelta;
+    }
+  }
+
+  const tagMap: Record<string, string[]> = {};
+  const discoveredByKey = new Map<string, any>();
+  const existingD1Pairs = new Set<string>();
+  const queuedUpsertKeys = new Set<string>();
+  const d1UpsertPairs: Array<{ tag: string; pkgId: string }> = [];
+
+  if (db) {
+    try {
+      const lowerTags = JAM_2026_TAGS.map((t) => t.toLowerCase());
+      const placeholders = lowerTags.map(() => '?').join(', ');
+      const d1RowsRes = await db
+        .prepare(`SELECT tag_name, package_id FROM promo_tag_packages WHERE LOWER(tag_name) IN (${placeholders}) LIMIT 500`)
+        .bind(...lowerTags)
+        .all()
+        .catch(() => null);
+      if (Array.isArray(d1RowsRes?.results)) {
+        for (const r of d1RowsRes.results) {
+          if (r?.package_id && r?.tag_name) {
+            existingD1Pairs.add(`${String(r.tag_name).toLowerCase()}::${String(r.package_id).toLowerCase()}`);
+          }
+        }
+      }
+    } catch {
+      // Proceed cleanly if promo_tag_packages table does not exist yet
+    }
+  }
+
+  const addTagStamp = (lowerPkgId: string, tag: string) => {
+    if (!lowerPkgId || !tag) return;
+    const list = tagMap[lowerPkgId] || [];
+    if (!list.some((existing) => existing.toLowerCase() === tag.toLowerCase())) {
+      list.push(tag);
+      tagMap[lowerPkgId] = list;
+    }
+  };
+
+  const repoTagMap = await syncJam2026IntoPromoRowDelta({
+    uniqueTags: [JAM_2026_PRIMARY_TAG],
+    addTagStamp,
+    discoveredByKey,
+    existingD1Pairs,
+    queuedUpsertKeys,
+    d1UpsertPairs,
+    db,
+    noCache,
+    upstreamCatalog,
+    officialUpstreamKeysLower
+  });
+
+  if (db && d1UpsertPairs.length > 0) {
+    const stmts = d1UpsertPairs.slice(0, 120).map((pair) =>
+      db
+        .prepare(`
+          INSERT INTO promo_tag_packages (tag_name, package_id, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(tag_name, package_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+        `)
+        .bind(pair.tag, pair.pkgId)
+    );
+    try {
+      if (typeof db.batch === 'function') {
+        await db.batch(stmts);
+      } else {
+        for (const s of stmts) {
+          await s.run();
+        }
+      }
+    } catch {
+      // Non-fatal promo_tag_packages write failure
+    }
+  }
+
+  const items = Array.from(discoveredByKey.values());
+  if (items.length === 0 && Object.keys(tagMap).length === 0) {
+    return null;
+  }
+  const result = {
+    tagMap,
+    ...(repoTagMap ? { repoTagMap } : {}),
+    items
+  };
+  if (!noCache) {
+    await writeEdgeCacheJson(JAM_2026_STANDALONE_DELTA_CACHE_KEY, result, 300).catch(() => {});
+  }
+  return result;
+}
+
+/**
+ * Overlays Game Jam 2026 release integers onto `/api/updates/` so pure-Git Jam entries are
+ * always advertised as installable/upgradable, and triggers D1 sync if a newer Jam commit is detected.
+ */
+export async function overlayJam2026UpdatesMap(
+  updatesMap: Record<string, number>,
+  noCache = false,
+  db?: any,
+  d1Rows?: any[],
+  officialUpstreamKeysLower?: Set<string>
+): Promise<void> {
+  const brews = await fetchJam2026BrewsCached(noCache).catch(() => []);
+  if (!Array.isArray(brews) || brews.length === 0) return;
+
+  const d1ByLowerId = new Map<string, any>();
+  if (Array.isArray(d1Rows)) {
+    for (const r of d1Rows) {
+      if (r?.author_name && r?.name) {
+        d1ByLowerId.set(`${r.author_name}/${r.name}`.toLowerCase(), r);
+      }
+    }
+  }
+
+  let hasUnsyncedCommitOrRow = false;
+  if (db && Array.isArray(d1Rows)) {
+    for (const brew of brews) {
+      const brewKeys = [brew.id, ...(Array.isArray(brew.aliases) ? brew.aliases : [])];
+      if (officialUpstreamKeysLower && brewKeys.some((k) => Boolean(k && officialUpstreamKeysLower.has(k.toLowerCase())))) {
+        continue;
+      }
+      const existingRow = d1ByLowerId.get(brew.id.toLowerCase());
+      if (!existingRow) {
+        hasUnsyncedCommitOrRow = true;
+        break;
+      }
+      const existingSha = String(existingRow.latest_commit_sha || '').trim().toLowerCase();
+      if (existingSha && existingSha !== brew.latest_commit_sha.toLowerCase()) {
+        hasUnsyncedCommitOrRow = true;
+        break;
+      }
+    }
+  }
+
+  const delta = hasUnsyncedCommitOrRow && db
+    ? await buildJam2026StandalonePromoDelta(db, noCache, undefined, officialUpstreamKeysLower).catch(() => null)
+    : null;
+  const effectiveBrews = delta && Array.isArray(delta.items) && delta.items.length > 0 ? delta.items : brews;
+
+  for (const brew of effectiveBrews) {
+    if (!brew?.id || !brew?.author || !brew?.name) continue;
+    const rel = Math.max(1, Number(brew.release) || 1);
+    const keys = [
+      brew.id,
+      brew.id.toLowerCase(),
+      ...(Array.isArray(brew.aliases) ? brew.aliases.flatMap((a: string) => [a, a.toLowerCase()]) : [])
+    ];
+    if (officialUpstreamKeysLower && keys.some((k) => Boolean(k && officialUpstreamKeysLower.has(k.toLowerCase())))) {
+      continue;
+    }
+    for (const k of keys) {
+      if (k) {
+        updatesMap[k] = Math.max(Number(updatesMap[k]) || 0, rel);
+      }
+    }
+  }
+}
+
+/**
+ * Checks whether an existing D1 Game Jam 2026 package lags behind the latest approved commit on
+ * `jam.luanti.org` and, if so, triggers D1 sync so `d1Pkg.updated_at` and `release` advance monotonically.
+ */
+export async function refreshJam2026D1PkgIfStale(
+  d1Pkg: any,
+  db?: any,
+  noCache = false
+): Promise<any> {
+  if (!d1Pkg || !d1Pkg.author_name || !d1Pkg.name) return d1Pkg;
+  const tagsStr = String(d1Pkg.tags || '').toLowerCase();
+  if (!tagsStr.includes(JAM_2026_PRIMARY_TAG) && !tagsStr.includes(JAM_2026_SECONDARY_TAG)) {
+    return d1Pkg;
+  }
+  const brew = await findJam2026BrewBySlug(d1Pkg.author_name, d1Pkg.name, noCache).catch(() => undefined);
+  if (!brew || !d1Pkg.latest_commit_sha) return d1Pkg;
+  if (brew.latest_commit_sha.toLowerCase() === String(d1Pkg.latest_commit_sha).trim().toLowerCase()) {
+    return d1Pkg;
+  }
+  const delta = db ? await buildJam2026StandalonePromoDelta(db, noCache).catch(() => null) : null;
+  const synced = delta?.items?.find((it: any) => String(it?.id || '').toLowerCase() === brew.id.toLowerCase()) || brew;
+  return {
+    ...d1Pkg,
+    latest_commit_sha: synced.latest_commit_sha || brew.latest_commit_sha,
+    updated_at: synced.updated_at || new Date().toISOString()
+  };
+}
+
+/**
  * Provides an isolated synthetic D1 package + pinned-commit release fallback for `GET /api/packages/[author]/[name]`
  * when a Game Jam 2026 entry is opened before D1 persistence has run.
  */
@@ -867,19 +1183,20 @@ export async function resolveJam2026SyntheticD1Detail(
   author: string,
   name: string,
   d1Pkg: any,
-  bundledReleases: any[]
+  bundledReleases: any[],
+  noCache = false
 ): Promise<{ d1Pkg: any; bundledReleases: any[] }> {
   if (d1Pkg?.repo_url) {
     return { d1Pkg, bundledReleases };
   }
-  const brew = await findJam2026BrewBySlug(author, name).catch(() => undefined);
+  const brew = await findJam2026BrewBySlug(author, name, noCache).catch(() => undefined);
   if (!brew) {
     return { d1Pkg, bundledReleases };
   }
 
   const syntheticPkg = {
     id: brew.id,
-    author_id: `ext_jam2026_${brew.author.toLowerCase()}`,
+    author_id: null,
     author_name: brew.author,
     name: brew.name,
     title: brew.title,

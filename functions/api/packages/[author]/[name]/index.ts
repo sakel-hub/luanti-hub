@@ -64,9 +64,14 @@ import {
   buildPackageDetailEdgeCacheKey,
   buildPackageCacheInvalidationKeys,
   BOOT_CATALOG_EDGE_CACHE_KEY,
-  isCreatedIn2026OrUnknown
+  isCreatedIn2026OrUnknown,
+  computeLuantiClientReleaseId
 } from '../../../lib/upstream';
-import { fetchJam2026FallbackReadme, resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
+import {
+  fetchJam2026FallbackReadme,
+  resolveJam2026SyntheticD1Detail,
+  refreshJam2026D1PkgIfStale
+} from '../../../lib/jam-2026';
 import {
   verifySessionToken,
   parseCookies,
@@ -1165,6 +1170,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, 300),
     isLite ? Promise.resolve(null) : fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/reviews/`, 300)
   ]);
+  if (Array.isArray(upstreamData) || (upstreamData && typeof upstreamData === 'object' && !upstreamData.name && !upstreamData.title)) {
+    upstreamData = null;
+  }
   let forClientData: any = null;
 
   // Ensure Git tags/releases are always discovered & merged alongside ContentDB/D1 releases
@@ -1387,7 +1395,22 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   // Resolve directly from D1 + Server-side Git Repository Scanner (.conf + .cdb.json + README + Git Releases)
   if (!upstreamData) {
     if (!d1Pkg?.repo_url) {
-      ({ d1Pkg, bundledReleases } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, bundledReleases));
+      ({ d1Pkg, bundledReleases } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, bundledReleases, noCache));
+    } else {
+      const refreshedJamPkg = await refreshJam2026D1PkgIfStale(d1Pkg, context.env.DB, noCache);
+      if (refreshedJamPkg !== d1Pkg) {
+        d1Pkg = refreshedJamPkg;
+        if (bundledReleases.length > 0 && d1Pkg?.latest_commit_sha) {
+          bundledReleases = [
+            {
+              ...bundledReleases[0],
+              commit_sha: d1Pkg.latest_commit_sha,
+              released_at: d1Pkg.updated_at || bundledReleases[0].released_at
+            },
+            ...bundledReleases.slice(1)
+          ];
+        }
+      }
     }
     const d1Tags = Array.from(
       new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
@@ -1699,6 +1722,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         game_support: pureGitGameSupport.length > 0 ? pureGitGameSupport : undefined,
         created_at: d1Pkg?.created_at || undefined,
         updated_at: d1Pkg?.updated_at || undefined,
+        release: computeLuantiClientReleaseId(d1Pkg),
         latest_commit_sha: bundledReleases[0]?.commit_sha || d1Pkg?.latest_commit_sha || undefined,
         provider: d1Pkg?.provider || (resolvedRepo.includes('codeberg.org') ? 'codeberg' : resolvedRepo.includes('git.minetest.land') ? 'mesehub' : resolvedRepo.includes('gitlab.com') ? 'gitlab' : resolvedRepo.includes('bitbucket.org') ? 'bitbucket' : 'github'),
         default_branch: d1Pkg?.default_branch || gitScan?.defaultBranch || 'main',

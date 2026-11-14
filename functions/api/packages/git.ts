@@ -1732,14 +1732,32 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     // 6. Save to Cloudflare D1 (merging onto existing ContentDB record if present to prevent duplicates)
     if (context.env.DB) {
       await ensureExtendedPackageColumns(context.env.DB);
-      const authorId = ownershipVerified && resolvedUserId
+      let authorId: string | null = ownershipVerified && resolvedUserId
         ? resolvedUserId
-        : (existingD1Pkg?.author_id || `ext_${canonicalAuthor}`);
+        : (existingD1Pkg?.author_id || null);
 
-      await context.env.DB.prepare(`
-        INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
-        VALUES (?, ?, ?, ?)
-      `).bind(authorId, canonicalAuthor, canonicalAuthor, `https://github.com/${owner}.png`).run();
+      if (ownershipVerified && resolvedUserId) {
+        await context.env.DB.prepare(`
+          INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
+          VALUES (?, ?, ?, ?)
+        `).bind(resolvedUserId, canonicalAuthor, canonicalAuthor, `https://github.com/${owner}.png`).run().catch(() => null);
+      } else if (!authorId) {
+        const candidateExtId = `ext_${canonicalAuthor}`;
+        const existingUserRow = (await context.env.DB.prepare(
+          `SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1`
+        ).bind(canonicalAuthor).first().catch(() => null)) as { id?: string } | null;
+
+        if (existingUserRow?.id && String(existingUserRow.id) !== candidateExtId) {
+          // Username is already owned by another user account; leave unclaimed (`NULL`) to avoid FK failure or false cross-provider ownership
+          authorId = null;
+        } else {
+          authorId = candidateExtId;
+          await context.env.DB.prepare(`
+            INSERT OR IGNORE INTO users (id, username, display_name, avatar_url)
+            VALUES (?, ?, ?, ?)
+          `).bind(candidateExtId, canonicalAuthor, canonicalAuthor, `https://github.com/${owner}.png`).run().catch(() => null);
+        }
+      }
 
       const existingReviewAvgRow = await context.env.DB.prepare(
         `SELECT ROUND(AVG(rating), 1) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
@@ -1880,13 +1898,24 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         preservedCreatedAt
       ).run();
 
-      try {
-        await runPackageUpsert();
-      } catch (upsertErr: any) {
-        if (/has no column named|no such column/i.test(String(upsertErr?.message || ''))) {
-          await ensureExtendedPackageColumns(context.env.DB, true);
+      let columnsRetried = false;
+      let fkRetried = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
           await runPackageUpsert();
-        } else {
+          break;
+        } catch (upsertErr: any) {
+          const errMsg = String(upsertErr?.message || '');
+          if (!columnsRetried && /has no column named|no such column/i.test(errMsg)) {
+            columnsRetried = true;
+            await ensureExtendedPackageColumns(context.env.DB, true);
+            continue;
+          }
+          if (!fkRetried && /FOREIGN KEY constraint failed/i.test(errMsg) && !(ownershipVerified && resolvedUserId)) {
+            fkRetried = true;
+            authorId = null;
+            continue;
+          }
           throw upsertErr;
         }
       }

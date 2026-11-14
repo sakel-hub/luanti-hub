@@ -18,14 +18,35 @@ import {
   buildPackageCacheInvalidationKeys,
   buildPackageStatsEdgeCacheKey,
   buildAuthorStatsEdgeCacheKey,
-  readResponseBytesBounded
+  readResponseBytesBounded,
+  fetchGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp
 } from '../../../lib/upstream';
-import { findJam2026BrewRepoBySlug } from '../../../lib/jam-2026';
+import { findJam2026BrewBySlug } from '../../../lib/jam-2026';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
 
 interface Env {
   DB?: any;
   SESSION_SECRET?: string;
+}
+
+function buildCommitArchiveUrl(repoUrl: string, author: string, name: string, commitSha: string): string | null {
+  const cleanSha = String(commitSha || '').trim();
+  if (!cleanSha) return null;
+  const target = parseGitRepoTarget(repoUrl, author, name);
+  if (!target) return null;
+  if (
+    target.provider === 'gitlab' ||
+    target.host.toLowerCase().includes('gitlab') ||
+    target.host.toLowerCase().includes('gitgud.io')
+  ) {
+    const encSha = encodeURIComponent(cleanSha);
+    return `https://${target.host}/${target.owner}/${target.repo}/-/archive/${encSha}/${target.repo}-${encSha}.zip`;
+  }
+  if (target.provider === 'bitbucket') {
+    return `https://bitbucket.org/${target.owner}/${target.repo}/get/${encodeURIComponent(cleanSha)}.zip`;
+  }
+  return `https://${target.host}/${target.owner}/${target.repo}/archive/${encodeURIComponent(cleanSha)}.zip`;
 }
 
 const recentDownloadWrites = new Map<string, number>();
@@ -293,7 +314,7 @@ export async function onRequest(context: {
 
   const effectivePkgId = pkgRecord?.id || packageId;
   const effectiveAuthor = pkgRecord?.author_name || author;
-  const effectiveName = pkgRecord?.name || name;
+  let effectiveName = pkgRecord?.name || name;
 
   const healPackageDownloadSizeIfChanged = async (zipBytes: number) => {
     if (!env.DB || !pkgRecord?.id || zipBytes <= 0) return;
@@ -340,10 +361,30 @@ export async function onRequest(context: {
   let resolvedReleaseId =
     (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
     (/^\d+$/.test(queryRelease) ? queryRelease : '');
-  const isPureGitPkg = Boolean(pkgRecord && pkgRecord.provider && pkgRecord.provider !== 'contentdb');
-  const d1VersionFingerprint = isPureGitPkg
-    ? String(pkgRecord?.latest_commit_sha || pkgRecord?.updated_at || '').trim()
-    : '';
+  const hasExplicitContentDbReleaseId = Boolean(
+    resolvedReleaseId &&
+    Number(resolvedReleaseId) >= 2 &&
+    Number(resolvedReleaseId) < 1_000_000_000
+  );
+  const isPureGitPkg = Boolean(
+    pkgRecord &&
+    pkgRecord.provider &&
+    pkgRecord.provider !== 'contentdb' &&
+    !hasExplicitContentDbReleaseId
+  );
+  const hasJamTag = String(pkgRecord?.tags || '').toLowerCase().includes('jam_game_2026');
+  const earlyJamBrew =
+    !pkgRecord || isPureGitPkg || hasJamTag
+      ? await findJam2026BrewBySlug(effectiveAuthor, effectiveName, rawReason === 'update').catch(() => undefined)
+      : undefined;
+  const isPureGitJamOnly = Boolean(
+    earlyJamBrew &&
+    !hasExplicitContentDbReleaseId &&
+    (isPureGitPkg || (!pkgRecord && (!resolvedReleaseId || Number(resolvedReleaseId) >= 1_000_000_000)))
+  );
+  const d1VersionFingerprint =
+    (isPureGitJamOnly && earlyJamBrew?.latest_commit_sha) ||
+    (isPureGitPkg ? String(pkgRecord?.latest_commit_sha || pkgRecord?.updated_at || '').trim() : '');
 
   // Check Shared Isolate Memory & Cloudflare Edge Cache for already-normalized .zip binary.
   // When `reason=update` is passed by the Luanti client for an upstream ContentDB package without an explicit
@@ -354,8 +395,7 @@ export async function onRequest(context: {
     effectiveName,
     requestedTag || resolvedReleaseId || d1VersionFingerprint || 'latest'
   );
-  const canUseFastPreResolutionCache =
-    rawReason !== 'update' || Boolean(requestedTag || resolvedReleaseId || isPureGitPkg);
+  const canUseFastPreResolutionCache = rawReason !== 'update' || Boolean(requestedTag);
   if (canUseFastPreResolutionCache) {
     const cachedZipHit =
       (await getCachedNormalizedZip(initialEdgeZipCacheKey, request)) ||
@@ -374,11 +414,18 @@ export async function onRequest(context: {
   if (env.DB) {
     try {
       const relRes = await env.DB.prepare(
-        `SELECT id, version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id ASC`
+        `SELECT id, version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY released_at DESC, id DESC`
       ).bind(effectivePkgId).all();
       d1Releases = relRes.results || [];
     } catch {
-      // Proceed below
+      try {
+        const fallbackRelRes = await env.DB.prepare(
+          `SELECT id, version, tag_name, commit_sha, download_url FROM releases WHERE LOWER(package_id) = LOWER(?) ORDER BY id DESC`
+        ).bind(effectivePkgId).all();
+        d1Releases = fallbackRelRes.results || [];
+      } catch {
+        // Proceed below
+      }
     }
   }
 
@@ -391,14 +438,15 @@ export async function onRequest(context: {
   // to discover `repo_url`, release ID, commit SHA, and fallback `.zip` upload URLs when not already in D1.
   // When `rawReason === 'update'`, bypass the 5-minute `/releases/` cache (ttl=0) so newly published releases are discovered immediately.
   const releaseMetadataTtl = rawReason === 'update' ? 0 : 300;
+  const skipUpstreamContentDbFetch = isPureGitPkg || isPureGitJamOnly;
   const [upstreamReleases, upstreamPkg, forClient] = await Promise.all([
-    !isPureGitPkg
+    !skipUpstreamContentDbFetch
       ? fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null),
-    (!effectiveRepoUrl && !isPureGitPkg)
+    (!effectiveRepoUrl && !skipUpstreamContentDbFetch)
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600).catch(() => null)
       : Promise.resolve(null),
-    (!resolvedReleaseId || !effectiveRepoUrl) && !isPureGitPkg
+    (!resolvedReleaseId || !effectiveRepoUrl) && !skipUpstreamContentDbFetch
       ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null)
   ]);
@@ -463,7 +511,7 @@ export async function onRequest(context: {
     }
   };
 
-  if (!effectiveRepoUrl) {
+  if (!effectiveRepoUrl && !skipUpstreamContentDbFetch) {
     const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
     if (Array.isArray(bulkCatalog)) {
       const lowerA = effectiveAuthor.toLowerCase();
@@ -484,15 +532,57 @@ export async function onRequest(context: {
     }
   }
 
-  let matchedJamBrewFallback = false;
-  if (!effectiveRepoUrl) {
-    const jamRepo = await findJam2026BrewRepoBySlug(effectiveAuthor, effectiveName).catch(() => undefined);
-    if (jamRepo) {
-      effectiveRepoUrl = normalizeRepoCandidate(jamRepo);
-      matchedJamBrewFallback = true;
-      if (!pkgRecord?.type || String(pkgRecord.type).toLowerCase() === 'mod') {
-        effectiveType = 'game';
+  const hadInitialRepoUrl = Boolean(effectiveRepoUrl);
+  const matchedJamBrew = earlyJamBrew;
+  const matchedJamBrewFallback = Boolean(matchedJamBrew && !hadInitialRepoUrl);
+  if (matchedJamBrew) {
+    if (!effectiveRepoUrl && matchedJamBrew.repo_url) {
+      effectiveRepoUrl = normalizeRepoCandidate(matchedJamBrew.repo_url);
+    }
+    if (!pkgRecord?.type || String(pkgRecord.type).toLowerCase() === 'mod') {
+      effectiveType = matchedJamBrew.type || 'game';
+    }
+    if (matchedJamBrew.name) {
+      effectiveName = matchedJamBrew.name;
+    }
+  }
+
+  let liveUpdateCommitSha = '';
+  let liveUpdateArchiveUrl = '';
+  if (rawReason === 'update' && isPureGitPkg && !matchedJamBrew && effectiveRepoUrl && !requestedTag) {
+    try {
+      const [gitReleases, gitRefs] = await Promise.all([
+        fetchGitRepoReleasesAndTags(
+          effectiveRepoUrl,
+          effectiveAuthor,
+          effectiveName,
+          pkgRecord?.min_minetest_version || '5.0.0',
+          true
+        ).catch(() => []),
+        fetchGitSmartHttpRefs(effectiveRepoUrl, effectiveAuthor, effectiveName, true).catch(() => null)
+      ]);
+      const newestGitRel = Array.isArray(gitReleases) && gitReleases.length > 0 ? gitReleases[0] : null;
+      const newestFingerprint = String(newestGitRel?.tag_name || newestGitRel?.version || gitRefs?.headSha || '').trim();
+      if (newestGitRel?.download_url) {
+        liveUpdateArchiveUrl = newestGitRel.download_url;
       }
+      if (gitRefs?.headSha && /^[0-9a-f]{7,40}$/i.test(gitRefs.headSha)) {
+        liveUpdateCommitSha = gitRefs.headSha;
+        if (!liveUpdateArchiveUrl) {
+          liveUpdateArchiveUrl = buildCommitArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, liveUpdateCommitSha) || '';
+        }
+      }
+      if (env.DB && pkgRecord?.id && newestFingerprint && newestFingerprint !== String(pkgRecord.latest_commit_sha || '').trim()) {
+        await syncDebouncedGitVersionStamp(
+          env.DB,
+          pkgRecord,
+          newestFingerprint,
+          Boolean(newestGitRel),
+          newestGitRel?.released_at || new Date().toISOString()
+        ).catch(() => false);
+      }
+    } catch {
+      // Proceed cleanly with D1/Git fallbacks
     }
   }
 
@@ -514,10 +604,14 @@ export async function onRequest(context: {
     applyUpstreamPackageType(forClient.type, forClient.provides);
   }
 
+  const resolvedUpdateFingerprint =
+    rawReason === 'update' && !requestedTag && (isPureGitPkg || isPureGitJamOnly)
+      ? (matchedJamBrew?.latest_commit_sha || liveUpdateCommitSha || '')
+      : '';
   const edgeZipCacheKey = buildSharedZipCacheKey(
     effectiveAuthor,
     effectiveName,
-    requestedTag || resolvedReleaseId || upstreamCommitSha || d1VersionFingerprint || 'latest'
+    requestedTag || resolvedUpdateFingerprint || resolvedReleaseId || upstreamCommitSha || (isPureGitJamOnly ? matchedJamBrew?.latest_commit_sha : '') || d1VersionFingerprint || 'latest'
   );
   if (edgeZipCacheKey !== initialEdgeZipCacheKey || !canUseFastPreResolutionCache) {
     const resolvedZipHit = await getCachedNormalizedZip(edgeZipCacheKey);
@@ -567,6 +661,30 @@ export async function onRequest(context: {
     }
   }
 
+  const hasOfficialUpstreamRelease = Boolean(
+    hasExplicitContentDbReleaseId ||
+    upstreamCommitSha ||
+    upstreamReleaseUrl ||
+    (upstreamPkg && !Array.isArray(upstreamPkg) && upstreamPkg.name) ||
+    (forClient && !Array.isArray(forClient) && forClient.name)
+  );
+  const isAuthoritativeJamArchive = Boolean(
+    matchedJamBrew?.download_zip_url &&
+    !hasOfficialUpstreamRelease &&
+    (isPureGitPkg || !pkgRecord)
+  );
+  if (!requestedTag) {
+    if (isAuthoritativeJamArchive && matchedJamBrew?.download_zip_url) {
+      addCandidate(matchedJamBrew.download_zip_url);
+    }
+    if (liveUpdateArchiveUrl) {
+      addCandidate(liveUpdateArchiveUrl);
+    }
+    if (hasExplicitContentDbReleaseId && upstreamCommitSha && effectiveRepoUrl) {
+      addCandidate(buildCommitArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, upstreamCommitSha));
+    }
+  }
+
   const taggedRelease = d1Releases.find(
     (r: any) => r && r.download_url && r.commit_sha !== 'HEAD' && r.version !== 'latest'
   );
@@ -603,15 +721,11 @@ export async function onRequest(context: {
     }
 
     if (upstreamCommitSha) {
-      const target = parseGitRepoTarget(effectiveRepoUrl, effectiveAuthor, effectiveName);
-      if (target) {
-        if (target.provider === 'gitlab') {
-          const projectPath = encodeURIComponent(`${target.owner}/${target.repo}`);
-          addCandidate(`https://${target.host}/api/v4/projects/${projectPath}/repository/archive.zip?sha=${encodeURIComponent(upstreamCommitSha)}`);
-        } else {
-          addCandidate(`https://${target.host}/${target.owner}/${target.repo}/archive/${encodeURIComponent(upstreamCommitSha)}.zip`);
-        }
-      }
+      addCandidate(buildCommitArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, upstreamCommitSha));
+    }
+
+    if (!requestedTag && !isAuthoritativeJamArchive && matchedJamBrew?.download_zip_url) {
+      addCandidate(matchedJamBrew.download_zip_url);
     }
 
     // Always include HEAD.zip (auto-resolves default branch whether `main`, `master`, or custom)

@@ -49,6 +49,8 @@ import {
   parseBadgeTagsArray,
   ORGANIC_CODE_TAG,
   BOOT_CATALOG_EDGE_CACHE_KEY,
+  IN_GAME_CATALOG_CACHE_PREFIX,
+  computeLuantiClientReleaseId,
   readResponseBytesBounded,
   isUntrustedTunnelOrPrivateHost
 } from '../lib/upstream';
@@ -57,7 +59,8 @@ import {
   isJam2026AllowedImageHost,
   isJam2026Tag,
   syncJam2026IntoPromoRowDelta,
-  applyJam2026RepoOverlayOnCatalog
+  applyJam2026RepoOverlayOnCatalog,
+  buildJam2026StandalonePromoDelta
 } from '../lib/jam-2026';
 
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
@@ -114,7 +117,7 @@ export async function syncActivePromotionRowPackages(
   if (uniqueTags.length === 0 && uniqueAuthors.length === 0) return null;
 
   const cacheSignature = `tags=${uniqueTags.map((t) => t.toLowerCase()).sort().join(',')}|authors=${uniqueAuthors.map((a) => a.toLowerCase()).sort().join(',')}`;
-  const syncCacheKey = `/__promo_row_sync_v4_${encodeURIComponent(cacheSignature)}`;
+  const syncCacheKey = `/__promo_row_sync_v5_${encodeURIComponent(cacheSignature)}`;
 
   if (!noCache) {
     const cachedDelta = await readEdgeCacheJson<PromoRowDelta>(syncCacheKey);
@@ -317,8 +320,51 @@ export function overlayPromotionRowDeltaOnCatalog(
     items
   );
 
+  // 1c. Preserve/advance release & commit metadata for existing non-official packages matched by id
+  let idSyncedList: any[] | null = null;
+  if (items.length > 0) {
+    const deltaItemByLowerId = new Map<string, any>();
+    for (const item of items) {
+      if (item?.author && item?.name) {
+        deltaItemByLowerId.set(`${item.author}/${item.name}`.toLowerCase(), item);
+      }
+    }
+    for (let i = 0; i < repoOverlaidList.length; i++) {
+      const existing = repoOverlaidList[i];
+      const existingId = String(
+        existing?.id || (existing?.author && existing?.name ? `${existing.author}/${existing.name}` : '')
+      ).toLowerCase();
+      if (!existingId) continue;
+      const deltaItem = deltaItemByLowerId.get(existingId);
+      if (!deltaItem) continue;
+      const isOfficialExisting = Array.isArray(existing.sources)
+        ? existing.sources.includes('official')
+        : existing.source === 'official' || existing.provider === 'contentdb';
+      const isOfficialDelta = Array.isArray(deltaItem.sources)
+        ? deltaItem.sources.includes('official')
+        : deltaItem.source === 'official' || deltaItem.provider === 'contentdb';
+      if (isOfficialExisting || isOfficialDelta) continue;
+      const maxRelease = Math.max(Number(existing.release) || 0, Number(deltaItem.release) || 0);
+      const nextSha = deltaItem.latest_commit_sha || existing.latest_commit_sha;
+      if (
+        (maxRelease > 0 && maxRelease !== Number(existing.release || 0)) ||
+        (nextSha && existing.latest_commit_sha !== nextSha)
+      ) {
+        if (!idSyncedList) idSyncedList = [...repoOverlaidList];
+        idSyncedList[i] = {
+          ...existing,
+          ...(maxRelease > 0 ? { release: maxRelease } : {}),
+          ...(nextSha ? { latest_commit_sha: nextSha } : {}),
+          ...(deltaItem.updated_at && (!existing.updated_at || deltaItem.updated_at > existing.updated_at)
+            ? { updated_at: deltaItem.updated_at }
+            : {})
+        };
+      }
+    }
+  }
+
   // 2. Inject brand-new ContentDB or Jam 2026 submissions that arrived after the 30-min catalog bundle was built
-  const baseList = repoOverlaidList;
+  const baseList = idSyncedList || repoOverlaidList;
   if (!appendMissingItems) {
     return baseList;
   }
@@ -391,6 +437,102 @@ export function overlayPromotionRowDeltaOnCatalog(
   }
 
   return appendedNew.length > 0 ? [...appendedNew, ...baseList] : baseList;
+}
+
+function mergePromoDeltas(primary: PromoRowDelta | null, secondary: PromoRowDelta | null): PromoRowDelta | null {
+  if (!primary) return secondary;
+  if (!secondary) return primary;
+  const tagMap: Record<string, string[]> = { ...(primary.tagMap || {}) };
+  for (const [k, tags] of Object.entries(secondary.tagMap || {})) {
+    const existing = tagMap[k] || [];
+    const next = [...existing];
+    for (const t of tags) {
+      if (t && !next.some((et) => et.toLowerCase() === t.toLowerCase())) {
+        next.push(t);
+      }
+    }
+    tagMap[k] = next;
+  }
+  const repoTagMap =
+    primary.repoTagMap || secondary.repoTagMap
+      ? { ...(primary.repoTagMap || {}), ...(secondary.repoTagMap || {}) }
+      : undefined;
+  return {
+    tagMap,
+    ...(repoTagMap ? { repoTagMap } : {}),
+    items: [...(primary.items || []), ...(secondary.items || [])]
+  };
+}
+
+async function resolveActivePromosWithDbFallback(db?: any): Promise<any[]> {
+  const nowMs = Date.now();
+  const cachedMem = getLastKnownActivePromotions(nowMs);
+  if (Array.isArray(cachedMem) && cachedMem.length > 0) {
+    return cachedMem;
+  }
+  const cachedEdge = await readEdgeCacheJson<any[]>('/__active_promotions_v1').catch(() => null);
+  if (Array.isArray(cachedEdge)) {
+    const validEdge = cachedEdge
+      .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+      .map((r: any) => normalizePromotionRow(r));
+    setLastKnownActivePromotions(validEdge);
+    return validEdge;
+  }
+  if (!db) return [];
+  try {
+    const res = await db
+      .prepare(`SELECT * FROM hero_promotions ORDER BY priority DESC, created_at DESC LIMIT 20`)
+      .all();
+    const validRows = (res?.results || [])
+      .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+      .map((r: any) => normalizePromotionRow(r));
+    setLastKnownActivePromotions(validRows);
+    await writeEdgeCacheJson('/__active_promotions_v1', validRows, 21600).catch(() => {});
+    return validRows;
+  } catch {
+    return [];
+  }
+}
+
+async function syncAndOverlayCatalogWithPromosAndJam(options: {
+  packagesList: any[];
+  activePromos?: any[] | null;
+  db?: any;
+  noCache?: boolean;
+  upstreamCatalog?: any[];
+  blockedIds?: Set<string>;
+  lhDownloadsMap?: Map<string, number>;
+  appendMissingItems?: boolean;
+}): Promise<{ packages: any[]; effectiveDelta: PromoRowDelta | null }> {
+  const {
+    packagesList,
+    activePromos,
+    db,
+    noCache = false,
+    upstreamCatalog,
+    blockedIds,
+    lhDownloadsMap,
+    appendMissingItems = true
+  } = options;
+
+  const promoDelta =
+    Array.isArray(activePromos) && activePromos.length > 0
+      ? await syncActivePromotionRowPackages(activePromos, db, noCache, upstreamCatalog).catch(() => null)
+      : null;
+  const jamDelta = !promoDelta?.repoTagMap
+    ? await buildJam2026StandalonePromoDelta(db, noCache, upstreamCatalog).catch(() => null)
+    : null;
+  const effectiveDelta = mergePromoDeltas(promoDelta, jamDelta);
+  const overlaid = effectiveDelta
+    ? overlayPromotionRowDeltaOnCatalog(
+        packagesList,
+        effectiveDelta,
+        blockedIds,
+        lhDownloadsMap,
+        appendMissingItems
+      )
+    : packagesList;
+  return { packages: overlaid, effectiveDelta };
 }
 
 function computeCatalogStarRating(item: any, d1StarAvg?: number): number {
@@ -929,7 +1071,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}&cw=${isWebClientQuery ? '1' : '0'}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
-    : `https://cache.luantihub.internal/__catalog_edge_v13_${encodeURIComponent(normalizedCatalogKey)}`;
+    : `https://cache.luantihub.internal${IN_GAME_CATALOG_CACHE_PREFIX}${encodeURIComponent(normalizedCatalogKey)}`;
 
   const lowerQ = q.toLowerCase();
   const lowerAuthor = author.toLowerCase();
@@ -1023,18 +1165,25 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         'short_description',
         'release',
         'thumbnail',
-        'featured'
+        'featured',
+        'aliases'
       ];
-      const rows = slimList.map((it: any) => [
-        it.author,
-        it.name,
-        it.title,
-        it.type,
-        it.short_description,
-        it.release,
-        it.thumbnail,
-        Boolean(it.featured)
-      ]);
+      const rows = slimList.map((it: any) => {
+        const parsedAliases = Array.isArray(it.aliases)
+          ? it.aliases
+          : (typeof it.aliases === 'string' && it.aliases.trim() ? parseJsonArray(it.aliases) : []);
+        return [
+          it.author,
+          it.name,
+          it.title,
+          it.type,
+          it.short_description,
+          it.release,
+          it.thumbnail,
+          Boolean(it.featured),
+          parsedAliases.length > 0 ? parsedAliases : null
+        ];
+      });
       return {
         keys,
         pkgs: rows,
@@ -1611,13 +1760,24 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     if (!isBootBundle && !q && !author && !hasCustomUpstreamFilters) {
       const cachedBoot = await readEdgeCacheJson<any>(bootEdgeCacheKey);
       if (cachedBoot && Array.isArray(cachedBoot.packages) && cachedBoot.packages.length > 0) {
-        const sharedClientPayload = buildInGameClientCatalogResponse(cachedBoot.packages);
-        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 1800);
+        const sharedPromos = Array.isArray(cachedBoot.promotions)
+          ? cachedBoot.promotions
+          : (getLastKnownActivePromotions() || []);
+        const { packages: overlaidBootPackages } = await syncAndOverlayCatalogWithPromosAndJam({
+          packagesList: cachedBoot.packages,
+          activePromos: sharedPromos,
+          db: env.DB,
+          noCache: false,
+          upstreamCatalog: cachedBoot.packages,
+          appendMissingItems: true
+        });
+        const sharedClientPayload = buildInGameClientCatalogResponse(overlaidBootPackages);
+        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 300);
         return new Response(JSON.stringify(sharedClientPayload), {
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
+            'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
             'X-LuantiHub-Cache': 'HIT-BOOT-SHARED'
           }
         });
@@ -1674,33 +1834,34 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             recentlyAdded: liveRecentlyAdded
           };
         }
-        if (Array.isArray(rawPromos)) {
-          const validEdgePromos = rawPromos
-            .filter((r: any) => isValidActivePromotionRow(r, nowMs))
-            .map((r: any) => normalizePromotionRow(r));
-          const promoDelta = await syncActivePromotionRowPackages(
-            validEdgePromos,
-            env.DB,
-            false,
-            overlaidPackages
-          );
-          if (promoDelta && overlaidPackages.length > 0) {
-            overlaidPackages = overlayPromotionRowDeltaOnCatalog(overlaidPackages, promoDelta);
-          }
-          const overlaidRecentRaw =
-            promoDelta && Array.isArray(edgeBody.recentlyAdded) && edgeBody.recentlyAdded.length > 0
-              ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, promoDelta, undefined, undefined, false)
-              : edgeBody.recentlyAdded;
-          const overlaidRecent = Array.isArray(overlaidRecentRaw)
-            ? overlayRecentlyAddedOnPackages(overlaidRecentRaw, []).slice(0, 24)
-            : overlaidRecentRaw;
-          edgeBody = {
-            ...edgeBody,
-            packages: overlaidPackages,
-            ...(Array.isArray(overlaidRecent) ? { recentlyAdded: overlaidRecent } : {}),
-            promotions: validEdgePromos
-          };
-        }
+        const validEdgePromos = Array.isArray(rawPromos)
+          ? rawPromos
+              .filter((r: any) => isValidActivePromotionRow(r, nowMs))
+              .map((r: any) => normalizePromotionRow(r))
+          : [];
+        const { packages: promoOverlaidPackages, effectiveDelta: edgePromoDelta } =
+          await syncAndOverlayCatalogWithPromosAndJam({
+            packagesList: overlaidPackages,
+            activePromos: validEdgePromos,
+            db: env.DB,
+            noCache: false,
+            upstreamCatalog: overlaidPackages,
+            appendMissingItems: overlaidPackages.length > 0
+          });
+        overlaidPackages = promoOverlaidPackages;
+        const overlaidRecentRaw =
+          edgePromoDelta && Array.isArray(edgeBody.recentlyAdded) && edgeBody.recentlyAdded.length > 0
+            ? overlayPromotionRowDeltaOnCatalog(edgeBody.recentlyAdded, edgePromoDelta, undefined, undefined, false)
+            : edgeBody.recentlyAdded;
+        const overlaidRecent = Array.isArray(overlaidRecentRaw)
+          ? overlayRecentlyAddedOnPackages(overlaidRecentRaw, []).slice(0, 24)
+          : overlaidRecentRaw;
+        edgeBody = {
+          ...edgeBody,
+          packages: overlaidPackages,
+          ...(Array.isArray(overlaidRecent) ? { recentlyAdded: overlaidRecent } : {}),
+          ...(Array.isArray(rawPromos) ? { promotions: validEdgePromos } : {})
+        };
         if (sharedRatings && Object.keys(sharedRatings).length > 0 && Array.isArray(edgeBody.packages)) {
           const applySharedRating = (pkg: any) => {
             if (!pkg?.id) return pkg;
@@ -1749,7 +1910,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': isBootBundle
             ? 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'
-            : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600',
+            : 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
           'X-LuantiHub-Cache': 'HIT-EDGE'
         }
       });
@@ -1831,7 +1992,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       params.push(author);
     }
 
-    const orderSuffix = ` ORDER BY downloads_count DESC LIMIT 1000`;
+    const orderSuffix = ` ORDER BY CASE WHEN COALESCE(provider, 'contentdb') != 'contentdb' THEN 0 ELSE 1 END ASC, downloads_count DESC LIMIT 2500`;
     const query = `SELECT ${selectCols} FROM packages ${whereClause}${orderSuffix}`;
     const fallbackStarQuery = `SELECT * FROM packages ${whereClause}${orderSuffix}`;
 
@@ -2384,13 +2545,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       typeof p.downloads_count === 'number' ? p.downloads_count : 0
     );
     const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
-    const releaseId =
-      Number(matchedUpstream?.release) > 0
-        ? Number(matchedUpstream.release)
-        : Math.max(
-            1,
-            Math.floor(new Date(p.updated_at || p.created_at || '2026-01-01T00:00:00Z').getTime() / 1000) || 1
-          );
+    const releaseId = computeLuantiClientReleaseId(
+      { updated_at: p.updated_at, created_at: p.created_at },
+      Number(matchedUpstream?.release) > 0 ? Number(matchedUpstream.release) : undefined
+    );
 
     const authorMeta = resolveAuthorMeta(
       p.author_id,
@@ -2647,15 +2805,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   let responsePayload: any = merged;
   if (isBootBundle) {
     const tags = Array.isArray(rawTags) && rawTags.length > 0 ? rawTags : DEFAULT_CONTENTDB_TAGS;
-    const promoDelta = await syncActivePromotionRowPackages(
-      activePromotions,
-      env.DB,
-      noCache,
-      combinedUpstreamList
-    ).catch(() => null);
-    const mergedWithInitialPromoStamps = promoDelta
-      ? overlayPromotionRowDeltaOnCatalog(merged, promoDelta, blockedIds, lhDownloadsMap, false)
-      : merged;
+    const { packages: mergedWithInitialPromoStamps, effectiveDelta: promoDelta } =
+      await syncAndOverlayCatalogWithPromosAndJam({
+        packagesList: merged,
+        activePromos: activePromotions,
+        db: env.DB,
+        noCache,
+        upstreamCatalog: combinedUpstreamList,
+        blockedIds,
+        lhDownloadsMap,
+        appendMissingItems: false
+      });
     if (mergedWithInitialPromoStamps !== merged) {
       merged.length = 0;
       merged.push(...mergedWithInitialPromoStamps);
@@ -3104,14 +3264,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 1800);
     }
   } else {
+    const knownPromos = await resolveActivePromosWithDbFallback(env.DB);
+    let activePromosForSync: any[] | null = knownPromos;
     if (requestedTagFilters.length > 0) {
       const VALID_PROMO_TAG_SLUG = /^[a-z0-9_-]{1,32}$/i;
       const knownPromoTags = new Set<string>();
-      const cachedActivePromos =
-        getLastKnownActivePromotions() ||
-        (await readEdgeCacheJson<any[]>('/__active_promotions_v1').catch(() => null)) ||
-        [];
-      for (const promo of cachedActivePromos) {
+      for (const promo of knownPromos) {
         const pTags = Array.isArray(promo?.row_filter_tags)
           ? promo.row_filter_tags
           : parseJsonArray(promo?.row_filter_tags);
@@ -3123,35 +3281,33 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         const lower = String(t || '').trim().toLowerCase();
         return VALID_PROMO_TAG_SLUG.test(lower) && (isJam2026Tag(lower) || knownPromoTags.has(lower));
       });
-      const tagSyncDelta =
+      activePromosForSync =
         eligibleSyncTags.length > 0
-          ? await syncActivePromotionRowPackages(
-              eligibleSyncTags.map((t) => ({ row_enabled: true, row_filter_tags: [t] })),
-              env.DB,
-              noCache,
-              combinedUpstreamList
-            ).catch(() => null)
-          : null;
-      if (tagSyncDelta) {
-        const mergedWithTagDelta = overlayPromotionRowDeltaOnCatalog(
-          merged,
-          tagSyncDelta,
-          blockedIds,
-          lhDownloadsMap,
-          true
-        );
-        if (mergedWithTagDelta !== merged) {
-          merged.length = 0;
-          merged.push(...mergedWithTagDelta);
-        }
-      }
+          ? eligibleSyncTags.map((t) => ({ row_enabled: true, row_filter_tags: [t] }))
+          : knownPromos;
     }
+
+    const { packages: mergedWithClientPromos } = await syncAndOverlayCatalogWithPromosAndJam({
+      packagesList: merged,
+      activePromos: activePromosForSync,
+      db: env.DB,
+      noCache,
+      upstreamCatalog: combinedUpstreamList,
+      blockedIds,
+      lhDownloadsMap,
+      appendMissingItems: true
+    });
+    if (mergedWithClientPromos !== merged) {
+      merged.length = 0;
+      merged.push(...mergedWithClientPromos);
+    }
+
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
     responsePayload = buildInGameClientCatalogResponse(merged);
   }
 
   if (!isBootBundle && !noCache && catalogEdgeCacheKey) {
-    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 1800);
+    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 300);
   }
 
   return new Response(JSON.stringify(responsePayload), {
@@ -3161,7 +3317,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       'Cache-Control': !noCache
         ? (isBootBundle
             ? 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'
-            : 'public, max-age=120, s-maxage=1800, stale-while-revalidate=3600')
+            : 'public, max-age=120, s-maxage=300, stale-while-revalidate=600')
         : 'no-cache, no-store, must-revalidate',
       'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
     }

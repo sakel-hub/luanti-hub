@@ -15527,4 +15527,462 @@ core.register_node(modname .. ":panel", {
     (authService as any)._isProfileDrawerOpen.set(false);
     (authService as any)._currentUser.set(null);
   });
+
+  it('should prioritize non-contentdb D1 packages ahead of >1000 hydrated ContentDB rows in catalog and serve newest multi-release .zip on ?reason=update for decentralized Git packages', async () => {
+    const { onRequestGet: packagesIndexGet } = await import('../../functions/api/packages/index');
+    const { onRequest: onDownloadGet } = await import('../../functions/api/packages/[author]/[name]/download');
+    const { resetJam2026IsolateCacheForTests } = await import('../../functions/api/lib/jam-2026');
+    const {
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      invalidateEdgeCacheKeys
+    } = await import('../../functions/api/lib/upstream');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const v = cacheStore.get(k);
+          return v ? v.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+
+    const buildTestModZip = (initContent: string): Uint8Array => {
+      const encoder = new TextEncoder();
+      const files = [
+        { path: 'multi_rel_mod/mod.conf', content: 'name = multi_rel_mod\n' },
+        { path: 'multi_rel_mod/init.lua', content: initContent }
+      ];
+      const crcTable = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        crcTable[n] = c >>> 0;
+      }
+      const crc32 = (buf: Uint8Array) => {
+        let crc = 0xffffffff;
+        for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+        return (crc ^ 0xffffffff) >>> 0;
+      };
+      const localParts: Uint8Array[] = [];
+      const cdParts: Uint8Array[] = [];
+      let offset = 0;
+      for (const f of files) {
+        const nameBytes = encoder.encode(f.path);
+        const dataBytes = encoder.encode(f.content);
+        const crc = crc32(dataBytes);
+        const lh = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+        const lv = new DataView(lh.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);
+        lv.setUint32(14, crc, true);
+        lv.setUint32(18, dataBytes.length, true);
+        lv.setUint32(22, dataBytes.length, true);
+        lv.setUint16(26, nameBytes.length, true);
+        lh.set(nameBytes, 30);
+        lh.set(dataBytes, 30 + nameBytes.length);
+        localParts.push(lh);
+
+        const ch = new Uint8Array(46 + nameBytes.length);
+        const cv = new DataView(ch.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, dataBytes.length, true);
+        cv.setUint32(24, dataBytes.length, true);
+        cv.setUint16(28, nameBytes.length, true);
+        cv.setUint32(42, offset, true);
+        ch.set(nameBytes, 46);
+        cdParts.push(ch);
+        offset += lh.length;
+      }
+      const cdSize = cdParts.reduce((s, p) => s + p.length, 0);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, files.length, true);
+      ev.setUint16(10, files.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, offset, true);
+      const out = new Uint8Array(offset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...cdParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const zipV1 = buildTestModZip('-- version 1\n');
+    const zipV2 = buildTestModZip('-- version 2 with major release overhaul ' + 'x'.repeat(180) + '\n');
+
+    // Seed 1,100 hydrated ContentDB packages with higher downloads_count than our 0-download Git packages
+    const d1Packages: any[] = [];
+    for (let i = 0; i < 1100; i++) {
+      d1Packages.push({
+        id: `CdbAuthor${i}/cdb_mod_${i}`,
+        author_name: `CdbAuthor${i}`,
+        name: `cdb_mod_${i}`,
+        title: `CDB Mod ${i}`,
+        type: 'mod',
+        short_desc: 'Hydrated ContentDB cache row',
+        provider: 'contentdb',
+        repo_url: `https://github.com/CdbAuthor${i}/cdb_mod_${i}`,
+        tags: JSON.stringify(['contentdb']),
+        downloads_count: 10000 - i,
+        contentdb_downloads: 10000 - i,
+        status: 'active',
+        updated_at: '2026-09-01T00:00:00Z'
+      });
+    }
+    d1Packages.push(
+      {
+        id: 'IndieDev/zero_dl_git_mod',
+        author_name: 'IndieDev',
+        name: 'zero_dl_git_mod',
+        title: 'Zero DL Git Mod',
+        type: 'mod',
+        short_desc: 'Decentralized Git mod with 0 downloads',
+        provider: 'github',
+        repo_url: 'https://github.com/IndieDev/zero_dl_git_mod',
+        tags: JSON.stringify(['building']),
+        downloads_count: 0,
+        contentdb_downloads: 0,
+        status: 'active',
+        updated_at: '2026-10-05T00:00:00Z'
+      },
+      {
+        id: 'IndieDev/multi_rel_mod',
+        author_name: 'IndieDev',
+        name: 'multi_rel_mod',
+        title: 'Multi Release Mod',
+        type: 'mod',
+        short_desc: 'Decentralized multi-release Git mod',
+        provider: 'github',
+        repo_url: 'https://github.com/IndieDev/multi_rel_mod',
+        default_branch: 'main',
+        latest_commit_sha: 'v1.0.0',
+        tags: JSON.stringify(['tools']),
+        downloads_count: 5,
+        contentdb_downloads: 0,
+        status: 'active',
+        updated_at: '2026-01-01T00:00:00Z'
+      }
+    );
+
+    const d1Releases = [
+      {
+        id: 1,
+        package_id: 'IndieDev/multi_rel_mod',
+        version: 'v1.0.0',
+        tag_name: 'v1.0.0',
+        commit_sha: 'aaaa1111',
+        download_url: 'https://github.com/IndieDev/multi_rel_mod/archive/refs/tags/v1.0.0.zip',
+        released_at: '2026-01-01T00:00:00Z'
+      },
+      {
+        id: 2,
+        package_id: 'IndieDev/multi_rel_mod',
+        version: 'v2.0.0',
+        tag_name: 'v2.0.0',
+        commit_sha: 'bbbb2222',
+        download_url: 'https://github.com/IndieDev/multi_rel_mod/archive/refs/tags/v2.0.0.zip',
+        released_at: '2026-10-01T00:00:00Z'
+      }
+    ];
+
+    let capturedPackagesOrderSql = '';
+    let capturedReleasesOrderSql = '';
+    const fetchedZipUrls: string[] = [];
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => {
+          const bound: any[] = [];
+          const runQuery = async (mode: 'first' | 'all' | 'run') => {
+            if (mode === 'run') return { success: true };
+            if (/FROM\s+releases/i.test(sql)) {
+              capturedReleasesOrderSql = sql;
+              const pkgId = String(bound[0] || '').toLowerCase();
+              const matched = d1Releases.filter((r) => r.package_id.toLowerCase() === pkgId);
+              if (/ORDER BY\s+released_at\s+DESC,\s+id\s+DESC/i.test(sql)) {
+                matched.sort((a, b) => b.released_at.localeCompare(a.released_at) || b.id - a.id);
+              } else {
+                matched.sort((a, b) => a.id - b.id);
+              }
+              return mode === 'first' ? matched[0] || null : { results: matched };
+            }
+            if (/FROM\s+packages/i.test(sql) && /ORDER BY/i.test(sql)) {
+              capturedPackagesOrderSql = sql;
+              const rows = [...d1Packages];
+              if (/CASE\s+WHEN\s+COALESCE\(provider,\s*'contentdb'\)\s*!=\s*'contentdb'\s+THEN\s+0\s+ELSE\s+1\s+END/i.test(sql)) {
+                rows.sort((a, b) => {
+                  const aNonCdb = a.provider !== 'contentdb' ? 0 : 1;
+                  const bNonCdb = b.provider !== 'contentdb' ? 0 : 1;
+                  return aNonCdb - bNonCdb || b.downloads_count - a.downloads_count;
+                });
+              } else {
+                rows.sort((a, b) => b.downloads_count - a.downloads_count);
+              }
+              const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+              const limit = limitMatch ? Number(limitMatch[1]) : 1000;
+              return { results: rows.slice(0, limit) };
+            }
+            if (/FROM\s+packages/i.test(sql) && mode === 'first') {
+              const target = String(bound[0] || '').toLowerCase();
+              return d1Packages.find((p) => p.id.toLowerCase() === target) || null;
+            }
+            return mode === 'first' ? null : { results: [] };
+          };
+          const stmt: any = {
+            bind: (...args: any[]) => {
+              bound.push(...args);
+              return stmt;
+            },
+            first: () => runQuery('first'),
+            all: () => runQuery('all'),
+            run: () => runQuery('run')
+          };
+          return stmt;
+        }
+      }
+    };
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('content.luanti.org/api/packages') && !urlStr.includes('/IndieDev/')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (urlStr.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (urlStr.includes('api.github.com/repos/IndieDev/multi_rel_mod/releases')) {
+        return new Response(
+          JSON.stringify([
+            {
+              tag_name: 'v2.0.0',
+              name: 'v2.0.0',
+              zipball_url: 'https://github.com/IndieDev/multi_rel_mod/archive/refs/tags/v2.0.0.zip',
+              published_at: '2026-10-01T00:00:00Z'
+            },
+            {
+              tag_name: 'v1.0.0',
+              name: 'v1.0.0',
+              zipball_url: 'https://github.com/IndieDev/multi_rel_mod/archive/refs/tags/v1.0.0.zip',
+              published_at: '2026-01-01T00:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('api.github.com/repos/IndieDev/multi_rel_mod/tags')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (urlStr.includes('/v2.0.0.zip')) {
+        fetchedZipUrls.push(urlStr);
+        return new Response(zipV2 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (urlStr.includes('/v1.0.0.zip')) {
+        fetchedZipUrls.push(urlStr);
+        return new Response(zipV1 as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. Catalog includes 0-download non-contentdb Git mod even with 1,100 high-download ContentDB rows in D1
+      const catalogRes = await packagesIndexGet({
+        request: new Request('https://luantihub.org/api/packages/?type=mod&nocache=1'),
+        env: mockEnv
+      } as any);
+      expect(catalogRes.status).toBe(200);
+      expect(capturedPackagesOrderSql).toContain('LIMIT 2500');
+      const catalogJson = await catalogRes.json();
+      expect(
+        catalogJson.some((p: any) => p.author === 'IndieDev' && p.name === 'zero_dl_git_mod')
+      ).toBe(true);
+
+      // 2. Multi-release decentralized Git package serves newest release (v2.0.0), not oldest row (v1.0.0), on ?reason=update
+      const dlUpdateRes = await onDownloadGet({
+        request: new Request(
+          'https://luantihub.org/packages/IndieDev/multi_rel_mod/releases/1760000000/download/?reason=update'
+        ),
+        env: mockEnv,
+        params: { author: 'IndieDev', name: 'multi_rel_mod', release: '1760000000' }
+      } as any);
+      expect(dlUpdateRes.status).toBe(200);
+      expect(capturedReleasesOrderSql).toContain('ORDER BY released_at DESC, id DESC');
+      expect(fetchedZipUrls[0]).toContain('v2.0.0');
+      const updatedBytes = new Uint8Array(await dlUpdateRes.arrayBuffer());
+      expect(updatedBytes.byteLength).toBeGreaterThan(zipV1.byteLength + 100);
+
+      // 3. PWA package detail endpoint emits the same monotonic release ID as /for-client
+      const { onRequestGet: pkgDetailGet } = await import('../../functions/api/packages/[author]/[name]/index');
+      const { onRequestGet: forClientGet } = await import('../../functions/api/packages/[author]/[name]/for-client');
+      const [detailRes, forClientRes] = await Promise.all([
+        pkgDetailGet({
+          params: { author: 'IndieDev', name: 'multi_rel_mod' },
+          request: new Request('https://luantihub.org/api/packages/IndieDev/multi_rel_mod'),
+          env: mockEnv
+        } as any),
+        forClientGet({
+          params: { author: 'IndieDev', name: 'multi_rel_mod' },
+          request: new Request('https://luantihub.org/api/packages/IndieDev/multi_rel_mod/for-client/?formspec_version=8'),
+          env: mockEnv
+        } as any)
+      ]);
+      expect(detailRes.status).toBe(200);
+      expect(forClientRes.status).toBe(200);
+      const detailJson = await detailRes.json();
+      const forClientJson = await forClientRes.json();
+      expect(detailJson.release).toBe(forClientJson.release);
+      expect(detailJson.release).toBeGreaterThan(1700000000);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      resetJam2026IsolateCacheForTests();
+      await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY, IN_GAME_CATALOG_CACHE_PREFIX]);
+    }
+  });
+
+  it('should leave author_id as null (never cross-attributing to another OAuth user or failing D1 FK) when username already exists under a different users.id', async () => {
+    const { syncJam2026IntoPromoRowDelta, resetJam2026IsolateCacheForTests } = await import('../../functions/api/lib/jam-2026');
+    const { clearIsolateCachesForTests } = await import('../../functions/api/lib/upstream');
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const v = cacheStore.get(k);
+          return v ? v.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+    resetJam2026IsolateCacheForTests();
+
+    const users = new Map<string, any>([
+      ['usr_github_alice', { id: 'usr_github_alice', username: 'alice', display_name: 'Alice', avatar_url: '' }]
+    ]);
+    const packages = new Map<string, any>();
+    const fkDb = {
+      prepare: (sql: string) => {
+        const args: any[] = [];
+        const exec = async (mode: 'run' | 'first' | 'all') => {
+          if (/INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+users/i.test(sql)) {
+            const [id, username, display_name, avatar_url] = args;
+            const taken = Array.from(users.values()).some(
+              (u) => String(u.username || '').toLowerCase() === String(username || '').toLowerCase()
+            );
+            if (!taken && !users.has(id)) {
+              users.set(id, { id, username, display_name, avatar_url });
+            }
+            return { success: true };
+          }
+          if (/INSERT\s+INTO\s+packages/i.test(sql) && /SELECT\s+\?/i.test(sql)) {
+            const [id, author_id, author_name, name, title] = args;
+            if (author_id !== null && author_id !== undefined && !users.has(String(author_id))) {
+              throw new Error('D1_ERROR: FOREIGN KEY constraint failed');
+            }
+            packages.set(String(id).toLowerCase(), {
+              id,
+              author_id: author_id ?? null,
+              author_name,
+              name,
+              title,
+              status: 'active'
+            });
+            return { success: true };
+          }
+          return mode === 'first' ? null : { results: [] };
+        };
+        const stmt: any = {
+          bind: (...b: any[]) => {
+            args.push(...b);
+            return stmt;
+          },
+          run: () => exec('run'),
+          first: () => exec('first'),
+          all: () => exec('all')
+        };
+        return stmt;
+      },
+      batch: async (stmts: any[]) => {
+        for (const s of stmts) await s.run();
+        return [];
+      }
+    };
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://codeberg.org/alice/cross_provider_game',
+              commit: 'fedcba9876543210fedcba9876543210fedcba98',
+              title: 'Cross Provider Game',
+              description: 'Ensures alice/cross_provider_game stays unclaimed.',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T18:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const discoveredByKey = new Map<string, any>();
+      await syncJam2026IntoPromoRowDelta({
+        uniqueTags: ['jam_game_2026'],
+        addTagStamp: () => {},
+        discoveredByKey,
+        existingD1Pairs: new Set<string>(),
+        queuedUpsertKeys: new Set<string>(),
+        d1UpsertPairs: [],
+        db: fkDb,
+        noCache: true
+      });
+      const saved = packages.get('alice/cross_provider_game');
+      expect(saved).toBeDefined();
+      expect(saved.author_id).toBeNull();
+      expect(users.has('ext_jam2026_alice')).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+    }
+  });
 });

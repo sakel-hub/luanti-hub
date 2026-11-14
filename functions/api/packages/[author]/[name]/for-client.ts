@@ -8,9 +8,18 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   resolveLocalizedPackageText,
-  toLegacyLuantiClientThumbnailUrl
+  toLegacyLuantiClientThumbnailUrl,
+  computeLuantiClientReleaseId,
+  fetchGitSmartHttpRefs,
+  syncDebouncedGitVersionStamp,
+  invalidateEdgeCacheKeys,
+  buildPackageCacheInvalidationKeys,
+  FOR_CLIENT_CACHE_PREFIX
 } from '../../../lib/upstream';
-import { resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
+import {
+  resolveJam2026SyntheticD1Detail,
+  refreshJam2026D1PkgIfStale
+} from '../../../lib/jam-2026';
 
 interface Env {
   DB?: any;
@@ -125,7 +134,12 @@ function markdownToLuantiHypertext(md: string, linksMap: Record<string, string>,
   return out.join('\n') + '\n';
 }
 
-export async function onRequestGet(context: { request: Request; params: { author: string; name: string }; env: Env }) {
+export async function onRequestGet(context: {
+  request: Request;
+  params: { author: string; name: string };
+  env: Env;
+  waitUntil?: (promise: Promise<any>) => void;
+}) {
   const author = safeDecodeParam(context.params.author);
   const name = safeDecodeParam(context.params.name);
   const encAuthor = encodeURIComponent(author);
@@ -133,6 +147,10 @@ export async function onRequestGet(context: { request: Request; params: { author
   const pkgId = `${author}/${name}`;
 
   const reqUrl = context.request ? new URL(context.request.url) : new URL(`https://luantihub.org/api/packages/${encAuthor}/${encName}/for-client/`);
+  const noCache =
+    reqUrl.searchParams.get('nocache') === '1' ||
+    reqUrl.searchParams.get('nocache') === 'true' ||
+    (context.request?.headers?.get('Cache-Control') || '').toLowerCase().includes('no-cache');
   const rawLang =
     reqUrl.searchParams.get('lang') ||
     (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
@@ -149,8 +167,9 @@ export async function onRequestGet(context: { request: Request; params: { author
     forwardParams.set('formspec_version', '8');
   }
   const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
-  const edgeCacheKey = `https://cache.luantihub.internal/__for_client_v5/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${encodeURIComponent(querySuffix)}`;
-  const cachedClient = await readEdgeCacheJson<any>(edgeCacheKey);
+  const formspecVersion = forwardParams.get('formspec_version') || '8';
+  const edgeCacheKey = `https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/fsv=${encodeURIComponent(formspecVersion)}`;
+  const cachedClient = !noCache ? await readEdgeCacheJson<any>(edgeCacheKey) : null;
   if (cachedClient) {
     if (context.env.DB) {
       await recordLuantiClientView(context.env.DB, context.request, pkgId);
@@ -244,7 +263,7 @@ export async function onRequestGet(context: { request: Request; params: { author
       )
     : null;
 
-  if (data) {
+  if (data && !Array.isArray(data) && (data.name || data.title)) {
     const cdbDownloads = Math.max(
       Number(data.downloads) || 0,
       Number(d1Pkg?.contentdb_downloads) || 0
@@ -309,7 +328,9 @@ export async function onRequestGet(context: { request: Request; params: { author
   }
 
   if (!d1Pkg?.repo_url) {
-    ({ d1Pkg } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, []));
+    ({ d1Pkg } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, [], noCache));
+  } else {
+    d1Pkg = await refreshJam2026D1PkgIfStale(d1Pkg, context.env.DB, noCache);
   }
 
   if (d1Pkg) {
@@ -342,10 +363,7 @@ export async function onRequestGet(context: { request: Request; params: { author
     }
 
     const totalDl = Math.max(Number(d1Pkg.downloads_count) || 0, lhDownloads);
-    const releaseId = Math.max(
-      1,
-      Math.floor(new Date(d1Pkg.updated_at || d1Pkg.created_at || '2026-01-01T00:00:00Z').getTime() / 1000) || 1
-    );
+    const releaseId = computeLuantiClientReleaseId(d1Pkg);
     const tags = parseJsonArray(d1Pkg.tags);
     const provides = parseJsonArray(d1Pkg.provides);
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
@@ -438,14 +456,65 @@ export async function onRequestGet(context: { request: Request; params: { author
       created_at: d1Pkg.created_at || new Date().toISOString()
     };
 
-    await writeEdgeCacheJson(edgeCacheKey, clientPayload, 300);
+    if (!noCache) {
+      await writeEdgeCacheJson(edgeCacheKey, clientPayload, 300);
+    }
+
+    if (
+      typeof context.waitUntil === 'function' &&
+      context.env?.DB &&
+      d1Pkg?.id &&
+      d1Pkg?.repo_url &&
+      d1Pkg?.provider &&
+      d1Pkg.provider !== 'contentdb' &&
+      !String(d1Pkg.tags || '').toLowerCase().includes('jam_game_2026')
+    ) {
+      const debounceKey = `https://cache.luantihub.internal/__for_client_git_check_v1/${encodeURIComponent(String(d1Pkg.id).toLowerCase())}`;
+      context.waitUntil(
+        (async () => {
+          try {
+            const recentlyChecked = await readEdgeCacheJson<number>(debounceKey).catch(() => null);
+            if (recentlyChecked) return;
+            await writeEdgeCacheJson(debounceKey, Date.now(), 900).catch(() => {});
+            const gitRefs = await fetchGitSmartHttpRefs(
+              d1Pkg.repo_url,
+              d1Pkg.author_name || author,
+              d1Pkg.name || name
+            ).catch(() => null);
+            const liveHeadSha = gitRefs?.headSha;
+            if (liveHeadSha && liveHeadSha !== d1Pkg.latest_commit_sha) {
+              const bumped = await syncDebouncedGitVersionStamp(
+                context.env.DB,
+                d1Pkg,
+                liveHeadSha,
+                false,
+                new Date().toISOString()
+              ).catch(() => false);
+              if (bumped) {
+                await invalidateEdgeCacheKeys(
+                  buildPackageCacheInvalidationKeys(
+                    d1Pkg.author_name || author,
+                    d1Pkg.name || name,
+                    { includeBootCatalog: true }
+                  )
+                ).catch(() => {});
+              }
+            }
+          } catch {
+            // Best-effort background refresh
+          }
+        })()
+      );
+    }
 
     return new Response(JSON.stringify(clientPayload), {
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-        'X-LuantiHub-Cache': 'MISS-EDGE'
+        'Cache-Control': !noCache
+          ? 'public, max-age=120, s-maxage=300, stale-while-revalidate=600'
+          : 'no-cache, no-store, must-revalidate',
+        'X-LuantiHub-Cache': !noCache ? 'MISS-EDGE' : 'BYPASS'
       }
     });
   }

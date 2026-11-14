@@ -5,6 +5,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson
 } from '../../../lib/upstream';
+import { resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
 
 interface Env {
   DB?: any;
@@ -85,6 +86,10 @@ export async function onRequestGet(context: {
     }
   }
 
+  if (!d1Pkg?.repo_url) {
+    ({ d1Pkg } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, []));
+  }
+
   const isPureGitPkg = Boolean(
     d1Pkg &&
     d1Pkg.provider &&
@@ -110,8 +115,8 @@ export async function onRequestGet(context: {
     });
   }
 
-  // Resolve dependencies for decentralized D1 Git packages (e.g. sakel-hub/pixie, sakel-hub/x_mobs)
-  if (d1Pkg && context.env?.DB) {
+  // Resolve dependencies for decentralized D1 Git packages (e.g. sakel-hub/pixie, sakel-hub/x_mobs, Game Jam 2026 entries)
+  if (d1Pkg) {
     try {
       const canonicalId = `${d1Pkg.author_name || author}/${d1Pkg.name || name}`;
       const hardDeps = parseJsonArray(d1Pkg.dependencies);
@@ -124,7 +129,8 @@ export async function onRequestGet(context: {
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=300, s-maxage=600'
+            'Cache-Control': 'public, max-age=300, s-maxage=600',
+            'X-LuantiHub-Source': 'd1-git'
           }
         });
       }
@@ -134,9 +140,11 @@ export async function onRequestGet(context: {
 
       // Resolve matching package IDs (including provides) from D1 and shared cached upstream catalog
       const [d1Matches, upstreamCatalog] = await Promise.all([
-        context.env.DB.prepare(
-          `SELECT author_name, name, dependencies, optional_dependencies, provides FROM packages WHERE status = 'active'`
-        ).all().then((r: any) => r.results || []).catch(() => []),
+        context.env?.DB
+          ? context.env.DB.prepare(
+              `SELECT author_name, name, dependencies, optional_dependencies, provides FROM packages WHERE status = 'active'`
+            ).all().then((r: any) => r.results || []).catch(() => [])
+          : Promise.resolve([]),
         fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => [])
       ]);
 
@@ -217,7 +225,8 @@ export async function onRequestGet(context: {
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=300, s-maxage=600'
+            'Cache-Control': 'public, max-age=300, s-maxage=600',
+            'X-LuantiHub-Source': 'd1-git'
           }
         }
       );

@@ -419,11 +419,29 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v22',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v23',
     'https://cache.luantihub.internal/__api_boot_catalog_bundle_v24',
+    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v25',
+    'https://cache.luantihub.internal/__api_updates_v3',
+    UPDATES_EDGE_CACHE_KEY,
     'https://cache.luantihub.internal/__api_boot_recently_added_v1',
     'https://cache.luantihub.internal/__api_boot_recently_added_v2',
     'https://cache.luantihub.internal/__recent_reviews_v1',
-    'https://cache.luantihub.internal/__d1_recent_reviews_v1'
+    'https://cache.luantihub.internal/__d1_recent_reviews_v1',
+    'https://cache.luantihub.internal/__jam_2026_standalone_delta_v1',
+    'https://cache.luantihub.internal/__promo_row_sync_v5_tags%3Djam_game_2026%7Cauthors%3D',
+    'https://cache.luantihub.internal/__promo_row_sync_v5_tags%3Dgamejam%2Cjam_game_2026%7Cauthors%3D'
   ]);
+  for (const tSig of ['all', 'game', 'mod', 'txp']) {
+    for (const fmtSig of ['', 'json', 'keys']) {
+      expandedUrls.add(
+        `https://cache.luantihub.internal${IN_GAME_CATALOG_CACHE_PREFIX}${encodeURIComponent(`q=&a=&t=${tSig}&p=&fmt=${fmtSig}&cw=0`)}`
+      );
+      for (const hSig of ['deprecated', '*,deprecated']) {
+        expandedUrls.add(
+          `https://cache.luantihub.internal${IN_GAME_CATALOG_CACHE_PREFIX}${encodeURIComponent(`q=&a=&t=${tSig}&p=&fmt=${fmtSig}&cw=0&h=${hSig}&tg=&gm=&ev=&s=&o=&lm=&lc=`)}`
+        );
+      }
+    }
+  }
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
@@ -481,6 +499,11 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/${loc}/${a}/${n}`);
         expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/%3Fformspec_version%3D8`);
         expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/`);
+        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${loc}/${a}/${n}/%3Fformspec_version%3D8`);
+        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${loc}/${a}/${n}/`);
+        for (const fsv of ['8', '7', '6', '4']) {
+          expandedUrls.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${loc}/${a}/${n}/fsv=${fsv}`);
+        }
       }
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/latest`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/latest`);
@@ -507,6 +530,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
         k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
         k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v') ||
+        k.startsWith('https://cache.luantihub.internal/__jam_2026_standalone_delta_v') ||
         k.startsWith('https://cache.luantihub.internal/__unified_tags_v')
       ) {
         isolateJsonCache.delete(k);
@@ -5655,10 +5679,50 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v24';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v25';
+export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v14_';
+export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v6';
+export const UPDATES_EDGE_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v4';
 export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v23';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
+
+export function clearIsolateCachesForTests(): void {
+  isolateJsonCache.clear();
+  sharedIsolateZipCache.clear();
+}
+
+/**
+ * Computes the deterministic integer `release` identifier exposed to Luanti in-game clients across
+ * `/api/packages/`, `/api/packages/:author/:name/for-client/`, and `/api/updates/`.
+ * Always preserves ContentDB's integer `release` ID when a ContentDB mirror release is matched.
+ */
+export function computeLuantiClientReleaseId(
+  pkg?: {
+    updated_at?: string | null;
+    created_at?: string | null;
+    release?: number | string | null;
+  } | null,
+  matchedUpstreamRelease?: number | null
+): number {
+  if (
+    typeof matchedUpstreamRelease === 'number' &&
+    Number.isFinite(matchedUpstreamRelease) &&
+    matchedUpstreamRelease > 0
+  ) {
+    return Math.floor(matchedUpstreamRelease);
+  }
+  const rawTs = pkg?.updated_at || pkg?.created_at || '';
+  const normalizedIso = rawTs ? normalizeUtcIsoTimestamp(String(rawTs)) : '';
+  const parsedMs = normalizedIso ? Date.parse(normalizedIso) : 0;
+  const epochSec = Number.isFinite(parsedMs) && parsedMs > 0 ? Math.floor(parsedMs / 1000) : 0;
+  const explicitRel = Number(pkg?.release) || 0;
+  return Math.max(
+    1,
+    Number.isFinite(explicitRel) ? Math.floor(explicitRel) : 0,
+    epochSec
+  );
+}
 
 export function isCreatedIn2026OrUnknown(createdAt: unknown): boolean {
   if (createdAt === null || createdAt === undefined || createdAt === '') return true;
@@ -5744,6 +5808,9 @@ export function buildPackageCacheInvalidationKeys(
 
   for (const lang of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
     keys.add(`https://cache.luantihub.internal/__for_client_v5/${lang}/${encA}/${encN}/%3Fformspec_version%3D8`);
+    for (const fsv of ['8', '7', '6', '4']) {
+      keys.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${lang}/${encA}/${encN}/fsv=${fsv}`);
+    }
   }
 
   for (const d of [7, 30, 90, 365]) {
@@ -5753,6 +5820,7 @@ export function buildPackageCacheInvalidationKeys(
   if (options?.includeBootCatalog !== false) {
     keys.add(BOOT_CATALOG_EDGE_CACHE_KEY);
     keys.add(`https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`);
+    keys.add(UPDATES_EDGE_CACHE_KEY);
     keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/today');
     keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/week');
   }
