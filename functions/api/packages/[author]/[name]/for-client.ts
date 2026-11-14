@@ -10,6 +10,7 @@ import {
   resolveLocalizedPackageText,
   toLegacyLuantiClientThumbnailUrl
 } from '../../../lib/upstream';
+import { resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
 
 interface Env {
   DB?: any;
@@ -305,6 +306,10 @@ export async function onRequestGet(context: { request: Request; params: { author
         'X-LuantiHub-Cache': 'MISS-EDGE'
       }
     });
+  }
+
+  if (!d1Pkg?.repo_url) {
+    ({ d1Pkg } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, []));
   }
 
   if (d1Pkg) {

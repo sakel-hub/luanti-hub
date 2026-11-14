@@ -114,7 +114,7 @@ export async function syncActivePromotionRowPackages(
   if (uniqueTags.length === 0 && uniqueAuthors.length === 0) return null;
 
   const cacheSignature = `tags=${uniqueTags.map((t) => t.toLowerCase()).sort().join(',')}|authors=${uniqueAuthors.map((a) => a.toLowerCase()).sort().join(',')}`;
-  const syncCacheKey = `/__promo_row_sync_v3_${encodeURIComponent(cacheSignature)}`;
+  const syncCacheKey = `/__promo_row_sync_v4_${encodeURIComponent(cacheSignature)}`;
 
   if (!noCache) {
     const cachedDelta = await readEdgeCacheJson<PromoRowDelta>(syncCacheKey);

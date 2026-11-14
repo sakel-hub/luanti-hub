@@ -39,7 +39,7 @@ import { TranslationService } from '../i18n/translation.service';
 import {
   isJam2026PromoTag,
   syncJam2026ClientRowTagIfNeeded,
-  getJam2026TagsForRepoUrl
+  resolveJam2026OverlayForHydratedRepo
 } from './jam-2026-sync.helper';
 import {
   isGitProviderId,
@@ -1101,50 +1101,6 @@ export class PackageService {
   private readonly lastPromoTagSyncAt = new Map<string, number>();
   private readonly lastPromoTagSyncGen = new Map<string, number>();
   private readonly hasCatalogPackages = computed(() => this._packages().length > 0);
-
-  private resolveJam2026OverlayForHydratedRepo(
-    repoUrl?: string,
-    existingTags?: string[],
-    existingBadgeTags?: string[],
-    existingSources?: PackageSource[]
-  ): {
-    tags: string[];
-    badgeTags?: string[];
-    sources?: PackageSource[];
-    matchedJam: boolean;
-  } {
-    const jamTagsFromRepo = getJam2026TagsForRepoUrl(repoUrl);
-    const hasJamTagAlready = Boolean(
-      (existingTags || []).some(t => isJam2026PromoTag(t)) ||
-        (existingBadgeTags || []).some(bt => bt.toLowerCase() === 'jam_game_2026')
-    );
-    if (jamTagsFromRepo.length === 0 && !hasJamTagAlready) {
-      return {
-        tags: existingTags || [],
-        badgeTags: existingBadgeTags && existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
-        sources: existingSources,
-        matchedJam: false
-      };
-    }
-    const mergedTags = this.mergePackageTagsPreservingExisting(
-      existingTags,
-      jamTagsFromRepo.length > 0 ? jamTagsFromRepo : ['jam_game_2026', 'gamejam']
-    );
-    const mergedBadges = parseBadgeTagsArray([
-      ...(existingBadgeTags || []),
-      'jam_game_2026'
-    ]);
-    const baseSources = existingSources && existingSources.length > 0 ? existingSources : (['official'] as PackageSource[]);
-    const mergedSources: PackageSource[] = repoUrl
-      ? Array.from(new Set<PackageSource>([...baseSources, 'git']))
-      : baseSources;
-    return {
-      tags: mergedTags,
-      badgeTags: mergedBadges.length > 0 ? mergedBadges : undefined,
-      sources: mergedSources,
-      matchedJam: true
-    };
-  }
 
   private persistPromotionalTagsForPackage(
     lowerId: string,
@@ -6310,11 +6266,12 @@ export class PackageService {
             pkg.readme
           );
           const repoUrl = this.normalizeGitRepoUrl(h.repo_url || pkg.repo_url);
-          const jamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+          const jamOverlay = resolveJam2026OverlayForHydratedRepo(
             repoUrl,
             baseTags,
             mergedBadgeTags,
-            pkg.sources || [pkg.source]
+            pkg.sources || [pkg.source],
+            (a, b) => this.mergePackageTagsPreservingExisting(a, b)
           );
           const tags = jamOverlay.tags;
           const badgeTags = jamOverlay.badgeTags;
@@ -9063,11 +9020,12 @@ export class PackageService {
                 liveCatalogPkg?.tags,
                 cachedMetaEntry?.tags
               );
-        const detailJamOverlay = this.resolveJam2026OverlayForHydratedRepo(
+        const detailJamOverlay = resolveJam2026OverlayForHydratedRepo(
           repoUrl,
           baseDetailTags,
           baseDetailBadgeTags,
-          mergedSources
+          mergedSources,
+          (a, b) => this.mergePackageTagsPreservingExisting(a, b)
         );
         const mergedDetailTags = detailJamOverlay.tags;
         const badgeTags = detailJamOverlay.badgeTags || [];

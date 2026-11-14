@@ -29,7 +29,7 @@ export async function onRequestGet(context: { request?: Request; env?: Env }): P
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'public, max-age=300, s-maxage=600, stale-while-revalidate=1800'
+      'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=300'
     }
   });
 }

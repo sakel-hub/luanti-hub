@@ -10,11 +10,16 @@
  */
 
 import { WritableSignal } from '@angular/core';
-import { LuantiPackage } from '../models/package.model';
-import { detectGitProviderFromUrl, normalizeRepoComparisonKey } from '../config/git-providers.config';
+import { LuantiPackage, PackageSource } from '../models/package.model';
+import {
+  detectGitProviderFromUrl,
+  normalizeRepoComparisonKey,
+  toProxiedGitImageIfNeeded
+} from '../config/git-providers.config';
+import { parseBadgeTagsArray } from '../config/package-utils.config';
 
 export interface Jam2026ClientBrewEntry {
-  id: string;
+  id?: string;
   repository: string;
   commit: string;
   title: string;
@@ -28,6 +33,13 @@ const JAM_2026_ROW_TAGS = new Set(['jam_game_2026', 'gamejam']);
 
 export function isJam2026PromoTag(tag: string | undefined | null): boolean {
   return JAM_2026_ROW_TAGS.has(String(tag || '').trim().toLowerCase());
+}
+
+export function buildJam2026ClientImageUrl(repository: string, commit: string): string {
+  return `https://jam.greenxenith.com/api/brews/image?${new URLSearchParams({
+    repository: repository.trim(),
+    commit: commit.trim().toLowerCase()
+  }).toString()}`;
 }
 
 /**
@@ -85,7 +97,7 @@ export function convertJam2026BrewToRawPackage(
   }
 
   const rawScreenshotUrl = entry.hasScreenshot
-    ? `https://jam.greenxenith.com/api/brews/${encodeURIComponent(entry.id)}/images/${encodeURIComponent(commit)}`
+    ? buildJam2026ClientImageUrl(entry.repository, commit)
     : null;
   const proxiedScreenshot = rawScreenshotUrl
     ? `/api/packages?proxy_image=${encodeURIComponent(rawScreenshotUrl)}`
@@ -136,6 +148,49 @@ export function getJam2026TagsForRepoUrl(repoUrl?: string | null): string[] {
   const rk = normalizeRepoComparisonKey(repoUrl || undefined);
   if (!rk || !cachedJam2026RepoKeys.has(rk)) return [];
   return ['jam_game_2026', 'gamejam'];
+}
+
+export function resolveJam2026OverlayForHydratedRepo(
+  repoUrl?: string,
+  existingTags?: string[],
+  existingBadgeTags?: string[],
+  existingSources?: PackageSource[],
+  mergeTags?: (primary?: string[] | null, ...fallbacks: Array<string[] | undefined | null>) => string[]
+): {
+  tags: string[];
+  badgeTags?: string[];
+  sources?: PackageSource[];
+  matchedJam: boolean;
+} {
+  const jamTagsFromRepo = getJam2026TagsForRepoUrl(repoUrl);
+  const hasJamTagAlready = Boolean(
+    (existingTags || []).some((t) => isJam2026PromoTag(t)) ||
+      (existingBadgeTags || []).some((bt) => bt.toLowerCase() === 'jam_game_2026')
+  );
+  if (jamTagsFromRepo.length === 0 && !hasJamTagAlready) {
+    return {
+      tags: existingTags || [],
+      badgeTags: existingBadgeTags && existingBadgeTags.length > 0 ? existingBadgeTags : undefined,
+      sources: existingSources,
+      matchedJam: false
+    };
+  }
+  const extraJamTags = jamTagsFromRepo.length > 0 ? jamTagsFromRepo : ['jam_game_2026', 'gamejam'];
+  const mergedTags = mergeTags
+    ? mergeTags(existingTags, extraJamTags)
+    : Array.from(new Set([...(existingTags || []), ...extraJamTags]));
+  const mergedBadges = parseBadgeTagsArray([...(existingBadgeTags || []), 'jam_game_2026']);
+  const baseSources =
+    existingSources && existingSources.length > 0 ? existingSources : (['official'] as PackageSource[]);
+  const mergedSources: PackageSource[] = repoUrl
+    ? Array.from(new Set<PackageSource>([...baseSources, 'git']))
+    : baseSources;
+  return {
+    tags: mergedTags,
+    badgeTags: mergedBadges.length > 0 ? mergedBadges : undefined,
+    sources: mergedSources,
+    matchedJam: true
+  };
 }
 
 function normalizeComparableGameText(val: unknown): string {
@@ -190,7 +245,9 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
       const fetcher =
         fetchJson ||
         (async (url: string) => {
-          const bypassUrl = url.includes('?') ? `${url}&ngsw-bypass=true` : `${url}?ngsw-bypass=true`;
+          const bypassUrl = url.includes('?')
+            ? `${url}&v=2&ngsw-bypass=true`
+            : `${url}?v=2&ngsw-bypass=true`;
           const res = await fetch(bypassUrl, {
             cache: 'no-cache',
             headers: {
@@ -328,6 +385,22 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
         if (nextSources.length !== existingSources.length) {
           changed = true;
         }
+        const rawBrewThumb =
+          typeof matchedRaw?.['thumbnail'] === 'string' && matchedRaw['thumbnail'].trim()
+            ? toProxiedGitImageIfNeeded(matchedRaw['thumbnail'].trim())
+            : '';
+        const currentThumb = String(pkg.thumbnail || '');
+        const hasJamHostedImage =
+          currentThumb.includes('jam.greenxenith.com') || String(pkg.banner || '').includes('jam.greenxenith.com');
+        const stripBypass = (u: string) => u.replace(/&ngsw-bypass=true\b/g, '');
+        const needsJamShotUpdate = Boolean(
+          matchedRaw &&
+            ((hasJamHostedImage && stripBypass(currentThumb) !== stripBypass(rawBrewThumb)) ||
+              ((!currentThumb || currentThumb === 'logo.svg') && rawBrewThumb))
+        );
+        if (needsJamShotUpdate) {
+          changed = true;
+        }
         if (!changed) return pkg;
 
         anyMutated = true;
@@ -341,6 +414,13 @@ export async function syncJam2026ClientRowTagIfNeeded(options: {
         const nextPkg: LuantiPackage = {
           ...pkg,
           ...(nextRepoUrl ? { repo_url: nextRepoUrl } : {}),
+          ...(needsJamShotUpdate
+            ? {
+                thumbnail: rawBrewThumb || 'logo.svg',
+                banner: rawBrewThumb || undefined,
+                screenshots: rawBrewThumb ? [rawBrewThumb] : []
+              }
+            : {}),
           tags: nextTags,
           badge_tags: nextBadgeTags,
           sources: nextSources,

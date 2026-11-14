@@ -6,11 +6,14 @@ import { provideHttpClientTesting } from '@angular/common/http/testing';
 import {
   fetchJam2026BrewsCached,
   parseJam2026RepositoryUrl,
+  buildJam2026BrewImageUrl,
   normalizeJam2026BrewEntry,
   syncJam2026IntoPromoRowDelta,
   applyJam2026RepoOverlayOnCatalog,
   detectJam2026RootParticipationTags,
   fetchJam2026FallbackReadme,
+  findJam2026BrewBySlug,
+  resolveJam2026SyntheticD1Detail,
   isJam2026AllowedImageHost,
   resetJam2026IsolateCacheForTests,
   Jam2026BrewEntry
@@ -22,9 +25,13 @@ import {
   onRequestGet as getPackagesCatalog
 } from '../../functions/api/packages/index';
 import { onRequestPost as postPackagesHydrate } from '../../functions/api/packages/hydrate';
+import { onRequestGet as getPackageDetail } from '../../functions/api/packages/[author]/[name]/index';
+import { onRequestGet as getPackageForClient } from '../../functions/api/packages/[author]/[name]/for-client';
 import { onRequest as handlePackageDownload } from '../../functions/api/packages/[author]/[name]/download';
+import { toLegacyLuantiClientThumbnailUrl } from './core/config/git-providers.config';
 import {
   isJam2026PromoTag,
+  buildJam2026ClientImageUrl,
   convertJam2026BrewToRawPackage,
   syncJam2026ClientRowTagIfNeeded,
   resetJam2026ClientCacheForTests
@@ -115,7 +122,7 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
       expect(normalized?.tags).toContain('gamejam');
       expect(normalized?.thumbnail).toBe(
         `/api/packages?proxy_image=${encodeURIComponent(
-          'https://jam.greenxenith.com/api/brews/brew-uuid-1/images/abc1234'
+          buildJam2026BrewImageUrl(item.url, 'abc1234')
         )}`
       );
     }
@@ -326,7 +333,10 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
       });
     }) as any;
 
-    const targetImg = 'https://jam.greenxenith.com/api/brews/pure-git-1/images/1111aaaa2222bbbb';
+    const targetImg = buildJam2026BrewImageUrl(
+      'https://github.com/zenonseth/strata',
+      'fddfc86228fdcc6b6fc0a5010d35c5001ea1d028'
+    );
     const res = await getPackagesCatalog({
       request: new Request(
         `https://luantihub.org/api/packages?proxy_image=${encodeURIComponent(targetImg)}`
@@ -1769,5 +1779,271 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(jamZipEntries).toContain('confspace/game.conf');
     expect(jamZipEntries).toContain('confspace/mods/confspace_core/init.lua');
     expect(jamZipEntries).not.toContain('confspace/modpack.conf');
+  });
+
+  it('normalizes the v2 luanti-org/jam.luanti.org composite (repository, commit) payload without id (including zenonseth/strata)', async () => {
+    const liveV2Brews = [
+      {
+        repository: 'https://github.com/zenonseth/strata',
+        commit: 'fddfc86228fdcc6b6fc0a5010d35c5001ea1d028',
+        title: 'Strata',
+        description:
+          'You signed a contract to get rich and skipped the fine print. Dig down through Strata, pay off your debt, and see what else is down there.',
+        commitUrl: 'https://github.com/zenonseth/strata/tree/fddfc86228fdcc6b6fc0a5010d35c5001ea1d028',
+        hasScreenshot: true,
+        publishedAt: '2026-11-13T22:24:52.623Z'
+      },
+      {
+        repository: 'https://github.com/sakel-hub/terrarium_crucible',
+        commit: '4ab642dc8a316db04d9be65872094be69a304d81',
+        title: 'Terrarium Crucible',
+        description:
+          "Shrink down inside a wizard's glass terrarium and care for magical glowing plants!",
+        commitUrl: 'https://github.com/sakel-hub/terrarium_crucible/tree/4ab642dc8a316db04d9be65872094be69a304d81',
+        hasScreenshot: true,
+        publishedAt: '2026-11-08T18:10:00.000Z'
+      },
+      {
+        repository: 'https://gitlab.com/sztest/confspace',
+        commit: 'e48305a0c4e187dc75011a932df084d7ec02bc11',
+        title: 'Configuration Space',
+        description:
+          'Work in Progress. One tiny room could have billions of possible states. Surely, they would all fit inside.',
+        commitUrl: 'https://gitlab.com/sztest/confspace/-/tree/e48305a0c4e187dc75011a932df084d7ec02bc11',
+        hasScreenshot: true,
+        publishedAt: '2026-11-06T12:00:00.000Z'
+      }
+    ];
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(JSON.stringify(liveV2Brews), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as any;
+
+    const jamEndpointRes = await getJam2026Endpoint({
+      request: new Request('https://luantihub.org/api/jam-2026')
+    });
+    expect(jamEndpointRes.status).toBe(200);
+    expect(jamEndpointRes.headers.get('Cache-Control')).toBe(
+      'public, max-age=120, s-maxage=300, stale-while-revalidate=300'
+    );
+    const jamBody = await jamEndpointRes.json();
+    expect(jamBody.brews).toHaveLength(3);
+
+    const strata = jamBody.brews.find((b: any) => b.id === 'zenonseth/strata');
+    expect(strata).toBeDefined();
+    expect(strata.jam_entry_id).toBe('https://github.com/zenonseth/strata');
+    const expectedStrataImg = `/api/packages?proxy_image=${encodeURIComponent(
+      'https://jam.greenxenith.com/api/brews/image?repository=https%3A%2F%2Fgithub.com%2Fzenonseth%2Fstrata&commit=fddfc86228fdcc6b6fc0a5010d35c5001ea1d028'
+    )}`;
+    expect(strata.thumbnail).toBe(expectedStrataImg);
+    expect(strata.banner).toBe(expectedStrataImg);
+    expect(strata.screenshots).toEqual([expectedStrataImg]);
+
+    // Client fallback helper also converts raw v2 entries without `id` identically
+    const clientConverted = convertJam2026BrewToRawPackage(liveV2Brews[0] as any);
+    expect(clientConverted).not.toBeNull();
+    expect(clientConverted?.['id']).toBe('zenonseth/strata');
+    expect(clientConverted?.['thumbnail']).toBe(
+      `/api/packages?proxy_image=${encodeURIComponent(
+        buildJam2026ClientImageUrl(
+          liveV2Brews[0].repository,
+          liveV2Brews[0].commit
+        )
+      )}`
+    );
+  });
+
+  it('refreshes ext_jam2026_ D1 screenshot URLs when a newer commit supersedes a purged screenshot in jam.luanti.org', async () => {
+    const commit1 = '1111111111111111111111111111111111111111';
+    const commit2 = '2222222222222222222222222222222222222222';
+    let currentCommit = commit1;
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://github.com/zenonseth/strata',
+              commit: currentCommit,
+              title: 'Strata',
+              description: 'Dig down through Strata.',
+              commitUrl: `https://github.com/zenonseth/strata/tree/${currentCommit}`,
+              hasScreenshot: true,
+              publishedAt: '2026-11-13T22:24:52.623Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as any;
+
+    const capturedSqls: string[] = [];
+    const capturedBinds: any[][] = [];
+    const mockDb = {
+      prepare: vi.fn((sql: string) => {
+        capturedSqls.push(sql);
+        return {
+          bind: vi.fn((...args: any[]) => {
+            capturedBinds.push(args);
+            return {
+              all: vi.fn(async () => ({ results: [] })),
+              run: vi.fn(async () => ({}))
+            };
+          })
+        };
+      }),
+      batch: vi.fn(async () => [])
+    };
+
+    await syncJam2026IntoPromoRowDelta({
+      uniqueTags: ['jam_game_2026'],
+      addTagStamp: () => {},
+      discoveredByKey: new Map(),
+      existingD1Pairs: new Set(),
+      queuedUpsertKeys: new Set(),
+      d1UpsertPairs: [],
+      db: mockDb,
+      noCache: true
+    });
+
+    const insertSql = capturedSqls.find((s) => s.includes('INSERT INTO packages'));
+    expect(insertSql).toBeDefined();
+    expect(insertSql).toContain("WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%'");
+    expect(insertSql).toContain("WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.thumbnail_url");
+    expect(insertSql).toContain('THEN excluded.thumbnail_url');
+    expect(insertSql).toContain('THEN excluded.banner_url');
+    expect(insertSql).toContain('THEN excluded.screenshots');
+
+    // Now simulate moderator approving a newer commit (superseding & purging commit1's screenshot in jam.luanti.org)
+    capturedBinds.length = 0;
+    currentCommit = commit2;
+    const discoveredCommit2Map = new Map<string, any>();
+    const repoTagMap2 = await syncJam2026IntoPromoRowDelta({
+      uniqueTags: ['jam_game_2026'],
+      addTagStamp: () => {},
+      discoveredByKey: discoveredCommit2Map,
+      existingD1Pairs: new Set(),
+      queuedUpsertKeys: new Set(),
+      d1UpsertPairs: [],
+      db: mockDb,
+      noCache: true
+    });
+
+    const expectedCommit1Thumb = `/api/packages?proxy_image=${encodeURIComponent(
+      buildJam2026BrewImageUrl('https://github.com/zenonseth/strata', commit1)
+    )}&ngsw-bypass=true`;
+    const expectedCommit2Thumb = `/api/packages?proxy_image=${encodeURIComponent(
+      buildJam2026BrewImageUrl('https://github.com/zenonseth/strata', commit2)
+    )}`;
+    const packageUpsertBind = capturedBinds.find((args) => args[0] === 'zenonseth/strata' && args.length >= 20);
+    expect(packageUpsertBind).toBeDefined();
+    expect(packageUpsertBind?.[9]).toBe(expectedCommit2Thumb);
+    expect(packageUpsertBind?.[10]).toBe(expectedCommit2Thumb);
+    expect(packageUpsertBind?.[16]).toBe(commit2);
+
+    // Warm Edge catalog overlay also refreshes superseded commit1 screenshot immediately
+    const warmCatalogOverlay = applyJam2026RepoOverlayOnCatalog(
+      [
+        {
+          id: 'zenonseth/strata',
+          author: 'zenonseth',
+          name: 'strata',
+          type: 'game',
+          repo_url: 'https://github.com/zenonseth/strata',
+          thumbnail: expectedCommit1Thumb,
+          banner: expectedCommit1Thumb,
+          latest_commit_sha: commit1,
+          tags: ['jam_game_2026', 'gamejam', 'game'],
+          badge_tags: ['jam_game_2026'],
+          source: 'git',
+          sources: ['git']
+        }
+      ],
+      repoTagMap2,
+      Array.from(discoveredCommit2Map.values())
+    );
+    expect(warmCatalogOverlay.packages[0].thumbnail).toBe(`${expectedCommit2Thumb}&ngsw-bypass=true`);
+    expect(warmCatalogOverlay.packages[0].latest_commit_sha).toBe(commit2);
+  });
+
+  it('resolves GET /api/packages/zenonseth/strata and /for-client via isolated resolveJam2026SyntheticD1Detail even before D1 persistence', async () => {
+    const strataCommit = 'fddfc86228fdcc6b6fc0a5010d35c5001ea1d028';
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://github.com/zenonseth/strata',
+              commit: strataCommit,
+              title: 'Strata',
+              description: 'You signed a contract to get rich and skipped the fine print.',
+              commitUrl: `https://github.com/zenonseth/strata/tree/${strataCommit}`,
+              hasScreenshot: true,
+              publishedAt: '2026-11-13T22:24:52.623Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('raw.githubusercontent.com/zenonseth/strata') && url.endsWith('/game.conf')) {
+        return new Response('name = Strata\ndescription = Dig down through Strata.\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      if (url.includes('raw.githubusercontent.com/zenonseth/strata') && url.endsWith('/JAM2026.md')) {
+        return new Response('# Strata (Game Jam 2026)\nDig deep and pay off your contract!', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    const matchedBrew = await findJam2026BrewBySlug('zenonseth', 'strata');
+    expect(matchedBrew?.repo_url).toBe('https://github.com/zenonseth/strata');
+    expect(toLegacyLuantiClientThumbnailUrl(matchedBrew?.thumbnail)).toBeUndefined();
+
+    const synth = await resolveJam2026SyntheticD1Detail('zenonseth', 'strata', null, []);
+    expect(synth.d1Pkg?.id).toBe('zenonseth/strata');
+    expect(synth.d1Pkg?.type).toBe('game');
+    expect(synth.bundledReleases).toHaveLength(1);
+    expect(synth.bundledReleases[0].commit_sha).toBe(strataCommit);
+
+    const detailRes = await getPackageDetail({
+      params: { author: 'zenonseth', name: 'strata' },
+      request: new Request('https://luantihub.org/api/packages/zenonseth/strata?readme=1'),
+      env: {}
+    } as any);
+    expect(detailRes.status).toBe(200);
+    const detailJson = await detailRes.json();
+    expect(detailJson.id).toBe('zenonseth/strata');
+    expect(detailJson.title).toBe('Strata');
+    expect(detailJson.type).toBe('game');
+    expect(detailJson.repo_url).toBe('https://github.com/zenonseth/strata');
+    expect(detailJson.tags).toContain('jam_game_2026');
+    expect(detailJson.badge_tags).toContain('jam_game_2026');
+    expect(detailJson.readme).toContain('# Strata (Game Jam 2026)');
+
+    const forClientRes = await getPackageForClient({
+      params: { author: 'zenonseth', name: 'strata' },
+      request: new Request('https://luantihub.org/api/packages/zenonseth/strata/for-client?formspec_version=8'),
+      env: {}
+    } as any);
+    expect(forClientRes.status).toBe(200);
+    const forClientJson = await forClientRes.json();
+    expect(forClientJson.name).toBe('strata');
+    expect(forClientJson.type).toBe('game');
+    expect(forClientJson.screenshots).toEqual([]);
   });
 });

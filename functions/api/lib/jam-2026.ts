@@ -28,10 +28,10 @@ export const JAM_2026_PRIMARY_TAG = 'jam_game_2026';
 export const JAM_2026_SECONDARY_TAG = 'gamejam';
 export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as const;
 
-const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v1';
-const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v1';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v2';
-const JAM_2026_BREWS_TTL_SECONDS = 600; // 10 minutes Edge + Isolate cache
+const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v2';
+const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v2';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v3';
+const JAM_2026_BREWS_TTL_SECONDS = 300; // 5 minutes Edge + Isolate cache (aligned with jam.luanti.org shelfRefreshMs)
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
   'jam.greenxenith.com',
@@ -40,7 +40,7 @@ const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
 ]);
 
 export interface Jam2026BrewEntry {
-  id: string;
+  id?: string;
   repository: string;
   commit: string;
   title: string;
@@ -183,19 +183,27 @@ export function parseJam2026RepositoryUrl(rawRepoUrl: string): {
   }
 }
 
+export function buildJam2026BrewImageUrl(repository: string, commit: string): string {
+  return `${JAM_2026_API_ORIGIN}/api/brews/image?${new URLSearchParams({
+    repository: repository.trim(),
+    commit: commit.trim().toLowerCase()
+  }).toString()}`;
+}
+
 export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | null {
   if (!raw || typeof raw !== 'object') return null;
-  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const legacyId = typeof raw.id === 'string' ? raw.id.trim() : '';
   const repository = typeof raw.repository === 'string' ? raw.repository.trim() : '';
   const commit = typeof raw.commit === 'string' ? raw.commit.trim().toLowerCase() : '';
   const title = typeof raw.title === 'string' ? raw.title.trim() : '';
   const description = typeof raw.description === 'string' ? raw.description.trim() : '';
-  if (!id || !repository || !/^[0-9a-f]{7,40}$/.test(commit) || !title) {
+  if (!repository || !/^[0-9a-f]{7,40}$/.test(commit) || !title) {
     return null;
   }
 
   const repoInfo = parseJam2026RepositoryUrl(repository);
   if (!repoInfo) return null;
+  const jamEntryId = legacyId || repoInfo.canonicalRepoUrl.toLowerCase();
 
   let downloadZipUrl = `${repoInfo.canonicalRepoUrl}/archive/${commit}.zip`;
   if (repoInfo.host === 'gitlab.com' || repoInfo.host === 'gitgud.io') {
@@ -211,7 +219,7 @@ export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | 
   const releaseEpochSec = Math.max(1, Math.floor(Date.parse(publishedIso) / 1000) || 1);
 
   const hasScreenshot = Boolean(raw.hasScreenshot);
-  const rawJamImageUrl = `${JAM_2026_API_ORIGIN}/api/brews/${encodeURIComponent(id)}/images/${commit}`;
+  const rawJamImageUrl = buildJam2026BrewImageUrl(repository, commit);
   const proxiedScreenshotUrl = hasScreenshot
     ? `/api/packages?proxy_image=${encodeURIComponent(rawJamImageUrl)}`
     : null;
@@ -230,7 +238,7 @@ export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | 
 
   return {
     id: `${repoInfo.author}/${repoInfo.safeName}`,
-    jam_entry_id: id,
+    jam_entry_id: jamEntryId,
     author: repoInfo.author,
     name: repoInfo.safeName,
     ...(aliases.length > 0 ? { aliases } : {}),
@@ -489,9 +497,21 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                   title = CASE WHEN packages.author_id LIKE 'ext_jam2026_%' THEN excluded.title ELSE packages.title END,
                   short_desc = CASE WHEN packages.author_id LIKE 'ext_jam2026_%' THEN excluded.short_desc ELSE COALESCE(packages.short_desc, excluded.short_desc) END,
                   repo_url = COALESCE(NULLIF(packages.repo_url, ''), excluded.repo_url),
-                  thumbnail_url = COALESCE(NULLIF(packages.thumbnail_url, ''), excluded.thumbnail_url),
-                  banner_url = COALESCE(NULLIF(packages.banner_url, ''), excluded.banner_url),
-                  screenshots = COALESCE(NULLIF(packages.screenshots, ''), excluded.screenshots),
+                  thumbnail_url = CASE
+                    WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%' OR packages.thumbnail_url LIKE '%/api/brews/%' THEN excluded.thumbnail_url
+                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.thumbnail_url, NULLIF(packages.thumbnail_url, ''))
+                    ELSE COALESCE(NULLIF(packages.thumbnail_url, ''), excluded.thumbnail_url)
+                  END,
+                  banner_url = CASE
+                    WHEN packages.banner_url LIKE '%jam.greenxenith.com%' OR packages.banner_url LIKE '%/api/brews/%' THEN excluded.banner_url
+                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.banner_url, NULLIF(packages.banner_url, ''))
+                    ELSE COALESCE(NULLIF(packages.banner_url, ''), excluded.banner_url)
+                  END,
+                  screenshots = CASE
+                    WHEN packages.screenshots LIKE '%jam.greenxenith.com%' OR packages.screenshots LIKE '%/api/brews/%' THEN excluded.screenshots
+                    WHEN packages.author_id LIKE 'ext_jam2026_%' THEN COALESCE(excluded.screenshots, NULLIF(packages.screenshots, ''))
+                    ELSE COALESCE(NULLIF(packages.screenshots, ''), excluded.screenshots)
+                  END,
                   latest_commit_sha = excluded.latest_commit_sha,
                   tags = CASE
                     WHEN packages.tags IS NULL OR packages.tags = '' OR packages.tags = '[]' THEN excluded.tags
@@ -641,11 +661,15 @@ export function applyJam2026RepoOverlayOnCatalog(
     typeof val === 'string' ? val.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 
   const discoveredJamByLowerName = new Map<string, any[]>();
+  const discoveredJamByRepoKey = new Map<string, any>();
   if (Array.isArray(discoveredItems)) {
     for (const d of discoveredItems) {
       if (!d || String(d.type || '').toLowerCase() !== 'game') continue;
       const dRepoKey = normalizeRepoKey(d.repo_url || d.repo);
       if (!dRepoKey || !repoTagMap[dRepoKey]) continue;
+      if (!discoveredJamByRepoKey.has(dRepoKey)) {
+        discoveredJamByRepoKey.set(dRepoKey, d);
+      }
       const dName = normalizeText(d.name);
       if (!dName) continue;
       const bucket = discoveredJamByLowerName.get(dName);
@@ -720,14 +744,54 @@ export function applyJam2026RepoOverlayOnCatalog(
 
     const needsRepoBackfill = Boolean(!pkg.repo_url && matchedDiscoveredRepoUrl);
 
-    if (nextTags || needsJamBadge || needsGitSource || needsRepoBackfill) {
+    const matchedJamBrew = discoveredJamByRepoKey.get(rKey);
+    const currentThumbStr = String(pkg.thumbnail || '');
+    const currentBannerStr = String(pkg.banner || '');
+    const stripBypass = (u: string) => u.replace(/&ngsw-bypass=true\b/g, '');
+    const hasJamHostedImage =
+      currentThumbStr.includes('jam.greenxenith.com') || currentBannerStr.includes('jam.greenxenith.com');
+    const rawNextJamShot =
+      matchedJamBrew && typeof matchedJamBrew.thumbnail === 'string' && matchedJamBrew.thumbnail
+        ? matchedJamBrew.thumbnail
+        : null;
+    const nextJamShot =
+      rawNextJamShot && rawNextJamShot.startsWith('/api/packages?proxy_image=') && !rawNextJamShot.includes('ngsw-bypass=true')
+        ? `${rawNextJamShot}&ngsw-bypass=true`
+        : rawNextJamShot;
+    const needsJamScreenshotRefresh = Boolean(
+      matchedJamBrew &&
+        ((hasJamHostedImage && stripBypass(currentThumbStr) !== stripBypass(nextJamShot || '')) ||
+          ((!currentThumbStr || currentThumbStr === 'logo.svg') && nextJamShot))
+    );
+    const needsJamCommitRefresh = Boolean(
+      matchedJamBrew?.latest_commit_sha &&
+        pkg.latest_commit_sha &&
+        pkg.latest_commit_sha !== matchedJamBrew.latest_commit_sha
+    );
+
+    if (
+      nextTags ||
+      needsJamBadge ||
+      needsGitSource ||
+      needsRepoBackfill ||
+      needsJamScreenshotRefresh ||
+      needsJamCommitRefresh
+    ) {
       if (!clonedList) clonedList = [...packagesList];
       clonedList[i] = {
         ...pkg,
         ...(nextTags ? { tags: nextTags } : {}),
         ...(needsJamBadge ? { badge_tags: nextBadgeTags } : {}),
         ...(needsGitSource ? { sources: nextSources } : {}),
-        ...(needsRepoBackfill ? { repo_url: matchedDiscoveredRepoUrl } : {})
+        ...(needsRepoBackfill ? { repo_url: matchedDiscoveredRepoUrl } : {}),
+        ...(needsJamScreenshotRefresh
+          ? {
+              thumbnail: nextJamShot,
+              banner: nextJamShot,
+              screenshots: nextJamShot ? [nextJamShot] : undefined
+            }
+          : {}),
+        ...(needsJamCommitRefresh ? { latest_commit_sha: matchedJamBrew.latest_commit_sha } : {})
       };
     }
   }
@@ -754,13 +818,13 @@ export function detectJam2026RootParticipationTags(
 }
 
 /**
- * Resolves a verified Game Jam 2026 repository URL for `author/name` (or normalized underscore/hyphen alias)
+ * Resolves a verified Game Jam 2026 package entry for `author/name` (or normalized underscore/hyphen alias)
  * from the cached `jam.greenxenith.com` brew list.
  */
-export async function findJam2026BrewRepoBySlug(
+export async function findJam2026BrewBySlug(
   author: string,
   name: string
-): Promise<string | undefined> {
+): Promise<Jam2026NormalizedPackage | undefined> {
   if (!author || !name) return undefined;
   const targetSlug = `${author}/${name}`.toLowerCase();
   const targetAuthorLower = author.toLowerCase();
@@ -768,19 +832,101 @@ export async function findJam2026BrewRepoBySlug(
   const brews = await fetchJam2026BrewsCached(false);
   for (const brew of brews) {
     if (brew.id.toLowerCase() === targetSlug) {
-      return brew.repo_url;
+      return brew;
     }
     if (brew.aliases?.some((alias) => alias.toLowerCase() === targetSlug)) {
-      return brew.repo_url;
+      return brew;
     }
     if (
       brew.author.toLowerCase() === targetAuthorLower &&
       brew.name.toLowerCase().replace(/-/g, '_') === targetNormName
     ) {
-      return brew.repo_url;
+      return brew;
     }
   }
   return undefined;
+}
+
+/**
+ * Resolves a verified Game Jam 2026 repository URL for `author/name` (or normalized underscore/hyphen alias)
+ * from the cached `jam.greenxenith.com` brew list.
+ */
+export async function findJam2026BrewRepoBySlug(
+  author: string,
+  name: string
+): Promise<string | undefined> {
+  const brew = await findJam2026BrewBySlug(author, name);
+  return brew?.repo_url;
+}
+
+/**
+ * Provides an isolated synthetic D1 package + pinned-commit release fallback for `GET /api/packages/[author]/[name]`
+ * when a Game Jam 2026 entry is opened before D1 persistence has run.
+ */
+export async function resolveJam2026SyntheticD1Detail(
+  author: string,
+  name: string,
+  d1Pkg: any,
+  bundledReleases: any[]
+): Promise<{ d1Pkg: any; bundledReleases: any[] }> {
+  if (d1Pkg?.repo_url) {
+    return { d1Pkg, bundledReleases };
+  }
+  const brew = await findJam2026BrewBySlug(author, name).catch(() => undefined);
+  if (!brew) {
+    return { d1Pkg, bundledReleases };
+  }
+
+  const syntheticPkg = {
+    id: brew.id,
+    author_id: `ext_jam2026_${brew.author.toLowerCase()}`,
+    author_name: brew.author,
+    name: brew.name,
+    title: brew.title,
+    type: 'game',
+    short_desc: brew.short_desc,
+    long_desc: brew.short_desc,
+    repo_url: brew.repo_url,
+    provider: brew.provider,
+    default_branch: 'main',
+    thumbnail_url: brew.thumbnail,
+    banner_url: brew.banner,
+    screenshots: brew.screenshots ? JSON.stringify(brew.screenshots) : null,
+    license: brew.license,
+    media_license: brew.media_license,
+    tags: JSON.stringify(brew.tags),
+    badge_tags: JSON.stringify([JAM_2026_PRIMARY_TAG]),
+    min_minetest_version: brew.min_minetest_version,
+    latest_commit_sha: brew.latest_commit_sha,
+    status: 'active',
+    created_at: brew.created_at,
+    updated_at: brew.updated_at,
+    ...(d1Pkg || {})
+  };
+
+  const shortSha = brew.latest_commit_sha.slice(0, 7);
+  const nextReleases =
+    Array.isArray(bundledReleases) && bundledReleases.length > 0
+      ? bundledReleases
+      : [
+          {
+            id: `jam2026-${shortSha}`,
+            version: shortSha,
+            title: `Jam Submission (${shortSha})`,
+            tag_name: shortSha,
+            commit_sha: brew.latest_commit_sha,
+            url: brew.download_zip_url,
+            download_url: brew.download_zip_url,
+            min_minetest_version: brew.min_minetest_version,
+            changelog: undefined,
+            released_at: brew.created_at
+          }
+        ];
+
+  return {
+    d1Pkg: syntheticPkg,
+    bundledReleases: nextReleases
+  };
 }
 
 /**

@@ -947,6 +947,12 @@ export function toLegacyLuantiClientThumbnailUrl(rawUrl?: string | null): string
       return u.toString();
     }
 
+    // Reject query-string endpoints without a .png/.jpg/.jpeg extension (e.g. jam.greenxenith.com WebP query URLs)
+    // because Luanti's C++ `screenshots.lua` parses `.ext` from the raw URL without stripping `?query` and Irrlicht lacks WebP thumbnail support.
+    if (u.search) {
+      return undefined;
+    }
+
     return u.toString();
   } catch {
     return undefined;

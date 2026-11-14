@@ -66,7 +66,7 @@ import {
   BOOT_CATALOG_EDGE_CACHE_KEY,
   isCreatedIn2026OrUnknown
 } from '../../../lib/upstream';
-import { fetchJam2026FallbackReadme } from '../../../lib/jam-2026';
+import { fetchJam2026FallbackReadme, resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
 import {
   verifySessionToken,
   parseCookies,
@@ -1386,6 +1386,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   // 3. Agnostic Resolution (Pure Git package OR when both ContentDB & Mirror APIs are offline):
   // Resolve directly from D1 + Server-side Git Repository Scanner (.conf + .cdb.json + README + Git Releases)
   if (!upstreamData) {
+    if (!d1Pkg?.repo_url) {
+      ({ d1Pkg, bundledReleases } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, bundledReleases));
+    }
     const d1Tags = Array.from(
       new Set([...(d1Pkg ? parseJsonArray(d1Pkg.tags) : []), ...d1PromoTags])
     ).filter(Boolean);
