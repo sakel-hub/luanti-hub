@@ -1,6 +1,7 @@
 import {
   fetchUpstreamJsonCached,
   safeDecodeParam,
+  parseJsonArray,
   ensureExtendedPackageColumns,
   sanitizePublicErrorMessage,
   readEdgeCacheJson,
@@ -63,14 +64,14 @@ export async function onRequestGet(context: {
     await ensureExtendedPackageColumns(env.DB);
     const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     let pkgRow = await env.DB.prepare(
-      `SELECT id, author_id, author_name, name, title, type, provider, repo_url, contentdb_downloads, luantihub_downloads, downloads_count
+      `SELECT id, author_id, author_name, name, title, type, provider, repo_url, tags, contentdb_downloads, luantihub_downloads, downloads_count
        FROM packages
        WHERE LOWER(id) = LOWER(?)
        LIMIT 1`
     ).bind(packageId).first().catch(() => null);
     if (!pkgRow) {
       pkgRow = await env.DB.prepare(
-        `SELECT id, author_id, author_name, name, title, type, provider, repo_url, contentdb_downloads, luantihub_downloads, downloads_count
+        `SELECT id, author_id, author_name, name, title, type, provider, repo_url, tags, contentdb_downloads, luantihub_downloads, downloads_count
          FROM packages
          WHERE LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
          LIMIT 1`
@@ -81,7 +82,14 @@ export async function onRequestGet(context: {
     const effectivePkgId = pkgRow?.id || packageId;
     const encAuthor = encodeURIComponent(pkgRow?.author_name || author);
     const encName = encodeURIComponent(pkgRow?.name || name);
-    const isPureGitPkg = Boolean(pkgRow && pkgRow.provider && pkgRow.provider !== 'contentdb');
+    const pkgTags = pkgRow ? parseJsonArray(pkgRow.tags).map((t: string) => t.toLowerCase()) : [];
+    const hasCdbPresence =
+      !pkgRow ||
+      !pkgRow.provider ||
+      pkgRow.provider === 'contentdb' ||
+      Number(pkgRow.contentdb_downloads || 0) > 0 ||
+      pkgTags.includes('contentdb');
+    const isPureGitPkg = !hasCdbPresence;
 
     // 3. Query D1 package_daily_downloads and upstream ContentDB /stats/ in parallel
     const [d1RowsRes, cdbStats] = await Promise.all([

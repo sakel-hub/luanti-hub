@@ -26,6 +26,7 @@ import {
   isCreatedIn2026OrUnknown
 } from '../lib/upstream';
 import { verifySameOriginMutation } from '../auth/lib/session';
+import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -172,10 +173,20 @@ async function handleHydrateRequest(
             (t: string) => !['mod', 'game', 'txp', 'texture_pack'].includes(t.toLowerCase())
           );
           const parsedRowRevCounts = parseNonZeroReviewThreadCounts(row.review_thread_counts);
-          const cdbDl = Number(row.contentdb_downloads || 0);
-          const lhDl = Math.max(Number(row.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
-          const totalDl = Math.max(Number(row.downloads_count || 0), cdbDl + lhDl);
-          const isOfficialD1Row = row.provider === 'contentdb' || cdbDl > 0 || parsedTags.includes('contentdb');
+          const isOfficialD1Row =
+            row.provider === 'contentdb' ||
+            Number(row.contentdb_downloads || 0) > 0 ||
+            parsedTags.includes('contentdb');
+          const reconciledRowDl = reconcilePackageDownloadCounts({
+            contentdbDownloads: Number(row.contentdb_downloads || 0),
+            luantihubDownloads: Math.max(Number(row.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0),
+            reportedTotalDownloads: Number(row.downloads_count || 0),
+            hasContentDbSource: isOfficialD1Row,
+            isPureGitOnly: !isOfficialD1Row
+          });
+          const cdbDl = reconciledRowDl.contentdbDownloads;
+          const lhDl = reconciledRowDl.luantihubDownloads;
+          const totalDl = reconciledRowDl.downloads;
           const rowScore = computeStarRatingFromData({
             review_thread_counts: parsedRowRevCounts,
             score: (!isOfficialD1Row || parsedRowRevCounts) ? row.score : 0
@@ -444,13 +455,28 @@ async function handleHydrateRequest(
               }) ||
               (sharedRating?.review_thread_counts ? sharedRating?.score : 0) ||
               0);
-          const cdbDl = Math.max(
-            Number(existing.contentdb_downloads || 0),
-            Number(detail?.downloads || 0),
-            Number(scoreEntry?.downloads || 0)
+          const hasCdbHydrate = Boolean(
+            detail ||
+            existing?.sources?.includes('official') ||
+            existing?.source === 'official' ||
+            existing?.provider === 'contentdb' ||
+            Number(existing?.contentdb_downloads || 0) > 0 ||
+            Number(scoreEntry?.downloads || 0) > 0
           );
-          const lhDl = Math.max(Number(existing.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0);
-          const totalDl = Math.max(Number(existing.downloads || 0), cdbDl + lhDl);
+          const reconciledHydrateDl = reconcilePackageDownloadCounts({
+            contentdbDownloads: Math.max(
+              Number(existing.contentdb_downloads || 0),
+              Number(detail?.downloads || 0),
+              Number(scoreEntry?.downloads || 0)
+            ),
+            luantihubDownloads: Math.max(Number(existing.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0),
+            reportedTotalDownloads: Number(existing.downloads || 0),
+            hasContentDbSource: hasCdbHydrate,
+            isPureGitOnly: !hasCdbHydrate
+          });
+          const cdbDl = reconciledHydrateDl.contentdbDownloads;
+          const lhDl = reconciledHydrateDl.luantihubDownloads;
+          const totalDl = reconciledHydrateDl.downloads;
           const rawMinVer = detail?.min_minetest_version && typeof detail.min_minetest_version === 'object'
             ? detail.min_minetest_version.name
             : detail?.min_minetest_version;

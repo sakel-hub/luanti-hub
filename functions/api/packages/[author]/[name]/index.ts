@@ -81,6 +81,7 @@ import {
   shouldHonorAuthenticatedNoCache,
   verifySameOriginMutation
 } from '../../../auth/lib/session';
+import { reconcilePackageDownloadCounts } from '../../../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -653,9 +654,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         d1Pkg.score,
         fastRevAvgVal
       );
-      const cdbDl = Number(d1Pkg.contentdb_downloads || 0);
-      const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), Number(dailyDlFast?.total_lh || 0));
-      const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
+      const reconciledFast = reconcilePackageDownloadCounts({
+        contentdbDownloads: Number(d1Pkg.contentdb_downloads || 0),
+        luantihubDownloads: Math.max(Number(d1Pkg.luantihub_downloads || 0), Number(dailyDlFast?.total_lh || 0)),
+        reportedTotalDownloads: Number(d1Pkg.downloads_count || 0),
+        hasContentDbSource: isOfficialFast,
+        isPureGitOnly: !isOfficialFast
+      });
+      const cdbDl = reconciledFast.contentdbDownloads;
+      const lhDl = reconciledFast.luantihubDownloads;
+      const totalDl = reconciledFast.downloads;
       const fastSources: Array<'official' | 'git'> = [];
       if (isOfficialFast) fastSources.push('official');
       if (isGitFast) fastSources.push('git');
@@ -1003,12 +1011,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               // Non-fatal D1 sync error
             }
           }
-          const cdbDl = Math.max(
-            Number(d1Pkg.contentdb_downloads || 0),
-            Number(fastCdbDetail?.downloads || 0)
-          );
-          const lhDl = Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum);
-          const totalDl = Math.max(Number(d1Pkg.downloads_count || 0), cdbDl + lhDl);
+          const reconciledFast = reconcilePackageDownloadCounts({
+            contentdbDownloads: Math.max(
+              Number(d1Pkg.contentdb_downloads || 0),
+              Number(fastCdbDetail?.downloads || 0)
+            ),
+            luantihubDownloads: Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum),
+            reportedTotalDownloads: Number(d1Pkg.downloads_count || 0),
+            hasContentDbSource: isOfficialFast,
+            isPureGitOnly: !isOfficialFast
+          });
+          const cdbDl = reconciledFast.contentdbDownloads;
+          const lhDl = reconciledFast.luantihubDownloads;
+          const totalDl = reconciledFast.downloads;
           const fastSources: Array<'official' | 'git'> = [];
           if (isOfficialFast) fastSources.push('official');
           if (isGitFast) fastSources.push('git');
@@ -1134,6 +1149,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             dependencies: fastHardDeps,
             optional_dependencies: fastSoftDeps,
             status: d1Pkg.status || 'active',
+            provider: d1Pkg.provider || (isGitFast ? 'github' : 'contentdb'),
+            ...(fastCdbDetail?.author && fastCdbDetail.author !== (d1Pkg.author_name || author)
+              ? { contentdb_author: fastCdbDetail.author }
+              : {}),
+            ...(fastCdbDetail?.name && fastCdbDetail.name !== (d1Pkg.name || name)
+              ? { contentdb_name: fastCdbDetail.name }
+              : {}),
             source: isGitFast ? 'git' : 'official',
             sources: fastSources,
             releases_list: fastBundledReleases,
@@ -1442,7 +1464,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const resolvedType = gitScan?.detectedType || d1Pkg?.type || 'mod';
       const resolvedRepo = gitScan?.repoUrl || d1Pkg?.repo_url || '';
       const isGitPkg = !d1Pkg || d1Pkg.provider !== 'contentdb' || d1Tags.includes('git');
-      const isAlsoOfficial = Boolean(d1Pkg && (d1Pkg.provider === 'contentdb' || d1Tags.includes('contentdb')));
+      const isAlsoOfficial = Boolean(
+        d1Pkg &&
+          (d1Pkg.provider === 'contentdb' ||
+            Number(d1Pkg.contentdb_downloads || 0) > 0 ||
+            d1Tags.includes('contentdb'))
+      );
       const sources: Array<'official' | 'git'> = [];
       if (isAlsoOfficial) sources.push('official');
       if (isGitPkg) sources.push('git');
@@ -1535,12 +1562,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         }
       }
 
-      const cdbDownloads = Number(d1Pkg?.contentdb_downloads || 0);
-      const lhDownloads = Math.max(
-        Number(d1Pkg?.luantihub_downloads || 0),
-        d1DailyDownloadsSum
-      );
-      const totalDownloads = cdbDownloads + lhDownloads;
+      const reconciledPureGit = reconcilePackageDownloadCounts({
+        contentdbDownloads: Number(d1Pkg?.contentdb_downloads || 0),
+        luantihubDownloads: Math.max(
+          Number(d1Pkg?.luantihub_downloads || 0),
+          d1DailyDownloadsSum
+        ),
+        reportedTotalDownloads: Number(d1Pkg?.downloads_count || 0),
+        hasContentDbSource: isAlsoOfficial,
+        isPureGitOnly: !isAlsoOfficial
+      });
+      const cdbDownloads = reconciledPureGit.contentdbDownloads;
+      const lhDownloads = reconciledPureGit.luantihubDownloads;
+      const totalDownloads = reconciledPureGit.downloads;
 
       const gitVideoUrl = d1Pkg?.video_url || gitScan?.cdbMeta?.video_url;
       const gitVideoThumb = d1Pkg?.video_thumbnail_url;
@@ -1991,16 +2025,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     '';
 
   // Dual-counter downloads: contentdb_downloads + luantihub_downloads
-  const contentdbDownloads = Math.max(
+  const rawCdbDownloads = Math.max(
     Number(upstreamData.downloads || 0),
     Number(forClientData?.downloads || 0),
     Number(d1Pkg?.contentdb_downloads || 0)
   );
-  const luantihubDownloads = Math.max(
+  const rawLhDownloads = Math.max(
     Number(d1Pkg?.luantihub_downloads || 0),
     d1DailyDownloadsSum
   );
-  const totalDownloads = contentdbDownloads + luantihubDownloads;
+  const reconciledSection4Dl = reconcilePackageDownloadCounts({
+    contentdbDownloads: rawCdbDownloads,
+    luantihubDownloads: rawLhDownloads,
+    reportedTotalDownloads: Number(d1Pkg?.downloads_count || 0),
+    hasContentDbSource: true,
+    isPureGitOnly: false
+  });
+  const contentdbDownloads = reconciledSection4Dl.contentdbDownloads;
+  const luantihubDownloads = reconciledSection4Dl.luantihubDownloads;
+  const totalDownloads = reconciledSection4Dl.downloads;
 
   // Normalize URLs & extra ContentDB / .cdb.json metadata
   const rawForum = upstreamData.forum_url || forClientData?.forum_url || upstreamData.forums || forClientData?.forums || probedCdbMeta?.forum_url || d1Pkg?.forum_url;
@@ -2139,7 +2182,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     normalizedLang
   );
 
-  const mergedTags = Array.from(new Set([...d1Tags, ...normalizedTags])).filter(Boolean);
+  const baseMergedTags = Array.from(new Set([...d1Tags, ...normalizedTags])).filter(Boolean);
+  const mergedTags =
+    isRegisteredInGitCommunity &&
+    !baseMergedTags.some((t: string) => String(t).toLowerCase() === 'contentdb')
+      ? [...baseMergedTags, 'contentdb']
+      : baseMergedTags;
   const d1BadgeTags = parseBadgeTagsArray(d1Pkg?.badge_tags);
   if (mergedTags.includes(ORGANIC_CODE_TAG) && !d1BadgeTags.includes(ORGANIC_CODE_TAG)) {
     d1BadgeTags.push(ORGANIC_CODE_TAG);
@@ -2168,8 +2216,20 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           ? resolvedScore
           : null;
     const rawExistingD1TagsOnly = parseJsonArray(d1Pkg.tags);
+    const hasMissingCdbTag =
+      d1Pkg.provider !== 'contentdb' &&
+      !rawExistingD1TagsOnly.some((t: string) => String(t).toLowerCase() === 'contentdb');
     const newTagsJson =
-      mergedTags.length > rawExistingD1TagsOnly.length ? JSON.stringify(mergedTags) : null;
+      mergedTags.length > rawExistingD1TagsOnly.length || hasMissingCdbTag
+        ? JSON.stringify(mergedTags)
+        : null;
+    const existingD1CdbDl = Number(d1Pkg.contentdb_downloads || 0);
+    const shouldSyncCdbDownloads =
+      d1Pkg.provider !== 'contentdb' &&
+      ((contentdbDownloads > 0 && existingD1CdbDl === 0) ||
+        Math.abs(contentdbDownloads - existingD1CdbDl) >= 10);
+    const newCdbDlVal = shouldSyncCdbDownloads ? contentdbDownloads : null;
+    const newTotalDlVal = shouldSyncCdbDownloads ? totalDownloads : null;
     const needsMetaBackfill =
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
@@ -2181,7 +2241,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       (!d1Pkg.long_desc && extractedLongDesc) ||
       Boolean(newRevCountsJson) ||
       newScoreVal !== null ||
-      Boolean(newTagsJson);
+      Boolean(newTagsJson) ||
+      shouldSyncCdbDownloads;
 
     if (needsMetaBackfill) {
       context.env.DB.prepare(`
@@ -2209,7 +2270,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               ELSE review_thread_counts
             END,
             score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
-            tags = COALESCE(?, tags)
+            tags = COALESCE(?, tags),
+            contentdb_downloads = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(contentdb_downloads, 0), ?) ELSE contentdb_downloads END,
+            downloads_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(downloads_count, 0), ?) ELSE downloads_count END
         WHERE id = ?
       `).bind(
         shortDesc || null,
@@ -2227,6 +2290,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         newScoreVal,
         newScoreVal,
         newTagsJson,
+        newCdbDlVal,
+        newCdbDlVal,
+        newTotalDlVal,
+        newTotalDlVal,
         targetRowId
       ).run().catch(() => {});
     }
@@ -2333,6 +2400,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     dependencies: finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps,
     optional_dependencies: finalSoftDeps.length > 0 ? finalSoftDeps : d1SoftDeps,
     status: d1Pkg?.status || 'active',
+    ...(upstreamData.author &&
+    (upstreamData.author !== (d1Pkg?.author_name || author) || upstreamData.author !== author)
+      ? { contentdb_author: upstreamData.author }
+      : {}),
+    ...(upstreamData.name &&
+    (upstreamData.name !== (d1Pkg?.name || name) || upstreamData.name !== name)
+      ? { contentdb_name: upstreamData.name }
+      : {}),
     source: isRegisteredInGitCommunity ? 'git' : 'official',
     sources,
     releases_list: bundledReleases,

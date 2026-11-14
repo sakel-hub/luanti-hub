@@ -182,7 +182,7 @@ export const HOVER_EMBED_FALLBACK_READY_MS = 320;
             <button
               type="button"
               (click)="onDownload($event)"
-              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '') + ' — ' + ((package.source === 'git' ? 'card.downloadSecurityTooltipGit' : 'card.downloadSecurityTooltipContentDb') | translate)"
+              [appTooltip]="('card.quickInstall' | translate) + (package.file_size ? ' (' + package.file_size + ')' : '') + ' — ' + (((package.source === 'git' || package.sources?.includes('git')) ? 'card.downloadSecurityTooltipGit' : 'card.downloadSecurityTooltipContentDb') | translate)"
               [attr.aria-label]="'card.downloadZip' | translate"
               class="w-8 h-8 rounded-full glass-btn-primary text-white flex items-center justify-center transition hover:scale-105 cursor-pointer">
               <svg lucideDownload class="w-4 h-4 text-white"></svg>

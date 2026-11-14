@@ -65,6 +65,7 @@ import {
 } from '../lib/jam-2026';
 
 import { parseCookies, verifySessionToken } from '../auth/lib/session';
+import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -394,19 +395,31 @@ export function overlayPromotionRowDeltaOnCatalog(
     const relEpochMs = Number(item.release) > 100000000 ? Number(item.release) * 1000 : Date.now();
     const isoDate = new Date(relEpochMs).toISOString();
 
-    const isGitOnlyDeltaItem = item.source === 'git' && (!Array.isArray(item.sources) || !item.sources.includes('official'));
-    const itemCdbDl = Number(
-      item.contentdb_downloads !== undefined
-        ? item.contentdb_downloads
-        : isGitOnlyDeltaItem
-          ? 0
-          : item.downloads || 0
-    );
-    const itemLhDl = Math.max(
-      Number(item.luantihub_downloads || 0),
-      lhDownloadsMap?.get(lowerId) || 0
-    );
-    const itemTotalDl = Math.max(Number(item.downloads || 0), itemCdbDl + itemLhDl);
+    const isGitOnlyDeltaItem =
+      item.source === 'git' &&
+      (!Array.isArray(item.sources) || !item.sources.includes('official')) &&
+      !(Number(item.contentdb_downloads || 0) > 0) &&
+      !itemTags.includes('contentdb');
+    const hasOfficialDelta =
+      !isGitOnlyDeltaItem &&
+      (item.provider === 'contentdb' ||
+        item.source === 'official' ||
+        (Array.isArray(item.sources) && item.sources.includes('official')) ||
+        Number(item.contentdb_downloads || 0) > 0 ||
+        itemTags.includes('contentdb'));
+    const recDeltaDl = reconcilePackageDownloadCounts({
+      contentdbDownloads: Number(item.contentdb_downloads || 0),
+      luantihubDownloads: Math.max(
+        Number(item.luantihub_downloads || 0),
+        lhDownloadsMap?.get(lowerId) || 0
+      ),
+      reportedTotalDownloads: Number(item.downloads || 0),
+      hasContentDbSource: hasOfficialDelta,
+      isPureGitOnly: !hasOfficialDelta
+    });
+    const itemCdbDl = recDeltaDl.contentdbDownloads;
+    const itemLhDl = recDeltaDl.luantihubDownloads;
+    const itemTotalDl = recDeltaDl.downloads;
 
     const newCatalogItem = {
       ...item,
@@ -429,9 +442,14 @@ export function overlayPromotionRowDeltaOnCatalog(
       min_minetest_version: item.min_minetest_version || '5.0.0',
       created_at: item.created_at || isoDate,
       updated_at: item.updated_at || isoDate,
-      provider: item.provider || 'contentdb',
-      source: item.source || 'official',
-      sources: Array.isArray(item.sources) && item.sources.length > 0 ? item.sources : ['official']
+      provider: item.provider || (hasOfficialDelta ? 'contentdb' : 'github'),
+      source: item.source || (hasOfficialDelta ? 'official' : 'git'),
+      sources:
+        Array.isArray(item.sources) && item.sources.length > 0
+          ? item.sources
+          : hasOfficialDelta
+            ? ['official']
+            : ['git']
     };
     indexByLowerId.set(lowerId, baseList.length + appendedNew.length);
     appendedNew.push(newCatalogItem);
@@ -2400,6 +2418,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   // 4. Format D1 packages into standard ContentDB-compatible schema (merging with upstream ContentDB if present)
   const seenKeys = new Set<string>();
   const merged: any[] = [];
+  const dualSourceBackfillStmts: any[] = [];
 
   for (const p of d1List) {
     const d1Key = `${p.author_name}/${p.name}`.toLowerCase();
@@ -2504,7 +2523,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const upstreamTags = Array.isArray(matchedUpstream?.tags)
       ? matchedUpstream.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
       : [];
-    const combinedTags = Array.from(new Set([...parsedTags, ...upstreamTags])).filter(Boolean);
+    const baseCombinedTags = Array.from(new Set([...parsedTags, ...upstreamTags])).filter(Boolean);
+    const combinedTags =
+      isAlsoOfficial &&
+      isGitSource &&
+      !baseCombinedTags.some((t: string) => String(t).toLowerCase() === 'contentdb')
+        ? [...baseCombinedTags, 'contentdb']
+        : baseCombinedTags;
 
     const parsedDeps = parseJsonArray(p.dependencies);
     const parsedOptDeps = parseJsonArray(p.optional_dependencies);
@@ -2541,19 +2566,60 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         resolvedThumb
       ) || '';
 
-    const cdbDownloads = Math.max(
+    const rawCdbDownloads = Math.max(
       typeof matchedUpstream?.downloads === 'number' ? matchedUpstream.downloads : 0,
       typeof p.contentdb_downloads === 'number' ? p.contentdb_downloads : 0
     );
-    const lhDownloads = Math.max(
+    const rawLhDownloads = Math.max(
       typeof p.luantihub_downloads === 'number' ? p.luantihub_downloads : 0,
-      lhDownloadsMap.get(canonicalKey) ?? lhDownloadsMap.get(d1Key) ?? 0,
-      !isAlsoOfficial && typeof p.downloads_count === 'number' ? p.downloads_count : 0
+      lhDownloadsMap.get(canonicalKey) ?? lhDownloadsMap.get(d1Key) ?? 0
     );
-    const combinedDownloads = Math.max(
-      cdbDownloads + lhDownloads,
-      typeof p.downloads_count === 'number' ? p.downloads_count : 0
-    );
+    const reconciledDl = reconcilePackageDownloadCounts({
+      contentdbDownloads: rawCdbDownloads,
+      luantihubDownloads: rawLhDownloads,
+      reportedTotalDownloads: typeof p.downloads_count === 'number' ? p.downloads_count : 0,
+      hasContentDbSource: isAlsoOfficial,
+      isPureGitOnly: !isAlsoOfficial
+    });
+    const cdbDownloads = reconciledDl.contentdbDownloads;
+    const lhDownloads = reconciledDl.luantihubDownloads;
+    const combinedDownloads = reconciledDl.downloads;
+
+    // Queue threshold-gated dual-source ContentDB linkage backfill so D1 fast paths don't lose ContentDB counts or provenance
+    if (
+      env.DB &&
+      dualSourceBackfillStmts.length < 15 &&
+      rawProvider !== 'contentdb' &&
+      matchedUpstream &&
+      p.id
+    ) {
+      const existingD1CdbDl = Number(p.contentdb_downloads || 0);
+      const missingContentDbTag = !parsedTags.some((t: string) => String(t).toLowerCase() === 'contentdb');
+      const significantCdbDelta =
+        (cdbDownloads > 0 && existingD1CdbDl === 0) ||
+        Math.abs(cdbDownloads - existingD1CdbDl) >= 10;
+      if (missingContentDbTag || significantCdbDelta) {
+        const nextD1Tags = missingContentDbTag
+          ? Array.from(new Set([...parsedTags, 'contentdb']))
+          : null;
+        dualSourceBackfillStmts.push(
+          env.DB.prepare(
+            `UPDATE packages
+             SET contentdb_downloads = MAX(COALESCE(contentdb_downloads, 0), ?),
+                 luantihub_downloads = MAX(COALESCE(luantihub_downloads, 0), ?),
+                 downloads_count = MAX(COALESCE(downloads_count, 0), ?),
+                 tags = COALESCE(?, tags)
+             WHERE id = ?`
+          ).bind(
+            cdbDownloads,
+            lhDownloads,
+            combinedDownloads,
+            nextD1Tags ? JSON.stringify(nextD1Tags) : null,
+            p.id
+          )
+        );
+      }
+    }
     const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
     const releaseId = computeLuantiClientReleaseId(
       { updated_at: p.updated_at, created_at: p.created_at },
@@ -2652,6 +2718,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       download_size: Number(p.download_size) > 0 ? Number(p.download_size) : undefined,
       file_size: p.file_size || undefined,
       provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
+      ...(matchedUpstream?.author &&
+      (matchedUpstream.author !== canonicalAuthor || matchedUpstream.author !== p.author_name)
+        ? { contentdb_author: matchedUpstream.author }
+        : {}),
+      ...(matchedUpstream?.name &&
+      (matchedUpstream.name !== canonicalName || matchedUpstream.name !== p.name)
+        ? { contentdb_name: matchedUpstream.name }
+        : {}),
       min_minetest_version: p.min_minetest_version || matchedUpstream?.min_minetest_version || '5.0.0',
       ...(p.max_minetest_version || matchedUpstream?.max_minetest_version ? { max_minetest_version: p.max_minetest_version || matchedUpstream?.max_minetest_version } : {}),
       tags: combinedTags.length > 0 ? combinedTags : [p.type || 'mod'],
@@ -2907,10 +2981,12 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       await Promise.all(
         batchToHydrate.map(async (pkg) => {
           const lowerPkgKey = String(pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase();
-          const detail = await fetchUpstreamJsonCached<any>(
-            `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`,
-            3600
-          ).catch(() => null);
+          const detail = pkg.sources?.includes('official')
+            ? await fetchUpstreamJsonCached<any>(
+                `/packages/${encodeURIComponent(pkg.contentdb_author || pkg.author)}/${encodeURIComponent(pkg.contentdb_name || pkg.name)}/`,
+                3600
+              ).catch(() => null)
+            : null;
           if (!detail && !pkg.repo_url) return;
           const resolvedLic = detail?.license || detail?.media_license || pkg.license || '';
           const resolvedMediaLic = detail?.media_license || detail?.license || pkg.media_license || '';
@@ -2954,7 +3030,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           ) {
             bootReviewFetchBudget--;
             cdbRevList = await fetchUpstreamJsonCached<any[]>(
-              `/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/reviews/`,
+              `/packages/${encodeURIComponent(pkg.contentdb_author || pkg.author)}/${encodeURIComponent(pkg.contentdb_name || pkg.name)}/reviews/`,
               3600
             ).catch(() => null);
             if (Array.isArray(cdbRevList)) {
@@ -3031,11 +3107,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             };
           }
           if (typeof detail?.downloads === 'number' && detail.downloads > 0) {
-            pkg.contentdb_downloads = Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads);
-            pkg.downloads = Math.max(
-              Number(pkg.downloads || 0),
-              pkg.contentdb_downloads + Number(pkg.luantihub_downloads || 0)
-            );
+            const recBootHydrateDl = reconcilePackageDownloadCounts({
+              contentdbDownloads: Math.max(Number(pkg.contentdb_downloads || 0), detail.downloads),
+              luantihubDownloads: Number(pkg.luantihub_downloads || 0),
+              reportedTotalDownloads: Number(pkg.downloads || 0),
+              hasContentDbSource: true,
+              isPureGitOnly: false
+            });
+            pkg.contentdb_downloads = recBootHydrateDl.contentdbDownloads;
+            pkg.luantihub_downloads = recBootHydrateDl.luantihubDownloads;
+            pkg.downloads = recBootHydrateDl.downloads;
           }
           const candidateRepo = pkg.repo_url || detail?.repo || detail?.repo_url || '';
           if (candidateRepo && !pkg.repo_url) {
@@ -3191,11 +3272,15 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       if (Object.keys(newEdgeRatings).length > 0) {
         await mergeSharedEdgeRatingsMap(newEdgeRatings).catch(() => {});
       }
-      if (env.DB && bootHydrateStmts.length > 0) {
+      const combinedBatchStmts = [
+        ...bootHydrateStmts,
+        ...dualSourceBackfillStmts.splice(0)
+      ];
+      if (env.DB && combinedBatchStmts.length > 0) {
         if (typeof env.DB.batch === 'function') {
-          await env.DB.batch(bootHydrateStmts).catch(() => {});
+          await env.DB.batch(combinedBatchStmts).catch(() => {});
         } else {
-          for (const stmt of bootHydrateStmts) {
+          for (const stmt of combinedBatchStmts) {
             stmt.run().catch(() => {});
           }
         }
@@ -3314,6 +3399,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
 
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
     responsePayload = buildInGameClientCatalogResponse(merged);
+  }
+
+  if (env.DB && dualSourceBackfillStmts.length > 0) {
+    const pendingBackfills = dualSourceBackfillStmts.splice(0);
+    if (typeof env.DB.batch === 'function') {
+      await env.DB.batch(pendingBackfills).catch(() => {});
+    } else {
+      for (const stmt of pendingBackfills) {
+        await stmt.run().catch(() => {});
+      }
+    }
   }
 
   if (!isBootBundle && !noCache && catalogEdgeCacheKey) {

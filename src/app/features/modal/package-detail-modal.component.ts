@@ -25,7 +25,9 @@ import {
   CommunityReview,
   PackageRelease,
   ReleaseNotesPayload,
-  PackageModalFocusRequest
+  PackageModalFocusRequest,
+  hasComplementaryContentDbSource,
+  reconcilePackageDownloadCounts
 } from '../../core/models/package.model';
 import {
   buildRawDirectoryBaseUrl,
@@ -214,7 +216,8 @@ import {
 
               <!-- Badges -->
               <app-package-badges
-                [package]="package"
+                data-testid="modal-header-badges"
+                [package]="effectivePackage"
                 [showFeatured]="true">
               </app-package-badges>
 
@@ -1152,16 +1155,18 @@ import {
                         </svg>
                       </button>
 
-                      <a
-                        [href]="gitRepoUrl"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        (click)="$event.stopPropagation()"
-                        class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer flex-shrink-0 whitespace-nowrap">
-                        <span class="sm:hidden">{{ hasValidGitRepo ? 'Git' : 'ContentDB' }}</span>
-                        <span class="hidden sm:inline">{{ (hasValidGitRepo ? 'modal.viewGitRepo' : 'modal.viewOnContentDb') | translate }}</span>
-                        <svg lucideExternalLink class="w-3 h-3 flex-shrink-0"></svg>
-                      </a>
+                      @if (getSafeExternalHref(gitRepoUrl); as safeHeaderRepoHref) {
+                        <a
+                          [href]="safeHeaderRepoHref"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          (click)="$event.stopPropagation()"
+                          class="text-[11px] font-semibold text-slate-400 hover:text-sky-300 flex items-center gap-1 transition cursor-pointer flex-shrink-0 whitespace-nowrap">
+                          <span class="sm:hidden">{{ hasValidGitRepo ? 'Git' : 'ContentDB' }}</span>
+                          <span class="hidden sm:inline">{{ (hasValidGitRepo ? 'modal.viewGitRepo' : 'modal.viewOnContentDb') | translate }}</span>
+                          <svg lucideExternalLink class="w-3 h-3 flex-shrink-0"></svg>
+                        </a>
+                      }
                     </div>
 
                     @if (isReadmeExpanded()) {
@@ -1408,12 +1413,16 @@ import {
                     <span class="text-slate-400 font-semibold uppercase tracking-wider block text-[10px]">
                       {{ 'modal.downloads' | translate }}
                     </span>
-                    <span class="font-black text-white text-sm mt-0.5 block">
-                      {{ package.downloads | compactNumber }}
+                    <span data-testid="modal-total-downloads" class="font-black text-white text-sm mt-0.5 block">
+                      {{ reconciledTotalDownloads | compactNumber }}
                     </span>
-                    @if ((package.contentdb_downloads || 0) > 0 || (package.luantihub_downloads || 0) > 0) {
-                      <span class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
-                        ContentDB: {{ (package.contentdb_downloads || 0) | compactNumber }} • Hub: {{ (package.luantihub_downloads || 0) | compactNumber }}
+                    @if (hasComplementaryContentDb && (reconciledHubDownloads > 0 || reconciledContentDbDownloads > 0)) {
+                      <span data-testid="downloads-source-breakdown" class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
+                        Hub: {{ reconciledHubDownloads | compactNumber }} • ContentDB: {{ reconciledContentDbDownloads | compactNumber }}
+                      </span>
+                    } @else if (!hasComplementaryContentDb && reconciledHubDownloads > 0) {
+                      <span data-testid="downloads-source-breakdown" class="text-[10px] text-slate-400 block mt-0.5 leading-tight">
+                        Luanti Hub: {{ reconciledHubDownloads | compactNumber }}
                       </span>
                     }
                     @if ((package.favorites_count || 0) > 0 || settingsService.isFavorite(package.id)) {
@@ -1494,21 +1503,32 @@ import {
                       </a>
                     }
 
-                    @if (getSafeExternalHref(gitRepoUrl); as safeRepoHref) {
+                    @if (getSafeExternalHref(verifiedGitRepoHref); as safeGitHref) {
                       <a
-                        [href]="safeRepoHref"
+                        data-testid="project-link-git"
+                        [href]="safeGitHref"
                         target="_blank"
                         rel="noopener noreferrer"
-                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeRepoHref) }"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeGitHref) }"
                         class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
                         <span class="flex items-center gap-2">
-                          @if (hasValidGitRepo) {
-                            <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
-                            <span>{{ 'modal.viewGitRepo' | translate }}</span>
-                          } @else {
-                            <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
-                            <span>{{ 'modal.viewOnContentDb' | translate }}</span>
-                          }
+                          <svg lucideGitBranch class="w-3.5 h-3.5 text-amber-400"></svg>
+                          <span>{{ 'modal.viewGitRepo' | translate }}</span>
+                        </span>
+                        <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
+                      </a>
+                    }
+                    @if (getSafeExternalHref(contentDbPackageHref); as safeCdbHref) {
+                      <a
+                        data-testid="project-link-contentdb"
+                        [href]="safeCdbHref"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        [appTooltip]="'modal.externalLinkSecurityTooltip' | translate:{ host: getExternalHostLabel(safeCdbHref) }"
+                        class="px-2.5 py-1.5 rounded-lg glass-btn text-slate-200 hover:text-white flex items-center justify-between text-xs transition cursor-pointer">
+                        <span class="flex items-center gap-2">
+                          <svg lucideGlobe class="w-3.5 h-3.5 text-emerald-400"></svg>
+                          <span>{{ 'modal.viewOnContentDb' | translate }}</span>
                         </span>
                         <svg lucideExternalLink class="w-3 h-3 text-slate-400"></svg>
                       </a>
@@ -1898,12 +1918,14 @@ import {
                           <img src="logo.svg" alt="Luanti Hub" class="w-3.5 h-3.5 object-contain flex-shrink-0" />
                           <span>Luanti Hub ({{ luantiHubReviewsCount() }})</span>
                         </span>
-                        <span
-                          [appTooltip]="'Reviews synced from the official Luanti ContentDB registry'"
-                          class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-sky-500/15 border border-sky-400/35 text-sky-300 font-bold text-[10px]">
-                          <svg lucideGlobe class="w-3 h-3 text-sky-300 flex-shrink-0"></svg>
-                          <span>ContentDB ({{ contentDbReviewsCount() }})</span>
-                        </span>
+                        @if (hasComplementaryContentDb || contentDbReviewsCount() > 0) {
+                          <span
+                            [appTooltip]="'Reviews synced from the official Luanti ContentDB registry'"
+                            class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-sky-500/15 border border-sky-400/35 text-sky-300 font-bold text-[10px]">
+                            <svg lucideGlobe class="w-3 h-3 text-sky-300 flex-shrink-0"></svg>
+                            <span>ContentDB ({{ contentDbReviewsCount() }})</span>
+                          </span>
+                        }
                       </div>
                     </div>
 
@@ -3242,19 +3264,58 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     return `${window.location.origin}/package/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}`;
   }
 
-  get hasValidGitRepo(): boolean {
-    const pkg = this.packageService.activePackage() || this.package;
+  protected get effectivePackage(): LuantiPackage {
+    return this.packageService.activePackage() || this.package;
+  }
+
+  get hasComplementaryContentDb(): boolean {
+    return hasComplementaryContentDbSource(this.effectivePackage);
+  }
+
+  get verifiedGitRepoHref(): string {
+    const pkg = this.effectivePackage;
     const normalized = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
-    return Boolean(normalized && pkg?.git_repo_status !== 'broken_404');
+    return normalized && pkg?.git_repo_status !== 'broken_404' ? normalized : '';
+  }
+
+  get contentDbPackageHref(): string {
+    if (!this.hasComplementaryContentDb) return '';
+    const pkg = this.effectivePackage;
+    const cdbAuthor = pkg?.contentdb_author || pkg?.author;
+    const cdbName = pkg?.contentdb_name || pkg?.name;
+    if (!cdbAuthor || !cdbName) return '';
+    return `https://content.luanti.org/packages/${encodeURIComponent(cdbAuthor)}/${encodeURIComponent(cdbName)}/`;
+  }
+
+  get hasValidGitRepo(): boolean {
+    return Boolean(this.verifiedGitRepoHref);
   }
 
   get gitRepoUrl(): string {
-    const pkg = this.packageService.activePackage() || this.package;
-    const normalized = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
-    if (normalized && pkg?.git_repo_status !== 'broken_404') {
-      return normalized;
-    }
-    return `https://content.luanti.org/packages/${encodeURIComponent(this.package.author)}/${encodeURIComponent(this.package.name)}/`;
+    return this.verifiedGitRepoHref || this.contentDbPackageHref;
+  }
+
+  private get reconciledDownloadStats() {
+    const pkg = this.effectivePackage;
+    return reconcilePackageDownloadCounts({
+      contentdbDownloads: pkg?.contentdb_downloads,
+      luantihubDownloads: pkg?.luantihub_downloads,
+      reportedTotalDownloads: pkg?.downloads,
+      hasContentDbSource: this.hasComplementaryContentDb,
+      isPureGitOnly: !this.hasComplementaryContentDb
+    });
+  }
+
+  get reconciledTotalDownloads(): number {
+    return this.reconciledDownloadStats.downloads;
+  }
+
+  get reconciledHubDownloads(): number {
+    return this.reconciledDownloadStats.luantihubDownloads;
+  }
+
+  get reconciledContentDbDownloads(): number {
+    return this.reconciledDownloadStats.contentdbDownloads;
   }
 
   get bannerImage(): string {

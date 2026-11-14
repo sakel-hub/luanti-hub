@@ -160,7 +160,7 @@ import {
               <button
                 type="button"
                 (click)="selectSpecificPackage(pkg.author, pkg.name)"
-                [class]="selectedPackageName()?.toLowerCase() === pkg.name.toLowerCase()
+                [class]="selectedPackageName().toLowerCase() === pkg.name.toLowerCase()
                   ? 'glass-btn-sky text-white shadow-sm'
                   : 'glass-btn text-slate-300 hover:text-white'"
                 class="px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-2 transition cursor-pointer flex-shrink-0">
@@ -216,7 +216,12 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
     const pkgName = this.selectedPackageName().trim().toLowerCase();
     const uname = this.effectiveUsername().trim();
     if (!pkgName || !uname) return null;
-    const match = this.authorPackages().find(p => p.name.toLowerCase() === pkgName);
+    const unameLower = uname.toLowerCase();
+    const match =
+      this.authorPackages().find(p => p.name.toLowerCase() === pkgName) ||
+      this.packageService
+        .packages()
+        .find(p => p.name.toLowerCase() === pkgName && p.author.toLowerCase() === unameLower);
     if (match) return match;
     return {
       id: `${uname}/${pkgName}`,
@@ -229,8 +234,10 @@ export class AnalyticsPageComponent implements OnInit, OnDestroy {
       score: 0,
       downloads: 0,
       license: 'MIT',
-      source: 'official',
-      tags: ['mod']
+      source: 'git',
+      sources: ['git'],
+      tags: ['mod'],
+      _unhydratedSeed: true
     };
   });
 

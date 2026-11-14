@@ -17,7 +17,7 @@ import {
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
-import { LuantiPackage } from '../../core/models/package.model';
+import { LuantiPackage, hasComplementaryContentDbSource } from '../../core/models/package.model';
 import { selectSharpPackageBanner } from '../../core/config/git-providers.config';
 import { ImgFallbackDirective } from '../../shared/directives/img-fallback.directive';
 import { TooltipDirective } from '../../shared/directives/tooltip.directive';
@@ -30,6 +30,7 @@ import {
   LucideInfo,
   LucideStar,
   LucideGitBranch,
+  LucideGlobe,
   LucideDownload,
   LucideExternalLink
 } from '@lucide/angular';
@@ -50,6 +51,7 @@ import {
     LucideInfo,
     LucideStar,
     LucideGitBranch,
+    LucideGlobe,
     LucideDownload,
     LucideExternalLink
   ],
@@ -262,16 +264,25 @@ import {
                           <span>{{ 'hero.viewDetails' | translate }}</span>
                         </button>
 
-                        <a
-                          [href]="getSlideGitUrl(slidePkg)"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          [attr.tabindex]="idx === currentIndex() ? null : -1"
-                          [appTooltip]="'hero.viewGit' | translate"
-                          class="h-11 w-11 rounded-xl glass-btn text-amber-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-                          [attr.aria-label]="'hero.viewGit' | translate">
-                          <svg lucideGitBranch class="w-5 h-5"></svg>
-                        </a>
+                        @if (getSlideGitUrl(slidePkg); as slideExternalUrl) {
+                          <a
+                            data-testid="hero-slide-external-link"
+                            [href]="slideExternalUrl"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            [attr.tabindex]="idx === currentIndex() ? null : -1"
+                            [appTooltip]="(hasSlideGitRepo(slidePkg) ? 'hero.viewGit' : 'modal.viewOnContentDb') | translate"
+                            class="h-11 w-11 rounded-xl glass-btn hover:text-white flex items-center justify-center transition cursor-pointer"
+                            [class.text-amber-300]="hasSlideGitRepo(slidePkg)"
+                            [class.text-emerald-300]="!hasSlideGitRepo(slidePkg)"
+                            [attr.aria-label]="(hasSlideGitRepo(slidePkg) ? 'hero.viewGit' : 'modal.viewOnContentDb') | translate">
+                            @if (hasSlideGitRepo(slidePkg)) {
+                              <svg lucideGitBranch class="w-5 h-5"></svg>
+                            } @else {
+                              <svg lucideGlobe class="w-5 h-5"></svg>
+                            }
+                          </a>
+                        }
                       </div>
                     }
 
@@ -605,12 +616,23 @@ export class HeroBillboardComponent implements OnInit, AfterViewInit, OnDestroy 
     this.packageService.downloadPackage(pkg);
   }
 
+  hasSlideGitRepo(pkg: LuantiPackage): boolean {
+    const normalized = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
+    return Boolean(normalized && pkg?.git_repo_status !== 'broken_404');
+  }
+
   getSlideGitUrl(pkg: LuantiPackage): string {
-    const normalized = this.packageService.normalizeGitRepoUrl(pkg.repo_url);
-    if (normalized && pkg.git_repo_status !== 'broken_404') {
+    const normalized = this.packageService.normalizeGitRepoUrl(pkg?.repo_url);
+    if (normalized && pkg?.git_repo_status !== 'broken_404') {
       return normalized;
     }
-    return `https://content.luanti.org/packages/${encodeURIComponent(pkg.author)}/${encodeURIComponent(pkg.name)}/`;
+    if (!hasComplementaryContentDbSource(pkg)) {
+      return '';
+    }
+    const cdbAuthor = String(pkg.contentdb_author || pkg.author || '').trim();
+    const cdbName = String(pkg.contentdb_name || pkg.name || '').trim();
+    if (!cdbAuthor || !cdbName) return '';
+    return `https://content.luanti.org/packages/${encodeURIComponent(cdbAuthor)}/${encodeURIComponent(cdbName)}/`;
   }
 
   getPackageUrl(pkg: LuantiPackage): string {

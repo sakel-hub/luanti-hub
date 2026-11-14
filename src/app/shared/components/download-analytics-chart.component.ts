@@ -33,6 +33,7 @@ import { PackageService } from '../../core/services/package.service';
 import {
   LuantiPackage,
   DownloadAnalyticsData,
+  hasComplementaryContentDbSource,
   AuthorPackageBreakdownItem
 } from '../../core/models/package.model';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -612,14 +613,14 @@ export class DownloadAnalyticsChartComponent implements OnChanges, AfterViewInit
     }
 
     if (mode === 'source') {
-      return [
-        {
-          key: 'source_contentdb',
-          label: 'ContentDB',
-          color: '#38bdf8',
-          bgColor: 'rgba(56, 189, 248, 0.28)',
-          data: data.source_contentdb
-        },
+      const hasContentDbTelemetry =
+        Array.isArray(data.source_contentdb) && data.source_contentdb.some((v) => Number(v) > 0);
+      const isPureGitSinglePackage =
+        Boolean(this.package) &&
+        !this.authorUsername &&
+        !hasComplementaryContentDbSource(this.package) &&
+        !hasContentDbTelemetry;
+      const series: ChartSeriesDef[] = [
         {
           key: 'source_luantihub',
           label: 'LuantiHub Edge',
@@ -628,6 +629,16 @@ export class DownloadAnalyticsChartComponent implements OnChanges, AfterViewInit
           data: data.source_luantihub
         }
       ];
+      if (!isPureGitSinglePackage) {
+        series.push({
+          key: 'source_contentdb',
+          label: 'ContentDB',
+          color: '#38bdf8',
+          bgColor: 'rgba(56, 189, 248, 0.28)',
+          data: data.source_contentdb
+        });
+      }
+      return series;
     }
 
     if (mode === 'packages' && Array.isArray(data.package_breakdown) && data.package_breakdown.length > 0) {

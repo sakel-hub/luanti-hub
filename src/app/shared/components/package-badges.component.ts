@@ -1,6 +1,7 @@
 import { Component, ChangeDetectionStrategy, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { LuantiPackage } from '../../core/models/package.model';
+import { LuantiPackage, hasComplementaryContentDbSource } from '../../core/models/package.model';
+import { isGitProviderId } from '../../core/config/git-providers.config';
 import { hasOrganicCodeTag } from '../../core/config/package-utils.config';
 import { TooltipDirective } from '../directives/tooltip.directive';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -45,20 +46,7 @@ import { LucideGitBranch, LucideGlobe, LucideLeaf } from '@lucide/angular';
         </span>
       }
 
-      <!-- Official ContentDB Source Badge -->
-      @if (showOfficial && isOfficialSource) {
-        <span
-          data-testid="contentdb-badge"
-          (click)="$event.stopPropagation()"
-          [appTooltip]="'card.contentDbSourceTooltip' | translate"
-          [appTooltipTap]="true"
-          [class]="badgePillClass('glass-badge-emerald font-bold')">
-          <svg lucideGlobe [class]="iconClass('text-emerald-300')"></svg>
-          <span>ContentDB</span>
-        </span>
-      }
-
-      <!-- Decentralized Git Source Badge -->
+      <!-- Decentralized Git Source Badge (Primary LuantiHub Source) -->
       @if (showGit && isGitSource) {
         <span
           data-testid="git-badge"
@@ -68,6 +56,19 @@ import { LucideGitBranch, LucideGlobe, LucideLeaf } from '@lucide/angular';
           [class]="badgePillClass('glass-badge-amber font-bold')">
           <svg lucideGitBranch [class]="iconClass('text-amber-300')"></svg>
           <span>Git</span>
+        </span>
+      }
+
+      <!-- Complementary ContentDB Source Badge -->
+      @if (showOfficial && isOfficialSource) {
+        <span
+          data-testid="contentdb-badge"
+          (click)="$event.stopPropagation()"
+          [appTooltip]="'card.contentDbSourceTooltip' | translate"
+          [appTooltipTap]="true"
+          [class]="badgePillClass('glass-badge-emerald font-bold')">
+          <svg lucideGlobe [class]="iconClass('text-emerald-300')"></svg>
+          <span>ContentDB</span>
         </span>
       }
 
@@ -139,17 +140,14 @@ export class PackageBadgesComponent {
   }
 
   get isOfficialSource(): boolean {
-    return Boolean(
-      this.package?.sources?.includes('official') ||
-      this.package?.source === 'official' ||
-      this.package?.source === 'mirror'
-    );
+    return hasComplementaryContentDbSource(this.package);
   }
 
   get isGitSource(): boolean {
     return Boolean(
       this.package?.sources?.includes('git') ||
-      this.package?.source === 'git'
+      this.package?.source === 'git' ||
+      isGitProviderId(this.package?.provider)
     );
   }
 

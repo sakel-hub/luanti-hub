@@ -139,6 +139,8 @@ export interface LuantiPackage {
   video_thumbnail_url?: string;
   provider?: GitProvider;
   default_branch?: string;
+  contentdb_author?: string; // Exact ContentDB author slug when it differs from canonical author
+  contentdb_name?: string; // Exact ContentDB technical name when it differs from canonical name
   source: PackageSource;
   sources?: PackageSource[];
   tags: string[];
@@ -812,5 +814,89 @@ export function enrichLuantiBlogPostFromArticleHtml(
     ...(bestAuthor ? { author: bestAuthor } : {})
   };
 }
+
+export interface ReconcileDownloadCountsInput {
+  contentdbDownloads?: number;
+  luantihubDownloads?: number;
+  reportedTotalDownloads?: number;
+  hasContentDbSource?: boolean;
+  isPureGitOnly?: boolean;
+}
+
+export interface ReconcileDownloadCountsResult {
+  contentdbDownloads: number;
+  luantihubDownloads: number;
+  downloads: number;
+}
+
+/**
+ * Returns true when a package genuinely has complementary ContentDB backing
+ * (official/mirror source, persisted ContentDB downloads, explicit ContentDB identity, or `contentdb` tag).
+ */
+export function hasComplementaryContentDbSource(
+  pkg?: {
+    source?: PackageSource | string;
+    sources?: Array<PackageSource | string>;
+    provider?: string;
+    contentdb_downloads?: number;
+    contentdb_author?: string;
+    contentdb_name?: string;
+    tags?: string[];
+  } | null
+): boolean {
+  if (!pkg) return false;
+  if (Array.isArray(pkg.sources) && pkg.sources.includes('official')) return true;
+  if (pkg.source === 'official' || pkg.source === 'mirror') return true;
+  if (pkg.provider === 'contentdb') return true;
+  if (Number(pkg.contentdb_downloads || 0) > 0) return true;
+  if (Boolean(pkg.contentdb_author?.trim()) || Boolean(pkg.contentdb_name?.trim())) return true;
+  if (Array.isArray(pkg.tags) && pkg.tags.some((t) => String(t).trim().toLowerCase() === 'contentdb')) return true;
+  return false;
+}
+
+/**
+ * Reconciles primary LuantiHub and complementary ContentDB download counts so
+ * `downloads === luantihubDownloads + contentdbDownloads` consistently across Edge, SSR, and client state.
+ */
+export function reconcilePackageDownloadCounts(
+  opts: ReconcileDownloadCountsInput
+): ReconcileDownloadCountsResult {
+  const hub = Math.max(0, Math.floor(Number(opts.luantihubDownloads || 0) || 0));
+  const rawCdb = Math.max(0, Math.floor(Number(opts.contentdbDownloads || 0) || 0));
+  const reported = Math.max(0, Math.floor(Number(opts.reportedTotalDownloads || 0) || 0));
+
+  if (opts.isPureGitOnly) {
+    const resolvedHub = Math.max(hub, reported);
+    return {
+      contentdbDownloads: 0,
+      luantihubDownloads: resolvedHub,
+      downloads: resolvedHub
+    };
+  }
+
+  let resolvedHub = hub;
+  let resolvedCdb = rawCdb;
+  const splitSum = resolvedHub + resolvedCdb;
+
+  if (reported > splitSum) {
+    const surplus = reported - splitSum;
+    if (opts.hasContentDbSource) {
+      if (resolvedCdb === 0) {
+        resolvedCdb = surplus;
+      } else if (resolvedHub === 0) {
+        resolvedHub = surplus;
+      }
+    } else {
+      resolvedHub += surplus;
+    }
+  }
+
+  return {
+    contentdbDownloads: resolvedCdb,
+    luantihubDownloads: resolvedHub,
+    downloads: resolvedHub + resolvedCdb
+  };
+}
+
 
 

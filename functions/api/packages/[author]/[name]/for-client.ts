@@ -22,6 +22,7 @@ import {
   refreshJam2026D1PkgIfStale,
   resolveJam2026ClientScreenshotUrl
 } from '../../../lib/jam-2026';
+import { reconcilePackageDownloadCounts } from '../../../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -254,7 +255,8 @@ export async function onRequestGet(context: {
     d1Pkg &&
     d1Pkg.provider &&
     d1Pkg.provider !== 'contentdb' &&
-    !parseJsonArray(d1Pkg.tags).includes('contentdb')
+    !parseJsonArray(d1Pkg.tags).includes('contentdb') &&
+    !(Number(d1Pkg.contentdb_downloads || 0) > 0)
   );
 
   const data = !isPureGitPkg
@@ -266,10 +268,16 @@ export async function onRequestGet(context: {
     : null;
 
   if (data && !Array.isArray(data) && (data.name || data.title)) {
-    const cdbDownloads = Math.max(
-      Number(data.downloads) || 0,
-      Number(d1Pkg?.contentdb_downloads) || 0
-    );
+    const recUpstreamClientDl = reconcilePackageDownloadCounts({
+      contentdbDownloads: Math.max(Number(data.downloads) || 0, Number(d1Pkg?.contentdb_downloads) || 0),
+      luantihubDownloads: lhDownloads,
+      reportedTotalDownloads: Number(d1Pkg?.downloads_count) || 0,
+      hasContentDbSource: true,
+      isPureGitOnly: false
+    });
+    const cdbDownloads = recUpstreamClientDl.contentdbDownloads;
+    const resolvedLhDownloads = recUpstreamClientDl.luantihubDownloads;
+    const totalClientDownloads = recUpstreamClientDl.downloads;
     const baseReviews = data.reviews && typeof data.reviews === 'object'
       ? data.reviews
       : { positive: 0, neutral: 0, negative: 0 };
@@ -316,8 +324,8 @@ export async function onRequestGet(context: {
       content_warnings: mergedWarnings,
       download_size: resolvedDownloadSize,
       contentdb_downloads: cdbDownloads,
-      luantihub_downloads: lhDownloads,
-      downloads: cdbDownloads + lhDownloads,
+      luantihub_downloads: resolvedLhDownloads,
+      downloads: totalClientDownloads,
       reviews: mergedReviews,
       screenshots: normalizedScreenshots
     };
@@ -367,9 +375,24 @@ export async function onRequestGet(context: {
       }
     }
 
-    const totalDl = Math.max(Number(d1Pkg.downloads_count) || 0, lhDownloads);
-    const releaseId = computeLuantiClientReleaseId(d1Pkg);
     const tags = parseJsonArray(d1Pkg.tags);
+    const isPureGitFallback = Boolean(
+      d1Pkg.provider &&
+      d1Pkg.provider !== 'contentdb' &&
+      !tags.includes('contentdb') &&
+      !(Number(d1Pkg.contentdb_downloads || 0) > 0)
+    );
+    const recFallbackDl = reconcilePackageDownloadCounts({
+      contentdbDownloads: Number(d1Pkg.contentdb_downloads) || 0,
+      luantihubDownloads: lhDownloads,
+      reportedTotalDownloads: Number(d1Pkg.downloads_count) || 0,
+      hasContentDbSource: !isPureGitFallback,
+      isPureGitOnly: isPureGitFallback
+    });
+    const totalDl = recFallbackDl.downloads;
+    const fallbackCdbDl = recFallbackDl.contentdbDownloads;
+    const fallbackLhDl = recFallbackDl.luantihubDownloads;
+    const releaseId = computeLuantiClientReleaseId(d1Pkg);
     const provides = parseJsonArray(d1Pkg.provides);
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
     const softDeps = parseJsonArray(d1Pkg.optional_dependencies);
@@ -455,8 +478,8 @@ export async function onRequestGet(context: {
       dev_state: d1Pkg.dev_state || 'ACTIVELY_DEVELOPED',
       download_size: resolvedSizeLabel || '< 1 MB',
       downloads: totalDl,
-      contentdb_downloads: Number(d1Pkg.contentdb_downloads) || 0,
-      luantihub_downloads: lhDownloads,
+      contentdb_downloads: fallbackCdbDl,
+      luantihub_downloads: fallbackLhDl,
       score: Number(d1Pkg.score) || 0,
       reviews: d1ReviewsCount,
       screenshots,

@@ -6,6 +6,7 @@ import {
   writeEdgeCacheJson
 } from '../../api/lib/upstream';
 import { resolveCanonicalAuthorDisplay } from '../../author/[username]';
+import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -309,21 +310,16 @@ export async function onRequestGet(context: {
           pkgSource = srcs.includes('git') ? 'git' : 'official';
         }
 
-        const rawTotal = Number(pkgData.downloads_count) || 0;
-        const hasExplicitSplit =
-          pkgData.contentdb_downloads !== undefined || pkgData.luantihub_downloads !== undefined;
-        if (hasExplicitSplit) {
-          pkgCdbDownloads = Math.max(0, Number(pkgData.contentdb_downloads) || 0);
-          const explicitLh = Math.max(0, Number(pkgData.luantihub_downloads) || 0);
-          pkgLhDownloads = !isOfficialRow && explicitLh === 0 && rawTotal > 0 ? rawTotal : explicitLh;
-        } else if (isGitRow && !isOfficialRow) {
-          pkgCdbDownloads = 0;
-          pkgLhDownloads = Math.max(0, rawTotal);
-        } else if (isOfficialRow && !isGitRow) {
-          pkgCdbDownloads = Math.max(0, rawTotal);
-          pkgLhDownloads = 0;
-        }
-        pkgDownloads = Math.max(rawTotal, (pkgCdbDownloads || 0) + (pkgLhDownloads || 0));
+        const reconciledSsrDl = reconcilePackageDownloadCounts({
+          contentdbDownloads: Number(pkgData.contentdb_downloads || 0),
+          luantihubDownloads: Number(pkgData.luantihub_downloads || 0),
+          reportedTotalDownloads: Number(pkgData.downloads_count || 0),
+          hasContentDbSource: isOfficialRow,
+          isPureGitOnly: isGitRow && !isOfficialRow
+        });
+        pkgCdbDownloads = reconciledSsrDl.contentdbDownloads;
+        pkgLhDownloads = reconciledSsrDl.luantihubDownloads;
+        pkgDownloads = reconciledSsrDl.downloads;
       }
 
       if (pkgData && (pkgData.provider !== 'contentdb' || pkgData.long_desc || pkgData.short_desc || pkgData.banner_url)) {
@@ -371,11 +367,16 @@ export async function onRequestGet(context: {
           pkgType = upstream.type || pkgType || 'mod';
           pkgLicense = upstream.license || pkgLicense;
           const upstreamDl = Math.max(0, Number(upstream.downloads) || 0);
-          pkgCdbDownloads = Math.max(pkgCdbDownloads || 0, upstreamDl);
-          if (pkgLhDownloads === undefined) {
-            pkgLhDownloads = 0;
-          }
-          pkgDownloads = Math.max(pkgDownloads, pkgCdbDownloads + pkgLhDownloads);
+          const recUpstreamSsrDl = reconcilePackageDownloadCounts({
+            contentdbDownloads: Math.max(pkgCdbDownloads || 0, upstreamDl),
+            luantihubDownloads: pkgLhDownloads ?? 0,
+            reportedTotalDownloads: pkgDownloads,
+            hasContentDbSource: true,
+            isPureGitOnly: false
+          });
+          pkgCdbDownloads = recUpstreamSsrDl.contentdbDownloads;
+          pkgLhDownloads = recUpstreamSsrDl.luantihubDownloads;
+          pkgDownloads = recUpstreamSsrDl.downloads;
           if (!pkgProvider) {
             pkgProvider = 'contentdb';
           }

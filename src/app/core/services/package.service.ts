@@ -24,7 +24,9 @@ import {
   PromoRowSortOption,
   LuantiBlogPost,
   parseLuantiBlogFeed,
-  enrichLuantiBlogPostFromArticleHtml
+  enrichLuantiBlogPostFromArticleHtml,
+  hasComplementaryContentDbSource,
+  reconcilePackageDownloadCounts
 } from '../models/package.model';
 import { SettingsService } from './settings.service';
 import {
@@ -2691,10 +2693,24 @@ export class PackageService {
     const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
     const isUnhydratedSeed = Boolean(item?._unhydratedSeed);
     const inferredHubGitAuthor = String(resolvedAuthor || '').trim().toLowerCase().endsWith('-hub');
-    const isGitOnlyItem =
-      isGitProviderId(item?.provider) ||
-      (item?.source === 'git' && (!Array.isArray(item?.sources) || !item.sources.includes('official'))) ||
-      (inferredHubGitAuthor && !Array.isArray(item?.sources) && item?.source !== 'official' && item?.provider !== 'contentdb');
+    const itemTagsList = this.parseArrayField(item?.tags).map((t: any) =>
+      String(typeof t === 'string' ? t : t?.name || t?.title || '').trim().toLowerCase()
+    );
+    const itemExplicitlyOfficial =
+      hasComplementaryContentDbSource({
+        source: item?.source,
+        sources: item?.sources,
+        provider: item?.provider,
+        contentdb_downloads: item?.contentdb_downloads,
+        contentdb_author: item?.contentdb_author,
+        contentdb_name: item?.contentdb_name,
+        tags: itemTagsList
+      }) ||
+      (!isGitProviderId(item?.provider) &&
+        item?.source !== 'git' &&
+        !inferredHubGitAuthor &&
+        !(Array.isArray(item?.sources) && !item.sources.includes('official')));
+    const isGitOnlyItem = !itemExplicitlyOfficial;
     const hasSplitDownloads = item?.contentdb_downloads !== undefined || item?.luantihub_downloads !== undefined;
     const rawCdbDl = Math.max(
       0,
@@ -2706,10 +2722,13 @@ export class PackageService {
           0
       ) || 0
     );
-    const contentdbDownloads = isGitOnlyItem && item?.contentdb_downloads === 0
-      ? 0
-      : Math.max(rawCdbDl, Number(cachedMeta?.contentdb_downloads || 0));
-    const luantihubDownloads = Math.max(
+    const cachedHasOfficial = hasComplementaryContentDbSource(cachedMeta);
+    const effectiveHasOfficial = itemExplicitlyOfficial || cachedHasOfficial;
+    const contentdbDownloadsRaw =
+      isGitOnlyItem && item?.contentdb_downloads === 0 && !cachedHasOfficial
+        ? 0
+        : Math.max(rawCdbDl, cachedHasOfficial ? Number(cachedMeta?.contentdb_downloads || 0) : 0);
+    const luantihubDownloadsRaw = Math.max(
       0,
       Number(
         item?.luantihub_downloads ??
@@ -2718,9 +2737,17 @@ export class PackageService {
       Number(cachedMeta?.luantihub_downloads || 0),
       localUserDlCount
     );
-    const downloads = hasSplitDownloads
-      ? Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0)
-      : Math.max(contentdbDownloads + luantihubDownloads, Number(item?.downloads ?? item?.downloads_count ?? cachedMeta?.downloads ?? 0) || 0);
+    const reconciledNormDl = reconcilePackageDownloadCounts({
+      contentdbDownloads: contentdbDownloadsRaw,
+      luantihubDownloads: luantihubDownloadsRaw,
+      reportedTotalDownloads:
+        Number((isUnhydratedSeed ? 0 : (item?.downloads ?? item?.downloads_count)) ?? cachedMeta?.downloads ?? 0) || 0,
+      hasContentDbSource: effectiveHasOfficial,
+      isPureGitOnly: !effectiveHasOfficial
+    });
+    const contentdbDownloads = reconciledNormDl.contentdbDownloads;
+    const luantihubDownloads = reconciledNormDl.luantihubDownloads;
+    const downloads = reconciledNormDl.downloads;
 
     const rawItemRevCounts =
       item.review_thread_counts ||
@@ -2861,7 +2888,9 @@ export class PackageService {
       explicitSources.includes('official') ||
       (source === 'official' && !isGitProvider) ||
       source === 'mirror' ||
-      lowerTags.includes('contentdb');
+      lowerTags.includes('contentdb') ||
+      contentdbDownloads > 0 ||
+      Boolean(item?.contentdb_author || item?.contentdb_name || cachedMeta?.contentdb_author || cachedMeta?.contentdb_name);
     const hasGit =
       explicitSources.includes('git') ||
       source === 'git' ||
@@ -2955,6 +2984,9 @@ export class PackageService {
       license: resolvedLic,
       media_license: resolvedMediaLic,
       repo_url: repoUrl,
+      ...(item.git_repo_status || cachedMeta?.git_repo_status
+        ? { git_repo_status: item.git_repo_status || cachedMeta?.git_repo_status }
+        : {}),
       website: item.website || undefined,
       issue_tracker: item.issue_tracker || undefined,
       forum_url: forumUrl,
@@ -2995,6 +3027,12 @@ export class PackageService {
                 ? 'github'
                 : 'contentdb'),
       default_branch: item.default_branch || 'main',
+      ...(item.contentdb_author || cachedMeta?.contentdb_author
+        ? { contentdb_author: item.contentdb_author || cachedMeta?.contentdb_author }
+        : {}),
+      ...(item.contentdb_name || cachedMeta?.contentdb_name
+        ? { contentdb_name: item.contentdb_name || cachedMeta?.contentdb_name }
+        : {}),
       source,
       sources,
       tags: rawTags.length > 0 ? rawTags : [item.type || 'mod'],
@@ -3131,11 +3169,29 @@ export class PackageService {
     ].find(Boolean);
     const resolvedBanner = nonLogoBannerMerge || resolvedThumb || 'logo.svg';
 
-    const cdbDl = Math.max(primary.contentdb_downloads || 0, secondary.contentdb_downloads || 0);
-    const lhDl = Math.max(primary.luantihub_downloads || 0, secondary.luantihub_downloads || 0);
-    const mergedDownloads = (cdbDl > 0 || lhDl > 0)
-      ? Math.max(cdbDl + lhDl, primary.downloads || 0, secondary.downloads || 0)
-      : Math.max(primary.downloads || 0, secondary.downloads || 0);
+    const hasCdbDual =
+      hasComplementaryContentDbSource(primary) ||
+      hasComplementaryContentDbSource(secondary);
+    const reconciledDual = reconcilePackageDownloadCounts({
+      contentdbDownloads: Math.max(primary.contentdb_downloads || 0, secondary.contentdb_downloads || 0),
+      luantihubDownloads: Math.max(primary.luantihub_downloads || 0, secondary.luantihub_downloads || 0),
+      reportedTotalDownloads: Math.max(primary.downloads || 0, secondary.downloads || 0),
+      hasContentDbSource: hasCdbDual,
+      isPureGitOnly: !hasCdbDual
+    });
+    const cdbDl = reconciledDual.contentdbDownloads;
+    const lhDl = reconciledDual.luantihubDownloads;
+    const mergedDownloads = reconciledDual.downloads;
+    const officialAuthorName = existingIsOfficial ? existing.author : incomingIsOfficial ? incoming.author : undefined;
+    const officialPkgName = existingIsOfficial ? existing.name : incomingIsOfficial ? incoming.name : undefined;
+    const resolvedCdbAuthor =
+      primary.contentdb_author ||
+      secondary.contentdb_author ||
+      (officialAuthorName && officialAuthorName !== primary.author ? officialAuthorName : undefined);
+    const resolvedCdbName =
+      primary.contentdb_name ||
+      secondary.contentdb_name ||
+      (officialPkgName && officialPkgName !== primary.name ? officialPkgName : undefined);
 
     const isRealContentDbRelease = (val: unknown): val is number => {
       const n = Number(val);
@@ -3174,6 +3230,8 @@ export class PackageService {
       contentdb_downloads: cdbDl,
       luantihub_downloads: lhDl,
       downloads: mergedDownloads,
+      ...(resolvedCdbAuthor ? { contentdb_author: resolvedCdbAuthor } : {}),
+      ...(resolvedCdbName ? { contentdb_name: resolvedCdbName } : {}),
       daily_downloads: Math.max(primary.daily_downloads || 0, secondary.daily_downloads || 0) || undefined,
       weekly_downloads: Math.max(primary.weekly_downloads || 0, secondary.weekly_downloads || 0) || undefined,
       weekly_views: Math.max(primary.weekly_views || 0, secondary.weekly_views || 0) || undefined,
@@ -3196,6 +3254,9 @@ export class PackageService {
       license: primary.license || secondary.license || '',
       media_license: primary.media_license || secondary.media_license || '',
       repo_url: secondary.repo_url || primary.repo_url,
+      ...(secondary.git_repo_status || primary.git_repo_status
+        ? { git_repo_status: secondary.git_repo_status || primary.git_repo_status }
+        : {}),
       forum_url: primary.forum_url || secondary.forum_url,
       forums: primary.forums || secondary.forums,
       donate_url: primary.donate_url || secondary.donate_url,
@@ -4299,15 +4360,30 @@ export class PackageService {
       const mergedBadgeTags = prev?.badge_tags?.length
         ? parseBadgeTagsArray([...(norm.badge_tags || []), ...prev.badge_tags])
         : norm.badge_tags;
-      const mergedCdbDl = Math.max(norm.contentdb_downloads || 0, prev?.contentdb_downloads || 0);
-      const mergedLhDl = Math.max(norm.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
-      const mergedTotalDl = Math.max(norm.downloads || 0, prev?.downloads || 0, mergedCdbDl + mergedLhDl);
+      const hasOfficial = hasComplementaryContentDbSource(norm) || hasComplementaryContentDbSource(prev);
+      const reconciledDl = reconcilePackageDownloadCounts({
+        contentdbDownloads: Math.max(norm.contentdb_downloads || 0, prev?.contentdb_downloads || 0),
+        luantihubDownloads: Math.max(norm.luantihub_downloads || 0, prev?.luantihub_downloads || 0),
+        reportedTotalDownloads: Math.max(norm.downloads || 0, prev?.downloads || 0),
+        hasContentDbSource: hasOfficial,
+        isPureGitOnly: !hasOfficial
+      });
+      const mergedSources = Array.from(
+        new Set([...(norm.sources || [norm.source]), ...(prev?.sources || [])])
+      ) as PackageSource[];
+      const resolvedCdbAuthor = norm.contentdb_author || prev?.contentdb_author;
+      const resolvedCdbName = norm.contentdb_name || prev?.contentdb_name;
       return {
         ...norm,
         ...(revDepCount !== norm.reverse_dep_count ? { reverse_dep_count: revDepCount } : {}),
-        contentdb_downloads: mergedCdbDl,
-        luantihub_downloads: mergedLhDl,
-        downloads: mergedTotalDl,
+        sources: hasOfficial
+          ? mergedSources
+          : mergedSources.filter(s => s !== 'official'),
+        ...(resolvedCdbAuthor ? { contentdb_author: resolvedCdbAuthor } : {}),
+        ...(resolvedCdbName ? { contentdb_name: resolvedCdbName } : {}),
+        contentdb_downloads: reconciledDl.contentdbDownloads,
+        luantihub_downloads: reconciledDl.luantihubDownloads,
+        downloads: reconciledDl.downloads,
         tags: mergedTags,
         ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
       };
@@ -4351,15 +4427,24 @@ export class PackageService {
       const mergedBadgeTags = prev?.badge_tags?.length
         ? parseBadgeTagsArray([...(pkg.badge_tags || []), ...prev.badge_tags])
         : pkg.badge_tags;
-      const isPureGitBootPkg =
-        pkg.source === 'git' && !pkg.sources?.includes('official') && (pkg.contentdb_downloads || 0) === 0;
-      const mergedCdbDl = isPureGitBootPkg
-        ? 0
-        : Math.max(pkg.contentdb_downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.contentdb_downloads || 0));
-      const mergedLhDl = Math.max(pkg.luantihub_downloads || 0, prev?.luantihub_downloads || 0);
-      const mergedTotalDl = isPureGitBootPkg
-        ? Math.max(pkg.downloads || 0, mergedLhDl)
-        : Math.max(pkg.downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.downloads || 0), mergedCdbDl + mergedLhDl);
+      const hasOfficialBootPkg =
+        hasComplementaryContentDbSource(pkg) ||
+        (!prev?._unhydratedSeed && hasComplementaryContentDbSource(prev));
+      const isPureGitBootPkg = !hasOfficialBootPkg;
+      const reconciledBoot = reconcilePackageDownloadCounts({
+        contentdbDownloads: isPureGitBootPkg
+          ? 0
+          : Math.max(pkg.contentdb_downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.contentdb_downloads || 0)),
+        luantihubDownloads: Math.max(pkg.luantihub_downloads || 0, prev?.luantihub_downloads || 0),
+        reportedTotalDownloads: Math.max(pkg.downloads || 0, prev?._unhydratedSeed ? 0 : (prev?.downloads || 0)),
+        hasContentDbSource: hasOfficialBootPkg,
+        isPureGitOnly: isPureGitBootPkg
+      });
+      const mergedCdbDl = reconciledBoot.contentdbDownloads;
+      const mergedLhDl = reconciledBoot.luantihubDownloads;
+      const mergedTotalDl = reconciledBoot.downloads;
+      const mergedCdbAuthor = pkg.contentdb_author || prev?.contentdb_author;
+      const mergedCdbName = pkg.contentdb_name || prev?.contentdb_name;
       const tagsChanged =
         mergedTags.length !== (pkg.tags?.length || 0) ||
         (mergedBadgeTags?.length || 0) !== (pkg.badge_tags?.length || 0);
@@ -4371,7 +4456,9 @@ export class PackageService {
         revDepCount !== pkg.reverse_dep_count ||
         (stampedCreatedAt && stampedCreatedAt !== pkg.created_at) ||
         tagsChanged ||
-        downloadsChanged
+        downloadsChanged ||
+        Boolean(mergedCdbAuthor && mergedCdbAuthor !== pkg.contentdb_author) ||
+        Boolean(mergedCdbName && mergedCdbName !== pkg.contentdb_name)
       ) {
         const nextPkg: LuantiPackage = {
           ...pkg,
@@ -4379,6 +4466,8 @@ export class PackageService {
           contentdb_downloads: mergedCdbDl,
           luantihub_downloads: mergedLhDl,
           downloads: mergedTotalDl,
+          ...(mergedCdbAuthor ? { contentdb_author: mergedCdbAuthor } : {}),
+          ...(mergedCdbName ? { contentdb_name: mergedCdbName } : {}),
           ...(stampedCreatedAt ? { created_at: stampedCreatedAt } : {}),
           tags: mergedTags,
           ...(mergedBadgeTags && mergedBadgeTags.length > 0 ? { badge_tags: mergedBadgeTags } : {})
@@ -4494,19 +4583,27 @@ export class PackageService {
             (curr.banner && curr.banner !== 'logo.svg' ? curr.banner : freshMatch.banner) ||
             mergedShots[0] ||
             resolvedThumb;
-          const isPureGitFresh =
-            freshMatch.source === 'git' &&
-            !freshMatch.sources?.includes('official') &&
-            (freshMatch.contentdb_downloads || 0) === 0;
-          const nextCdbDl = isPureGitFresh
-            ? 0
-            : Math.max(curr._unhydratedSeed ? 0 : (curr.contentdb_downloads || 0), freshMatch.contentdb_downloads || 0);
-          const nextLhDl = Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0);
-          const nextTotalDl = Math.max(
-            curr._unhydratedSeed ? 0 : (curr.downloads || 0),
-            freshMatch.downloads || 0,
-            nextCdbDl + nextLhDl
-          );
+          const hasOfficialFresh =
+            hasComplementaryContentDbSource(freshMatch) ||
+            (!curr._unhydratedSeed && hasComplementaryContentDbSource(curr));
+          const isPureGitFresh = !hasOfficialFresh;
+          const reconciledFresh = reconcilePackageDownloadCounts({
+            contentdbDownloads: isPureGitFresh
+              ? 0
+              : Math.max(curr._unhydratedSeed ? 0 : (curr.contentdb_downloads || 0), freshMatch.contentdb_downloads || 0),
+            luantihubDownloads: Math.max(curr.luantihub_downloads || 0, freshMatch.luantihub_downloads || 0),
+            reportedTotalDownloads: Math.max(curr._unhydratedSeed ? 0 : (curr.downloads || 0), freshMatch.downloads || 0),
+            hasContentDbSource: hasOfficialFresh,
+            isPureGitOnly: isPureGitFresh
+          });
+          const nextCdbDl = reconciledFresh.contentdbDownloads;
+          const nextLhDl = reconciledFresh.luantihubDownloads;
+          const nextTotalDl = reconciledFresh.downloads;
+          const nextCdbAuthor = freshMatch.contentdb_author || curr.contentdb_author;
+          const nextCdbName = freshMatch.contentdb_name || curr.contentdb_name;
+          const nextSources = hasOfficialFresh
+            ? Array.from(new Set<PackageSource>(['official', ...(curr._unhydratedSeed ? [] : (curr.sources || [])), ...(freshMatch.sources || [])]))
+            : freshMatch.sources || curr.sources;
           const { _unhydratedSeed: _dropSeed, ...cleanCurr } = curr;
           return {
             ...cleanCurr,
@@ -4514,9 +4611,13 @@ export class PackageService {
               ? {
                   provider: freshMatch.provider || curr.provider,
                   source: freshMatch.source,
-                  sources: freshMatch.sources
+                  sources: nextSources
                 }
-              : {}),
+              : hasOfficialFresh && nextSources
+                ? { sources: nextSources }
+                : {}),
+            ...(nextCdbAuthor ? { contentdb_author: nextCdbAuthor } : {}),
+            ...(nextCdbName ? { contentdb_name: nextCdbName } : {}),
             title: curr.title === curr.name && freshMatch.title ? freshMatch.title : curr.title,
             thumbnail: resolvedThumb,
             banner: resolvedBanner,
@@ -4862,26 +4963,36 @@ export class PackageService {
                   pkg.license = detail.license || detail.media_license || pkg.license;
                   pkg.media_license = detail.media_license || detail.license || pkg.media_license;
                 }
+                const hasOfficialRecent = hasComplementaryContentDbSource(pkg);
                 const detailCdbDl =
                   typeof detail.contentdb_downloads === 'number'
                     ? detail.contentdb_downloads
                     : detail.contentdb_downloads === undefined &&
                         typeof detail.downloads === 'number' &&
-                        (pkg.source !== 'git' || pkg.sources?.includes('official'))
+                        hasOfficialRecent
                       ? detail.downloads
                       : undefined;
-                if (typeof detail.luantihub_downloads === 'number') {
-                  pkg.luantihub_downloads = Math.max(pkg.luantihub_downloads || 0, detail.luantihub_downloads);
-                }
-                if (typeof detailCdbDl === 'number') {
-                  pkg.contentdb_downloads = Math.max(pkg.contentdb_downloads || 0, detailCdbDl);
-                }
-                if (typeof detail.downloads === 'number' || typeof detailCdbDl === 'number') {
-                  pkg.downloads = Math.max(
-                    pkg.downloads || 0,
-                    typeof detail.contentdb_downloads === 'number' ? Number(detail.downloads || 0) : 0,
-                    (pkg.contentdb_downloads || 0) + (pkg.luantihub_downloads || 0)
-                  );
+                if (
+                  typeof detail.luantihub_downloads === 'number' ||
+                  typeof detailCdbDl === 'number' ||
+                  typeof detail.downloads === 'number'
+                ) {
+                  const recDetail = reconcilePackageDownloadCounts({
+                    contentdbDownloads: Math.max(pkg.contentdb_downloads || 0, detailCdbDl ?? 0),
+                    luantihubDownloads: Math.max(
+                      pkg.luantihub_downloads || 0,
+                      typeof detail.luantihub_downloads === 'number' ? detail.luantihub_downloads : 0
+                    ),
+                    reportedTotalDownloads: Math.max(
+                      pkg.downloads || 0,
+                      typeof detail.contentdb_downloads === 'number' ? Number(detail.downloads || 0) : 0
+                    ),
+                    hasContentDbSource: hasOfficialRecent,
+                    isPureGitOnly: !hasOfficialRecent
+                  });
+                  pkg.contentdb_downloads = recDetail.contentdbDownloads;
+                  pkg.luantihub_downloads = recDetail.luantihubDownloads;
+                  pkg.downloads = recDetail.downloads;
                 }
                 if (Array.isArray(detail.screenshots) && detail.screenshots.length > 0) {
                   const mergedShots = this.mergePackageScreenshots([pkg.banner, pkg.thumbnail], detail.screenshots, pkg.screenshots);
@@ -4970,13 +5081,22 @@ export class PackageService {
               seenInCurr.add(lowerKey);
               const r = createdById.get(lowerKey);
               if (!r) return p;
+              const hasOfficial = hasComplementaryContentDbSource(p) || hasComplementaryContentDbSource(r);
+              const recRecent = reconcilePackageDownloadCounts({
+                contentdbDownloads: Math.max(p.contentdb_downloads || 0, r.contentdb_downloads || 0),
+                luantihubDownloads: Math.max(p.luantihub_downloads || 0, r.luantihub_downloads || 0),
+                reportedTotalDownloads: Math.max(p.downloads || 0, r.downloads || 0),
+                hasContentDbSource: hasOfficial,
+                isPureGitOnly: !hasOfficial
+              });
               return {
                 ...p,
                 created_at: r.created_at || p.created_at,
                 license: r.license || p.license,
                 media_license: r.media_license || p.media_license,
-                downloads: Math.max(p.downloads || 0, r.downloads || 0),
-                contentdb_downloads: Math.max(p.contentdb_downloads || 0, r.contentdb_downloads || 0),
+                downloads: recRecent.downloads,
+                contentdb_downloads: recRecent.contentdbDownloads,
+                luantihub_downloads: recRecent.luantihubDownloads,
                 banner: r.banner && r.banner !== 'logo.svg' ? r.banner : p.banner,
                 screenshots: r.screenshots?.length ? r.screenshots : p.screenshots
               };
@@ -5178,11 +5298,19 @@ export class PackageService {
             const s = scoresMap.get(pkg.id.toLowerCase()) || scoresMap.get(`${pkg.author}/${pkg.name}`.toLowerCase());
             if (!s) return pkg;
 
-            const cdbDl = typeof s.downloads === 'number'
-              ? Math.max(pkg.contentdb_downloads || 0, s.downloads)
-              : (pkg.contentdb_downloads || 0);
-            const lhDl = pkg.luantihub_downloads || 0;
-            const totalDl = Math.max(pkg.downloads || 0, cdbDl + lhDl);
+            const recScores = reconcilePackageDownloadCounts({
+              contentdbDownloads:
+                typeof s.downloads === 'number'
+                  ? Math.max(pkg.contentdb_downloads || 0, s.downloads)
+                  : (pkg.contentdb_downloads || 0),
+              luantihubDownloads: pkg.luantihub_downloads || 0,
+              reportedTotalDownloads: pkg.downloads || 0,
+              hasContentDbSource: true,
+              isPureGitOnly: false
+            });
+            const cdbDl = recScores.contentdbDownloads;
+            const lhDl = recScores.luantihubDownloads;
+            const totalDl = recScores.downloads;
             const rawCdbScore = typeof s.score === 'number' ? Math.round(s.score * 10) / 10 : (pkg.contentdb_score || 0);
             const revCounts =
               parseNonZeroReviewThreadCounts(s.reviews) ||
@@ -5196,6 +5324,7 @@ export class PackageService {
             this.hydratedMetaCache.set(pkg.id.toLowerCase(), {
               ...existingMeta,
               contentdb_downloads: cdbDl,
+              luantihub_downloads: lhDl,
               downloads: totalDl,
               contentdb_score: rawCdbScore,
               score: starScore
@@ -5204,6 +5333,7 @@ export class PackageService {
             return {
               ...pkg,
               contentdb_downloads: cdbDl,
+              luantihub_downloads: lhDl,
               downloads: totalDl,
               contentdb_score: rawCdbScore,
               score: starScore,
@@ -5911,22 +6041,35 @@ export class PackageService {
           ? (itemMs >= patchMs ? item.created_at : patch.created_at)
           : (item.created_at || patch.created_at);
     }
-    const resolvedCdbDl =
-      patch.contentdb_downloads !== undefined || item.contentdb_downloads !== undefined
-        ? Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0))
-        : undefined;
-    const resolvedLhDl =
-      patch.luantihub_downloads !== undefined || item.luantihub_downloads !== undefined
-        ? Math.max(Number(patch.luantihub_downloads || 0), Number(item.luantihub_downloads || 0))
-        : undefined;
-    const resolvedTotalDl =
-      patch.downloads !== undefined || item.downloads !== undefined || resolvedCdbDl !== undefined || resolvedLhDl !== undefined
-        ? Math.max(
-            Number(patch.downloads || 0),
-            Number(item.downloads || 0),
-            (resolvedCdbDl || 0) + (resolvedLhDl || 0)
-          )
-        : undefined;
+    const hasAnyDlField =
+      patch.downloads !== undefined ||
+      item.downloads !== undefined ||
+      patch.contentdb_downloads !== undefined ||
+      item.contentdb_downloads !== undefined ||
+      patch.luantihub_downloads !== undefined ||
+      item.luantihub_downloads !== undefined;
+    let resolvedCdbDl: number | undefined;
+    let resolvedLhDl: number | undefined;
+    let resolvedTotalDl: number | undefined;
+    if (hasAnyDlField) {
+      const candidateForSource: Partial<LuantiPackage> = {
+        ...item,
+        ...patch,
+        tags: mergedTags,
+        sources: patch.sources || item.sources
+      };
+      const hasOfficial = hasComplementaryContentDbSource(candidateForSource);
+      const recPatch = reconcilePackageDownloadCounts({
+        contentdbDownloads: Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0)),
+        luantihubDownloads: Math.max(Number(patch.luantihub_downloads || 0), Number(item.luantihub_downloads || 0)),
+        reportedTotalDownloads: Math.max(Number(patch.downloads || 0), Number(item.downloads || 0)),
+        hasContentDbSource: hasOfficial,
+        isPureGitOnly: !hasOfficial
+      });
+      resolvedCdbDl = recPatch.contentdbDownloads;
+      resolvedLhDl = recPatch.luantihubDownloads;
+      resolvedTotalDl = recPatch.downloads;
+    }
     const merged: LuantiPackage = {
       ...item,
       ...patch,
@@ -6223,26 +6366,37 @@ export class PackageService {
           const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
           const livePkgForHydrate = liveByLowerId.get(lowerKey);
           const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerKey] || 0);
-          const cdbDl = Math.max(
-            Number(pkg.contentdb_downloads || 0),
-            Number(livePkgForHydrate?.contentdb_downloads || 0),
-            Number(prevMetaForHydrate?.contentdb_downloads || 0),
-            Number(h.contentdb_downloads || 0)
-          );
-          const lhDl = Math.max(
-            Number(pkg.luantihub_downloads || 0),
-            Number(livePkgForHydrate?.luantihub_downloads || 0),
-            Number(prevMetaForHydrate?.luantihub_downloads || 0),
-            Number(h.luantihub_downloads || 0),
-            localUserDlCount
-          );
-          const totalDl = Math.max(
-            Number(pkg.downloads || 0),
-            Number(livePkgForHydrate?.downloads || 0),
-            Number(prevMetaForHydrate?.downloads || 0),
-            Number(h.downloads || 0),
-            cdbDl + lhDl
-          );
+          const hasOfficialHydrate =
+            hasComplementaryContentDbSource(h) ||
+            hasComplementaryContentDbSource(pkg) ||
+            hasComplementaryContentDbSource(livePkgForHydrate) ||
+            hasComplementaryContentDbSource(prevMetaForHydrate);
+          const reconciledHydrate = reconcilePackageDownloadCounts({
+            contentdbDownloads: Math.max(
+              Number(pkg.contentdb_downloads || 0),
+              Number(livePkgForHydrate?.contentdb_downloads || 0),
+              Number(prevMetaForHydrate?.contentdb_downloads || 0),
+              Number(h.contentdb_downloads || 0)
+            ),
+            luantihubDownloads: Math.max(
+              Number(pkg.luantihub_downloads || 0),
+              Number(livePkgForHydrate?.luantihub_downloads || 0),
+              Number(prevMetaForHydrate?.luantihub_downloads || 0),
+              Number(h.luantihub_downloads || 0),
+              localUserDlCount
+            ),
+            reportedTotalDownloads: Math.max(
+              Number(pkg.downloads || 0),
+              Number(livePkgForHydrate?.downloads || 0),
+              Number(prevMetaForHydrate?.downloads || 0),
+              Number(h.downloads || 0)
+            ),
+            hasContentDbSource: hasOfficialHydrate,
+            isPureGitOnly: !hasOfficialHydrate
+          });
+          const cdbDl = reconciledHydrate.contentdbDownloads;
+          const lhDl = reconciledHydrate.luantihubDownloads;
+          const totalDl = reconciledHydrate.downloads;
           const lic = h.license || h.media_license || pkg.license || '';
           const mediaLic = h.media_license || h.license || pkg.media_license || '';
           const baseTags = this.mergePackageTagsPreservingExisting(
@@ -7214,50 +7368,55 @@ export class PackageService {
       Number(prevMeta.luantihub_downloads || 0)
     );
     const latestLhDownloads = Math.max(baseLhDownloads + 1, localUserDlCount);
-    const isPureGitTarget =
-      pkg.source === 'git' &&
-      !pkg.sources?.includes('official') &&
-      !activeMatch?.sources?.includes('official') &&
-      !catalogMatch?.sources?.includes('official');
-    const latestCdbDownloads = isPureGitTarget
-      ? 0
-      : Math.max(
-          0,
-          Number(
-            pkg.contentdb_downloads ??
-              activeMatch?.contentdb_downloads ??
-              catalogMatch?.contentdb_downloads ??
-              prevMeta.contentdb_downloads ??
-              Math.max(0, (pkg.downloads || 0) - (pkg.luantihub_downloads || 0))
-          ) || 0
-        );
-    const latestTotalDownloads = Math.max(
-      isPureGitTarget ? 0 : Number(pkg.downloads || 0),
-      isPureGitTarget ? 0 : Number(activeMatch?.downloads || 0),
-      isPureGitTarget ? 0 : Number(catalogMatch?.downloads || 0),
-      isPureGitTarget ? 0 : Number(prevMeta.downloads || 0),
-      latestCdbDownloads + latestLhDownloads
+    const prevMetaHasOfficial = Boolean(
+      !prevMeta._unhydratedSeed &&
+      (prevMeta.sources?.includes('official') ||
+        prevMeta.source === 'official' ||
+        Number(prevMeta.contentdb_downloads || 0) > 0)
     );
+    const hasOfficialTarget =
+      hasComplementaryContentDbSource(pkg) ||
+      hasComplementaryContentDbSource(activeMatch) ||
+      hasComplementaryContentDbSource(catalogMatch) ||
+      prevMetaHasOfficial;
+    const reconciledTarget = reconcilePackageDownloadCounts({
+      contentdbDownloads: Math.max(
+        Number(pkg.contentdb_downloads || 0),
+        Number(activeMatch?.contentdb_downloads || 0),
+        Number(catalogMatch?.contentdb_downloads || 0),
+        Number(prevMeta.contentdb_downloads || 0)
+      ),
+      luantihubDownloads: latestLhDownloads,
+      reportedTotalDownloads: Math.max(
+        Number(pkg.downloads || 0),
+        Number(activeMatch?.downloads || 0),
+        Number(catalogMatch?.downloads || 0),
+        Number(prevMeta.downloads || 0)
+      ),
+      hasContentDbSource: hasOfficialTarget,
+      isPureGitOnly: !hasOfficialTarget
+    });
+    const latestCdbDownloads = reconciledTarget.contentdbDownloads;
+    const latestTotalDownloads = reconciledTarget.downloads;
 
     const bumpCounters = (item: LuantiPackage): LuantiPackage => {
-      const itemIsPureGit = item.source === 'git' && !item.sources?.includes('official');
-      const cdb = itemIsPureGit
-        ? 0
-        : Math.max(
-            latestCdbDownloads,
-            Number(
-              item.contentdb_downloads ??
-                Math.max(0, (item.downloads || 0) - (item.luantihub_downloads || 0))
-            ) || 0
-          );
-      const total = itemIsPureGit
-        ? Math.max(latestTotalDownloads, latestLhDownloads)
-        : Math.max(item.downloads || 0, latestTotalDownloads, cdb + latestLhDownloads);
+      const itemHasOfficial = hasOfficialTarget || hasComplementaryContentDbSource(item);
+      const recItem = reconcilePackageDownloadCounts({
+        contentdbDownloads: Math.max(latestCdbDownloads, Number(item.contentdb_downloads || 0)),
+        luantihubDownloads: Math.max(reconciledTarget.luantihubDownloads, Number(item.luantihub_downloads || 0)),
+        reportedTotalDownloads: Math.max(latestTotalDownloads, Number(item.downloads || 0)),
+        hasContentDbSource: itemHasOfficial,
+        isPureGitOnly: !itemHasOfficial
+      });
+      const nextSources = itemHasOfficial
+        ? (Array.from(new Set([...(item.sources || [item.source]), 'official'])) as PackageSource[])
+        : (item.sources || [item.source]).filter(s => s !== 'official');
       return {
         ...item,
-        contentdb_downloads: cdb,
-        luantihub_downloads: latestLhDownloads,
-        downloads: total
+        sources: nextSources.length > 0 ? nextSources : [item.source],
+        contentdb_downloads: recItem.contentdbDownloads,
+        luantihub_downloads: recItem.luantihubDownloads,
+        downloads: recItem.downloads
       };
     };
 
@@ -7276,18 +7435,26 @@ export class PackageService {
 
     const pendingPatch = this.pendingCatalogPatches.get(targetIdLower);
     if (pendingPatch) {
+      const pendingHasOfficial = hasOfficialTarget || hasComplementaryContentDbSource(pendingPatch);
+      const recPending = reconcilePackageDownloadCounts({
+        contentdbDownloads: Math.max(Number(pendingPatch.contentdb_downloads || 0), latestCdbDownloads),
+        luantihubDownloads: Math.max(Number(pendingPatch.luantihub_downloads || 0), reconciledTarget.luantihubDownloads),
+        reportedTotalDownloads: Math.max(Number(pendingPatch.downloads || 0), latestTotalDownloads),
+        hasContentDbSource: pendingHasOfficial,
+        isPureGitOnly: !pendingHasOfficial
+      });
       this.pendingCatalogPatches.set(targetIdLower, {
         ...pendingPatch,
-        contentdb_downloads: Math.max(Number(pendingPatch.contentdb_downloads || 0), latestCdbDownloads),
-        luantihub_downloads: Math.max(Number(pendingPatch.luantihub_downloads || 0), latestLhDownloads),
-        downloads: Math.max(Number(pendingPatch.downloads || 0), latestTotalDownloads)
+        contentdb_downloads: recPending.contentdbDownloads,
+        luantihub_downloads: recPending.luantihubDownloads,
+        downloads: recPending.downloads
       });
     }
 
     this.hydratedMetaCache.set(targetIdLower, {
       ...prevMeta,
-      contentdb_downloads: Math.max(Number(prevMeta.contentdb_downloads || 0), latestCdbDownloads),
-      luantihub_downloads: latestLhDownloads,
+      contentdb_downloads: latestCdbDownloads,
+      luantihub_downloads: reconciledTarget.luantihubDownloads,
       downloads: latestTotalDownloads
     });
     this.scheduleHydratedMetaPersist();
@@ -7372,7 +7539,9 @@ export class PackageService {
           }
         }
       } else if (!this.edgeApiAvailable) {
-        targetUrl = `https://content.luanti.org/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}/download/`;
+        const cdbAuthor = pkg.contentdb_author || resolvedAuthor;
+        const cdbName = pkg.contentdb_name || pkg.name;
+        targetUrl = `https://content.luanti.org/packages/${encodeURIComponent(cdbAuthor)}/${encodeURIComponent(cdbName)}/download/`;
       }
     }
 
@@ -8827,27 +8996,40 @@ export class PackageService {
           ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
           : [];
         const hasSplitDownloads = data.contentdb_downloads !== undefined || data.luantihub_downloads !== undefined;
-        const isAuthoritativePureGit =
-          hasSplitDownloads &&
-          Number(data.contentdb_downloads || 0) === 0 &&
-          ((dataSources.length > 0 && !dataSources.includes('official')) ||
-            (dataSources.length === 0 &&
-              data.source === 'git' &&
-              !liveCatalogPkgForDownloads?.sources?.includes('official')));
-        const resolvedCdbDownloads = isAuthoritativePureGit
-          ? 0
-          : Math.max(
-              hasSplitDownloads
-                ? Math.max(0, Number(data.contentdb_downloads || 0))
-                : (!pkg._unhydratedSeed && (pkg.source !== 'git' || pkg.sources?.includes('official'))
-                    ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
-                    : (pkg._unhydratedSeed ? 0 : (pkg.contentdb_downloads || 0))),
-              pkg._unhydratedSeed ? 0 : Number(pkg.contentdb_downloads || 0),
-              Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
-              Number(cachedMetaForDownloads?.contentdb_downloads || 0)
-            );
+        const dataInlineTags = Array.isArray(data.tags)
+          ? data.tags
+              .map((t: any) => String(typeof t === 'string' ? t : t?.name || t?.title || '').trim().toLowerCase())
+              .filter(Boolean)
+          : [];
+        const catalogHasContentDb = hasComplementaryContentDbSource(liveCatalogPkgForDownloads);
+        const existingPkgHasContentDb = !pkg._unhydratedSeed && hasComplementaryContentDbSource(pkg);
+        const cachedMetaHasContentDb = hasComplementaryContentDbSource(cachedMetaForDownloads);
+        const dataHasContentDb =
+          hasComplementaryContentDbSource({
+            source: data.source,
+            sources: dataSources,
+            provider: data.provider,
+            contentdb_downloads: data.contentdb_downloads,
+            contentdb_author: data.contentdb_author,
+            contentdb_name: data.contentdb_name,
+            tags: dataInlineTags
+          }) || (!hasSplitDownloads && dataSources.length === 0 && data.source !== 'git' && !isGitProviderId(data.provider));
+        const hasAnyContentDbProvenance =
+          dataHasContentDb || catalogHasContentDb || existingPkgHasContentDb || cachedMetaHasContentDb;
+        const isAuthoritativePureGit = !hasAnyContentDbProvenance;
+
+        const rawCdbCandidates = Math.max(
+          hasSplitDownloads
+            ? Math.max(0, Number(data.contentdb_downloads || 0))
+            : (!pkg._unhydratedSeed && dataHasContentDb
+                ? Math.max(0, Number(data.downloads ?? data.downloads_count ?? pkg.contentdb_downloads ?? pkg.downloads ?? 0) || 0)
+                : (pkg._unhydratedSeed ? 0 : (pkg.contentdb_downloads || 0))),
+          pkg._unhydratedSeed ? 0 : Number(pkg.contentdb_downloads || 0),
+          Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0),
+          Number(cachedMetaForDownloads?.contentdb_downloads || 0)
+        );
         const localUserDlCount = Number(this.settingsService.downloadedPackages()[cacheKey] || 0);
-        const resolvedLhDownloads = Math.max(
+        const rawLhCandidates = Math.max(
           0,
           Number(data.luantihub_downloads ?? 0) || 0,
           Number(pkg.luantihub_downloads ?? 0) || 0,
@@ -8855,19 +9037,41 @@ export class PackageService {
           Number(cachedMetaForDownloads?.luantihub_downloads ?? 0) || 0,
           localUserDlCount
         );
-        const resolvedDownloads = isAuthoritativePureGit
-          ? Math.max(
-              resolvedLhDownloads,
-              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
-              Number(liveCatalogPkgForDownloads?.downloads || 0)
-            )
-          : Math.max(
-              resolvedCdbDownloads + resolvedLhDownloads,
-              Number(data.downloads ?? data.downloads_count ?? 0) || 0,
-              pkg._unhydratedSeed ? 0 : Number(pkg.downloads || 0),
-              Number(liveCatalogPkgForDownloads?.downloads || 0),
-              Number(cachedMetaForDownloads?.downloads || 0)
-            );
+        const reconciledDetailDl = reconcilePackageDownloadCounts({
+          contentdbDownloads: isAuthoritativePureGit ? 0 : rawCdbCandidates,
+          luantihubDownloads: rawLhCandidates,
+          reportedTotalDownloads: Math.max(
+            Number(data.downloads ?? data.downloads_count ?? 0) || 0,
+            pkg._unhydratedSeed ? 0 : Number(pkg.downloads || 0),
+            Number(liveCatalogPkgForDownloads?.downloads || 0),
+            Number(cachedMetaForDownloads?.downloads || 0)
+          ),
+          hasContentDbSource: hasAnyContentDbProvenance,
+          isPureGitOnly: isAuthoritativePureGit
+        });
+        const resolvedCdbDownloads = reconciledDetailDl.contentdbDownloads;
+        const resolvedLhDownloads = reconciledDetailDl.luantihubDownloads;
+        const resolvedDownloads = reconciledDetailDl.downloads;
+        const resolvedContentDbAuthor =
+          data.contentdb_author ||
+          liveCatalogPkgForDownloads?.contentdb_author ||
+          cachedMetaForDownloads?.contentdb_author ||
+          pkg.contentdb_author ||
+          (catalogHasContentDb &&
+          liveCatalogPkgForDownloads?.author &&
+          liveCatalogPkgForDownloads.author !== pkg.author
+            ? liveCatalogPkgForDownloads.author
+            : undefined);
+        const resolvedContentDbName =
+          data.contentdb_name ||
+          liveCatalogPkgForDownloads?.contentdb_name ||
+          cachedMetaForDownloads?.contentdb_name ||
+          pkg.contentdb_name ||
+          (catalogHasContentDb &&
+          liveCatalogPkgForDownloads?.name &&
+          liveCatalogPkgForDownloads.name !== pkg.name
+            ? liveCatalogPkgForDownloads.name
+            : undefined);
 
         const reviewThreadCounts =
           parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
@@ -8959,7 +9163,16 @@ export class PackageService {
         let mergedSources =
           pkg._unhydratedSeed && dataSources.length > 0
             ? Array.from(new Set<PackageSource>(dataSources))
-            : Array.from(new Set<PackageSource>([...(pkg.sources || [pkg.source]), ...dataSources]));
+            : Array.from(
+                new Set<PackageSource>([
+                  ...(pkg.sources || [pkg.source]),
+                  ...(liveCatalogPkgForDownloads?.sources || []),
+                  ...dataSources
+                ])
+              );
+        if (hasAnyContentDbProvenance && !mergedSources.includes('official')) {
+          mergedSources = ['official', ...mergedSources];
+        }
 
         const forumUrl = this.normalizeForumUrl(data.forum_url || data.forums) || pkg.forum_url || pkg.forums;
         const providesList = this.parseArrayField(data.provides)
@@ -9110,6 +9323,8 @@ export class PackageService {
           banner: resolvedDetailBanner,
           dependencies: deps.length > 0 ? deps : (pkg.dependencies || []),
           optional_dependencies: optDeps.length > 0 ? optDeps : (pkg.optional_dependencies || []),
+          ...(resolvedContentDbAuthor ? { contentdb_author: resolvedContentDbAuthor } : {}),
+          ...(resolvedContentDbName ? { contentdb_name: resolvedContentDbName } : {}),
           sources: mergedSources
         };
 
@@ -9126,13 +9341,20 @@ export class PackageService {
             license: resolvedLicense || prevMeta.license,
             media_license: resolvedMediaLicense || prevMeta.media_license,
             min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
+            ...(resolvedContentDbAuthor || prevMeta.contentdb_author
+              ? { contentdb_author: resolvedContentDbAuthor || prevMeta.contentdb_author }
+              : {}),
+            ...(resolvedContentDbName || prevMeta.contentdb_name
+              ? { contentdb_name: resolvedContentDbName || prevMeta.contentdb_name }
+              : {}),
+            ...(mergedSources.includes('official') ? { sources: mergedSources } : {}),
             contentdb_downloads: isAuthoritativePureGit
               ? 0
               : Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
             luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
             downloads: isAuthoritativePureGit
               ? Math.max(resolvedDownloads, resolvedLhDownloads)
-              : Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
+              : reconciledDetailDl.downloads || Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
             score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
             ...(reviewThreadCounts || prevMeta.review_thread_counts
               ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
@@ -9165,23 +9387,27 @@ export class PackageService {
               ((current.author || '').toLowerCase() === targetAuthorLower &&
                 (current.name || '').toLowerCase() === targetNameLower))
           ) {
-            const mergedCdbDl = isAuthoritativePureGit
-              ? 0
-              : Math.max(
-                  current._unhydratedSeed ? 0 : Number(current.contentdb_downloads || 0),
-                  Number(updatedFields.contentdb_downloads || 0)
-                );
-            const mergedLhDl = Math.max(
-              Number(current.luantihub_downloads || 0),
-              Number(updatedFields.luantihub_downloads || 0)
-            );
-            const mergedTotalDl = isAuthoritativePureGit
-              ? Math.max(Number(updatedFields.downloads || 0), mergedLhDl)
-              : Math.max(
-                  current._unhydratedSeed ? 0 : Number(current.downloads || 0),
-                  Number(updatedFields.downloads || 0),
-                  mergedCdbDl + mergedLhDl
-                );
+            const reconciledActive = reconcilePackageDownloadCounts({
+              contentdbDownloads: isAuthoritativePureGit
+                ? 0
+                : Math.max(
+                    current._unhydratedSeed ? 0 : Number(current.contentdb_downloads || 0),
+                    Number(updatedFields.contentdb_downloads || 0)
+                  ),
+              luantihubDownloads: Math.max(
+                Number(current.luantihub_downloads || 0),
+                Number(updatedFields.luantihub_downloads || 0)
+              ),
+              reportedTotalDownloads: Math.max(
+                current._unhydratedSeed ? 0 : Number(current.downloads || 0),
+                Number(updatedFields.downloads || 0)
+              ),
+              hasContentDbSource: hasAnyContentDbProvenance,
+              isPureGitOnly: isAuthoritativePureGit
+            });
+            const mergedCdbDl = reconciledActive.contentdbDownloads;
+            const mergedLhDl = reconciledActive.luantihubDownloads;
+            const mergedTotalDl = reconciledActive.downloads;
             const { _unhydratedSeed: _dropSeed, ...cleanCurrent } = current;
             const merged = {
               ...cleanCurrent,

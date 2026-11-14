@@ -29,6 +29,13 @@ import {
 } from '../../functions/api/packages/index';
 import { onRequestPost as postPackagesHydrate } from '../../functions/api/packages/hydrate';
 import { onRequestGet as getPackageDetail } from '../../functions/api/packages/[author]/[name]/index';
+import { onRequestGet as getPackageStats } from '../../functions/api/packages/[author]/[name]/stats';
+import { onRequestGet as getTop10Packages } from '../../functions/api/packages/top10';
+import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
+import { PackageBadgesComponent } from './shared/components/package-badges.component';
+import { DownloadAnalyticsChartComponent } from './shared/components/download-analytics-chart.component';
+import { HeroBillboardComponent } from './features/hero/hero-billboard.component';
+import { AuthorDrawerComponent } from './features/author/author-drawer.component';
 import { onRequestGet as getPackageForClient } from '../../functions/api/packages/[author]/[name]/for-client';
 import { onRequestGet as getPackageDependencies } from '../../functions/api/packages/[author]/[name]/dependencies';
 import { onRequest as handlePackageDownload } from '../../functions/api/packages/[author]/[name]/download';
@@ -3167,6 +3174,832 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
         { url: `https://raw.githubusercontent.com/zenonseth/strata/${commit2}/screenshot.png` }
       ]);
     } finally {
+      clearIsolateCachesForTests();
+    }
+  });
+
+  it('reconciles dual-source ZenonSeth/strata downloads (Hub + ContentDB), backfills D1 cleanly without extra fast-path subrequests, and renders Hub-first modal links & badges', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+
+    const strataShot = 'https://raw.githubusercontent.com/ZenonSeth/strata/main/screenshot.png';
+    const d1Packages = new Map<string, any>([
+      [
+        'zenonseth/strata',
+        {
+          id: 'ZenonSeth/strata',
+          author_id: null,
+          author_name: 'ZenonSeth',
+          name: 'strata',
+          title: 'Strata',
+          type: 'game',
+          short_desc: 'Dig down through Strata.',
+          repo_url: 'https://github.com/ZenonSeth/strata',
+          provider: 'github',
+          default_branch: 'main',
+          thumbnail_url: strataShot,
+          banner_url: strataShot,
+          screenshots: JSON.stringify([strataShot]),
+          license: 'MIT',
+          media_license: 'CC-BY-SA-4.0',
+          tags: JSON.stringify(['jam_game_2026', 'gamejam', 'git', 'game']),
+          badge_tags: JSON.stringify(['jam_game_2026']),
+          contentdb_downloads: 0,
+          luantihub_downloads: 2,
+          downloads_count: 2,
+          review_thread_counts: JSON.stringify({ positive: 1, neutral: 0, negative: 0 }),
+          status: 'active',
+          created_at: '2026-11-10T00:00:00Z',
+          updated_at: '2026-11-14T00:00:00Z'
+        }
+      ]
+    ]);
+    let backfillUpdateCount = 0;
+
+    const createStrataDb = () => {
+      const prepare = (sql: string) => {
+        const clean = sql.trim();
+        const runQuery = async (args: any[], mode: 'run' | 'first' | 'all') => {
+          if (/SELECT\s+.*FROM\s+packages/i.test(clean)) {
+            if (clean.includes("'flagged'") || clean.includes("'delisted'")) {
+              return mode === 'first' ? null : { results: [] };
+            }
+            const rows = Array.from(d1Packages.values());
+            if (/WHERE\s+/i.test(clean) && args.length > 0) {
+              const target = String(args[0] || '').toLowerCase();
+              const matched = rows.filter(
+                (r) =>
+                  r.id.toLowerCase() === target ||
+                  `${r.author_name}/${r.name}`.toLowerCase() === target ||
+                  r.author_name.toLowerCase() === target
+              );
+              return mode === 'first' ? (matched[0] ?? null) : { results: matched };
+            }
+            return mode === 'first' ? (rows[0] ?? null) : { results: rows };
+          }
+          if (/SELECT\s+LOWER\(package_id\)\s+as\s+pkg_id,\s*SUM\(downloads_count\)/i.test(clean)) {
+            return { results: [{ pkg_id: 'zenonseth/strata', total_dl: 2 }] };
+          }
+          if (/SELECT\s+COALESCE\(SUM\(downloads_count\),\s*0\)\s+as\s+total_lh/i.test(clean)) {
+            return { total_lh: 2 };
+          }
+          if (/UPDATE\s+packages/i.test(clean) && /contentdb_downloads/i.test(clean)) {
+            backfillUpdateCount += 1;
+            const [newCdbDl, newLhDl, newTotalDl, nextTagsJson, targetId] = args;
+            const row = d1Packages.get(String(targetId || '').toLowerCase());
+            if (row) {
+              row.contentdb_downloads = Math.max(Number(row.contentdb_downloads || 0), Number(newCdbDl || 0));
+              row.luantihub_downloads = Math.max(Number(row.luantihub_downloads || 0), Number(newLhDl || 0));
+              row.downloads_count = Math.max(Number(row.downloads_count || 0), Number(newTotalDl || 0));
+              if (nextTagsJson) row.tags = nextTagsJson;
+            }
+            return { success: true };
+          }
+          if (/SELECT\s+AVG\(rating\)/i.test(clean)) {
+            return { avg_rating: null, cnt: 0 };
+          }
+          return mode === 'first' ? null : mode === 'all' ? { results: [] } : { success: true };
+        };
+
+        return {
+          bind: (...args: any[]) => ({
+            first: () => runQuery(args, 'first'),
+            all: () => runQuery(args, 'all'),
+            run: () => runQuery(args, 'run'),
+            _exec: () => runQuery(args, 'run')
+          }),
+          first: () => runQuery([], 'first'),
+          all: () => runQuery([], 'all'),
+          run: () => runQuery([], 'run')
+        };
+      };
+      return {
+        prepare,
+        batch: async (stmts: any[]) => {
+          for (const st of stmts) {
+            if (typeof st._exec === 'function') {
+              await st._exec();
+            } else if (typeof st.run === 'function') {
+              await st.run();
+            }
+          }
+          return [];
+        }
+      };
+    };
+
+    const db = createStrataDb();
+    let contentDbDetailFetchCount = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('content.luanti.org/api/packages/?fmt=vcs') || url.includes('content.luanti.org/api/packages/?')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'ZenonSeth',
+              name: 'strata',
+              title: 'Strata',
+              type: 'game',
+              repo: 'https://github.com/ZenonSeth/strata',
+              downloads: 2,
+              license: 'MIT',
+              media_license: 'CC-BY-SA-4.0',
+              tags: ['game', 'jam_game_2026'],
+              created_at: '2026-11-10T00:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/ZenonSeth/strata')) {
+        contentDbDetailFetchCount += 1;
+        return new Response(
+          JSON.stringify({
+            author: 'ZenonSeth',
+            name: 'strata',
+            title: 'Strata',
+            type: 'game',
+            downloads: 2,
+            license: 'MIT',
+            media_license: 'CC-BY-SA-4.0',
+            tags: ['game', 'jam_game_2026']
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/packages/ZenonSeth/strata')) {
+        // Simulate unbackfilled fast-path detail response before D1 settles
+        return new Response(
+          JSON.stringify({
+            id: 'ZenonSeth/strata',
+            author: 'ZenonSeth',
+            name: 'strata',
+            title: 'Strata',
+            type: 'game',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            repo_url: 'https://github.com/ZenonSeth/strata',
+            git_repo_status: 'verified',
+            license: 'MIT',
+            media_license: 'CC-BY-SA-4.0',
+            contentdb_downloads: 0,
+            luantihub_downloads: 2,
+            downloads: 2,
+            tags: ['git', 'game', 'jam_game_2026'],
+            reviews_list: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/')) {
+        return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as any;
+
+    try {
+      // 1. /api/packages?boot=1 catalog join emits reconciled 4 = 2 + 2 and persists dual-source ContentDB linkage via batched D1 backfill
+      const catRes = await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages?boot=1'),
+        env: { DB: db }
+      } as any);
+      expect(catRes.status).toBe(200);
+      const catJson = await catRes.json();
+      const catList = Array.isArray(catJson) ? catJson : catJson.packages || [];
+      const strataCatalog = catList.find((p: any) => String(p.id).toLowerCase() === 'zenonseth/strata');
+      expect(strataCatalog).toBeTruthy();
+      expect(strataCatalog.contentdb_downloads).toBe(2);
+      expect(strataCatalog.luantihub_downloads).toBe(2);
+      expect(strataCatalog.downloads).toBe(4);
+      expect(strataCatalog.sources).toEqual(expect.arrayContaining(['official', 'git']));
+      expect(strataCatalog.tags).toEqual(expect.arrayContaining(['contentdb', 'git']));
+      expect(backfillUpdateCount).toBe(1);
+
+      // Re-running catalog (cache cleared so D1 loop runs again) is threshold-gated -> 0 redundant D1 writes
+      (globalThis as any).caches = createInMemoryEdgeCaches();
+      clearIsolateCachesForTests();
+      await getPackagesCatalog({
+        request: new Request('https://luantihub.org/api/packages?boot=1'),
+        env: { DB: db }
+      } as any);
+      expect(backfillUpdateCount).toBe(1);
+
+      // 2. Post-backfill D1 ?lite=1 fast path serves 4 = 2 + 2 directly from D1 with 0 ContentDB subrequests
+      contentDbDetailFetchCount = 0;
+      (globalThis as any).caches = createInMemoryEdgeCaches();
+      clearIsolateCachesForTests();
+      const fastRes = await getPackageDetail({
+        params: { author: 'ZenonSeth', name: 'strata' },
+        request: new Request('https://luantihub.org/api/packages/ZenonSeth/strata/?lite=1&nocache=1'),
+        env: { DB: db }
+      } as any);
+      expect(fastRes.status).toBe(200);
+      const fastJson = await fastRes.json();
+      expect(fastJson.contentdb_downloads).toBe(2);
+      expect(fastJson.luantihub_downloads).toBe(2);
+      expect(fastJson.downloads).toBe(4);
+      expect(fastJson.sources).toEqual(expect.arrayContaining(['official', 'git']));
+      expect(contentDbDetailFetchCount).toBe(0);
+
+      // 3. Even if the client receives an unbackfilled fast-path detail ({ cdb: 0, hub: 2, total: 2, sources: ['git'] }),
+      // PackageService preserves catalog ContentDB provenance and UI renders Hub-first totals + independent links + ordered badges
+      TestBed.configureTestingModule({
+        providers: [provideHttpClient(), provideHttpClientTesting()]
+      });
+      const pkgService = TestBed.inject(PackageService);
+      (pkgService as any).edgeApiAvailable = true;
+      (pkgService as any).hydratedMetaCache.clear();
+      (pkgService as any).applyBootPayload({ packages: [strataCatalog] });
+
+      const catalogPkg = pkgService.packages().find((p) => p.id.toLowerCase() === 'zenonseth/strata')!;
+      expect(catalogPkg.downloads).toBe(4);
+      expect(catalogPkg.contentdb_downloads).toBe(2);
+      expect(catalogPkg.luantihub_downloads).toBe(2);
+
+      (pkgService as any)._activePackage.set(catalogPkg);
+      await pkgService.loadPackageDetails(catalogPkg, false);
+      const active = pkgService.activePackage()!;
+      expect(active.downloads).toBe(4);
+      expect(active.luantihub_downloads).toBe(2);
+      expect(active.contentdb_downloads).toBe(2);
+      expect(active.sources).toEqual(expect.arrayContaining(['official', 'git']));
+
+      const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+      modalFixture.componentInstance.package = active;
+      modalFixture.detectChanges();
+      const modalEl = modalFixture.nativeElement as HTMLElement;
+
+      expect(modalEl.querySelector('[data-testid="modal-total-downloads"]')?.textContent?.trim()).toBe('4');
+      expect(modalEl.querySelector('[data-testid="downloads-source-breakdown"]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Hub: 2 • ContentDB: 2'
+      );
+
+      const gitLink = modalEl.querySelector('[data-testid="project-link-git"]') as HTMLAnchorElement;
+      const cdbLink = modalEl.querySelector('[data-testid="project-link-contentdb"]') as HTMLAnchorElement;
+      expect(gitLink).toBeTruthy();
+      expect(gitLink.getAttribute('href')).toBe('https://github.com/ZenonSeth/strata');
+      expect(cdbLink).toBeTruthy();
+      expect(cdbLink.getAttribute('href')).toBe('https://content.luanti.org/packages/ZenonSeth/strata/');
+
+      const headerBadgesEl = modalEl.querySelector('[data-testid="modal-header-badges"]')!;
+      expect(headerBadgesEl).toBeTruthy();
+      const modalBadgeOrder = Array.from(
+        headerBadgesEl.querySelectorAll('[data-testid="git-badge"], [data-testid="contentdb-badge"]')
+      ).map((el) => el.getAttribute('data-testid'));
+      expect(modalBadgeOrder).toEqual(['git-badge', 'contentdb-badge']);
+      modalFixture.destroy();
+      pkgService.closePackageModal();
+    } finally {
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY]);
+    }
+  });
+
+  it('keeps pure-Git packages with broken_404 repos isolated from ContentDB links/subrequests and avoids ContentDB: 0 clutter', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+
+    const pureGitRow = {
+      id: 'IndieDev/pure_voxel',
+      author_id: null,
+      author_name: 'IndieDev',
+      name: 'pure_voxel',
+      title: 'Pure Voxel',
+      type: 'mod',
+      short_desc: 'Independent Git-hosted mod.',
+      repo_url: 'https://github.com/IndieDev/pure_voxel',
+      git_repo_status: 'broken_404',
+      provider: 'github',
+      default_branch: 'main',
+      thumbnail_url: 'https://luantihub.org/assets/pure_voxel.png',
+      banner_url: 'https://luantihub.org/assets/pure_voxel.png',
+      screenshots: JSON.stringify(['https://luantihub.org/assets/pure_voxel.png']),
+      license: 'MIT',
+      media_license: 'CC-BY-SA-4.0',
+      tags: JSON.stringify(['git', 'mod']),
+      contentdb_downloads: 0,
+      luantihub_downloads: 3,
+      downloads_count: 3,
+      status: 'active'
+    };
+
+    const mockPureDb = {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          first: async () => {
+            if (/FROM\s+packages/i.test(sql)) return pureGitRow;
+            if (/total_lh/i.test(sql)) return { total_lh: 3 };
+            return null;
+          },
+          all: async () => ({ results: [] }),
+          run: async () => ({ success: true })
+        })
+      })
+    };
+
+    let cdbFetchCount = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('content.luanti.org')) {
+        cdbFetchCount += 1;
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    try {
+      const detailRes = await getPackageDetail({
+        params: { author: 'IndieDev', name: 'pure_voxel' },
+        request: new Request('https://luantihub.org/api/packages/IndieDev/pure_voxel/?lite=1&nocache=1'),
+        env: { DB: mockPureDb }
+      } as any);
+      expect(detailRes.status).toBe(200);
+      const detailJson = await detailRes.json();
+      expect(detailJson.downloads).toBe(3);
+      expect(detailJson.contentdb_downloads).toBe(0);
+      expect(detailJson.luantihub_downloads).toBe(3);
+      expect(detailJson.sources).toEqual(['git']);
+
+      const statsRes = await getPackageStats({
+        params: { author: 'IndieDev', name: 'pure_voxel' },
+        request: new Request('https://luantihub.org/api/packages/IndieDev/pure_voxel/stats/?days=30&nocache=1'),
+        env: { DB: mockPureDb }
+      } as any);
+      expect(statsRes.status).toBe(200);
+      expect(cdbFetchCount).toBe(0);
+
+      TestBed.configureTestingModule({
+        providers: [provideHttpClient(), provideHttpClientTesting()]
+      });
+      const purePkg: LuantiPackage = {
+        id: 'IndieDev/pure_voxel',
+        author: 'IndieDev',
+        name: 'pure_voxel',
+        title: 'Pure Voxel',
+        type: 'mod',
+        short_desc: 'Independent Git-hosted mod.',
+        desc: 'Independent Git-hosted mod.',
+        thumbnail: 'https://luantihub.org/assets/pure_voxel.png',
+        banner: 'https://luantihub.org/assets/pure_voxel.png',
+        screenshots: ['https://luantihub.org/assets/pure_voxel.png'],
+        score: 0,
+        downloads: 3,
+        contentdb_downloads: 0,
+        luantihub_downloads: 3,
+        license: 'MIT',
+        repo_url: 'https://github.com/IndieDev/pure_voxel',
+        git_repo_status: 'broken_404',
+        provider: 'github',
+        source: 'git',
+        sources: ['git'],
+        tags: ['git', 'mod']
+      };
+      const pkgService = TestBed.inject(PackageService);
+      (pkgService as any)._activePackage.set(purePkg);
+
+      const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+      modalFixture.componentInstance.package = purePkg;
+      modalFixture.detectChanges();
+      const modalEl = modalFixture.nativeElement as HTMLElement;
+
+      expect(modalEl.querySelector('[data-testid="modal-total-downloads"]')?.textContent?.trim()).toBe('3');
+      const breakdownText = modalEl.querySelector('[data-testid="downloads-source-breakdown"]')?.textContent?.replace(/\s+/g, ' ').trim();
+      expect(breakdownText).toBe('Luanti Hub: 3');
+      expect(breakdownText).not.toContain('ContentDB');
+      expect(modalEl.querySelector('[data-testid="project-link-git"]')).toBeNull();
+      expect(modalEl.querySelector('[data-testid="project-link-contentdb"]')).toBeNull();
+      const pureHeaderBadges = modalEl.querySelector('[data-testid="modal-header-badges"]')!;
+      expect(pureHeaderBadges).toBeTruthy();
+      expect(pureHeaderBadges.querySelector('[data-testid="git-badge"]')).toBeTruthy();
+      expect(pureHeaderBadges.querySelector('[data-testid="contentdb-badge"]')).toBeNull();
+      modalFixture.destroy();
+      pkgService.closePackageModal();
+
+      const badgesFixture = TestBed.createComponent(PackageBadgesComponent);
+      badgesFixture.componentInstance.package = purePkg;
+      badgesFixture.detectChanges();
+      expect(badgesFixture.nativeElement.querySelector('[data-testid="git-badge"]')).toBeTruthy();
+      expect(badgesFixture.nativeElement.querySelector('[data-testid="contentdb-badge"]')).toBeNull();
+      badgesFixture.destroy();
+    } finally {
+      clearIsolateCachesForTests();
+    }
+  });
+
+  it('merges complementary ContentDB stats for dual-source packages and orders LuantiHub Edge first in DownloadAnalyticsChartComponent', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+
+    const dualRow = {
+      id: 'ZenonSeth/strata',
+      author_id: null,
+      author_name: 'ZenonSeth',
+      name: 'strata',
+      title: 'Strata',
+      type: 'game',
+      provider: 'github',
+      repo_url: 'https://github.com/ZenonSeth/strata',
+      tags: JSON.stringify(['jam_game_2026', 'game', 'git', 'contentdb']),
+      contentdb_downloads: 2,
+      luantihub_downloads: 2,
+      downloads_count: 4
+    };
+    const todayIso = new Date().toISOString().slice(0, 10);
+
+    const mockDualStatsDb = {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          first: async () => (/FROM\s+packages/i.test(sql) ? dualRow : null),
+          all: async () => ({
+            results: /FROM\s+package_daily_downloads/i.test(sql)
+              ? [{ download_date: todayIso, downloads_count: 2, platform_luanti: 2, platform_web: 0, reason_new: 2, reason_update: 0, reason_dependency: 0, reason_web: 0, views_luanti: 5, views_web: 3 }]
+              : []
+          })
+        })
+      })
+    };
+
+    let requestedCdbStatsUrl = '';
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('content.luanti.org/api/packages/ZenonSeth/strata/stats/')) {
+        requestedCdbStatsUrl = url;
+        const mkArr = (lastVal: number) => [...Array(13).fill(0), lastVal];
+        return new Response(
+          JSON.stringify({
+            downloads: {
+              platform: { minetest: mkArr(2), other: mkArr(0) },
+              reason: { new: mkArr(2), update: mkArr(0), dependency: mkArr(0), other: mkArr(0) }
+            },
+            views: mkArr(4)
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    try {
+      const res = await getPackageStats({
+        params: { author: 'ZenonSeth', name: 'strata' },
+        request: new Request('https://luantihub.org/api/packages/ZenonSeth/strata/stats/?days=7'),
+        env: { DB: mockDualStatsDb }
+      } as any);
+      expect(res.status).toBe(200);
+      expect(requestedCdbStatsUrl).toContain('content.luanti.org/api/packages/ZenonSeth/strata/stats/');
+      const statsJson = await res.json();
+      expect(statsJson.summary.periodDownloads).toBe(4);
+      expect(statsJson.source_luantihub.reduce((a: number, b: number) => a + b, 0)).toBe(2);
+      expect(statsJson.source_contentdb.reduce((a: number, b: number) => a + b, 0)).toBe(2);
+
+      TestBed.configureTestingModule({
+        providers: [provideHttpClient(), provideHttpClientTesting()]
+      });
+      const chartFixture = TestBed.createComponent(DownloadAnalyticsChartComponent);
+      const chartComp = chartFixture.componentInstance;
+      chartComp.package = {
+        id: 'ZenonSeth/strata',
+        author: 'ZenonSeth',
+        name: 'strata',
+        title: 'Strata',
+        type: 'game',
+        short_desc: 'Strata',
+        desc: 'Strata',
+        thumbnail: 'logo.svg',
+        score: 0,
+        downloads: 4,
+        contentdb_downloads: 2,
+        luantihub_downloads: 2,
+        license: 'MIT',
+        source: 'git',
+        sources: ['official', 'git'],
+        tags: ['git', 'game', 'contentdb']
+      };
+      chartComp.statsData.set(statsJson);
+      chartComp.seriesMode.set('source');
+      expect((chartComp as any).activeSeriesList().map((s: any) => s.key)).toEqual([
+        'source_luantihub',
+        'source_contentdb'
+      ]);
+
+      // Pure-Git package with 0 ContentDB telemetry hides ContentDB series
+      chartComp.package = {
+        ...chartComp.package,
+        id: 'IndieDev/pure_voxel',
+        author: 'IndieDev',
+        name: 'pure_voxel',
+        contentdb_downloads: 0,
+        luantihub_downloads: 2,
+        downloads: 2,
+        sources: ['git'],
+        tags: ['git', 'mod']
+      };
+      chartComp.statsData.set({
+        ...statsJson,
+        source_contentdb: statsJson.source_contentdb.map(() => 0)
+      });
+      expect((chartComp as any).activeSeriesList().map((s: any) => s.key)).toEqual(['source_luantihub']);
+      chartFixture.destroy();
+    } finally {
+      clearIsolateCachesForTests();
+    }
+  });
+
+  it('keeps trackDownload, HeroBillboard, AuthorDrawer, top10.ts, and for-client.ts download math and pure-Git isolation consistent', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+
+    try {
+      TestBed.configureTestingModule({
+        providers: [provideHttpClient(), provideHttpClientTesting()]
+      });
+      const pkgService = TestBed.inject(PackageService);
+      (pkgService as any).edgeApiAvailable = true;
+      (pkgService as any).hydratedMetaCache.clear();
+      localStorage.removeItem('lh_user_downloads_v1');
+
+      // 1. trackDownload() reconciles an unbackfilled active dual-source item against catalog provenance
+      const catalogDual = (pkgService as any).normalizePackage({
+        id: 'ZenonSeth/strata',
+        author: 'ZenonSeth',
+        name: 'strata',
+        title: 'Strata',
+        type: 'game',
+        provider: 'github',
+        source: 'git',
+        sources: ['official', 'git'],
+        repo_url: 'https://github.com/ZenonSeth/strata',
+        tags: ['git', 'game', 'contentdb'],
+        contentdb_downloads: 2,
+        luantihub_downloads: 2,
+        downloads: 4
+      });
+      const pureGitPkg = (pkgService as any).normalizePackage({
+        id: 'IndieDev/pure_broken_git',
+        author: 'IndieDev',
+        name: 'pure_broken_git',
+        title: 'Pure Broken Git',
+        type: 'mod',
+        provider: 'github',
+        source: 'git',
+        sources: ['git'],
+        repo_url: 'https://github.com/IndieDev/pure_broken_git',
+        git_repo_status: 'broken_404',
+        tags: ['git', 'mod'],
+        contentdb_downloads: 0,
+        luantihub_downloads: 3,
+        downloads: 3
+      });
+      (pkgService as any)._packages.set([catalogDual, pureGitPkg]);
+
+      const unbackfilledActive: LuantiPackage = {
+        ...catalogDual,
+        sources: ['git'],
+        tags: ['git', 'game'],
+        contentdb_downloads: 0,
+        luantihub_downloads: 2,
+        downloads: 2
+      };
+      (pkgService as any)._activePackage.set(unbackfilledActive);
+      pkgService.trackDownload(unbackfilledActive);
+
+      const bumpedActive = pkgService.activePackage()!;
+      const bumpedCatalog = pkgService.packages().find(p => p.id === 'ZenonSeth/strata')!;
+      expect(bumpedActive.luantihub_downloads).toBe(3);
+      expect(bumpedActive.contentdb_downloads).toBe(2);
+      expect(bumpedActive.downloads).toBe(5);
+      expect(bumpedActive.sources).toEqual(expect.arrayContaining(['git', 'official']));
+      expect(bumpedCatalog.luantihub_downloads).toBe(3);
+      expect(bumpedCatalog.contentdb_downloads).toBe(2);
+      expect(bumpedCatalog.downloads).toBe(5);
+
+      pkgService.trackDownload(pureGitPkg);
+      const bumpedPure = pkgService.packages().find(p => p.id === 'IndieDev/pure_broken_git')!;
+      expect(bumpedPure.luantihub_downloads).toBe(4);
+      expect(bumpedPure.contentdb_downloads).toBe(0);
+      expect(bumpedPure.downloads).toBe(4);
+      expect(bumpedPure.sources).toEqual(['git']);
+
+      // 2. HeroBillboardComponent.getSlideGitUrl suppresses fabricated ContentDB links for pure-Git broken_404 repos,
+      // and uses contentdb_author/contentdb_name when ContentDB provenance exists without a usable Git repo
+      const heroFixture = TestBed.createComponent(HeroBillboardComponent);
+      const heroComp = heroFixture.componentInstance;
+      expect(heroComp.getSlideGitUrl(pureGitPkg)).toBe('');
+      expect(heroComp.getSlideGitUrl(catalogDual)).toBe('https://github.com/ZenonSeth/strata');
+      const aliasOfficialBrokenGit: LuantiPackage = {
+        ...catalogDual,
+        id: 'GitAlias/strata_hub',
+        author: 'GitAlias',
+        name: 'strata_hub',
+        contentdb_author: 'ZenonSeth',
+        contentdb_name: 'strata',
+        git_repo_status: 'broken_404'
+      };
+      expect(heroComp.getSlideGitUrl(aliasOfficialBrokenGit)).toBe(
+        'https://content.luanti.org/packages/ZenonSeth/strata/'
+      );
+      heroFixture.destroy();
+
+      // 3. AuthorDrawerComponent orders Git badge before CDB badge and renders LuantiHub-first download breakdowns
+      (pkgService as any)._packages.set([
+        {
+          ...catalogDual,
+          luantihub_downloads: 3,
+          contentdb_downloads: 2,
+          downloads: 99 // Deliberately higher legacy total to verify per-package reconciliation sum
+        }
+      ]);
+      (pkgService as any)._activeAuthorUsername.set('ZenonSeth');
+      (pkgService as any)._activeAuthorProfile.set({
+        username: 'ZenonSeth',
+        display_name: 'ZenonSeth',
+        bio: '',
+        identities: []
+      });
+      const drawerFixture = TestBed.createComponent(AuthorDrawerComponent);
+      const drawerComp = drawerFixture.componentInstance;
+      drawerFixture.detectChanges();
+      const drawerEl = drawerFixture.nativeElement as HTMLElement;
+
+      expect(drawerComp.totalHubDownloads()).toBe(3);
+      expect(drawerComp.totalCdbDownloads()).toBe(2);
+      expect(drawerComp.totalDownloads()).toBe(drawerComp.totalHubDownloads() + drawerComp.totalCdbDownloads());
+      expect(drawerEl.querySelector('[data-testid="author-downloads-breakdown"]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Hub 3 • CDB 2'
+      );
+      const authorSourceText = Array.from(drawerEl.querySelectorAll('[data-testid="author-sources-badges"] span')).map(el =>
+        el.textContent?.trim()
+      );
+      expect(authorSourceText).toEqual(['1 Git', '1 CDB']);
+
+      (pkgService as any)._activeAuthorUsername.set('IndieDev');
+      (pkgService as any)._activeAuthorProfile.set({
+        username: 'IndieDev',
+        display_name: 'IndieDev',
+        bio: '',
+        identities: []
+      });
+      (pkgService as any)._packages.set([bumpedPure]);
+      drawerFixture.detectChanges();
+      expect(drawerEl.querySelector('[data-testid="author-downloads-breakdown"]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'Luanti Hub: 4'
+      );
+      drawerFixture.destroy();
+      pkgService.closeAuthorDrawer(true, true);
+
+      // 4. top10.ts and for-client.ts D1 paths enforce downloads === luantihub_downloads + contentdb_downloads
+      const mockTop10Db = {
+        prepare: (sql: string) => {
+          const allFn = async () => {
+            if (/FROM\s+package_daily_downloads/i.test(sql)) {
+              return {
+                results: [
+                  {
+                    package_id: 'ZenonSeth/strata',
+                    period_downloads: 0,
+                    r_new: 0,
+                    r_web: 0,
+                    r_upd: 0,
+                    r_dep: 0,
+                    period_views: 10,
+                    title: 'Strata',
+                    author: 'ZenonSeth',
+                    name: 'strata',
+                    type: 'game',
+                    short_desc: 'Strata',
+                    provider: 'github',
+                    status: 'active',
+                    downloads_count: 8,
+                    contentdb_downloads: 2,
+                    luantihub_downloads: 3,
+                    tags: JSON.stringify(['game', 'git', 'contentdb'])
+                  },
+                  {
+                    package_id: 'IndieDev/pure_broken_git',
+                    period_downloads: 2,
+                    r_new: 2,
+                    r_web: 0,
+                    r_upd: 0,
+                    r_dep: 0,
+                    period_views: 5,
+                    title: 'Pure Broken Git',
+                    author: 'IndieDev',
+                    name: 'pure_broken_git',
+                    type: 'mod',
+                    short_desc: 'Pure Git',
+                    provider: 'github',
+                    status: 'active',
+                    downloads_count: 6,
+                    contentdb_downloads: 0,
+                    luantihub_downloads: 4,
+                    tags: JSON.stringify(['mod', 'git'])
+                  }
+                ]
+              };
+            }
+            return { results: [] };
+          };
+          return { all: allFn, bind: () => ({ all: allFn, first: async () => null, run: async () => ({ success: true }) }) };
+        }
+      };
+      globalThis.fetch = vi.fn(async () => new Response('[]', { status: 200 })) as any;
+
+      const top10Res = await getTop10Packages({
+        request: new Request('https://luantihub.org/api/packages/top10?timeframe=today'),
+        env: { DB: mockTop10Db }
+      } as any);
+      expect(top10Res.status).toBe(200);
+      const top10Items = await top10Res.json();
+      const top10Strata = top10Items.find((i: any) => i.id === 'ZenonSeth/strata');
+      const top10Pure = top10Items.find((i: any) => i.id === 'IndieDev/pure_broken_git');
+      expect(top10Strata.downloads).toBe(top10Strata.contentdb_downloads + top10Strata.luantihub_downloads);
+      expect(top10Strata.sources).toEqual(expect.arrayContaining(['git', 'official']));
+      expect(top10Pure.contentdb_downloads).toBe(0);
+      expect(top10Pure.downloads).toBe(6);
+      expect(top10Pure.luantihub_downloads).toBe(6);
+      expect(top10Pure.sources).toEqual(['git']);
+
+      const mockForClientDb = {
+        prepare: (sql: string) => ({
+          bind: () => ({
+            first: async () => {
+              if (/FROM\s+packages/i.test(sql)) {
+                return {
+                  id: 'ZenonSeth/strata',
+                  author_name: 'ZenonSeth',
+                  name: 'strata',
+                  title: 'Strata',
+                  type: 'game',
+                  short_desc: 'Strata',
+                  long_desc: 'Strata',
+                  provider: 'github',
+                  repo_url: 'https://github.com/ZenonSeth/strata',
+                  default_branch: 'main',
+                  tags: JSON.stringify(['game', 'git']),
+                  contentdb_downloads: 2,
+                  luantihub_downloads: 3,
+                  downloads_count: 9,
+                  status: 'active',
+                  download_size: 4096,
+                  file_size: '4 KB'
+                };
+              }
+              if (/total_lh/i.test(sql)) return { total_lh: 3 };
+              return null;
+            },
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true })
+          })
+        })
+      };
+      globalThis.fetch = vi.fn(async () => new Response('[]', { status: 404 })) as any;
+
+      const fcRes = await getPackageForClient({
+        params: { author: 'ZenonSeth', name: 'strata' },
+        request: new Request('https://luantihub.org/api/packages/ZenonSeth/strata/for-client/?nocache=1'),
+        env: { DB: mockForClientDb }
+      } as any);
+      expect(fcRes.status).toBe(200);
+      const fcJson = await fcRes.json();
+      expect(fcJson.contentdb_downloads).toBe(2);
+      expect(fcJson.luantihub_downloads).toBe(3);
+      expect(fcJson.downloads).toBe(5);
+
+      // 5. overlayPromotionRowDeltaOnCatalog preserves pure-Git provenance for new delta items
+      const overlaidPure = overlayPromotionRowDeltaOnCatalog(
+        [],
+        {
+          items: [
+            {
+              id: 'IndieDev/delta_jam_git',
+              author: 'IndieDev',
+              name: 'delta_jam_git',
+              title: 'Delta Jam Git',
+              type: 'game',
+              source: 'git',
+              downloads: 4,
+              luantihub_downloads: 4,
+              tags: ['game', 'jam_game_2026']
+            }
+          ],
+          tagMap: {}
+        },
+        undefined,
+        new Map([['indiedev/delta_jam_git', 4]])
+      );
+      expect(overlaidPure[0].source).toBe('git');
+      expect(overlaidPure[0].sources).toEqual(['git']);
+      expect(overlaidPure[0].provider).not.toBe('contentdb');
+      expect(overlaidPure[0].contentdb_downloads).toBe(0);
+      expect(overlaidPure[0].luantihub_downloads).toBe(4);
+      expect(overlaidPure[0].downloads).toBe(4);
+    } finally {
+      localStorage.removeItem('lh_user_downloads_v1');
       clearIsolateCachesForTests();
     }
   });

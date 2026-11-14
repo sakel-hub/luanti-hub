@@ -14,7 +14,13 @@ import { PackageService } from '../../core/services/package.service';
 import { AuthService } from '../../core/services/auth.service';
 import { SettingsService } from '../../core/services/settings.service';
 import { PwaService } from '../../core/services/pwa.service';
-import { LuantiPackage, SortOption, UserIdentity } from '../../core/models/package.model';
+import {
+  LuantiPackage,
+  SortOption,
+  UserIdentity,
+  hasComplementaryContentDbSource,
+  reconcilePackageDownloadCounts
+} from '../../core/models/package.model';
 import { isEligibleGitRepoUrl as checkEligibleGitRepoUrl } from '../../core/config/git-providers.config';
 import { CompactNumberPipe } from '../../shared/pipes/compact-number.pipe';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
@@ -273,8 +279,12 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
               <span class="text-base sm:text-lg font-black text-emerald-400 mt-1">
                 {{ totalDownloads() | compactNumber }}
               </span>
-              <span class="text-[10px] text-slate-400 mt-0.5 truncate">
-                CDB {{ totalCdbDownloads() | compactNumber }} • Hub {{ totalHubDownloads() | compactNumber }}
+              <span data-testid="author-downloads-breakdown" class="text-[10px] text-slate-400 mt-0.5 truncate">
+                @if (officialCount() > 0 || totalCdbDownloads() > 0) {
+                  Hub {{ totalHubDownloads() | compactNumber }} • CDB {{ totalCdbDownloads() | compactNumber }}
+                } @else {
+                  Luanti Hub: {{ totalHubDownloads() | compactNumber }}
+                }
               </span>
             </div>
 
@@ -295,15 +305,15 @@ import { PackageGitSyncStatus } from '../../core/services/auth.service';
               <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                 {{ 'author.sourcesLabel' | translate }}
               </span>
-              <div class="flex items-center gap-1.5 mt-1 flex-wrap">
-                @if (officialCount() > 0) {
-                  <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
-                    {{ officialCount() }} CDB
-                  </span>
-                }
+              <div data-testid="author-sources-badges" class="flex items-center gap-1.5 mt-1 flex-wrap">
                 @if (gitCount() > 0) {
                   <span class="glass-badge glass-badge-amber font-bold text-[10px]">
                     {{ gitCount() }} Git
+                  </span>
+                }
+                @if (officialCount() > 0) {
+                  <span class="glass-badge glass-badge-emerald font-bold text-[10px]">
+                    {{ officialCount() }} CDB
                   </span>
                 }
               </div>
@@ -672,7 +682,7 @@ export class AuthorDrawerComponent {
     this.authorPackages().filter(p => p.sources?.includes('git') || p.source === 'git').length
   );
   readonly officialCount = computed(() =>
-    this.authorPackages().filter(p => p.sources?.includes('official') || p.source === 'official').length
+    this.authorPackages().filter(p => hasComplementaryContentDbSource(p)).length
   );
 
   readonly unsyncedEligibleGitPackages = computed<LuantiPackage[]>(() => {
@@ -732,15 +742,29 @@ export class AuthorDrawerComponent {
     return parts.join(' • ') || '0';
   });
 
-  readonly totalDownloads = computed(() =>
-    this.authorPackages().reduce((sum, p) => sum + (p.downloads || 0), 0)
-  );
-  readonly totalCdbDownloads = computed(() =>
-    this.authorPackages().reduce((sum, p) => sum + (p.contentdb_downloads || 0), 0)
-  );
-  readonly totalHubDownloads = computed(() =>
-    this.authorPackages().reduce((sum, p) => sum + (p.luantihub_downloads || 0), 0)
-  );
+  private readonly reconciledDownloadSums = computed(() => {
+    let total = 0;
+    let cdb = 0;
+    let hub = 0;
+    for (const p of this.authorPackages()) {
+      const hasOfficial = hasComplementaryContentDbSource(p);
+      const rec = reconcilePackageDownloadCounts({
+        contentdbDownloads: p.contentdb_downloads || 0,
+        luantihubDownloads: p.luantihub_downloads || 0,
+        reportedTotalDownloads: p.downloads || 0,
+        hasContentDbSource: hasOfficial,
+        isPureGitOnly: !hasOfficial
+      });
+      total += rec.downloads;
+      cdb += rec.contentdbDownloads;
+      hub += rec.luantihubDownloads;
+    }
+    return { total, cdb, hub };
+  });
+
+  readonly totalDownloads = computed(() => this.reconciledDownloadSums().total);
+  readonly totalCdbDownloads = computed(() => this.reconciledDownloadSums().cdb);
+  readonly totalHubDownloads = computed(() => this.reconciledDownloadSums().hub);
 
   readonly ratedCount = computed(() =>
     this.authorPackages().filter(p => (p.score || 0) > 0).length

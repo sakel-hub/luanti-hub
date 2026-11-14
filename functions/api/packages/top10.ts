@@ -18,6 +18,7 @@ import {
   writeEdgeCacheJson
 } from '../lib/upstream';
 import { shouldHonorAuthenticatedNoCache } from '../auth/lib/session';
+import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
 
 interface Env {
   DB?: any;
@@ -197,12 +198,27 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             starMultiplier *
             depMultiplier;
 
-          const cdbDl = Number(r.contentdb_downloads || 0);
-          const lhDl = Math.max(Number(r.luantihub_downloads || 0), periodDl);
-          const totalDl = Math.max(
-            Number(r.downloads_count || 0),
-            cdbDl + lhDl,
-            periodDl || 1
+          const isGitRow = Boolean(r.provider && r.provider !== 'contentdb' && r.provider !== 'forum');
+          const hasOfficialRow = Boolean(
+            r.provider === 'contentdb' ||
+            Number(r.contentdb_downloads || 0) > 0 ||
+            rowTags.includes('contentdb')
+          );
+          const recTop10Dl = reconcilePackageDownloadCounts({
+            contentdbDownloads: Number(r.contentdb_downloads || 0),
+            luantihubDownloads: Math.max(Number(r.luantihub_downloads || 0), periodDl),
+            reportedTotalDownloads: Number(r.downloads_count || 0),
+            hasContentDbSource: hasOfficialRow,
+            isPureGitOnly: !hasOfficialRow
+          });
+          const cdbDl = recTop10Dl.contentdbDownloads;
+          const lhDl = recTop10Dl.luantihubDownloads;
+          const totalDl = recTop10Dl.downloads;
+          const rowSources = Array.from(
+            new Set([
+              ...(isGitRow ? ['git'] : []),
+              ...(hasOfficialRow ? ['official'] : [])
+            ])
           );
 
           const rowScreenshots = parseJsonArray(r.screenshots);
@@ -235,7 +251,8 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               favorites_count: favCnt > 0 ? favCnt : undefined,
               file_size: r.file_size || undefined,
               license: r.license || '',
-              source: r.provider && r.provider !== 'contentdb' ? 'git' : 'official'
+              source: isGitRow ? 'git' : 'official',
+              sources: rowSources.length > 0 ? rowSources : [isGitRow ? 'git' : 'official']
             }
           });
         }

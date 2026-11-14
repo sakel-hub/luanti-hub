@@ -672,8 +672,8 @@ description = Mob animation and spawning framework.
     const badges = contentSection.querySelectorAll('app-package-badges .glass-badge');
     expect(badges.length).toBe(3);
     expect(badges[0].classList.contains('glass-badge-sky')).toBe(true);
-    expect(badges[1].classList.contains('glass-badge-emerald')).toBe(true);
-    expect(badges[2].classList.contains('glass-badge-amber')).toBe(true);
+    expect(badges[1].classList.contains('glass-badge-amber')).toBe(true);
+    expect(badges[2].classList.contains('glass-badge-emerald')).toBe(true);
   });
 
   it('should prioritize 1-Click OAuth sign-in (including Mesehub) with Direct Sign-In collapsed by default and no trailing colon after favorites', () => {
@@ -3614,7 +3614,7 @@ supported_games = minetest_game, voxelibre
     chartComp.setSeriesMode('platform');
     expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['platform_luanti', 'platform_web']);
     chartComp.setSeriesMode('source');
-    expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['source_contentdb', 'source_luantihub']);
+    expect(chartComp.activeSeriesList().map(s => s.key)).toEqual(['source_luantihub', 'source_contentdb']);
   });
 
   it('should select custom badged LuantiHub icons per notification variant and await ServiceWorker ready when installing', async () => {
