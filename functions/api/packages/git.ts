@@ -12,6 +12,8 @@ import {
 } from '../auth/lib/session';
 import {
   fetchUpstreamJsonCached,
+  readEdgeCacheJson,
+  writeEdgeCacheJson,
   normalizeRepoKey,
   parseJsonArray,
   invalidateEdgeCacheKeys,
@@ -20,12 +22,16 @@ import {
   rewriteRelativeMarkdownUrls,
   autoResolveBrokenRepoReport,
   parseCdbJsonMetadata,
-  CdbJsonMetadata,
+  type CdbJsonMetadata,
   parseLuantiConf,
   computeConfShortDescription,
   normalizeGitRepoInputUrl,
   extractGitBranchHint,
   fetchGitSmartHttpRefs,
+  type GitSmartHttpRefs,
+  type DiscoveredGitRelease,
+  parseGitRepoTarget,
+  MAX_PACKAGE_RELEASES,
   buildProviderRawBaseCandidates,
   detectGitProviderFromUrl,
   isUntrustedTunnelOrPrivateHost,
@@ -49,11 +55,15 @@ import {
   buildPackageCacheInvalidationKeys
 } from '../lib/upstream';
 import {
-  GitProviderId,
+  type GitProviderId,
   LUA_TUNNEL_C2_PATTERN
 } from '../../../src/app/core/config/git-providers.config';
 import { detectSpdxFromLicenseText } from '../../../src/app/core/config/package-utils.config';
-import { evaluateRepositoryContentSafety } from '../lib/content-safety';
+import {
+  evaluateRepositoryContentSafety,
+  type ContentSafetyEvaluation,
+  type ContentSafetyInput
+} from '../lib/content-safety';
 
 interface Env {
   DB?: any;
@@ -67,71 +77,353 @@ interface RepoEntry {
   type: 'file' | 'dir';
 }
 
+export const GIT_SMART_REFS_REFRESH_COOLDOWN_MS = 10_000;
+export const GIT_PREFLIGHT_SNAPSHOT_TTL_SECONDS = 300;
+const GIT_ROOT_ENTRIES_SHA_TTL_SECONDS = 3600;
+const MAX_GIT_AUDIT_COOLDOWN_ENTRIES = 1000;
+
+const gitAuditSmartRefsCooldown = new Map<string, number>();
+const gitAuditLastTagsDigest = new Map<string, string>();
+
+/**
+ * Resets per-isolate Git Pre-Flight Check cooldown and tag-digest maps (used by test suites).
+ */
+export function resetGitAuditCachesForTests(): void {
+  gitAuditSmartRefsCooldown.clear();
+  gitAuditLastTagsDigest.clear();
+}
+
+function isFullHexSha(value?: string | null): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value.trim());
+}
+
+function recordBoundedCooldownEntry<T>(map: Map<string, T>, key: string, value: T): void {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, value);
+  if (map.size > MAX_GIT_AUDIT_COOLDOWN_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) {
+      map.delete(oldestKey);
+    }
+  }
+}
+
+/**
+ * Enforces a per-repository 10s cooldown on live `info/refs` bypasses so rapid button-mashing
+ * reuses the cached Git refs while normal edit -> push -> re-check cycles pick up new commits immediately.
+ */
+function shouldForceRefreshGitSmartRefs(repoCooldownKey: string, nowMs = Date.now()): boolean {
+  if (gitAuditSmartRefsCooldown.size >= MAX_GIT_AUDIT_COOLDOWN_ENTRIES) {
+    for (const [k, ts] of gitAuditSmartRefsCooldown.entries()) {
+      if (nowMs - ts >= GIT_SMART_REFS_REFRESH_COOLDOWN_MS) {
+        gitAuditSmartRefsCooldown.delete(k);
+      }
+    }
+  }
+  const lastRefreshMs = gitAuditSmartRefsCooldown.get(repoCooldownKey) || 0;
+  if (lastRefreshMs > 0 && nowMs - lastRefreshMs < GIT_SMART_REFS_REFRESH_COOLDOWN_MS) {
+    return false;
+  }
+  recordBoundedCooldownEntry(gitAuditSmartRefsCooldown, repoCooldownKey, nowMs);
+  return true;
+}
+
+function buildGitRootEntriesCacheKey(
+  provider: GitProviderId,
+  host: string,
+  owner: string,
+  repo: string,
+  commitSha: string
+): string {
+  return `/__git_root_entries_v1/${provider}/${encodeURIComponent(host.toLowerCase())}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${commitSha.toLowerCase()}`;
+}
+
+function buildGitPreflightSnapshotKey(
+  provider: GitProviderId,
+  host: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  commitSha: string
+): string {
+  return `/__git_preflight_sha_v1/${provider}/${encodeURIComponent(host.toLowerCase())}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(branch)}/${commitSha.toLowerCase()}`;
+}
+
+interface CachedGitCommitAuditSnapshot {
+  missingConf: boolean;
+  branch: string;
+  resolvedCustomRawBase: string;
+  rawConfig: string;
+  confFileName: string;
+  packageType: 'mod' | 'game' | 'txp' | 'modpack';
+  rawCdbJsonText: string;
+  effectiveLicense: string;
+  effectiveMediaLicense: string;
+  luaSource: string;
+  discoveredRootEntries: RepoEntry[] | null;
+  readmeMarkdown: string;
+  longDesc: string;
+  screenshotUrl: string;
+  hasScreenshot: boolean;
+  verifiedCdbScreenshots: string[];
+  safetyEval: ContentSafetyEvaluation;
+  baseDiagnostics: GitAuditDiagnostic[];
+}
+
+function cloneAuditDiagnostics(diags: GitAuditDiagnostic[]): GitAuditDiagnostic[] {
+  return diags.map((d) => ({ ...d }));
+}
+
+function cloneSafetyEvaluation(ev: ContentSafetyEvaluation): ContentSafetyEvaluation {
+  return {
+    ...ev,
+    categories: [...ev.categories],
+    matches: ev.matches.map((m) => ({ ...m })),
+    autoContentWarnings: [...ev.autoContentWarnings]
+  };
+}
+
+interface ExtractedConfMetadata {
+  parsedConf: Record<string, string>;
+  rawName: string;
+  rawTitle: string;
+  rawFullDesc: string;
+  rawDesc: string;
+  rawLicense: string;
+  rawMediaLicense: string;
+  rawDepends: string;
+  rawOptDepends: string;
+  rawConfTags: string;
+  rawMinVersion: string;
+  rawMaxVersion?: string;
+  supportedGames: string[];
+  unsupportedGames: string[];
+}
+
+function cleanConfDep(s: string): string {
+  return s
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/\?$/, '')
+    .split(/\s+#/)[0]
+    .trim();
+}
+
+function extractConfMetadata(rawConfig: string): ExtractedConfMetadata {
+  const parsedConf = parseLuantiConf(rawConfig);
+  const rawFullDesc = parsedConf['description'] || '';
+  const rawDesc = computeConfShortDescription(rawFullDesc) || rawFullDesc;
+  const rawDepends = parsedConf['depends'] || '';
+  const rawOptDepends = parsedConf['optional_depends'] || '';
+  return {
+    parsedConf,
+    rawName: parsedConf['name'] || '',
+    rawTitle: parsedConf['title'] || '',
+    rawFullDesc,
+    rawDesc,
+    rawLicense: parsedConf['license'] || '',
+    rawMediaLicense: parsedConf['media_license'] || '',
+    rawDepends,
+    rawOptDepends,
+    rawConfTags: parsedConf['tags'] || parsedConf['categories'] || '',
+    rawMinVersion: parsedConf['min_minetest_version'] || '5.0.0',
+    rawMaxVersion: parsedConf['max_minetest_version'] || undefined,
+    supportedGames: parsedConf['supported_games']
+      ? parsedConf['supported_games'].split(',').map(cleanConfDep).filter(Boolean)
+      : [],
+    unsupportedGames: parsedConf['unsupported_games']
+      ? parsedConf['unsupported_games'].split(',').map(cleanConfDep).filter(Boolean)
+      : []
+  };
+}
+
+/**
+ * Resolves repository releases/tags using cached `/__git_releases_tags_v3/...` whenever
+ * Git Smart HTTP tag refs still match, avoiding unauthenticated REST API quota drain on
+ * untagged repositories and unchanged release sets.
+ */
+async function resolveAuditGitReleases(
+  repoUrl: string,
+  owner: string,
+  repo: string,
+  rawMinVersion: string,
+  repoCooldownKey: string,
+  smartRefs: GitSmartHttpRefs | null,
+  allowLiveTagRefresh: boolean
+): Promise<DiscoveredGitRelease[]> {
+  const liveTagsDigest = smartRefs
+    ? smartRefs.tags.map((t) => `${t.tagName}:${t.commitSha}`).join('\n')
+    : '';
+
+  if (
+    smartRefs &&
+    (smartRefs.headSha || Object.keys(smartRefs.branches).length > 0) &&
+    smartRefs.tags.length === 0
+  ) {
+    recordBoundedCooldownEntry(gitAuditLastTagsDigest, repoCooldownKey, '');
+    return [];
+  }
+
+  const target = parseGitRepoTarget(repoUrl, owner, repo);
+  if (smartRefs && smartRefs.tags.length > 0 && target) {
+    const encOwnerPath = target.owner.split('/').map(encodeURIComponent).join('/');
+    const relCacheKey = `/__git_releases_tags_v3/${target.host}/${encOwnerPath}/${encodeURIComponent(target.repo.toLowerCase())}/${encodeURIComponent(rawMinVersion)}`;
+    const cachedReleases = await readEdgeCacheJson<DiscoveredGitRelease[]>(relCacheKey);
+
+    if (Array.isArray(cachedReleases) && cachedReleases.length > 0) {
+      const smartTagMap = new Map(smartRefs.tags.map((t) => [t.tagName, t.commitSha]));
+      const cachedByTag = new Map(cachedReleases.map((r) => [r.tag_name, r]));
+      const shaMatches = (a?: string, b?: string): boolean => {
+        if (!a || !b) return true;
+        const la = a.toLowerCase();
+        const lb = b.toLowerCase();
+        return la === lb || la.startsWith(lb) || lb.startsWith(la);
+      };
+
+      const allCachedStillPresent = cachedReleases.every((rel) => {
+        if (!smartTagMap.has(rel.tag_name)) return false;
+        return shaMatches(smartTagMap.get(rel.tag_name), rel.commit_sha);
+      });
+
+      const prevDigest = gitAuditLastTagsDigest.get(repoCooldownKey);
+      const matchesLiveTags =
+        allCachedStillPresent &&
+        (smartRefs.tags.length <= MAX_PACKAGE_RELEASES
+          ? cachedReleases.length === smartRefs.tags.length &&
+            smartRefs.tags.every((st) => {
+              const cachedRel = cachedByTag.get(st.tagName);
+              return Boolean(cachedRel && shaMatches(st.commitSha, cachedRel.commit_sha));
+            })
+          : prevDigest !== undefined
+            ? prevDigest === liveTagsDigest
+            : Boolean(
+                cachedByTag.get(smartRefs.tags[0].tagName) &&
+                  shaMatches(
+                    smartRefs.tags[0].commitSha,
+                    cachedByTag.get(smartRefs.tags[0].tagName)?.commit_sha
+                  )
+              ));
+
+      if (matchesLiveTags) {
+        recordBoundedCooldownEntry(gitAuditLastTagsDigest, repoCooldownKey, liveTagsDigest);
+        return cachedReleases.map((r) => ({ ...r }));
+      }
+
+      const refreshed = await fetchGitRepoReleasesAndTags(
+        repoUrl,
+        owner,
+        repo,
+        rawMinVersion,
+        allowLiveTagRefresh
+      );
+      if (allowLiveTagRefresh || refreshed.length > 0) {
+        recordBoundedCooldownEntry(gitAuditLastTagsDigest, repoCooldownKey, liveTagsDigest);
+      }
+      return refreshed.map((r) => ({ ...r }));
+    }
+  }
+
+  const releases = await fetchGitRepoReleasesAndTags(repoUrl, owner, repo, rawMinVersion, false);
+  if (smartRefs) {
+    recordBoundedCooldownEntry(gitAuditLastTagsDigest, repoCooldownKey, liveTagsDigest);
+  }
+  return releases.map((r) => ({ ...r }));
+}
+
 async function fetchRepoRootEntries(
   provider: GitProviderId,
   host: string,
   owner: string,
   repo: string,
-  branch: string
+  ref: string
 ): Promise<RepoEntry[] | null> {
+  const rootCacheKey = isFullHexSha(ref)
+    ? buildGitRootEntriesCacheKey(provider, host, owner, repo, ref)
+    : '';
+  if (rootCacheKey) {
+    const cachedEntries = await readEdgeCacheJson<RepoEntry[]>(rootCacheKey);
+    if (Array.isArray(cachedEntries)) {
+      return cachedEntries.map((entry) => ({
+        name: String(entry.name || ''),
+        type: entry.type === 'dir' ? 'dir' : 'file'
+      }));
+    }
+  }
+
   const headers: Record<string, string> = {
     'Accept': 'application/json',
     'User-Agent': 'LuantiHub/1.0 (+https://luantihub.org)'
   };
+  const cacheIfPinned = async (entries: RepoEntry[]): Promise<RepoEntry[]> => {
+    if (rootCacheKey) {
+      await writeEdgeCacheJson(rootCacheKey, entries, GIT_ROOT_ENTRIES_SHA_TTL_SECONDS);
+    }
+    return entries;
+  };
   try {
     if (provider === 'github') {
       const res = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(ref)}`,
         { headers }
       );
       if (!res.ok) return null;
       const items = await res.json();
       if (!Array.isArray(items)) return null;
-      return items.map((it: any) => ({
-        name: String(it.name || ''),
-        type: it.type === 'dir' ? 'dir' : 'file'
-      }));
+      return cacheIfPinned(
+        items.map((it: any) => ({
+          name: String(it.name || ''),
+          type: it.type === 'dir' ? 'dir' : 'file'
+        }))
+      );
     }
     if (provider === 'codeberg' || provider === 'mesehub') {
       const res = await fetchWithAnubisSupport(
-        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(branch)}`,
+        `https://${host}/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?ref=${encodeURIComponent(ref)}`,
         { headers }
       );
       if (!res.ok) return null;
       const items = await res.json();
       if (!Array.isArray(items)) return null;
-      return items.map((it: any) => ({
-        name: String(it.name || ''),
-        type: it.type === 'dir' || it.type === 'submodule' ? 'dir' : 'file'
-      }));
+      return cacheIfPinned(
+        items.map((it: any) => ({
+          name: String(it.name || ''),
+          type: it.type === 'dir' || it.type === 'submodule' ? 'dir' : 'file'
+        }))
+      );
     }
     if (provider === 'gitlab') {
       const projectPath = encodeURIComponent(`${owner}/${repo}`);
       const res = await fetch(
-        `https://${host}/api/v4/projects/${projectPath}/repository/tree?ref=${encodeURIComponent(branch)}&per_page=100`,
+        `https://${host}/api/v4/projects/${projectPath}/repository/tree?ref=${encodeURIComponent(ref)}&per_page=100`,
         { headers }
       );
       if (!res.ok) return null;
       const items = await res.json();
       if (!Array.isArray(items)) return null;
-      return items.map((it: any) => ({
-        name: String(it.name || ''),
-        type: it.type === 'tree' || it.type === 'commit' ? 'dir' : 'file'
-      }));
+      return cacheIfPinned(
+        items.map((it: any) => ({
+          name: String(it.name || ''),
+          type: it.type === 'tree' || it.type === 'commit' ? 'dir' : 'file'
+        }))
+      );
     }
     if (provider === 'bitbucket') {
       const res = await fetch(
-        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/src/${encodeURIComponent(branch)}/?pagelen=100`,
+        `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/src/${encodeURIComponent(ref)}/?pagelen=100`,
         { headers }
       );
       if (!res.ok) return null;
       const data: any = await res.json();
       const items = Array.isArray(data?.values) ? data.values : null;
       if (!items) return null;
-      return items.map((it: any) => ({
-        name: String(it.path || '').split('/').pop() || '',
-        type: it.type === 'commit_directory' ? 'dir' : 'file'
-      }));
+      return cacheIfPinned(
+        items.map((it: any) => ({
+          name: String(it.path || '').split('/').pop() || '',
+          type: it.type === 'commit_directory' ? 'dir' : 'file'
+        }))
+      );
     }
   } catch {
     return null;
@@ -581,13 +873,21 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     // Only allow customConf / customLua overrides during dryRun preview;
     // when publishing (dryRun: false), always fetch committed files from the live Git repository.
+    const hasInlinePreviewOverride = Boolean(dryRun && (customConf || customLua));
     let rawConfig = dryRun ? (customConf || '') : '';
     let confFileName = 'mod.conf';
     let packageType: 'mod' | 'game' | 'txp' | 'modpack' = 'mod';
     let branch = branchHint || 'main';
     let smartHeadSha = '';
 
-    const smartRefs = await fetchGitSmartHttpRefs(canonicalRepoUrl, owner, repo).catch(() => null);
+    const repoCooldownKey = `${provider}:${host.toLowerCase()}/${owner.toLowerCase()}/${repo.toLowerCase()}`;
+    const forceSmartRefsRefresh = !hasInlinePreviewOverride && shouldForceRefreshGitSmartRefs(repoCooldownKey);
+    const smartRefs = await fetchGitSmartHttpRefs(
+      canonicalRepoUrl,
+      owner,
+      repo,
+      forceSmartRefsRefresh
+    ).catch(() => null);
     if (smartRefs?.headSha) {
       smartHeadSha = smartRefs.headSha;
     }
@@ -595,84 +895,159 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       branch = smartRefs.defaultBranch;
     }
 
-    if (!rawConfig) {
-      const confFiles: Array<{ file: string; type: 'mod' | 'game' | 'txp' | 'modpack' }> = [
-        { file: 'mod.conf', type: 'mod' },
-        { file: 'game.conf', type: 'game' },
-        { file: 'modpack.conf', type: 'modpack' },
-        { file: 'texture_pack.conf', type: 'txp' }
-      ];
-
-      if (provider === 'custom') {
-        const rawBaseCandidates = buildProviderRawBaseCandidates(
-          canonicalRepoUrl,
-          owner,
-          repo,
-          branchHint || smartRefs?.defaultBranch
-        );
-        for (const baseCand of rawBaseCandidates) {
-          const cleanBase = baseCand.base.replace(/\/+$/, '');
-          for (const cf of confFiles) {
-            try {
-              const r = await fetchWithAnubisSupport(`${cleanBase}/${cf.file}`);
-              if (r.ok) {
-                const text = await r.text();
-                if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
-                  rawConfig = text;
-                  confFileName = cf.file;
-                  packageType = cf.type;
-                  resolvedCustomRawBase = cleanBase;
-                  break;
-                }
-              }
-            } catch {
-              // Try next candidate
-            }
-          }
-          if (rawConfig) break;
+    const resolveCommitShaForRef = (refName: string): string => {
+      const cleanRef = (refName || '').trim();
+      if (!cleanRef) return '';
+      if (isFullHexSha(cleanRef)) return cleanRef.toLowerCase();
+      if (smartRefs) {
+        const branchSha = smartRefs.branches[cleanRef];
+        if (isFullHexSha(branchSha)) {
+          return branchSha.toLowerCase();
         }
-      } else {
-        const branchCandidates = Array.from(
-          new Set([branchHint, smartRefs?.defaultBranch, 'main', 'master'].filter((b): b is string => Boolean(b)))
-        );
-        for (const cf of confFiles) {
-          for (const candBranch of branchCandidates) {
-            try {
-              const r = await fetchWithAnubisSupport(buildRawUrl(candBranch, cf.file));
-              if (r.ok) {
-                const text = await r.text();
-                if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
-                  rawConfig = text;
-                  confFileName = cf.file;
-                  packageType = cf.type;
-                  branch = candBranch;
-                  break;
-                }
-              }
-            } catch {
-              // Try next candidate
-            }
-          }
-          if (rawConfig) break;
+        const matchingTag = smartRefs.tags.find((t) => t.tagName === cleanRef);
+        if (matchingTag && isFullHexSha(matchingTag.commitSha)) {
+          return matchingTag.commitSha.toLowerCase();
+        }
+        if (isFullHexSha(smartRefs.headSha) && (!smartRefs.defaultBranch || cleanRef === smartRefs.defaultBranch)) {
+          return smartRefs.headSha.toLowerCase();
         }
       }
-    }
+      if (isFullHexSha(smartHeadSha) && (!smartRefs?.defaultBranch || cleanRef === smartRefs.defaultBranch)) {
+        return smartHeadSha.toLowerCase();
+      }
+      return '';
+    };
+
+    const buildAuditRawUrl = (
+      branchName: string,
+      filePath: string,
+      baseOverride = ''
+    ): { url: string; fallbackUrl?: string; pinned: boolean } => {
+      const cleanPath = filePath.replace(/^\/+/, '');
+      const commitSha = resolveCommitShaForRef(branchName);
+      const effectiveCustomBase = (baseOverride || resolvedCustomRawBase).replace(/\/+$/, '');
+
+      if (!commitSha) {
+        return {
+          url: effectiveCustomBase
+            ? (cleanPath ? `${effectiveCustomBase}/${cleanPath}` : effectiveCustomBase)
+            : buildRawUrl(branchName, filePath),
+          pinned: false
+        };
+      }
+
+      if (effectiveCustomBase) {
+        const unpinned = cleanPath ? `${effectiveCustomBase}/${cleanPath}` : effectiveCustomBase;
+        if (/\/plain$/i.test(effectiveCustomBase)) {
+          return {
+            url: cleanPath ? `${unpinned}?id=${commitSha}` : effectiveCustomBase,
+            fallbackUrl: unpinned,
+            pinned: Boolean(cleanPath)
+          };
+        }
+        if (/\/raw\/branch\/[^/]+$/i.test(effectiveCustomBase)) {
+          const pinnedBase = effectiveCustomBase.replace(/\/raw\/branch\/[^/]+$/i, `/raw/commit/${commitSha}`);
+          return {
+            url: cleanPath ? `${pinnedBase}/${cleanPath}` : pinnedBase,
+            fallbackUrl: unpinned,
+            pinned: true
+          };
+        }
+        if (/\/-\/raw\/[^/]+$/i.test(effectiveCustomBase)) {
+          const pinnedBase = effectiveCustomBase.replace(/\/-\/raw\/[^/]+$/i, `/-/raw/${commitSha}`);
+          return {
+            url: cleanPath ? `${pinnedBase}/${cleanPath}` : pinnedBase,
+            fallbackUrl: unpinned,
+            pinned: true
+          };
+        }
+        if (/\/raw\/(?:HEAD|master|main)$/i.test(effectiveCustomBase)) {
+          const pinnedBase = effectiveCustomBase.replace(/\/raw\/(?:HEAD|master|main)$/i, `/raw/${commitSha}`);
+          return {
+            url: cleanPath ? `${pinnedBase}/${cleanPath}` : pinnedBase,
+            fallbackUrl: unpinned,
+            pinned: true
+          };
+        }
+        if (/\/api\/v1\/repos\/.*\/raw$/i.test(effectiveCustomBase)) {
+          return {
+            url: cleanPath ? `${unpinned}?ref=${commitSha}` : unpinned,
+            fallbackUrl: unpinned,
+            pinned: Boolean(cleanPath)
+          };
+        }
+        return { url: unpinned, pinned: false };
+      }
+
+      if (provider === 'codeberg' || provider === 'mesehub') {
+        return {
+          url: `https://${host}/${owner}/${repo}/raw/commit/${commitSha}/${cleanPath}`,
+          pinned: true
+        };
+      }
+      if (provider === 'gitlab') {
+        return {
+          url: `https://${host}/${owner}/${repo}/-/raw/${commitSha}/${cleanPath}`,
+          pinned: true
+        };
+      }
+      if (provider === 'bitbucket') {
+        return {
+          url: `https://bitbucket.org/${owner}/${repo}/raw/${commitSha}/${cleanPath}`,
+          pinned: true
+        };
+      }
+      if (provider === 'custom') {
+        const unpinned = `${canonicalRepoUrl.replace(/\/+$/, '')}/plain/${cleanPath}`;
+        return {
+          url: `${unpinned}?id=${commitSha}`,
+          fallbackUrl: unpinned,
+          pinned: true
+        };
+      }
+      return {
+        url: `https://raw.githubusercontent.com/${owner}/${repo}/${commitSha}/${cleanPath}`,
+        pinned: true
+      };
+    };
+
+    const fetchAuditFileResponse = async (
+      branchName: string,
+      filePath: string,
+      init: RequestInit = {},
+      baseOverride = ''
+    ): Promise<Response> => {
+      const { url, fallbackUrl, pinned } = buildAuditRawUrl(branchName, filePath, baseOverride);
+      if (pinned) {
+        const res = await fetchWithAnubisSupport(url, init);
+        if (res.ok || !fallbackUrl) {
+          return res;
+        }
+        return fetchWithAnubisSupport(fallbackUrl, init);
+      }
+      const mergedHeaders = new Headers(init.headers);
+      if (!mergedHeaders.has('Cache-Control')) {
+        mergedHeaders.set('Cache-Control', 'no-cache');
+      }
+      return fetchWithAnubisSupport(url, {
+        ...init,
+        headers: mergedHeaders
+      });
+    };
+
+    const preliminaryCommitSha = resolveCommitShaForRef(branch);
+    const readSnapshotKey =
+      !hasInlinePreviewOverride && isFullHexSha(preliminaryCommitSha)
+        ? buildGitPreflightSnapshotKey(provider, host, owner, repo, branch, preliminaryCommitSha)
+        : '';
+    const cachedSnapshot = readSnapshotKey
+      ? await readEdgeCacheJson<CachedGitCommitAuditSnapshot>(readSnapshotKey)
+      : null;
 
     const diagnostics: GitAuditDiagnostic[] = [];
     const sanitizedDefaultName = repo.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'my_mod';
 
-    // Check 1: Configuration File Presence
-    if (!rawConfig) {
-      diagnostics.push({
-        code: 'CONF_MISSING',
-        severity: 'error',
-        file: 'mod.conf / game.conf',
-        title: 'Missing Package Configuration File',
-        message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch '${branch}' in ${owner}/${repo}.`,
-        howToFix: `Create a 'mod.conf' (or 'game.conf') file in the root directory of your ${provider} repository with the following fields and push it to your default branch:`,
-        snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0`
-      });
-
+    if (cachedSnapshot?.missingConf) {
       const failedAudit = {
         valid: false,
         passed: false,
@@ -681,9 +1056,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         licenseValid: false,
         errorsCount: 1,
         warningsCount: 0,
-        diagnostics
+        diagnostics: cloneAuditDiagnostics(cachedSnapshot.baseDiagnostics)
       };
-
       return Response.json({
         success: false,
         canPublish: false,
@@ -693,344 +1067,614 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       }, { status: 422 });
     }
 
-    // 2. Parse Key-Value Metadata from *.conf (including multiline """...""" blocks)
-    const parsedConf = parseLuantiConf(rawConfig);
-
-    const cleanDep = (s: string): string => {
-      return s
-        .trim()
-        .replace(/^["']|["']$/g, '')
-        .replace(/\?$/, '') // Strip legacy optional modifier
-        .split(/\s+#/)[0]   // Strip inline comment if preceded by space
-        .trim();
-    };
-
-    const rawName = parsedConf['name'] || '';
-    const rawTitle = parsedConf['title'] || '';
-    const rawFullDesc = parsedConf['description'] || '';
-    const rawDesc = computeConfShortDescription(rawFullDesc) || rawFullDesc;
-    const rawLicense = parsedConf['license'] || '';
-    const rawMediaLicense = parsedConf['media_license'] || '';
-    const rawDepends = parsedConf['depends'] || '';
-    const rawOptDepends = parsedConf['optional_depends'] || '';
-    const rawConfTags = parsedConf['tags'] || parsedConf['categories'] || '';
-    const rawMinVersion = parsedConf['min_minetest_version'] || '5.0.0';
-    const rawMaxVersion = parsedConf['max_minetest_version'] || undefined;
-    const supportedGames = parsedConf['supported_games']
-      ? parsedConf['supported_games'].split(',').map(cleanDep).filter(Boolean)
-      : [];
-    const unsupportedGames = parsedConf['unsupported_games']
-      ? parsedConf['unsupported_games'].split(',').map(cleanDep).filter(Boolean)
-      : [];
-
-    // Optional: Probe `.cdb.json` (Luanti ContentDB repository metadata specification)
-    let cdbMeta: CdbJsonMetadata | null = null;
     let rawCdbJsonText = '';
-    try {
-      const cdbRes = await fetchWithAnubisSupport(buildRawUrl(branch, '.cdb.json'));
-      if (cdbRes.ok) {
-        const cdbText = await cdbRes.text();
-        rawCdbJsonText = cdbText;
-        cdbMeta = parseCdbJsonMetadata(cdbText);
-        if (cdbMeta) {
-          diagnostics.push({
-            code: 'CDB_JSON_DETECTED',
-            severity: 'pass',
-            file: '.cdb.json',
-            title: 'Luanti .cdb.json Metadata Detected',
-            message: `Parsed ContentDB schema from .cdb.json (${[
-              cdbMeta.license ? `license: ${cdbMeta.license}` : '',
-              cdbMeta.tags.length > 0 ? `${cdbMeta.tags.length} tags` : '',
-              cdbMeta.dev_state ? `state: ${cdbMeta.dev_state}` : ''
-            ].filter(Boolean).join(', ') || 'extended metadata'}).`
-          });
-        }
-      }
-    } catch {
-      // Optional .cdb.json not present
-    }
+    let effectiveLicense = 'MIT';
+    let effectiveMediaLicense = 'CC-BY-SA-4.0';
+    let luaSource = '';
+    let discoveredRootEntries: RepoEntry[] | null = null;
+    let readmeMarkdown = '';
+    let longDesc = '';
+    let screenshotUrl = '';
+    let hasScreenshot = false;
+    let verifiedCdbScreenshots: string[] = [];
+    let safetyEval: ContentSafetyEvaluation;
 
-    const technicalName = rawName || cdbMeta?.name || sanitizedDefaultName;
-
-    // Validate `name`
-    if (!rawName) {
-      diagnostics.push({
-        code: 'CONF_MISSING_NAME',
-        severity: 'error',
-        file: confFileName,
-        line: 1,
-        title: `Missing 'name' Field in ${confFileName}`,
-        message: `Your ${confFileName} does not declare a technical 'name = ...' identifier.`,
-        howToFix: `Add 'name = ${sanitizedDefaultName}' to ${confFileName}. Technical names must use only lowercase letters, numbers, and underscores.`,
-        snippet: `name = ${sanitizedDefaultName}`
-      });
-    } else if (!/^[a-z0-9_]+$/.test(rawName)) {
-      const fixedName = rawName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-      diagnostics.push({
-        code: 'CONF_INVALID_NAME',
-        severity: 'error',
-        file: confFileName,
-        line: 1,
-        title: `Invalid Technical Name '${rawName}' in ${confFileName}`,
-        message: `Luanti requires technical mod/game names to contain only lowercase letters (a-z), digits (0-9), and underscores (_). Hyphens or uppercase letters cause Luanti to reject loading the mod.`,
-        howToFix: `Update 'name' in ${confFileName} to '${fixedName}':`,
-        snippet: `name = ${fixedName}`
-      });
+    if (cachedSnapshot) {
+      resolvedCustomRawBase = cachedSnapshot.resolvedCustomRawBase;
+      rawConfig = cachedSnapshot.rawConfig;
+      confFileName = cachedSnapshot.confFileName;
+      packageType = cachedSnapshot.packageType;
+      branch = cachedSnapshot.branch;
+      rawCdbJsonText = cachedSnapshot.rawCdbJsonText;
+      effectiveLicense = cachedSnapshot.effectiveLicense;
+      effectiveMediaLicense = cachedSnapshot.effectiveMediaLicense;
+      luaSource = cachedSnapshot.luaSource;
+      discoveredRootEntries = cachedSnapshot.discoveredRootEntries
+        ? cachedSnapshot.discoveredRootEntries.map((entry) => ({
+            name: String(entry.name || ''),
+            type: entry.type === 'dir' ? 'dir' : 'file'
+          }))
+        : null;
+      readmeMarkdown = cachedSnapshot.readmeMarkdown;
+      longDesc = cachedSnapshot.longDesc;
+      screenshotUrl = cachedSnapshot.screenshotUrl;
+      hasScreenshot = cachedSnapshot.hasScreenshot;
+      verifiedCdbScreenshots = [...cachedSnapshot.verifiedCdbScreenshots];
+      safetyEval = cloneSafetyEvaluation(cachedSnapshot.safetyEval);
+      diagnostics.push(...cloneAuditDiagnostics(cachedSnapshot.baseDiagnostics));
     } else {
-      diagnostics.push({
-        code: 'CONF_VALID_NAME',
-        severity: 'pass',
-        file: confFileName,
-        title: `Valid Technical Identifier (${rawName})`,
-        message: `${confFileName} declares valid technical name '${rawName}'.`
-      });
-    }
+      if (!rawConfig) {
+        const confFiles: Array<{ file: string; type: 'mod' | 'game' | 'txp' | 'modpack' }> = [
+          { file: 'mod.conf', type: 'mod' },
+          { file: 'game.conf', type: 'game' },
+          { file: 'modpack.conf', type: 'modpack' },
+          { file: 'texture_pack.conf', type: 'txp' }
+        ];
 
-    // Validate `title` and `description` (allowing .cdb.json to satisfy missing mod.conf fields)
-    const effectiveRawTitle = rawTitle || cdbMeta?.title || '';
-    const effectiveRawDesc = rawDesc || cdbMeta?.short_description || '';
-    if (!effectiveRawTitle || !effectiveRawDesc) {
-      diagnostics.push({
-        code: 'CONF_METADATA_INCOMPLETE',
-        severity: 'warning',
-        file: confFileName,
-        title: `Recommended 'title' or 'description' Missing in ${confFileName}`,
-        message: `Adding both 'title' and 'description' in ${confFileName} (or .cdb.json) improves search ranking and in-game Content tab display.`,
-        howToFix: `Add descriptive 'title' and 'description' lines to ${confFileName}:`,
-        snippet: `title = ${effectiveRawTitle || technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your package adds to Luanti.'}`
-      });
-    } else {
-      diagnostics.push({
-        code: 'CONF_METADATA_OK',
-        severity: 'pass',
-        file: rawTitle && rawDesc ? confFileName : '.cdb.json',
-        title: 'Title & Description Present',
-        message: `Title ("${effectiveRawTitle}") and description verified.`
-      });
-    }
-
-    // Check 3: Detect SPDX Open-Source License from mod.conf, .cdb.json, or LICENSE / COPYING / README.md
-    let detectedLicense = rawLicense || cdbMeta?.license || '';
-    let detectedLicenseFile = rawLicense ? confFileName : (cdbMeta?.license ? '.cdb.json' : 'LICENSE');
-
-    if (!detectedLicense) {
-      const licenseCandidates = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING', 'COPYING.txt'];
-      for (const licFile of licenseCandidates) {
-        try {
-          const licRes = await fetchWithAnubisSupport(buildRawUrl(branch, licFile));
-          if (licRes.ok) {
-            const licText = await licRes.text();
-            if (licText && !licText.trim().startsWith('<!DOCTYPE')) {
-              const spdx = detectSpdxFromLicenseText(licText);
-              if (spdx) {
-                detectedLicense = spdx;
-                detectedLicenseFile = licFile;
-                break;
+        if (provider === 'custom') {
+          const rawBaseCandidates = buildProviderRawBaseCandidates(
+            canonicalRepoUrl,
+            owner,
+            repo,
+            branchHint || smartRefs?.defaultBranch
+          );
+          for (const baseCand of rawBaseCandidates) {
+            const cleanBase = baseCand.base.replace(/\/+$/, '');
+            for (const cf of confFiles) {
+              try {
+                const r = await fetchAuditFileResponse(branch, cf.file, {}, cleanBase);
+                if (r.ok) {
+                  const text = await r.text();
+                  if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
+                    rawConfig = text;
+                    confFileName = cf.file;
+                    packageType = cf.type;
+                    resolvedCustomRawBase = cleanBase;
+                    break;
+                  }
+                }
+              } catch {
+                // Try next candidate
               }
             }
+            if (rawConfig) break;
           }
-        } catch {
-          // Try next candidate
+        } else {
+          const knownBranchNames = smartRefs ? Object.keys(smartRefs.branches) : [];
+          const branchCandidates = Array.from(
+            new Set(
+              [
+                branchHint,
+                smartRefs?.defaultBranch,
+                ...(knownBranchNames.length > 0
+                  ? ['main', 'master'].filter((b) => smartRefs?.branches[b] !== undefined)
+                  : ['main', 'master'])
+              ].filter((b): b is string => Boolean(b))
+            )
+          );
+          for (const cf of confFiles) {
+            for (const candBranch of branchCandidates) {
+              try {
+                const r = await fetchAuditFileResponse(candBranch, cf.file);
+                if (r.ok) {
+                  const text = await r.text();
+                  if (text && text.trim().length > 0 && !text.trim().startsWith('<!DOCTYPE') && !text.trim().startsWith('<html')) {
+                    rawConfig = text;
+                    confFileName = cf.file;
+                    packageType = cf.type;
+                    branch = candBranch;
+                    break;
+                  }
+                }
+              } catch {
+                // Try next candidate
+              }
+            }
+            if (rawConfig) break;
+          }
         }
       }
-    }
 
-    const effectiveLicense = detectedLicense || 'MIT';
-    const effectiveMediaLicense = rawMediaLicense || cdbMeta?.media_license || detectedLicense || 'CC-BY-SA-4.0';
+      // Check 1: Configuration File Presence
+      if (!rawConfig) {
+        diagnostics.push({
+          code: 'CONF_MISSING',
+          severity: 'error',
+          file: 'mod.conf / game.conf',
+          title: 'Missing Package Configuration File',
+          message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch '${branch}' in ${owner}/${repo}.`,
+          howToFix: `Create a 'mod.conf' (or 'game.conf') file in the root directory of your ${provider} repository with the following fields and push it to your default branch:`,
+          snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0`
+        });
 
-    if ((rawLicense || cdbMeta?.license) && !isApprovedLicense(rawLicense || cdbMeta?.license || '')) {
-      diagnostics.push({
-        code: 'LICENSE_INVALID',
-        severity: 'error',
-        file: detectedLicenseFile,
-        title: `Unrecognized or Non-FOSS License: '${rawLicense || cdbMeta?.license}'`,
-        message: `LuantiHub requires an OSI-approved Open Source or Free Culture SPDX license.`,
-        howToFix: `Include a standard open-source LICENSE file (e.g., MIT, LGPL-2.1-only, GPL-3.0-only, Apache-2.0, CC-BY-SA-4.0) in the root of your repository.`
-      });
-    } else {
-      diagnostics.push({
-        code: 'LICENSE_VERIFIED',
-        severity: 'pass',
-        file: detectedLicenseFile,
-        title: `Open-Source License Verified (${effectiveLicense})`,
-        message: detectedLicense
-          ? `Detected ${effectiveLicense} license from ${detectedLicenseFile}.`
-          : `Verified open-source distribution under submission warranty (${effectiveLicense} / ${effectiveMediaLicense}).`
-      });
-    }
+        if (readSnapshotKey) {
+          await writeEdgeCacheJson(
+            readSnapshotKey,
+            {
+              missingConf: true,
+              branch,
+              resolvedCustomRawBase,
+              rawConfig: '',
+              confFileName,
+              packageType,
+              rawCdbJsonText: '',
+              effectiveLicense: 'MIT',
+              effectiveMediaLicense: 'CC-BY-SA-4.0',
+              luaSource: '',
+              discoveredRootEntries: null,
+              readmeMarkdown: '',
+              longDesc: '',
+              screenshotUrl: 'logo.svg',
+              hasScreenshot: false,
+              verifiedCdbScreenshots: [],
+              safetyEval: {
+                holdForAdminReview: false,
+                categories: [],
+                matches: [],
+                autoContentWarnings: [],
+                aiChecked: false,
+                aiFallbackUsed: false,
+                summary: ''
+              },
+              baseDiagnostics: cloneAuditDiagnostics(diagnostics)
+            } satisfies CachedGitCommitAuditSnapshot,
+            GIT_PREFLIGHT_SNAPSHOT_TTL_SECONDS
+          );
+        }
 
-    // Check 4: Fetch & Audit `init.lua` (for mods) or Directory Structure (for games / modpacks / texture packs)
-    let luaSource = dryRun ? (customLua || '') : '';
-    if (!luaSource && packageType === 'mod') {
+        const failedAudit = {
+          valid: false,
+          passed: false,
+          configFound: null,
+          luacheckPassed: false,
+          licenseValid: false,
+          errorsCount: 1,
+          warningsCount: 0,
+          diagnostics
+        };
+
+        return Response.json({
+          success: false,
+          canPublish: false,
+          error: 'Validation failed: Missing mod.conf or game.conf in repository root.',
+          audit: failedAudit,
+          auditReport: failedAudit
+        }, { status: 422 });
+      }
+
+      // 2. Parse Key-Value Metadata from *.conf (including multiline """...""" blocks)
+      const confMeta = extractConfMetadata(rawConfig);
+
+      // Optional: Probe `.cdb.json` (Luanti ContentDB repository metadata specification)
+      let cdbMeta: CdbJsonMetadata | null = null;
       try {
-        const luaRes = await fetchWithAnubisSupport(buildRawUrl(branch, 'init.lua'));
-        if (luaRes.ok) {
-          const text = await luaRes.text();
-          if (text && !text.trim().startsWith('<!DOCTYPE')) {
-            luaSource = text;
+        const cdbRes = await fetchAuditFileResponse(branch, '.cdb.json');
+        if (cdbRes.ok) {
+          const cdbText = await cdbRes.text();
+          rawCdbJsonText = cdbText;
+          cdbMeta = parseCdbJsonMetadata(cdbText);
+          if (cdbMeta) {
+            diagnostics.push({
+              code: 'CDB_JSON_DETECTED',
+              severity: 'pass',
+              file: '.cdb.json',
+              title: 'Luanti .cdb.json Metadata Detected',
+              message: `Parsed ContentDB schema from .cdb.json (${[
+                cdbMeta.license ? `license: ${cdbMeta.license}` : '',
+                cdbMeta.tags.length > 0 ? `${cdbMeta.tags.length} tags` : '',
+                cdbMeta.dev_state ? `state: ${cdbMeta.dev_state}` : ''
+              ].filter(Boolean).join(', ') || 'extended metadata'}).`
+            });
           }
         }
       } catch {
-        // Ignore network error
+        // Optional .cdb.json not present
       }
-    }
 
-    let discoveredRootEntries: RepoEntry[] | null = null;
-    if (packageType === 'mod') {
-      if (!luaSource) {
+      const technicalName = confMeta.rawName || cdbMeta?.name || sanitizedDefaultName;
+
+      // Validate `name`
+      if (!confMeta.rawName) {
         diagnostics.push({
-          code: 'LUA_ENTRYPOINT_MISSING',
+          code: 'CONF_MISSING_NAME',
           severity: 'error',
-          file: 'init.lua',
-          title: 'Missing init.lua Entrypoint',
-          message: `Every Luanti mod must contain an 'init.lua' script in its root directory, but none was found on branch '${branch}'.`,
-          howToFix: `Create an 'init.lua' file in the root of your repository (next to mod.conf) containing your mod's Lua code.`,
-          snippet: `-- init.lua\nlocal modname = core.get_current_modname()\ncore.log("action", "[" .. modname .. "] Loaded successfully!")`
+          file: confFileName,
+          line: 1,
+          title: `Missing 'name' Field in ${confFileName}`,
+          message: `Your ${confFileName} does not declare a technical 'name = ...' identifier.`,
+          howToFix: `Add 'name = ${sanitizedDefaultName}' to ${confFileName}. Technical names must use only lowercase letters, numbers, and underscores.`,
+          snippet: `name = ${sanitizedDefaultName}`
+        });
+      } else if (!/^[a-z0-9_]+$/.test(confMeta.rawName)) {
+        const fixedName = confMeta.rawName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        diagnostics.push({
+          code: 'CONF_INVALID_NAME',
+          severity: 'error',
+          file: confFileName,
+          line: 1,
+          title: `Invalid Technical Name '${confMeta.rawName}' in ${confFileName}`,
+          message: `Luanti requires technical mod/game names to contain only lowercase letters (a-z), digits (0-9), and underscores (_). Hyphens or uppercase letters cause Luanti to reject loading the mod.`,
+          howToFix: `Update 'name' in ${confFileName} to '${fixedName}':`,
+          snippet: `name = ${fixedName}`
         });
       } else {
-        const luaDiags = runLuacheckStaticAudit(luaSource, technicalName);
-        diagnostics.push(...luaDiags);
+        diagnostics.push({
+          code: 'CONF_VALID_NAME',
+          severity: 'pass',
+          file: confFileName,
+          title: `Valid Technical Identifier (${confMeta.rawName})`,
+          message: `${confFileName} declares valid technical name '${confMeta.rawName}'.`
+        });
       }
-    } else {
-      // Verify repository directory structure for game.conf, modpack.conf, or texture_pack.conf
-      const rootEntries = await fetchRepoRootEntries(provider, host, owner, repo, branch);
-      discoveredRootEntries = rootEntries;
-      if (rootEntries && rootEntries.length > 0) {
-        const hasGitmodules = rootEntries.some(e => e.name.toLowerCase() === '.gitmodules');
-        if (packageType === 'game') {
-          const hasModsDir = rootEntries.some(e => e.type === 'dir' && e.name.toLowerCase() === 'mods');
-          if (!hasModsDir && !hasGitmodules) {
-            diagnostics.push({
-              code: 'GAME_STRUCTURE_INVALID',
-              severity: 'error',
-              file: 'mods/',
-              title: 'Missing mods/ Directory for Luanti Game',
-              message: `Repository declares game.conf, but no 'mods/' directory was found in the root of ${owner}/${repo}.`,
-              howToFix: `Create a 'mods/' directory in the root of your game repository containing the game's base mods.`
-            });
-          } else {
-            diagnostics.push({
-              code: 'GAME_STRUCTURE_OK',
-              severity: 'pass',
-              file: 'mods/',
-              title: 'Luanti Game Directory Structure Verified',
-              message: `Found required 'mods/' directory structure for game package.`
-            });
-          }
-        } else if (packageType === 'modpack') {
-          const subDirs = rootEntries.filter(e => e.type === 'dir' && !e.name.startsWith('.'));
-          if (subDirs.length === 0 && !hasGitmodules) {
-            diagnostics.push({
-              code: 'MODPACK_STRUCTURE_INVALID',
-              severity: 'error',
-              file: confFileName,
-              title: 'No Sub-Mod Directories Found in Modpack',
-              message: `Repository declares modpack.conf, but contains no mod subdirectories in the root of ${owner}/${repo}.`,
-              howToFix: `Place at least one mod subfolder (each with its own mod.conf and init.lua) inside the modpack repository.`
-            });
-          } else {
-            diagnostics.push({
-              code: 'MODPACK_STRUCTURE_OK',
-              severity: 'pass',
-              file: confFileName,
-              title: 'Modpack Directory Structure Verified',
-              message: `Found ${subDirs.length || 1} sub-directory entry(s) in modpack root.`
-            });
-          }
-        } else if (packageType === 'txp') {
-          const hasPngFiles = rootEntries.some(
-            e => e.type === 'file' && /\.(png|jpg|tga)$/i.test(e.name) && e.name.toLowerCase() !== 'screenshot.png'
-          );
-          const hasAssetSubdirs = rootEntries.some(e => e.type === 'dir' && !e.name.startsWith('.'));
-          if (!hasPngFiles && !hasAssetSubdirs) {
-            diagnostics.push({
-              code: 'TXP_STRUCTURE_INVALID',
-              severity: 'error',
-              file: confFileName,
-              title: 'No Texture Files Found in Texture Pack',
-              message: `Repository declares texture_pack.conf, but no .png texture files or texture subdirectories were found in ${owner}/${repo}.`,
-              howToFix: `Add your .png node/item texture files to the repository root or texture subdirectories.`
-            });
-          } else {
-            diagnostics.push({
-              code: 'TXP_STRUCTURE_OK',
-              severity: 'pass',
-              file: confFileName,
-              title: 'Texture Pack Assets Verified',
-              message: 'Detected texture files/directories in repository.'
-            });
+
+      // Validate `title` and `description` (allowing .cdb.json to satisfy missing mod.conf fields)
+      const effectiveRawTitle = confMeta.rawTitle || cdbMeta?.title || '';
+      const effectiveRawDesc = confMeta.rawDesc || cdbMeta?.short_description || '';
+      if (!effectiveRawTitle || !effectiveRawDesc) {
+        diagnostics.push({
+          code: 'CONF_METADATA_INCOMPLETE',
+          severity: 'warning',
+          file: confFileName,
+          title: `Recommended 'title' or 'description' Missing in ${confFileName}`,
+          message: `Adding both 'title' and 'description' in ${confFileName} (or .cdb.json) improves search ranking and in-game Content tab display.`,
+          howToFix: `Add descriptive 'title' and 'description' lines to ${confFileName}:`,
+          snippet: `title = ${effectiveRawTitle || technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your package adds to Luanti.'}`
+        });
+      } else {
+        diagnostics.push({
+          code: 'CONF_METADATA_OK',
+          severity: 'pass',
+          file: confMeta.rawTitle && confMeta.rawDesc ? confFileName : '.cdb.json',
+          title: 'Title & Description Present',
+          message: `Title ("${effectiveRawTitle}") and description verified.`
+        });
+      }
+
+      // Check 3: Detect SPDX Open-Source License from mod.conf, .cdb.json, or LICENSE / COPYING / README.md
+      let detectedLicense = confMeta.rawLicense || cdbMeta?.license || '';
+      let detectedLicenseFile = confMeta.rawLicense ? confFileName : (cdbMeta?.license ? '.cdb.json' : 'LICENSE');
+
+      if (!detectedLicense) {
+        const licenseCandidates = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING', 'COPYING.txt'];
+        for (const licFile of licenseCandidates) {
+          try {
+            const licRes = await fetchAuditFileResponse(branch, licFile);
+            if (licRes.ok) {
+              const licText = await licRes.text();
+              if (licText && !licText.trim().startsWith('<!DOCTYPE')) {
+                const spdx = detectSpdxFromLicenseText(licText);
+                if (spdx) {
+                  detectedLicense = spdx;
+                  detectedLicenseFile = licFile;
+                  break;
+                }
+              }
+            }
+          } catch {
+            // Try next candidate
           }
         }
       }
-    }
 
-    // Optional Dependency Syntax Check (only if depends / optional_depends are specified; empty is 100% valid)
-    const rawDepList = [
-      ...(rawDepends ? rawDepends.split(',').map(cleanDep).filter(Boolean) : []),
-      ...(rawOptDepends ? rawOptDepends.split(',').map(cleanDep).filter(Boolean) : [])
-    ];
-    const invalidDeps = rawDepList.filter(d => !/^[a-z0-9_]+$/.test(d));
-    if (invalidDeps.length > 0) {
-      diagnostics.push({
-        code: 'CONF_INVALID_DEPENDS',
-        severity: 'error',
-        file: confFileName,
-        title: `Invalid Dependency Identifier: '${invalidDeps[0]}'`,
-        message: `Luanti dependency names in 'depends' / 'optional_depends' must use only lowercase letters, numbers, and underscores (found '${invalidDeps.join(', ')}').`,
-        howToFix: `Ensure all comma-separated mod names in 'depends' and 'optional_depends' are valid snake_case technical mod names.`
-      });
-    }
+      effectiveLicense = detectedLicense || 'MIT';
+      effectiveMediaLicense = confMeta.rawMediaLicense || cdbMeta?.media_license || detectedLicense || 'CC-BY-SA-4.0';
 
-    // Check 5: Probe README.md & screenshot.png
-    const rawAssetBase = buildRawUrl(branch, '').replace(/\/+$/, '');
-    let readmeMarkdown = '';
-    try {
-      const readmeRes = await fetchWithAnubisSupport(buildRawUrl(branch, 'README.md'));
-      if (readmeRes.ok) {
-        const md = await readmeRes.text();
-        if (md && !md.trim().startsWith('<!DOCTYPE')) {
-          readmeMarkdown = rewriteRelativeMarkdownUrls(md.slice(0, 64000), rawAssetBase);
+      if ((confMeta.rawLicense || cdbMeta?.license) && !isApprovedLicense(confMeta.rawLicense || cdbMeta?.license || '')) {
+        diagnostics.push({
+          code: 'LICENSE_INVALID',
+          severity: 'error',
+          file: detectedLicenseFile,
+          title: `Unrecognized or Non-FOSS License: '${confMeta.rawLicense || cdbMeta?.license}'`,
+          message: `LuantiHub requires an OSI-approved Open Source or Free Culture SPDX license.`,
+          howToFix: `Include a standard open-source LICENSE file (e.g., MIT, LGPL-2.1-only, GPL-3.0-only, Apache-2.0, CC-BY-SA-4.0) in the root of your repository.`
+        });
+      } else {
+        diagnostics.push({
+          code: 'LICENSE_VERIFIED',
+          severity: 'pass',
+          file: detectedLicenseFile,
+          title: `Open-Source License Verified (${effectiveLicense})`,
+          message: detectedLicense
+            ? `Detected ${effectiveLicense} license from ${detectedLicenseFile}.`
+            : `Verified open-source distribution under submission warranty (${effectiveLicense} / ${effectiveMediaLicense}).`
+        });
+      }
+
+      // Check 4: Fetch & Audit `init.lua` (for mods) or Directory Structure (for games / modpacks / texture packs)
+      luaSource = dryRun ? (customLua || '') : '';
+      if (!luaSource && packageType === 'mod') {
+        try {
+          const luaRes = await fetchAuditFileResponse(branch, 'init.lua');
+          if (luaRes.ok) {
+            const text = await luaRes.text();
+            if (text && !text.trim().startsWith('<!DOCTYPE')) {
+              luaSource = text;
+            }
+          }
+        } catch {
+          // Ignore network error
         }
       }
-    } catch {
-      // Keep shortDesc
-    }
-    const longDesc = readmeMarkdown ? readmeMarkdown.slice(0, 12000) : (rawFullDesc || rawDesc || 'Decentralized Luanti community package.');
 
-    let screenshotUrl = buildRawUrl(branch, 'screenshot.png');
-    let hasScreenshot = false;
-    try {
-      const shotRes = await fetchWithAnubisSupport(screenshotUrl, { method: 'HEAD' });
-      hasScreenshot = shotRes.ok;
-    } catch {
-      hasScreenshot = false;
-    }
+      if (packageType === 'mod') {
+        if (!luaSource) {
+          diagnostics.push({
+            code: 'LUA_ENTRYPOINT_MISSING',
+            severity: 'error',
+            file: 'init.lua',
+            title: 'Missing init.lua Entrypoint',
+            message: `Every Luanti mod must contain an 'init.lua' script in its root directory, but none was found on branch '${branch}'.`,
+            howToFix: `Create an 'init.lua' file in the root of your repository (next to mod.conf) containing your mod's Lua code.`,
+            snippet: `-- init.lua\nlocal modname = core.get_current_modname()\ncore.log("action", "[" .. modname .. "] Loaded successfully!")`
+          });
+        } else {
+          const luaDiags = runLuacheckStaticAudit(luaSource, technicalName);
+          diagnostics.push(...luaDiags);
+        }
+      } else {
+        // Verify repository directory structure for game.conf, modpack.conf, or texture_pack.conf
+        const rootRef = resolveCommitShaForRef(branch) || branch;
+        const rootEntries = await fetchRepoRootEntries(provider, host, owner, repo, rootRef);
+        discoveredRootEntries = rootEntries;
+        if (rootEntries && rootEntries.length > 0) {
+          const hasGitmodules = rootEntries.some(e => e.name.toLowerCase() === '.gitmodules');
+          if (packageType === 'game') {
+            const hasModsDir = rootEntries.some(e => e.type === 'dir' && e.name.toLowerCase() === 'mods');
+            if (!hasModsDir && !hasGitmodules) {
+              diagnostics.push({
+                code: 'GAME_STRUCTURE_INVALID',
+                severity: 'error',
+                file: 'mods/',
+                title: 'Missing mods/ Directory for Luanti Game',
+                message: `Repository declares game.conf, but no 'mods/' directory was found in the root of ${owner}/${repo}.`,
+                howToFix: `Create a 'mods/' directory in the root of your game repository containing the game's base mods.`
+              });
+            } else {
+              diagnostics.push({
+                code: 'GAME_STRUCTURE_OK',
+                severity: 'pass',
+                file: 'mods/',
+                title: 'Luanti Game Directory Structure Verified',
+                message: `Found required 'mods/' directory structure for game package.`
+              });
+            }
+          } else if (packageType === 'modpack') {
+            const subDirs = rootEntries.filter(e => e.type === 'dir' && !e.name.startsWith('.'));
+            if (subDirs.length === 0 && !hasGitmodules) {
+              diagnostics.push({
+                code: 'MODPACK_STRUCTURE_INVALID',
+                severity: 'error',
+                file: confFileName,
+                title: 'No Sub-Mod Directories Found in Modpack',
+                message: `Repository declares modpack.conf, but contains no mod subdirectories in the root of ${owner}/${repo}.`,
+                howToFix: `Place at least one mod subfolder (each with its own mod.conf and init.lua) inside the modpack repository.`
+              });
+            } else {
+              diagnostics.push({
+                code: 'MODPACK_STRUCTURE_OK',
+                severity: 'pass',
+                file: confFileName,
+                title: 'Modpack Directory Structure Verified',
+                message: `Found ${subDirs.length || 1} sub-directory entry(s) in modpack root.`
+              });
+            }
+          } else if (packageType === 'txp') {
+            const hasPngFiles = rootEntries.some(
+              e => e.type === 'file' && /\.(png|jpg|tga)$/i.test(e.name) && e.name.toLowerCase() !== 'screenshot.png'
+            );
+            const hasAssetSubdirs = rootEntries.some(e => e.type === 'dir' && !e.name.startsWith('.'));
+            if (!hasPngFiles && !hasAssetSubdirs) {
+              diagnostics.push({
+                code: 'TXP_STRUCTURE_INVALID',
+                severity: 'error',
+                file: confFileName,
+                title: 'No Texture Files Found in Texture Pack',
+                message: `Repository declares texture_pack.conf, but no .png texture files or texture subdirectories were found in ${owner}/${repo}.`,
+                howToFix: `Add your .png node/item texture files to the repository root or texture subdirectories.`
+              });
+            } else {
+              diagnostics.push({
+                code: 'TXP_STRUCTURE_OK',
+                severity: 'pass',
+                file: confFileName,
+                title: 'Texture Pack Assets Verified',
+                message: 'Detected texture files/directories in repository.'
+              });
+            }
+          }
+        }
+      }
 
-    if (!hasScreenshot) {
-      screenshotUrl = 'logo.svg';
-      diagnostics.push({
-        code: 'SCREENSHOT_MISSING',
-        severity: 'warning',
-        file: 'screenshot.png',
-        title: 'Optional screenshot.png Not Found',
-        message: 'No screenshot.png was found in the repository root. A default voxel icon will be used until you add one.',
-        howToFix: 'Add a 16:9 PNG image named `screenshot.png` (e.g. 1280×720) to the root of your repository.'
+      // Optional Dependency Syntax Check (only if depends / optional_depends are specified; empty is 100% valid)
+      const rawDepList = [
+        ...(confMeta.rawDepends ? confMeta.rawDepends.split(',').map(cleanConfDep).filter(Boolean) : []),
+        ...(confMeta.rawOptDepends ? confMeta.rawOptDepends.split(',').map(cleanConfDep).filter(Boolean) : [])
+      ];
+      const invalidDeps = rawDepList.filter(d => !/^[a-z0-9_]+$/.test(d));
+      if (invalidDeps.length > 0) {
+        diagnostics.push({
+          code: 'CONF_INVALID_DEPENDS',
+          severity: 'error',
+          file: confFileName,
+          title: `Invalid Dependency Identifier: '${invalidDeps[0]}'`,
+          message: `Luanti dependency names in 'depends' / 'optional_depends' must use only lowercase letters, numbers, and underscores (found '${invalidDeps.join(', ')}').`,
+          howToFix: `Ensure all comma-separated mod names in 'depends' and 'optional_depends' are valid snake_case technical mod names.`
+        });
+      }
+
+      // Check 5: Probe README.md & screenshot.png (pinned by commit SHA when available, while D1 URLs stay branch-based)
+      const rawAssetBase = buildRawUrl(branch, '').replace(/\/+$/, '');
+      try {
+        const readmeRes = await fetchAuditFileResponse(branch, 'README.md');
+        if (readmeRes.ok) {
+          const md = await readmeRes.text();
+          if (md && !md.trim().startsWith('<!DOCTYPE')) {
+            readmeMarkdown = rewriteRelativeMarkdownUrls(md.slice(0, 64000), rawAssetBase);
+          }
+        }
+      } catch {
+        // Keep shortDesc
+      }
+      longDesc = readmeMarkdown
+        ? readmeMarkdown.slice(0, 12000)
+        : (confMeta.rawFullDesc || confMeta.rawDesc || 'Decentralized Luanti community package.');
+
+      screenshotUrl = buildRawUrl(branch, 'screenshot.png');
+      try {
+        const shotRes = await fetchAuditFileResponse(branch, 'screenshot.png', { method: 'HEAD' });
+        hasScreenshot = shotRes.ok;
+      } catch {
+        hasScreenshot = false;
+      }
+
+      if (!hasScreenshot) {
+        screenshotUrl = 'logo.svg';
+        diagnostics.push({
+          code: 'SCREENSHOT_MISSING',
+          severity: 'warning',
+          file: 'screenshot.png',
+          title: 'Optional screenshot.png Not Found',
+          message: 'No screenshot.png was found in the repository root. A default voxel icon will be used until you add one.',
+          howToFix: 'Add a 16:9 PNG image named `screenshot.png` (e.g. 1280×720) to the root of your repository.'
+        });
+      } else {
+        screenshotUrl = toProxiedGitImageIfNeeded(screenshotUrl);
+        diagnostics.push({
+          code: 'SCREENSHOT_FOUND',
+          severity: 'pass',
+          file: 'screenshot.png',
+          title: 'Repository Screenshot Verified',
+          message: 'Found screenshot.png in repository root.'
+        });
+      }
+
+      const candidateCdbScreenshots: Array<{ storedUrl: string; relPath: string }> = Array.isArray(cdbMeta?.screenshots)
+        ? cdbMeta.screenshots
+            .map((s: string) => {
+              const clean = String(s || '').trim();
+              if (!clean) return { storedUrl: '', relPath: '' };
+              if (/^https?:\/\//i.test(clean)) return { storedUrl: clean, relPath: '' };
+              const relPath = clean.replace(/^(?:\.\/+|\/+)+/, '');
+              return { storedUrl: `${rawAssetBase}/${relPath}`, relPath };
+            })
+            .filter((item) => Boolean(item.storedUrl))
+            .slice(0, 6)
+        : [];
+
+      verifiedCdbScreenshots = (
+        await Promise.all(
+          candidateCdbScreenshots.map(async (item) => {
+            try {
+              const r = item.relPath
+                ? await fetchAuditFileResponse(branch, item.relPath, { method: 'HEAD' })
+                : await fetchWithAnubisSupport(item.storedUrl, { method: 'HEAD' });
+              const ct = (r.headers.get('content-type') || '').toLowerCase();
+              if (r.ok && !ct.includes('text/html') && !ct.includes('text/plain')) {
+                return toProxiedGitImageIfNeeded(item.storedUrl);
+              }
+            } catch {
+              // Ignore unreachable screenshot candidate
+            }
+            return '';
+          })
+        )
+      ).filter(Boolean);
+
+      // Check 5B: Automated Content Safety Audit (Static Layers 1-3 first; Workers AI Layer 4 runs only after verified ownership on !dryRun)
+      const preliminaryTitle = confMeta.rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+      const preliminaryShortDesc = confMeta.rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
+      const staticSafetyInput: ContentSafetyInput = {
+        repoOwner: owner,
+        repoName: repo,
+        confFileName,
+        rawConfig,
+        title: preliminaryTitle,
+        shortDesc: preliminaryShortDesc,
+        cdbJsonText: rawCdbJsonText || undefined,
+        readmeMarkdown: readmeMarkdown || undefined,
+        luaSource: luaSource || undefined,
+        rootFileNames: discoveredRootEntries ? discoveredRootEntries.map(e => e.name) : undefined
+      };
+      safetyEval = await evaluateRepositoryContentSafety(staticSafetyInput, {
+        aiBinding: context.env.AI,
+        runAiCheck: false
       });
-    } else {
-      screenshotUrl = toProxiedGitImageIfNeeded(screenshotUrl);
-      diagnostics.push({
-        code: 'SCREENSHOT_FOUND',
-        severity: 'pass',
-        file: 'screenshot.png',
-        title: 'Repository Screenshot Verified',
-        message: 'Found screenshot.png in repository root.'
-      });
+
+      if (safetyEval.holdForAdminReview) {
+        const firstMatch = safetyEval.matches[0];
+        diagnostics.push({
+          code: 'CONTENT_SAFETY_HOLD',
+          severity: 'warning',
+          file: firstMatch?.file || confFileName,
+          line: firstMatch?.line,
+          title: 'Content Safety Review Required (Queued for Admin Approval)',
+          message: `${safetyEval.summary}. If published as-is, this package will be held for administrator review before appearing in the public catalog.`,
+          howToFix: 'If this match was unintentional, remove the flagged wording from your repository and re-run Pre-Flight Check. If your package is a legitimate horror/mature mod, you may still click Publish and a moderator will review and approve it.',
+          snippet: firstMatch?.snippet
+        });
+      } else if (safetyEval.autoContentWarnings.length > 0) {
+        diagnostics.push({
+          code: 'CONTENT_WARNING_AUTO_TAGGED',
+          severity: 'warning',
+          file: confFileName,
+          title: `Content Warning Badge Attached (${safetyEval.autoContentWarnings.join(', ')})`,
+          message: `Detected mature thematic terms (${safetyEval.autoContentWarnings.join(', ')}). Package can be published immediately with an automatic Content Warning badge.`
+        });
+      }
+
+      const resolvedCommitSha = resolveCommitShaForRef(branch);
+      const writeSnapshotKey =
+        !hasInlinePreviewOverride && isFullHexSha(resolvedCommitSha)
+          ? buildGitPreflightSnapshotKey(provider, host, owner, repo, branch, resolvedCommitSha)
+          : '';
+      if (writeSnapshotKey) {
+        await writeEdgeCacheJson(
+          writeSnapshotKey,
+          {
+            missingConf: false,
+            branch,
+            resolvedCustomRawBase,
+            rawConfig,
+            confFileName,
+            packageType,
+            rawCdbJsonText,
+            effectiveLicense,
+            effectiveMediaLicense,
+            luaSource,
+            discoveredRootEntries: discoveredRootEntries
+              ? discoveredRootEntries.map((entry) => ({ name: entry.name, type: entry.type }))
+              : null,
+            readmeMarkdown,
+            longDesc,
+            screenshotUrl,
+            hasScreenshot,
+            verifiedCdbScreenshots: [...verifiedCdbScreenshots],
+            safetyEval: cloneSafetyEvaluation(safetyEval),
+            baseDiagnostics: cloneAuditDiagnostics(diagnostics)
+          } satisfies CachedGitCommitAuditSnapshot,
+          GIT_PREFLIGHT_SNAPSHOT_TTL_SECONDS
+        );
+      }
     }
 
-    // Check 5B: Automated Content Safety Audit (Static Layers 1-3 first; Workers AI Layer 4 runs only after verified ownership on !dryRun)
+    const {
+      rawName,
+      rawTitle,
+      rawDesc,
+      rawDepends,
+      rawOptDepends,
+      rawConfTags,
+      rawMinVersion,
+      rawMaxVersion,
+      supportedGames,
+      unsupportedGames
+    } = extractConfMetadata(rawConfig);
+    const cdbMeta = rawCdbJsonText ? parseCdbJsonMetadata(rawCdbJsonText) : null;
+    const technicalName = rawName || cdbMeta?.name || sanitizedDefaultName;
+
     const preliminaryTitle = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
     const preliminaryShortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
-    const safetyInput = {
+    const safetyInput: ContentSafetyInput = {
       repoOwner: owner,
       repoName: repo,
       confFileName,
@@ -1042,42 +1686,16 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       luaSource: luaSource || undefined,
       rootFileNames: discoveredRootEntries ? discoveredRootEntries.map(e => e.name) : undefined
     };
-    let safetyEval = await evaluateRepositoryContentSafety(safetyInput, {
-      aiBinding: context.env.AI,
-      runAiCheck: false
-    });
-
-    if (safetyEval.holdForAdminReview) {
-      const firstMatch = safetyEval.matches[0];
-      diagnostics.push({
-        code: 'CONTENT_SAFETY_HOLD',
-        severity: 'warning',
-        file: firstMatch?.file || confFileName,
-        line: firstMatch?.line,
-        title: 'Content Safety Review Required (Queued for Admin Approval)',
-        message: `${safetyEval.summary}. If published as-is, this package will be held for administrator review before appearing in the public catalog.`,
-        howToFix: 'If this match was unintentional, remove the flagged wording from your repository and re-run Pre-Flight Check. If your package is a legitimate horror/mature mod, you may still click Publish and a moderator will review and approve it.',
-        snippet: firstMatch?.snippet
-      });
-    } else if (safetyEval.autoContentWarnings.length > 0) {
-      diagnostics.push({
-        code: 'CONTENT_WARNING_AUTO_TAGGED',
-        severity: 'warning',
-        file: confFileName,
-        title: `Content Warning Badge Attached (${safetyEval.autoContentWarnings.join(', ')})`,
-        message: `Detected mature thematic terms (${safetyEval.autoContentWarnings.join(', ')}). Package can be published immediately with an automatic Content Warning badge.`
-      });
-    }
 
     const errorsCount = diagnostics.filter(d => d.severity === 'error').length;
     const warningsCount = diagnostics.filter(d => d.severity === 'warning').length;
     const canPublish = errorsCount === 0;
 
     const dependencies = rawDepends
-      ? rawDepends.split(',').map(cleanDep).filter(Boolean)
+      ? rawDepends.split(',').map(cleanConfDep).filter(Boolean)
       : [];
     const optionalDependencies = rawOptDepends
-      ? rawOptDepends.split(',').map(cleanDep).filter(Boolean)
+      ? rawOptDepends.split(',').map(cleanConfDep).filter(Boolean)
       : [];
 
     const confTags = rawConfTags
@@ -1335,45 +1953,19 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
     ).slice(0, 14);
 
     // Discover Git Tags & Releases first, falling back to default branch only when no tags/releases exist
-    const discoveredReleases = await fetchGitRepoReleasesAndTags(
+    const discoveredReleases = await resolveAuditGitReleases(
       repoUrl.trim(),
       owner,
       repo,
-      rawMinVersion
+      rawMinVersion,
+      repoCooldownKey,
+      smartRefs,
+      forceSmartRefsRefresh
     );
     const branchArchiveUrl = buildGitBranchArchiveUrl(repoUrl.trim(), owner, repo, branch);
     const downloadArchiveUrl = discoveredReleases.length > 0
       ? discoveredReleases[0].download_url
       : branchArchiveUrl;
-
-    const candidateCdbScreenshots = Array.isArray(cdbMeta?.screenshots)
-      ? cdbMeta.screenshots
-          .map((s: string) => {
-            const clean = String(s || '').trim();
-            if (!clean) return '';
-            if (/^https?:\/\//i.test(clean)) return clean;
-            return `${rawAssetBase}/${clean.replace(/^(?:\.\/+|\/+)+/, '')}`;
-          })
-          .filter(Boolean)
-          .slice(0, 6)
-      : [];
-
-    const verifiedCdbScreenshots = (
-      await Promise.all(
-        candidateCdbScreenshots.map(async (rawUrl: string) => {
-          try {
-            const r = await fetchWithAnubisSupport(rawUrl, { method: 'HEAD' });
-            const ct = (r.headers.get('content-type') || '').toLowerCase();
-            if (r.ok && !ct.includes('text/html') && !ct.includes('text/plain')) {
-              return toProxiedGitImageIfNeeded(rawUrl);
-            }
-          } catch {
-            // Ignore unreachable screenshot candidate
-          }
-          return '';
-        })
-      )
-    ).filter(Boolean);
 
     const resolvedCdbScreenshots = [
       ...(hasScreenshot && screenshotUrl !== 'logo.svg' ? [screenshotUrl] : []),
@@ -1436,8 +2028,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
 
     const resolvedMaxVersion =
       rawMaxVersion || matchedContentDbPkg?.max_minetest_version || existingD1Pkg?.max_minetest_version || undefined;
+    const resolvedCommitShaForBranch = resolveCommitShaForRef(branch);
     const latestCommitSha =
       discoveredReleases[0]?.commit_sha ||
+      resolvedCommitShaForBranch ||
       smartHeadSha ||
       existingD1Pkg?.latest_commit_sha ||
       null;
@@ -1498,7 +2092,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           version: branch,
           title: branch,
           tag_name: branch,
-          commit_sha: smartHeadSha || 'HEAD',
+          commit_sha: resolvedCommitShaForBranch || smartHeadSha || 'HEAD',
           url: branchArchiveUrl,
           download_url: branchArchiveUrl,
           min_minetest_version: rawMinVersion,
