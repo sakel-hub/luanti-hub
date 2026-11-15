@@ -1,6 +1,6 @@
-import { Component, ChangeDetectionStrategy, OnDestroy, inject, signal, computed } from '@angular/core';
+import { Component, OnDestroy, inject, signal, computed } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { CommonModule } from '@angular/common';
+import { UpperCasePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { PackageService } from '../../core/services/package.service';
@@ -26,10 +26,8 @@ import {
 
 @Component({
   selector: 'app-submit-modal',
-  standalone: true,
-  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
-    CommonModule,
+    UpperCasePipe,
     FormsModule,
     TooltipDirective,
     TranslatePipe,
@@ -180,7 +178,7 @@ import {
                     data-testid="audit-pill-conf"
                     [appTooltip]="'submit.pillConfTooltip' | translate"
                     [appTooltipTap]="true"
-                    [class]="report.configFound ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800' : 'bg-rose-950/70 text-rose-300 border-rose-800'"
+                    [class]="confPillClass(report)"
                     class="px-2 py-0.5 rounded border cursor-help">
                     {{ report.configFound || ('submit.pillMissingConf' | translate) }}
                   </span>
@@ -554,6 +552,17 @@ export class SubmitModalComponent {
 
   supportsDirectOwnerAuth(provider?: GitProvider | GitProviderId | null): boolean {
     return isAuthLoginGitProvider(provider || '');
+  }
+
+  protected confPillClass(report: GitAuditReport): string {
+    const confDiagnostics = report.diagnostics.filter((d) => d.code.startsWith('CONF_'));
+    if (!report.configFound || confDiagnostics.some((d) => d.severity === 'error')) {
+      return 'bg-rose-950/70 text-rose-300 border-rose-800';
+    }
+    if (confDiagnostics.some((d) => d.severity === 'warning')) {
+      return 'bg-amber-950/70 text-amber-300 border-amber-800';
+    }
+    return 'bg-emerald-950/70 text-emerald-300 border-emerald-800';
   }
 
   isOwnershipVerified(): boolean {

@@ -148,7 +148,7 @@ function buildGitPreflightSnapshotKey(
   branch: string,
   commitSha: string
 ): string {
-  return `/__git_preflight_sha_v1/${provider}/${encodeURIComponent(host.toLowerCase())}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(branch)}/${commitSha.toLowerCase()}`;
+  return `/__git_preflight_sha_v2/${provider}/${encodeURIComponent(host.toLowerCase())}/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}/${encodeURIComponent(branch)}/${commitSha.toLowerCase()}`;
 }
 
 interface CachedGitCommitAuditSnapshot {
@@ -237,6 +237,53 @@ function extractConfMetadata(rawConfig: string): ExtractedConfMetadata {
       ? parsedConf['unsupported_games'].split(',').map(cleanConfDep).filter(Boolean)
       : []
   };
+}
+
+/** Finds the 1-based line number of a `.conf` key, skipping comments and multiline `"""..."""` blocks. */
+function findConfKeyLine(rawConfig: string, targetKey: string): number | undefined {
+  const normalizedTarget = targetKey.trim().toLowerCase();
+  const lines = rawConfig.split(/\r?\n/);
+  let inMultiline = false;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (inMultiline) {
+      if (trimmed.endsWith('"""')) {
+        inMultiline = false;
+      }
+      continue;
+    }
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, eqIndex).trim().toLowerCase();
+    const rawVal = trimmed.slice(eqIndex + 1).trim();
+    if (key === normalizedTarget) {
+      return i + 1;
+    }
+    if (rawVal.startsWith('"""') && !(rawVal.length >= 6 && rawVal.endsWith('"""'))) {
+      inMultiline = true;
+    }
+  }
+  return undefined;
+}
+
+/** Resolves technical `name` (games ignore deprecated `game.conf` `name`, using `.cdb.json` or repo slug). */
+export function resolvePackageTechnicalName(
+  packageType: 'mod' | 'game' | 'txp' | 'modpack',
+  confRawName: string,
+  cdbName: string | undefined,
+  sanitizedDefaultName: string
+): string {
+  const cleanCdbName = (cdbName || '').trim();
+  const cleanConfName = confRawName.trim();
+  if (packageType === 'game') {
+    return cleanCdbName || sanitizedDefaultName;
+  }
+  return cleanConfName || cleanCdbName || sanitizedDefaultName;
 }
 
 /**
@@ -1183,8 +1230,8 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           file: 'mod.conf / game.conf',
           title: 'Missing Package Configuration File',
           message: `Could not find mod.conf, game.conf, modpack.conf, or texture_pack.conf on branch '${branch}' in ${owner}/${repo}.`,
-          howToFix: `Create a 'mod.conf' (or 'game.conf') file in the root directory of your ${provider} repository with the following fields and push it to your default branch:`,
-          snippet: `name = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0`
+          howToFix: `Create 'mod.conf', 'modpack.conf', or 'texture_pack.conf' (requiring technical 'name = ...') or 'game.conf' (requiring 'title = ...' and omitting deprecated 'name') in the root directory of your ${provider} repository and push it to your default branch:`,
+          snippet: `# mod.conf / modpack.conf / texture_pack.conf:\nname = ${sanitizedDefaultName}\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Adds new blocks and mechanics to Luanti.\nmin_minetest_version = 5.0.0\n\n# Or for game.conf (omit deprecated name):\ntitle = ${repo.replace(/[-_]/g, ' ')}\ndescription = Describe what your game adds to Luanti.`
         });
 
         if (readSnapshotKey) {
@@ -1271,10 +1318,60 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         // Optional .cdb.json not present
       }
 
-      const technicalName = confMeta.rawName || cdbMeta?.name || sanitizedDefaultName;
+      const technicalName = resolvePackageTechnicalName(packageType, confMeta.rawName, cdbMeta?.name, sanitizedDefaultName);
 
-      // Validate `name`
-      if (!confMeta.rawName) {
+      // Validate technical identifier & deprecated keys (in Luanti/ContentDB, `game.conf` omits `name` and requires `title`).
+      if (packageType === 'game') {
+        const cleanCdbName = (cdbMeta?.name || '').trim();
+        if (cleanCdbName) {
+          if (!/^[a-z0-9_]+$/.test(cleanCdbName)) {
+            const fixedName = cleanCdbName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+            diagnostics.push({
+              code: 'CONF_INVALID_NAME',
+              severity: 'error',
+              file: '.cdb.json',
+              line: 1,
+              title: `Invalid Technical Name '${cleanCdbName}' in .cdb.json`,
+              message: `Luanti requires technical game identifiers to contain only lowercase letters (a-z), digits (0-9), and underscores (_).`,
+              howToFix: `Update "name" in .cdb.json to "${fixedName}":`,
+              snippet: `"name": "${fixedName}"`
+            });
+          } else {
+            diagnostics.push({
+              code: 'CONF_VALID_NAME',
+              severity: 'pass',
+              file: '.cdb.json',
+              title: `Valid Game Identifier (${cleanCdbName})`,
+              message: `.cdb.json declares valid snake_case game identifier '${cleanCdbName}'.`
+            });
+          }
+        } else {
+          diagnostics.push({
+            code: 'CONF_VALID_NAME',
+            severity: 'pass',
+            file: confFileName,
+            title: `Valid Game Identifier (${technicalName})`,
+            message: `Game identifier '${technicalName}' resolved from repository slug (${confFileName} omits deprecated 'name').`
+          });
+        }
+
+        if (confMeta.rawName) {
+          const suggestedTitle =
+            confMeta.rawTitle ||
+            cdbMeta?.title ||
+            (/[A-Z\s-]/.test(confMeta.rawName) ? confMeta.rawName : technicalName.replace(/_/g, ' '));
+          diagnostics.push({
+            code: 'CONF_DEPRECATED_NAME',
+            severity: 'warning',
+            file: confFileName,
+            line: findConfKeyLine(rawConfig, 'name') || 1,
+            title: `Deprecated 'name' Key in ${confFileName}`,
+            message: `In Luanti & ContentDB, 'name' in ${confFileName} is deprecated (historically a display title, not the gameid) and triggers ContentDB/CI warnings. Game technical IDs come from .cdb.json ("name") or the folder name.`,
+            howToFix: `Remove 'name = ...' from ${confFileName} and declare 'title = ...' instead:`,
+            snippet: `title = ${suggestedTitle}`
+          });
+        }
+      } else if (!confMeta.rawName) {
         diagnostics.push({
           code: 'CONF_MISSING_NAME',
           severity: 'error',
@@ -1291,7 +1388,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           code: 'CONF_INVALID_NAME',
           severity: 'error',
           file: confFileName,
-          line: 1,
+          line: findConfKeyLine(rawConfig, 'name') || 1,
           title: `Invalid Technical Name '${confMeta.rawName}' in ${confFileName}`,
           message: `Luanti requires technical mod/game names to contain only lowercase letters (a-z), digits (0-9), and underscores (_). Hyphens or uppercase letters cause Luanti to reject loading the mod.`,
           howToFix: `Update 'name' in ${confFileName} to '${fixedName}':`,
@@ -1307,18 +1404,36 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         });
       }
 
-      // Validate `title` and `description` (allowing .cdb.json to satisfy missing mod.conf fields)
+      // Validate `title` and `description` (required `title` for game.conf; recommended for mods/modpacks/txps)
       const effectiveRawTitle = confMeta.rawTitle || cdbMeta?.title || '';
       const effectiveRawDesc = confMeta.rawDesc || cdbMeta?.short_description || '';
-      if (!effectiveRawTitle || !effectiveRawDesc) {
+      if (packageType === 'game' && !effectiveRawTitle) {
+        diagnostics.push({
+          code: 'CONF_MISSING_TITLE',
+          severity: 'error',
+          file: confFileName,
+          line: 1,
+          title: `Missing Required 'title' Field in ${confFileName}`,
+          message: `Luanti & ContentDB require ${confFileName} (or .cdb.json) to declare a human-readable 'title = ...'. Do not use deprecated 'name' in ${confFileName}.`,
+          howToFix: `Add 'title = ...' (and 'description = ...' if missing) to ${confFileName}:`,
+          snippet: `title = ${technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your game adds to Luanti.'}`
+        });
+      } else if (!effectiveRawTitle || !effectiveRawDesc) {
+        const missingFieldLabel = !effectiveRawTitle && !effectiveRawDesc
+          ? "'title' or 'description'"
+          : !effectiveRawTitle
+            ? "'title'"
+            : "'description'";
         diagnostics.push({
           code: 'CONF_METADATA_INCOMPLETE',
           severity: 'warning',
           file: confFileName,
-          title: `Recommended 'title' or 'description' Missing in ${confFileName}`,
+          title: `Recommended ${missingFieldLabel} Missing in ${confFileName}`,
           message: `Adding both 'title' and 'description' in ${confFileName} (or .cdb.json) improves search ranking and in-game Content tab display.`,
-          howToFix: `Add descriptive 'title' and 'description' lines to ${confFileName}:`,
-          snippet: `title = ${effectiveRawTitle || technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your package adds to Luanti.'}`
+          howToFix: `Add descriptive ${missingFieldLabel} lines to ${confFileName}:`,
+          snippet: !effectiveRawTitle
+            ? `title = ${technicalName.replace(/_/g, ' ')}\ndescription = ${effectiveRawDesc || 'Describe what your package adds to Luanti.'}`
+            : `description = Describe what your package adds to Luanti.`
         });
       } else {
         diagnostics.push({
@@ -1581,7 +1696,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ).filter(Boolean);
 
       // Check 5B: Automated Content Safety Audit (Static Layers 1-3 first; Workers AI Layer 4 runs only after verified ownership on !dryRun)
-      const preliminaryTitle = confMeta.rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+      const preliminaryTitle =
+        confMeta.rawTitle ||
+        cdbMeta?.title ||
+        (packageType === 'game' && confMeta.rawName ? confMeta.rawName : '') ||
+        technicalName.replace(/_/g, ' ');
       const preliminaryShortDesc = confMeta.rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
       const staticSafetyInput: ContentSafetyInput = {
         repoOwner: owner,
@@ -1670,9 +1789,13 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       unsupportedGames
     } = extractConfMetadata(rawConfig);
     const cdbMeta = rawCdbJsonText ? parseCdbJsonMetadata(rawCdbJsonText) : null;
-    const technicalName = rawName || cdbMeta?.name || sanitizedDefaultName;
+    const technicalName = resolvePackageTechnicalName(packageType, rawName, cdbMeta?.name, sanitizedDefaultName);
 
-    const preliminaryTitle = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+    const preliminaryTitle =
+      rawTitle ||
+      cdbMeta?.title ||
+      (packageType === 'game' && rawName ? rawName : '') ||
+      technicalName.replace(/_/g, ' ');
     const preliminaryShortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
     const safetyInput: ContentSafetyInput = {
       repoOwner: owner,
@@ -1706,7 +1829,11 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       ? userSubmittedTags.map(t => String(t).trim().toLowerCase().replace(/[^a-z0-9_/-]/g, '')).filter(Boolean)
       : [];
 
-    const title = rawTitle || cdbMeta?.title || technicalName.replace(/_/g, ' ');
+    const title =
+      rawTitle ||
+      cdbMeta?.title ||
+      (packageType === 'game' && rawName ? rawName : '') ||
+      technicalName.replace(/_/g, ' ');
     const shortDesc = rawDesc || cdbMeta?.short_description || 'Community package for Luanti.';
 
     // Check 6: Verify Cryptographic Repository Ownership (prevents posting someone else's Git repository)

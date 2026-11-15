@@ -1291,7 +1291,7 @@ description = Mob animation and spawning framework.
       return out;
     };
 
-    const listZipPaths = (zip: Uint8Array): string[] => {
+    const readZipEntries = (zip: Uint8Array): Array<{ name: string; method: number; compSize: number; localOffset: number }> => {
       const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
       let eocdPos = -1;
       for (let p = zip.length - 22; p >= 0; p--) {
@@ -1302,15 +1302,40 @@ description = Mob animation and spawning framework.
       }
       const count = v.getUint16(eocdPos + 10, true);
       let ptr = v.getUint32(eocdPos + 16, true);
-      const paths: string[] = [];
+      const entries: Array<{ name: string; method: number; compSize: number; localOffset: number }> = [];
       for (let i = 0; i < count; i++) {
+        const method = v.getUint16(ptr + 10, true);
+        const compSize = v.getUint32(ptr + 20, true);
         const nLen = v.getUint16(ptr + 28, true);
         const eLen = v.getUint16(ptr + 30, true);
         const cLen = v.getUint16(ptr + 32, true);
-        paths.push(decoder.decode(zip.subarray(ptr + 46, ptr + 46 + nLen)));
+        entries.push({
+          name: decoder.decode(zip.subarray(ptr + 46, ptr + 46 + nLen)),
+          method,
+          compSize,
+          localOffset: v.getUint32(ptr + 42, true)
+        });
         ptr += 46 + nLen + eLen + cLen;
       }
-      return paths;
+      return entries;
+    };
+
+    const listZipPaths = (zip: Uint8Array): string[] => readZipEntries(zip).map((e) => e.name);
+
+    const readZipEntryText = async (zip: Uint8Array, targetPath: string): Promise<string> => {
+      const entry = readZipEntries(zip).find((e) => e.name === targetPath);
+      if (!entry) return '';
+      const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+      const lnLen = v.getUint16(entry.localOffset + 26, true);
+      const leLen = v.getUint16(entry.localOffset + 28, true);
+      const dataStart = entry.localOffset + 30 + lnLen + leLen;
+      const payload = zip.subarray(dataStart, dataStart + entry.compSize);
+      if (entry.method === 0) {
+        return decoder.decode(payload);
+      }
+      return new Response(
+        new Blob([new Uint8Array(payload)]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
+      ).text();
     };
 
     // 1. Test WaySigns-style Git archive with nested folder + CI clutter + missing mod.conf
@@ -1380,16 +1405,20 @@ description = Mob animation and spawning framework.
     expect(defensiveGamePaths).toContain('confspace/game.conf');
     expect(defensiveGamePaths).not.toContain('confspace/modpack.conf');
 
-    // 2c. Legacy game.conf-less Git game (`mods/*/init.lua`) keeps `mods/` intact and synthesizes root `game.conf`
+    // 2c. Legacy game.conf-less Git game (`mods/*/init.lua`) keeps `mods/` intact and synthesizes root `game.conf` with `title` (never deprecated `name`)
     const rawLegacyGameZip = buildTestZip([
       { path: 'oldgame-main/mods/mod_one/init.lua', content: '-- one' },
       { path: 'oldgame-main/mods/mod_two/init.lua', content: '-- two' }
     ]);
-    const legacyGamePaths = listZipPaths(normalizeLuantiPackageZip(rawLegacyGameZip, 'oldgame', 'game'));
+    const normalizedLegacyGameZip = normalizeLuantiPackageZip(rawLegacyGameZip, 'oldgame', 'game');
+    const legacyGamePaths = listZipPaths(normalizedLegacyGameZip);
     expect(legacyGamePaths).toContain('oldgame/game.conf');
     expect(legacyGamePaths).toContain('oldgame/mods/mod_one/init.lua');
     expect(legacyGamePaths).toContain('oldgame/mods/mod_two/init.lua');
     expect(legacyGamePaths).not.toContain('oldgame/modpack.conf');
+    const synthesizedGameConf = await readZipEntryText(normalizedLegacyGameZip, 'oldgame/game.conf');
+    expect(synthesizedGameConf).toContain('title = Oldgame');
+    expect(synthesizedGameConf).not.toContain('name =');
 
     // 3. Verify "Install App" buttons are hidden when PWA is already installed
     const pwaService = TestBed.inject(PwaService);

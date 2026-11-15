@@ -2083,7 +2083,8 @@ export function normalizeLuantiPackageZip(
       !existingRelativeFiles.has('modpack.txt') &&
       !existingRelativeFiles.has('texture_pack.conf')
     ) {
-      addSynthesizedFile('game.conf', `name = ${safePkgName}\n`);
+      const synthesizedGameTitle = safePkgName.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      addSynthesizedFile('game.conf', `title = ${synthesizedGameTitle}\n`);
     } else if (
       normalizedPkgType === 'txp' &&
       !existingRelativeFiles.has('texture_pack.conf') &&

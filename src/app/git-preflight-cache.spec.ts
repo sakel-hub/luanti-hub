@@ -104,8 +104,8 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     const mockCache = createMockEdgeCache();
     (globalThis as any).caches = mockCache.cachesObj;
 
-    const brokenGameConf = 'title = Sky-Bridge Alchemists\nauthor = SaKeL\ndescription = Alchemist arena\n';
-    const fixedGameConf = 'name = skybridge_alchemists\ntitle = Sky-Bridge Alchemists\nauthor = SaKeL\ndescription = Alchemist arena\n';
+    const brokenGameConf = 'author = SaKeL\ndescription = Alchemist arena\n';
+    const fixedGameConf = 'title = Sky-Bridge Alchemists\nauthor = SaKeL\ndescription = Alchemist arena\n';
     const requestedUrls: string[] = [];
 
     globalThis.fetch = vi.fn(async (input: any) => {
@@ -158,7 +158,7 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     });
     const repoUrl = 'https://github.com/sakel-hub/skybridge_alchemists';
 
-    // 1. First Pre-Flight Check on broken commit sha1 -> fails with CONF_MISSING_NAME (422)
+    // 1. First Pre-Flight Check on broken commit sha1 -> fails with CONF_MISSING_TITLE (422)
     const res1 = await gitOnRequestPost({
       request: new Request('https://luantihub.org/api/packages/git', {
         method: 'POST',
@@ -170,7 +170,7 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     expect(res1.status).toBe(422);
     const body1: any = await res1.json();
     expect(body1.canPublish).toBe(false);
-    expect(body1.audit.diagnostics.some((d: any) => d.code === 'CONF_MISSING_NAME')).toBe(true);
+    expect(body1.audit.diagnostics.some((d: any) => d.code === 'CONF_MISSING_TITLE')).toBe(true);
     expect(requestedUrls).toContain(
       `https://raw.githubusercontent.com/sakel-hub/skybridge_alchemists/${sha1}/game.conf`
     );
@@ -192,7 +192,9 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     const body2: any = await res2.json();
     expect(body2.success).toBe(true);
     expect(body2.canPublish).toBe(true);
+    expect(body2.package.name).toBe('skybridge_alchemists');
     expect(body2.audit.diagnostics.some((d: any) => d.code === 'CONF_VALID_NAME')).toBe(true);
+    expect(body2.audit.diagnostics.some((d: any) => d.code === 'CONF_MISSING_NAME' || d.code === 'CONF_DEPRECATED_NAME')).toBe(false);
     expect(requestedUrls).toContain(
       `https://raw.githubusercontent.com/sakel-hub/skybridge_alchemists/${sha2}/game.conf`
     );
@@ -529,5 +531,75 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     expect(body.canPublish).toBe(true);
     expect(body.ownershipVerified).toBe(true);
     expect(requestedHeaders['cacheControl']).toBe('no-cache');
+  });
+
+  it('validates game.conf required title & deprecated name vs mod.conf required snake_case name', async () => {
+    const fileMap: Record<string, string> = {
+      'https://cheapiesystems.com/git/game_clean/plain/game.conf':
+        'title = Clean Game\nauthor = SaKeL\ndescription = Pure game config without name\nlicense = MIT\n',
+      'https://cheapiesystems.com/git/game_clean/plain/.cdb.json':
+        '{"type":"GAME","name":"game_clean","title":"Clean Game"}\n',
+      'https://cheapiesystems.com/git/skybridge_alchemists/plain/game.conf':
+        'title = Sky-Bridge Alchemists\nauthor = SaKeL\nname = Sky-Bridge Alchemists\ndescription = Alchemist arena\nlicense = MIT\n',
+      'https://cheapiesystems.com/git/mod_missing_name/plain/mod.conf':
+        'title = Missing Name Mod\ndescription = Mod config missing technical name\nlicense = MIT\n',
+      'https://cheapiesystems.com/git/mod_missing_name/plain/init.lua':
+        'core.log("action", "broken")\n'
+    };
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url in fileMap) {
+        return new Response(fileMap[url], { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as any;
+
+    const sessionCookie = await createSessionToken('user-sakel', 'test-secret');
+    const mockDb = createMockDb({
+      'user-sakel': [{ provider: 'github', username: 'SaKeL', verified: 1 }]
+    });
+
+    const runAudit = (repoUrl: string) =>
+      gitOnRequestPost({
+        request: new Request('https://luantihub.org/api/packages/git', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Cookie: `lh_session=${sessionCookie}` },
+          body: JSON.stringify({ repoUrl, dryRun: true, warrantiesAccepted: true })
+        }),
+        env: { DB: mockDb, SESSION_SECRET: 'test-secret' }
+      });
+
+    // (a) game.conf with title + .cdb.json name and NO deprecated name key -> clean pass
+    const cleanGameRes = await runAudit('https://cheapiesystems.com/git/game_clean');
+    expect(cleanGameRes.status).toBe(200);
+    const cleanGameBody: any = await cleanGameRes.json();
+    expect(cleanGameBody.canPublish).toBe(true);
+    expect(cleanGameBody.package.name).toBe('game_clean');
+    expect(cleanGameBody.audit.diagnostics.some((d: any) => d.code === 'CONF_VALID_NAME')).toBe(true);
+    expect(
+      cleanGameBody.audit.diagnostics.some(
+        (d: any) => d.code === 'CONF_MISSING_NAME' || d.code === 'CONF_DEPRECATED_NAME' || d.code === 'CONF_MISSING_TITLE'
+      )
+    ).toBe(false);
+
+    // (b) game.conf with title AND deprecated name = Sky-Bridge Alchemists on line 3 -> 200 warning, preserves technical gameid
+    const deprecatedGameRes = await runAudit('https://cheapiesystems.com/git/skybridge_alchemists');
+    expect(deprecatedGameRes.status).toBe(200);
+    const deprecatedGameBody: any = await deprecatedGameRes.json();
+    expect(deprecatedGameBody.canPublish).toBe(true);
+    expect(deprecatedGameBody.package.name).toBe('skybridge_alchemists');
+    const deprecatedDiag = deprecatedGameBody.audit.diagnostics.find((d: any) => d.code === 'CONF_DEPRECATED_NAME');
+    expect(deprecatedDiag).toBeTruthy();
+    expect(deprecatedDiag.severity).toBe('warning');
+    expect(deprecatedDiag.line).toBe(3);
+    expect(deprecatedGameBody.audit.diagnostics.some((d: any) => d.code === 'CONF_INVALID_NAME')).toBe(false);
+
+    // (c) mod.conf omitting required technical name -> 422 CONF_MISSING_NAME
+    const brokenModRes = await runAudit('https://cheapiesystems.com/git/mod_missing_name');
+    expect(brokenModRes.status).toBe(422);
+    const brokenModBody: any = await brokenModRes.json();
+    expect(brokenModBody.canPublish).toBe(false);
+    expect(brokenModBody.audit.diagnostics.some((d: any) => d.code === 'CONF_MISSING_NAME')).toBe(true);
   });
 });
