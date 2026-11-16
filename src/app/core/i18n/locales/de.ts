@@ -256,7 +256,13 @@ export const de: TranslationDictionary = {
     downloadSecurityTooltipGit: 'Geprüftes Git-Archiv: Über HTTPS mit ZipSlip-Pfadbereinigung, statischer init.lua-Sandbox-Prüfung und sofortigem Moderations-Kill-Switch bereitgestellt.',
     externalLinkSecurityTooltip: 'Öffnet externe Website ({host}) in einem isolierten Tab (noopener noreferrer). Externe Downloads außerhalb von LuantiHub stets prüfen.',
     reportSecurityTooltip: 'Vertrauliche Moderation: DMCA-, Malware- oder Lua-Sandbox-Verstöße melden. Ihre Identität ist nur für LuantiHub-Moderatoren sichtbar.',
-    reportConfidentialNotice: 'Vertrauliche Moderation: Ihre Identität als Melder ist ausschließlich für LuantiHub-Moderatoren sichtbar — niemals öffentlich. Bestätigte Malware- oder Sandbox-Verstöße lösen sofort eine HTTP-451-Sperre für Web und Spiel aus.'
+    reportConfidentialNotice: 'Vertrauliche Moderation: Ihre Identität als Melder ist ausschließlich für LuantiHub-Moderatoren sichtbar — niemals öffentlich. Bestätigte Malware- oder Sandbox-Verstöße lösen sofort eine HTTP-451-Sperre für Web und Spiel aus.',
+    codeLicenseLabel: 'Code-Lizenz',
+    mediaLicenseLabel: 'Medienlizenz',
+    licenseSpdxPlaceholder: 'z. B. MIT, GPL-3.0-or-later, LGPL-2.1-only',
+    resyncFromGit: 'Aus Git neu synchronisieren',
+    resyncingFromGit: 'Synchronisiere aus Git...',
+    resyncFromGitSuccess: 'Metadaten & Lizenz aus dem Git-Repository neu synchronisiert!'
   },
   auth: {
     title: 'Bei LuantiHub anmelden',

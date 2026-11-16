@@ -5,6 +5,7 @@ import { filter } from 'rxjs/operators';
 import {
   LuantiPackage,
   PackageSource,
+  GitProvider,
   CommunityReview,
   PackageRelease,
   SortOption,
@@ -272,6 +273,9 @@ export class PackageService {
   private readonly deepHydratedIds = new Set<string>();
   private readonly _deepHydratedVersion = signal<number>(0);
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
+  private readonly hydratedMetaStamps = new Map<string, { rev: string; exp: number }>();
+  private static readonly HYDRATED_META_STORAGE_KEY = 'lh_hydrated_meta_v16';
+  private static readonly HYDRATED_META_TTL_MS = 2 * 60 * 60 * 1000;
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly reviewsVerifiedEmptyKeys = new Set<string>();
   private readonly releasesCache = new Map<string, PackageRelease[]>();
@@ -1108,28 +1112,35 @@ export class PackageService {
     lowerId: string,
     tags: string[],
     badgeTags?: string[],
-    extra?: { repoUrl?: string; sources?: PackageSource[] }
+    extra?: { repoUrl?: string; sources?: PackageSource[]; replacePureGitSources?: boolean }
   ): boolean {
     if (!lowerId) return false;
     const prevMeta = this.hydratedMetaCache.get(lowerId) || {};
-    const prevMetaTags = Array.isArray(prevMeta.tags) ? prevMeta.tags : [];
+    const prevMetaTagsRaw = Array.isArray(prevMeta.tags) ? prevMeta.tags : [];
+    const prevMetaTags = extra?.replacePureGitSources
+      ? prevMetaTagsRaw.filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+      : prevMetaTagsRaw;
     const prevMetaBadges = Array.isArray(prevMeta.badge_tags) ? prevMeta.badge_tags : [];
-    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMetaTags);
+    const mergedTags = this.mergePackageTagsPreservingExisting(tags, prevMetaTags)
+      .filter(t => !extra?.replacePureGitSources || String(t).trim().toLowerCase() !== 'contentdb');
     const mergedBadgeTags = parseBadgeTagsArray([...(badgeTags || []), ...prevMetaBadges]);
     const nextRepoUrl = extra?.repoUrl || prevMeta.repo_url;
-    const nextSources = extra?.sources?.length
-      ? Array.from(new Set<PackageSource>([...(prevMeta.sources || []), ...extra.sources]))
-      : prevMeta.sources;
-    const prevLowerSet = new Set(prevMetaTags.map(t => t.toLowerCase()));
+    const nextSources = extra?.replacePureGitSources
+      ? (extra.sources?.length ? Array.from(new Set<PackageSource>(extra.sources)) : prevMeta.sources)
+      : extra?.sources?.length
+        ? Array.from(new Set<PackageSource>([...(prevMeta.sources || []), ...extra.sources]))
+        : prevMeta.sources;
+    const prevLowerSet = new Set(prevMetaTagsRaw.map(t => t.toLowerCase()));
     const prevBadgeSet = new Set(prevMetaBadges.map(t => t.toLowerCase()));
     const prevSourceSet = new Set<PackageSource>(prevMeta.sources || []);
     const metaChanged =
-      mergedTags.length !== prevMetaTags.length ||
+      mergedTags.length !== prevMetaTagsRaw.length ||
       mergedTags.some(t => !prevLowerSet.has(t.toLowerCase())) ||
       mergedBadgeTags.length !== prevMetaBadges.length ||
       mergedBadgeTags.some(t => !prevBadgeSet.has(t.toLowerCase())) ||
       (Boolean(nextRepoUrl) && nextRepoUrl !== prevMeta.repo_url) ||
-      Boolean(nextSources?.some(s => !prevSourceSet.has(s)));
+      Boolean(nextSources?.some(s => !prevSourceSet.has(s))) ||
+      Boolean(extra?.replacePureGitSources && prevSourceSet.has('official') && !nextSources?.includes('official'));
     if (metaChanged) {
       this.hydratedMetaCache.set(lowerId, {
         ...prevMeta,
@@ -1143,25 +1154,33 @@ export class PackageService {
       let listChanged = false;
       const nextList = list.map(item => {
         if ((item.id || `${item.author}/${item.name}`).toLowerCase() !== lowerId) return item;
-        const nextItemTags = this.mergePackageTagsPreservingExisting(mergedTags, item.tags);
+        const baseItemTags = extra?.replacePureGitSources
+          ? (item.tags || []).filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+          : item.tags;
+        const nextItemTags = this.mergePackageTagsPreservingExisting(mergedTags, baseItemTags)
+          .filter(t => !extra?.replacePureGitSources || String(t).trim().toLowerCase() !== 'contentdb');
         const nextItemBadgeTags = parseBadgeTagsArray([
           ...mergedBadgeTags,
           ...(item.badge_tags || [])
         ]);
         const itemRepoUrl = extra?.repoUrl || item.repo_url;
-        const itemSources = extra?.sources?.length
-          ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...extra.sources]))
-          : item.sources;
+        const itemSources = extra?.replacePureGitSources
+          ? (extra.sources?.length ? Array.from(new Set<PackageSource>(extra.sources)) : item.sources)
+          : extra?.sources?.length
+            ? Array.from(new Set<PackageSource>([...(item.sources || [item.source]), ...extra.sources]))
+            : item.sources;
         const itemTagSet = new Set((item.tags || []).map(t => t.toLowerCase()));
         const itemBadgeSet = new Set((item.badge_tags || []).map(t => t.toLowerCase()));
         const itemSourceSet = new Set<PackageSource>(
           item.sources && item.sources.length > 0 ? item.sources : [item.source]
         );
         const itemChanged =
+          nextItemTags.length !== (item.tags || []).length ||
           nextItemTags.some(t => !itemTagSet.has(t.toLowerCase())) ||
           nextItemBadgeTags.some(t => !itemBadgeSet.has(t.toLowerCase())) ||
           (Boolean(itemRepoUrl) && itemRepoUrl !== item.repo_url) ||
-          Boolean(itemSources?.some(s => !itemSourceSet.has(s)));
+          Boolean(itemSources?.some(s => !itemSourceSet.has(s))) ||
+          Boolean(extra?.replacePureGitSources && itemSourceSet.has('official') && !itemSources?.includes('official'));
         if (!itemChanged) return item;
         listChanged = true;
         return {
@@ -2453,6 +2472,7 @@ export class PackageService {
           }
         }
       }
+      const rawV16 = localStorage.getItem(PackageService.HYDRATED_META_STORAGE_KEY);
       const rawV15 = localStorage.getItem('lh_hydrated_meta_v15');
       const rawV14 = localStorage.getItem('lh_hydrated_meta_v14');
       const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
@@ -2478,10 +2498,28 @@ export class PackageService {
       if (rawV14) {
         localStorage.removeItem('lh_hydrated_meta_v14');
       }
-      const raw = rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      if (rawV15) {
+        localStorage.removeItem('lh_hydrated_meta_v15');
+      }
+      const rawLegacy = rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      let useV16 = Boolean(rawV16);
+      if (rawV16 && rawLegacy) {
+        try {
+          const parsed16 = JSON.parse(rawV16);
+          const entryCount16 = parsed16?.__v === 16 && parsed16.entries && typeof parsed16.entries === 'object'
+            ? Object.keys(parsed16.entries).length
+            : 0;
+          if (entryCount16 === 0) useV16 = false;
+        } catch {
+          useV16 = false;
+        }
+      }
+      const raw = useV16 ? rawV16 : rawLegacy;
       if (!raw) return;
-      const isMigratingLegacy = !rawV15 && Boolean(rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
-      const isMigratingPreV14 = !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
+      const isMigratingLegacy =
+        !useV16 && Boolean(rawLegacy);
+      const isMigratingPreV14 =
+        !useV16 && !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -2490,54 +2528,70 @@ export class PackageService {
       }
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        for (const [k, v] of Object.entries(parsed)) {
-          if (k && v && typeof v === 'object') {
-            const entry = { ...(v as Partial<LuantiPackage>) };
-            if (Array.isArray(entry.screenshots)) {
-              entry.screenshots = entry.screenshots
-                .map(s => sanitizePackageImageUrl(s) || '')
-                .filter(Boolean);
-            }
-            if (typeof entry.thumbnail === 'string') {
-              const sanThumb = sanitizePackageImageUrl(entry.thumbnail);
-              const upgThumb = upgradeContentDbThumbnailUrl(sanThumb, entry.screenshots);
-              entry.thumbnail = formatContentDbCdnUrl(upgThumb, 'tile') || upgThumb || sanThumb;
-            }
-            if (typeof entry.banner === 'string' || (entry.screenshots && entry.screenshots.length > 0)) {
-              const preferredGit = this.isGitScreenshotUrl(entry.banner)
-                ? entry.banner
-                : (this.isGitScreenshotUrl(entry.thumbnail) ? entry.thumbnail : undefined);
-              entry.banner = selectSharpPackageBanner(
-                preferredGit,
-                entry.screenshots,
-                entry.banner,
-                entry.thumbnail
-              );
-            }
-            if (entry.review_thread_counts) {
-              entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
-            }
-            if (isMigratingPreV14 && !entry.review_thread_counts) {
-              entry.score = 0;
-              entry.rating_checked = false;
-            }
-            if (isMigratingLegacy) {
-              // Heal any SSR deep-link phantom contentdb_downloads / 'official' source cached prior to v15
-              delete entry.contentdb_downloads;
-              if (typeof entry.luantihub_downloads === 'number' && entry.luantihub_downloads > 0) {
-                entry.downloads = entry.luantihub_downloads;
-              } else {
-                delete entry.downloads;
-              }
-              const lowerKeyAuthor = k.toLowerCase().split('/')[0] || '';
-              const hasCdbTag = Array.isArray(entry.tags) && entry.tags.some(t => String(t).toLowerCase() === 'contentdb');
-              if (Array.isArray(entry.sources) && !hasCdbTag && (lowerKeyAuthor.endsWith('-hub') || entry.sources.includes('git'))) {
-                const cleanedSources = entry.sources.filter(s => s !== 'official');
-                entry.sources = cleanedSources.length > 0 ? cleanedSources : ['git'];
-              }
-            }
-            this.hydratedMetaCache.set(k.toLowerCase(), entry);
+        const nowMs = Date.now();
+        const isV16Envelope = parsed.__v === 16 && parsed.entries && typeof parsed.entries === 'object';
+        const rawEntries: Record<string, any> = isV16Envelope ? parsed.entries : parsed;
+        for (const [k, v] of Object.entries(rawEntries)) {
+          if (!k || !v || typeof v !== 'object') continue;
+          const isWrapped = isV16Envelope || (v as any).meta !== undefined;
+          const stampExp = isWrapped && typeof (v as any).exp === 'number' ? Number((v as any).exp) : nowMs + PackageService.HYDRATED_META_TTL_MS;
+          if (isWrapped && typeof (v as any).exp === 'number' && nowMs > stampExp) {
+            continue;
           }
+          const rawEntryMeta = isWrapped ? (v as any).meta : v;
+          if (!rawEntryMeta || typeof rawEntryMeta !== 'object') continue;
+          const entry = { ...(rawEntryMeta as Partial<LuantiPackage>) };
+          if (Array.isArray(entry.screenshots)) {
+            entry.screenshots = entry.screenshots
+              .map(s => sanitizePackageImageUrl(s) || '')
+              .filter(Boolean);
+          }
+          if (typeof entry.thumbnail === 'string') {
+            const sanThumb = sanitizePackageImageUrl(entry.thumbnail);
+            const upgThumb = upgradeContentDbThumbnailUrl(sanThumb, entry.screenshots);
+            entry.thumbnail = formatContentDbCdnUrl(upgThumb, 'tile') || upgThumb || sanThumb;
+          }
+          if (typeof entry.banner === 'string' || (entry.screenshots && entry.screenshots.length > 0)) {
+            const preferredGit = this.isGitScreenshotUrl(entry.banner)
+              ? entry.banner
+              : (this.isGitScreenshotUrl(entry.thumbnail) ? entry.thumbnail : undefined);
+            entry.banner = selectSharpPackageBanner(
+              preferredGit,
+              entry.screenshots,
+              entry.banner,
+              entry.thumbnail
+            );
+          }
+          if (entry.review_thread_counts) {
+            entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
+          }
+          if (isMigratingPreV14 && !entry.review_thread_counts) {
+            entry.score = 0;
+            entry.rating_checked = false;
+          }
+          if (isMigratingLegacy) {
+            // Heal any SSR deep-link phantom contentdb_downloads / 'official' source cached prior to v16
+            delete entry.contentdb_downloads;
+            if (typeof entry.luantihub_downloads === 'number' && entry.luantihub_downloads > 0) {
+              entry.downloads = entry.luantihub_downloads;
+            } else {
+              delete entry.downloads;
+            }
+            const lowerKeyAuthor = k.toLowerCase().split('/')[0] || '';
+            const hasCdbTag = Array.isArray(entry.tags) && entry.tags.some(t => String(t).toLowerCase() === 'contentdb');
+            if (Array.isArray(entry.sources) && !hasCdbTag && (lowerKeyAuthor.endsWith('-hub') || entry.sources.includes('git'))) {
+              const cleanedSources = entry.sources.filter(s => s !== 'official');
+              entry.sources = cleanedSources.length > 0 ? cleanedSources : ['git'];
+            }
+          }
+          const lowerKey = k.toLowerCase();
+          this.hydratedMetaCache.set(lowerKey, entry);
+          this.hydratedMetaStamps.set(lowerKey, {
+            rev: isWrapped && typeof (v as any).rev === 'string'
+              ? (v as any).rev
+              : this.buildHydratedMetaRevision(entry),
+            exp: stampExp
+          });
         }
         if (isMigratingLegacy) {
           this.scheduleHydratedMetaPersist();
@@ -2548,6 +2602,55 @@ export class PackageService {
     }
   }
 
+  private buildHydratedMetaRevision(entry: any): string {
+    if (!entry || typeof entry !== 'object') return '';
+    const upd = typeof entry.updated_at === 'string' ? entry.updated_at.trim() : '';
+    const sha = typeof entry.latest_commit_sha === 'string'
+      ? entry.latest_commit_sha.trim().slice(0, 12).toLowerCase()
+      : '';
+    const rel = entry.release_id ?? entry.release;
+    const relStr = rel !== undefined && rel !== null ? String(rel).trim() : '';
+    return [upd, sha, relStr].some(Boolean) ? `${upd}|${sha}|${relStr}` : '';
+  }
+
+  private setHydratedMetaEntry(
+    lowerKey: string,
+    meta: Partial<LuantiPackage>,
+    revisionSource?: any
+  ): void {
+    const cleanKey = String(lowerKey || '').toLowerCase();
+    if (!cleanKey) return;
+    this.hydratedMetaCache.set(cleanKey, meta);
+    this.hydratedMetaStamps.set(cleanKey, {
+      rev: this.buildHydratedMetaRevision(revisionSource || meta),
+      exp: Date.now() + PackageService.HYDRATED_META_TTL_MS
+    });
+  }
+
+  private getFreshHydratedMeta(lowerKey: string, incomingItem?: any): Partial<LuantiPackage> | undefined {
+    const entry = this.hydratedMetaCache.get(lowerKey);
+    if (!entry) return undefined;
+    const stamp = this.hydratedMetaStamps.get(lowerKey);
+    if (stamp) {
+      if (stamp.exp > 0 && Date.now() > stamp.exp) {
+        this.hydratedMetaCache.delete(lowerKey);
+        this.hydratedMetaStamps.delete(lowerKey);
+        this.scheduleHydratedMetaPersist();
+        return undefined;
+      }
+      if (incomingItem && stamp.rev) {
+        const incomingRev = this.buildHydratedMetaRevision(incomingItem);
+        if (incomingRev && incomingRev !== stamp.rev) {
+          this.hydratedMetaCache.delete(lowerKey);
+          this.hydratedMetaStamps.delete(lowerKey);
+          this.scheduleHydratedMetaPersist();
+          return undefined;
+        }
+      }
+    }
+    return entry;
+  }
+
   private scheduleHydratedMetaPersist(): void {
     if (typeof localStorage === 'undefined') return;
     if (this.hydratedMetaPersistTimer) {
@@ -2555,12 +2658,23 @@ export class PackageService {
     }
     this.hydratedMetaPersistTimer = setTimeout(() => {
       try {
+        const nowMs = Date.now();
         const entries = Array.from(this.hydratedMetaCache.entries()).slice(-1800);
-        const obj: Record<string, any> = {};
+        const packed: Record<string, { rev: string; exp: number; meta: Partial<LuantiPackage> }> = {};
         for (const [k, v] of entries) {
-          obj[k] = v;
+          const stamp = this.hydratedMetaStamps.get(k);
+          const exp = stamp?.exp && stamp.exp > 0 ? stamp.exp : nowMs + PackageService.HYDRATED_META_TTL_MS;
+          if (nowMs > exp) continue;
+          packed[k] = {
+            rev: stamp?.rev ?? this.buildHydratedMetaRevision(v),
+            exp,
+            meta: v
+          };
         }
-        localStorage.setItem('lh_hydrated_meta_v15', JSON.stringify(obj));
+        localStorage.setItem(
+          PackageService.HYDRATED_META_STORAGE_KEY,
+          JSON.stringify({ __v: 16, entries: packed })
+        );
       } catch {
         // Ignore quota errors
       }
@@ -2687,7 +2801,7 @@ export class PackageService {
     const resolvedAuthor = item.author || item.author_name || (typeof item.id === 'string' && item.id.includes('/') ? item.id.split('/')[0] : '');
     const pkgId = item.id || `${resolvedAuthor}/${item.name}`;
     const lowerPkgId = String(pkgId).toLowerCase();
-    const cachedMeta = this.hydratedMetaCache.get(lowerPkgId);
+    const cachedMeta = this.getFreshHydratedMeta(lowerPkgId, item);
     const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerPkgId] || 0);
 
     const shortDesc = item.short_desc || item.short_description || cachedMeta?.short_desc || '';
@@ -2706,7 +2820,8 @@ export class PackageService {
         contentdb_name: item?.contentdb_name,
         tags: itemTagsList
       }) ||
-      (!isGitProviderId(item?.provider) &&
+      (!isUnhydratedSeed &&
+        !isGitProviderId(item?.provider) &&
         item?.source !== 'git' &&
         !inferredHubGitAuthor &&
         !(Array.isArray(item?.sources) && !item.sources.includes('official')));
@@ -2878,7 +2993,8 @@ export class PackageService {
       explicitSources.includes('git') ||
       item.source === 'git' ||
       isGitProvider ||
-      (inferredHubGitAuthor && !isExplicitOfficialOnly && !rawProvider)
+      (inferredHubGitAuthor && !isExplicitOfficialOnly && !rawProvider) ||
+      (isUnhydratedSeed && !itemExplicitlyOfficial)
         ? 'git'
         : item.source === 'mirror'
           ? 'mirror'
@@ -2886,21 +3002,21 @@ export class PackageService {
 
     const hasOfficial =
       explicitSources.includes('official') ||
-      (source === 'official' && !isGitProvider) ||
+      (!isUnhydratedSeed && source === 'official' && !isGitProvider) ||
       source === 'mirror' ||
       lowerTags.includes('contentdb') ||
       contentdbDownloads > 0 ||
       Boolean(item?.contentdb_author || item?.contentdb_name || cachedMeta?.contentdb_author || cachedMeta?.contentdb_name);
     const hasGit =
       explicitSources.includes('git') ||
-      source === 'git' ||
+      (!isUnhydratedSeed && source === 'git') ||
       isGitProvider ||
       (!isExplicitOfficialOnly && lowerTags.includes('git'));
 
     const sources: PackageSource[] = [];
     if (hasOfficial) sources.push('official');
     if (hasGit) sources.push('git');
-    if (sources.length === 0) sources.push(source);
+    if (!isUnhydratedSeed && sources.length === 0) sources.push(source);
 
     const forumUrl = this.normalizeForumUrl(item.forum_url || item.forums);
     const provides = this.parseArrayField(item.provides)
@@ -5389,7 +5505,8 @@ export class PackageService {
     const hasDownloads = isOfficial ? (pkg.contentdb_downloads || 0) > 0 : (pkg.downloads || 0) > 0;
     const needsGitScreenshot = this.needsGitScreenshotHydration(pkg, cachedMeta);
     const missingBanner = !pkg.banner || pkg.banner === 'logo.svg';
-    return !hasDownloads || missingBanner || needsGitScreenshot || needsOfficialRatingCheck || needsOfficialSharpBannerCheck;
+    const missingLicense = !pkg.license && !cachedMeta?.license && !pkg.rating_checked;
+    return !hasDownloads || missingBanner || missingLicense || needsGitScreenshot || needsOfficialRatingCheck || needsOfficialSharpBannerCheck;
   }
 
   private queueInitialVisibleHydration(): void {
@@ -6022,10 +6139,23 @@ export class PackageService {
   ): LuantiPackage {
     const key = (item.id || `${item.author}/${item.name}`).toLowerCase();
     const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(key);
+    const isPureGitSourceHeal = Boolean(
+      Array.isArray(patch.sources) &&
+      patch.sources.length > 0 &&
+      !patch.sources.includes('official') &&
+      patch.contentdb_downloads === 0 &&
+      !(Number(item.contentdb_downloads || 0) > 0) &&
+      !item.contentdb_author &&
+      !item.contentdb_name
+    );
+    const itemTagsForMerge = isPureGitSourceHeal
+      ? (item.tags || []).filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+      : item.tags;
     const mergedTags =
       patch.tags !== undefined
-        ? (isRecentlyMutated ? patch.tags : this.mergePackageTagsPreservingExisting(patch.tags, item.tags))
-        : item.tags;
+        ? (isRecentlyMutated ? patch.tags : this.mergePackageTagsPreservingExisting(patch.tags, itemTagsForMerge))
+            .filter(t => !isPureGitSourceHeal || String(t).trim().toLowerCase() !== 'contentdb')
+        : itemTagsForMerge;
     const mergedBadgeTags =
       patch.badge_tags !== undefined
         ? (isRecentlyMutated
@@ -6056,11 +6186,13 @@ export class PackageService {
         ...item,
         ...patch,
         tags: mergedTags,
-        sources: patch.sources || item.sources
+        sources: isPureGitSourceHeal ? patch.sources : (patch.sources || item.sources)
       };
-      const hasOfficial = hasComplementaryContentDbSource(candidateForSource);
+      const hasOfficial = isPureGitSourceHeal ? false : hasComplementaryContentDbSource(candidateForSource);
       const recPatch = reconcilePackageDownloadCounts({
-        contentdbDownloads: Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0)),
+        contentdbDownloads: isPureGitSourceHeal
+          ? 0
+          : Math.max(Number(patch.contentdb_downloads || 0), Number(item.contentdb_downloads || 0)),
         luantihubDownloads: Math.max(Number(patch.luantihub_downloads || 0), Number(item.luantihub_downloads || 0)),
         reportedTotalDownloads: Math.max(Number(patch.downloads || 0), Number(item.downloads || 0)),
         hasContentDbSource: hasOfficial,
@@ -6070,9 +6202,24 @@ export class PackageService {
       resolvedLhDl = recPatch.luantihubDownloads;
       resolvedTotalDl = recPatch.downloads;
     }
+    const resolvedPureGitPatchProvider = isPureGitSourceHeal
+      ? ((patch.provider && patch.provider !== 'contentdb'
+          ? patch.provider
+          : item.provider && item.provider !== 'contentdb'
+            ? item.provider
+            : 'github') as GitProvider)
+      : undefined;
     const merged: LuantiPackage = {
       ...item,
       ...patch,
+      ...(isPureGitSourceHeal
+        ? {
+            contentdb_author: undefined,
+            contentdb_name: undefined,
+            provider: resolvedPureGitPatchProvider,
+            source: 'git' as PackageSource
+          }
+        : {}),
       ...(resolvedCdbDl !== undefined ? { contentdb_downloads: resolvedCdbDl } : {}),
       ...(resolvedLhDl !== undefined ? { luantihub_downloads: resolvedLhDl } : {}),
       ...(resolvedTotalDl !== undefined ? { downloads: resolvedTotalDl } : {}),
@@ -6134,11 +6281,24 @@ export class PackageService {
     const existing = this.pendingCatalogPatches.get(targetIdLower);
     if (existing) {
       const isRecentlyMutated = this.recentlyMutatedPkgKeys.has(targetIdLower);
+      const isPureGitQueueHeal = Boolean(
+        Array.isArray(patch.sources) &&
+        patch.sources.length > 0 &&
+        !patch.sources.includes('official') &&
+        patch.contentdb_downloads === 0 &&
+        !(Number(existing.contentdb_downloads || 0) > 0) &&
+        !existing.contentdb_author &&
+        !existing.contentdb_name
+      );
+      const existingTagsForQueue = isPureGitQueueHeal
+        ? (existing.tags || []).filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+        : existing.tags;
       const mergedTags =
-        patch.tags !== undefined || existing.tags !== undefined
+        patch.tags !== undefined || existingTagsForQueue !== undefined
           ? (isRecentlyMutated && patch.tags !== undefined
               ? patch.tags
-              : this.mergePackageTagsPreservingExisting(patch.tags, existing.tags))
+              : this.mergePackageTagsPreservingExisting(patch.tags, existingTagsForQueue))
+              .filter(t => !isPureGitQueueHeal || String(t).trim().toLowerCase() !== 'contentdb')
           : undefined;
       const mergedBadgeTags =
         patch.badge_tags !== undefined || existing.badge_tags !== undefined
@@ -6146,8 +6306,9 @@ export class PackageService {
               ? patch.badge_tags
               : parseBadgeTagsArray([...(patch.badge_tags || []), ...(existing.badge_tags || [])]))
           : undefined;
-      const mergedCdbDl =
-        patch.contentdb_downloads !== undefined || existing.contentdb_downloads !== undefined
+      const mergedCdbDl = isPureGitQueueHeal
+        ? 0
+        : patch.contentdb_downloads !== undefined || existing.contentdb_downloads !== undefined
           ? Math.max(Number(patch.contentdb_downloads || 0), Number(existing.contentdb_downloads || 0))
           : undefined;
       const mergedLhDl =
@@ -6363,21 +6524,44 @@ export class PackageService {
             continue;
           }
 
-          const prevMetaForHydrate = this.hydratedMetaCache.get(lowerKey);
+          const prevMetaForHydrate = this.getFreshHydratedMeta(lowerKey, h);
           const livePkgForHydrate = liveByLowerId.get(lowerKey);
           const localUserDlCount = Number(this.settingsService.downloadedPackages()[lowerKey] || 0);
-          const hasOfficialHydrate =
-            hasComplementaryContentDbSource(h) ||
-            hasComplementaryContentDbSource(pkg) ||
-            hasComplementaryContentDbSource(livePkgForHydrate) ||
-            hasComplementaryContentDbSource(prevMetaForHydrate);
+          const hydrateSources: PackageSource[] = Array.isArray(h.sources)
+            ? h.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
+            : [];
+          const hasStrongExistingHydrateCdb = Boolean(
+            Number(pkg.contentdb_downloads || 0) > 0 ||
+            Boolean(pkg.contentdb_author?.trim()) ||
+            Boolean(pkg.contentdb_name?.trim()) ||
+            Number(livePkgForHydrate?.contentdb_downloads || 0) > 0 ||
+            Boolean(livePkgForHydrate?.contentdb_author?.trim()) ||
+            Boolean(livePkgForHydrate?.contentdb_name?.trim()) ||
+            Number(prevMetaForHydrate?.contentdb_downloads || 0) > 0 ||
+            Boolean(prevMetaForHydrate?.contentdb_author?.trim()) ||
+            Boolean(prevMetaForHydrate?.contentdb_name?.trim())
+          );
+          const hydrateHealedPureGit = Boolean(
+            hydrateSources.length > 0 &&
+            !hydrateSources.includes('official') &&
+            !hasComplementaryContentDbSource(h) &&
+            !hasStrongExistingHydrateCdb
+          );
+          const hasOfficialHydrate = hydrateHealedPureGit
+            ? false
+            : (hasComplementaryContentDbSource(h) ||
+                hasComplementaryContentDbSource(pkg) ||
+                hasComplementaryContentDbSource(livePkgForHydrate) ||
+                hasComplementaryContentDbSource(prevMetaForHydrate));
           const reconciledHydrate = reconcilePackageDownloadCounts({
-            contentdbDownloads: Math.max(
-              Number(pkg.contentdb_downloads || 0),
-              Number(livePkgForHydrate?.contentdb_downloads || 0),
-              Number(prevMetaForHydrate?.contentdb_downloads || 0),
-              Number(h.contentdb_downloads || 0)
-            ),
+            contentdbDownloads: hydrateHealedPureGit
+              ? 0
+              : Math.max(
+                  Number(pkg.contentdb_downloads || 0),
+                  Number(livePkgForHydrate?.contentdb_downloads || 0),
+                  Number(prevMetaForHydrate?.contentdb_downloads || 0),
+                  Number(h.contentdb_downloads || 0)
+                ),
             luantihubDownloads: Math.max(
               Number(pkg.luantihub_downloads || 0),
               Number(livePkgForHydrate?.luantihub_downloads || 0),
@@ -6404,7 +6588,7 @@ export class PackageService {
             pkg.tags,
             livePkgForHydrate?.tags,
             prevMetaForHydrate?.tags
-          );
+          ).filter(t => !hydrateHealedPureGit || String(t).trim().toLowerCase() !== 'contentdb');
           const mergedBadgeTags = parseBadgeTagsArray([
             ...(Array.isArray(h.badge_tags) ? h.badge_tags : []),
             ...(pkg.badge_tags || []),
@@ -6424,7 +6608,7 @@ export class PackageService {
             repoUrl,
             baseTags,
             mergedBadgeTags,
-            pkg.sources || [pkg.source],
+            hydrateHealedPureGit ? hydrateSources : (pkg.sources || [pkg.source]),
             (a, b) => this.mergePackageTagsPreservingExisting(a, b)
           );
           const tags = jamOverlay.tags;
@@ -6432,7 +6616,8 @@ export class PackageService {
           if (jamOverlay.matchedJam) {
             this.persistPromotionalTagsForPackage(lowerKey, tags, badgeTags, {
               repoUrl,
-              sources: jamOverlay.sources
+              sources: jamOverlay.sources,
+              replacePureGitSources: hydrateHealedPureGit
             });
           }
           const rawPreferredGitShot = [h.banner, h.thumbnail, pkg.banner, pkg.thumbnail]
@@ -6516,12 +6701,20 @@ export class PackageService {
             ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
             tags,
             ...(badgeTags && badgeTags.length > 0 ? { badge_tags: badgeTags } : {}),
-            ...(jamOverlay.matchedJam && jamOverlay.sources?.length
+            ...(h.provider ? { provider: h.provider } : {}),
+            ...(h.latest_commit_sha ? { latest_commit_sha: h.latest_commit_sha } : {}),
+            ...(h.updated_at ? { updated_at: h.updated_at } : {}),
+            ...(hydrateHealedPureGit
               ? {
-                  sources: jamOverlay.sources,
-                  source: jamOverlay.sources.includes('git') ? 'git' : pkg.source
+                  sources: hydrateSources,
+                  source: (hydrateSources.includes('git') ? 'git' : 'official') as PackageSource
                 }
-              : {}),
+              : jamOverlay.matchedJam && jamOverlay.sources?.length
+                ? {
+                    sources: jamOverlay.sources,
+                    source: jamOverlay.sources.includes('git') ? 'git' : pkg.source
+                  }
+                : {}),
             min_minetest_version: minVer,
             file_size: sizeFormatted,
             video_url: resolvedVideo.video_url,
@@ -6533,14 +6726,21 @@ export class PackageService {
           };
 
           updatesByLowerId.set(lowerKey, patch);
-          const prevMeta = this.hydratedMetaCache.get(lowerKey) || {};
-          this.hydratedMetaCache.set(lowerKey, {
-            ...prevMeta,
-            ...patch,
-            ...(wasRatingActuallyChecked ? { rating_checked: true } : {}),
-            ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
-            ...(repoUrl ? { git_shot_checked: true } : {})
-          } as Partial<LuantiPackage>);
+          const prevMeta = this.getFreshHydratedMeta(lowerKey, h) || {};
+          this.setHydratedMetaEntry(
+            lowerKey,
+            {
+              ...prevMeta,
+              ...patch,
+              ...(wasRatingActuallyChecked ? { rating_checked: true } : {}),
+              ...(wasScreenshotsChecked ? ({ screenshots_checked: true } as any) : {}),
+              ...(repoUrl ? { git_shot_checked: true } : {})
+            } as Partial<LuantiPackage>,
+            {
+              updated_at: h.updated_at || pkg.updated_at,
+              latest_commit_sha: h.latest_commit_sha || pkg.latest_commit_sha
+            }
+          );
 
           if (resolvedScore > 0 || resolvedRevCounts) {
             swRatingsUpdates[lowerKey] = {
@@ -8985,7 +9185,7 @@ export class PackageService {
           }
         }
 
-        const cachedMetaForDownloads = this.hydratedMetaCache.get(cacheKey);
+        const cachedMetaForDownloads = this.getFreshHydratedMeta(cacheKey, data);
         const liveCatalogPkgForDownloads = this._packages().find(
           p =>
             (p.id || `${p.author}/${p.name}`).toLowerCase() === cacheKey ||
@@ -9014,8 +9214,28 @@ export class PackageService {
             contentdb_name: data.contentdb_name,
             tags: dataInlineTags
           }) || (!hasSplitDownloads && dataSources.length === 0 && data.source !== 'git' && !isGitProviderId(data.provider));
-        const hasAnyContentDbProvenance =
-          dataHasContentDb || catalogHasContentDb || existingPkgHasContentDb || cachedMetaHasContentDb;
+        const hasStrongExistingContentDb = Boolean(
+          Number(liveCatalogPkgForDownloads?.contentdb_downloads || 0) > 0 ||
+          Boolean(liveCatalogPkgForDownloads?.contentdb_author?.trim()) ||
+          Boolean(liveCatalogPkgForDownloads?.contentdb_name?.trim()) ||
+          (!pkg._unhydratedSeed &&
+            (Number(pkg.contentdb_downloads || 0) > 0 ||
+              Boolean(pkg.contentdb_author?.trim()) ||
+              Boolean(pkg.contentdb_name?.trim()))) ||
+          Number(cachedMetaForDownloads?.contentdb_downloads || 0) > 0 ||
+          Boolean(cachedMetaForDownloads?.contentdb_author?.trim()) ||
+          Boolean(cachedMetaForDownloads?.contentdb_name?.trim())
+        );
+        const serverReturnedAuthoritativePureGit = Boolean(
+          edgeResolved &&
+          data &&
+          dataSources.length > 0 &&
+          !dataSources.includes('official') &&
+          !dataHasContentDb
+        );
+        const hasAnyContentDbProvenance = serverReturnedAuthoritativePureGit
+          ? hasStrongExistingContentDb
+          : (dataHasContentDb || catalogHasContentDb || existingPkgHasContentDb || cachedMetaHasContentDb);
         const isAuthoritativePureGit = !hasAnyContentDbProvenance;
 
         const rawCdbCandidates = Math.max(
@@ -9052,26 +9272,28 @@ export class PackageService {
         const resolvedCdbDownloads = reconciledDetailDl.contentdbDownloads;
         const resolvedLhDownloads = reconciledDetailDl.luantihubDownloads;
         const resolvedDownloads = reconciledDetailDl.downloads;
-        const resolvedContentDbAuthor =
-          data.contentdb_author ||
-          liveCatalogPkgForDownloads?.contentdb_author ||
-          cachedMetaForDownloads?.contentdb_author ||
-          pkg.contentdb_author ||
-          (catalogHasContentDb &&
-          liveCatalogPkgForDownloads?.author &&
-          liveCatalogPkgForDownloads.author !== pkg.author
-            ? liveCatalogPkgForDownloads.author
-            : undefined);
-        const resolvedContentDbName =
-          data.contentdb_name ||
-          liveCatalogPkgForDownloads?.contentdb_name ||
-          cachedMetaForDownloads?.contentdb_name ||
-          pkg.contentdb_name ||
-          (catalogHasContentDb &&
-          liveCatalogPkgForDownloads?.name &&
-          liveCatalogPkgForDownloads.name !== pkg.name
-            ? liveCatalogPkgForDownloads.name
-            : undefined);
+        const resolvedContentDbAuthor = isAuthoritativePureGit
+          ? undefined
+          : data.contentdb_author ||
+            liveCatalogPkgForDownloads?.contentdb_author ||
+            cachedMetaForDownloads?.contentdb_author ||
+            pkg.contentdb_author ||
+            (catalogHasContentDb &&
+            liveCatalogPkgForDownloads?.author &&
+            liveCatalogPkgForDownloads.author !== pkg.author
+              ? liveCatalogPkgForDownloads.author
+              : undefined);
+        const resolvedContentDbName = isAuthoritativePureGit
+          ? undefined
+          : data.contentdb_name ||
+            liveCatalogPkgForDownloads?.contentdb_name ||
+            cachedMetaForDownloads?.contentdb_name ||
+            pkg.contentdb_name ||
+            (catalogHasContentDb &&
+            liveCatalogPkgForDownloads?.name &&
+            liveCatalogPkgForDownloads.name !== pkg.name
+              ? liveCatalogPkgForDownloads.name
+              : undefined);
 
         const reviewThreadCounts =
           parseNonZeroReviewThreadCounts(data.review_thread_counts) ||
@@ -9161,16 +9383,19 @@ export class PackageService {
         let readmeText: string | undefined = data.readme || pkg.readme || (this.readmeCache.get(cacheKey) ?? undefined);
 
         let mergedSources =
-          pkg._unhydratedSeed && dataSources.length > 0
+          (pkg._unhydratedSeed || isAuthoritativePureGit) && dataSources.length > 0
             ? Array.from(new Set<PackageSource>(dataSources))
             : Array.from(
                 new Set<PackageSource>([
-                  ...(pkg.sources || [pkg.source]),
+                  ...(pkg.sources || (pkg.source ? [pkg.source] : [])),
                   ...(liveCatalogPkgForDownloads?.sources || []),
                   ...dataSources
                 ])
               );
-        if (hasAnyContentDbProvenance && !mergedSources.includes('official')) {
+        if (isAuthoritativePureGit) {
+          mergedSources = mergedSources.filter(s => s !== 'official');
+          if (mergedSources.length === 0) mergedSources = ['git'];
+        } else if (hasAnyContentDbProvenance && !mergedSources.includes('official')) {
           mergedSources = ['official', ...mergedSources];
         }
 
@@ -9210,7 +9435,7 @@ export class PackageService {
         const latestMutationEntry = this.recentlyMutatedPkgKeys.get(cacheKey);
         const wasMutatedMidFlight = Boolean(latestMutationEntry && latestMutationEntry.seq !== startMutationSeq);
         const isRecentlyMutated = Boolean(mutationTs || wasMutatedMidFlight);
-        const cachedMetaEntry = this.hydratedMetaCache.get(cacheKey);
+        const cachedMetaEntry = this.getFreshHydratedMeta(cacheKey, data);
         const cachedMetaBadgeTags = cachedMetaEntry?.badge_tags !== undefined
           ? parseBadgeTagsArray(cachedMetaEntry.badge_tags)
           : undefined;
@@ -9235,20 +9460,27 @@ export class PackageService {
               );
         const detailJamOverlay = resolveJam2026OverlayForHydratedRepo(
           repoUrl,
-          baseDetailTags,
+          isAuthoritativePureGit
+            ? baseDetailTags.filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+            : baseDetailTags,
           baseDetailBadgeTags,
           mergedSources,
           (a, b) => this.mergePackageTagsPreservingExisting(a, b)
         );
-        const mergedDetailTags = detailJamOverlay.tags;
+        const mergedDetailTags = isAuthoritativePureGit
+          ? detailJamOverlay.tags.filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+          : detailJamOverlay.tags;
         const badgeTags = detailJamOverlay.badgeTags || [];
         if (detailJamOverlay.matchedJam && detailJamOverlay.sources?.length) {
-          mergedSources = detailJamOverlay.sources;
+          mergedSources = isAuthoritativePureGit
+            ? detailJamOverlay.sources.filter(s => s !== 'official')
+            : detailJamOverlay.sources;
+          if (isAuthoritativePureGit && mergedSources.length === 0) mergedSources = ['git'];
           this.persistPromotionalTagsForPackage(
             (pkg.id || `${pkg.author}/${pkg.name}`).toLowerCase(),
             mergedDetailTags,
             badgeTags,
-            { repoUrl, sources: mergedSources }
+            { repoUrl, sources: mergedSources, replacePureGitSources: isAuthoritativePureGit }
           );
         }
 
@@ -9271,6 +9503,15 @@ export class PackageService {
           data.created_at ||
           pkg.created_at;
 
+        const resolvedDetailProvider: GitProvider | undefined = isAuthoritativePureGit
+          ? ((data.provider && data.provider !== 'contentdb'
+              ? String(data.provider)
+              : pkg.provider && pkg.provider !== 'contentdb'
+                ? pkg.provider
+                : 'github') as GitProvider)
+          : data.provider
+            ? (String(data.provider) as GitProvider)
+            : undefined;
         const updatedFields: Partial<LuantiPackage> = {
           ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
           ...(data.title ? { title: String(data.title) } : {}),
@@ -9323,8 +9564,14 @@ export class PackageService {
           banner: resolvedDetailBanner,
           dependencies: deps.length > 0 ? deps : (pkg.dependencies || []),
           optional_dependencies: optDeps.length > 0 ? optDeps : (pkg.optional_dependencies || []),
-          ...(resolvedContentDbAuthor ? { contentdb_author: resolvedContentDbAuthor } : {}),
-          ...(resolvedContentDbName ? { contentdb_name: resolvedContentDbName } : {}),
+          ...(isAuthoritativePureGit
+            ? { contentdb_author: undefined, contentdb_name: undefined }
+            : {
+                ...(resolvedContentDbAuthor ? { contentdb_author: resolvedContentDbAuthor } : {}),
+                ...(resolvedContentDbName ? { contentdb_name: resolvedContentDbName } : {})
+              }),
+          ...(resolvedDetailProvider ? { provider: resolvedDetailProvider } : {}),
+          source: (isAuthoritativePureGit ? 'git' : mergedSources.includes('git') ? 'git' : mergedSources[0] || pkg.source) as PackageSource,
           sources: mergedSources
         };
 
@@ -9332,51 +9579,73 @@ export class PackageService {
         const targetAuthorLower = (pkg.author || '').toLowerCase();
         const targetNameLower = (pkg.name || '').toLowerCase();
 
-        // Persist compact hydrated tile metadata locally
+        // Persist compact hydrated tile metadata locally with TTL + revision stamp
         if (resolvedLicense || resolvedDownloads > 0 || rawTags.length > 0 || badgeTags.length > 0 || preferredGitShot || resolvedAuthorId || reviewThreadCounts || resolvedScore > 0) {
-          const prevMeta = this.hydratedMetaCache.get(targetIdLower) || {};
-          this.hydratedMetaCache.set(targetIdLower, {
-            ...prevMeta,
-            ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
-            license: resolvedLicense || prevMeta.license,
-            media_license: resolvedMediaLicense || prevMeta.media_license,
-            min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
-            ...(resolvedContentDbAuthor || prevMeta.contentdb_author
-              ? { contentdb_author: resolvedContentDbAuthor || prevMeta.contentdb_author }
-              : {}),
-            ...(resolvedContentDbName || prevMeta.contentdb_name
-              ? { contentdb_name: resolvedContentDbName || prevMeta.contentdb_name }
-              : {}),
-            ...(mergedSources.includes('official') ? { sources: mergedSources } : {}),
-            contentdb_downloads: isAuthoritativePureGit
-              ? 0
-              : Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
-            luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
-            downloads: isAuthoritativePureGit
-              ? Math.max(resolvedDownloads, resolvedLhDownloads)
-              : reconciledDetailDl.downloads || Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
-            score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
-            ...(reviewThreadCounts || prevMeta.review_thread_counts
-              ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
-              : {}),
-            rating_checked: true,
-            dev_state: data.dev_state ?? prevMeta.dev_state,
-            tags: mergedDetailTags.length > 0 ? mergedDetailTags : prevMeta.tags,
-            ...(badgeTags.length > 0 ? { badge_tags: badgeTags } : prevMeta.badge_tags ? { badge_tags: prevMeta.badge_tags } : {}),
-            download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
-            file_size: sizeFormatted || prevMeta.file_size,
-            video_url: resolvedVideo.video_url || prevMeta.video_url,
-            video_thumbnail_url: resolvedVideo.video_thumbnail_url || prevMeta.video_thumbnail_url,
-            repo_url: repoUrl || prevMeta.repo_url,
-            ...(repoUrl ? { git_shot_checked: true } : {}),
-            ...(resolvedDetailThumb && resolvedDetailThumb !== 'logo.svg'
-              ? { thumbnail: resolvedDetailThumb }
-              : {}),
-            ...(resolvedDetailBanner && resolvedDetailBanner !== 'logo.svg'
-              ? { banner: resolvedDetailBanner }
-              : {}),
-            ...(screenshots && screenshots.length > 0 ? { screenshots } : {})
-          } as Partial<LuantiPackage>);
+          const prevMeta = this.getFreshHydratedMeta(targetIdLower, data) || {};
+          const resolvedSourceForMeta = (isAuthoritativePureGit ? 'git' : mergedSources.includes('git') ? 'git' : mergedSources[0] || pkg.source) as PackageSource;
+          const prevCleanTags = isAuthoritativePureGit
+            ? (prevMeta.tags || []).filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+            : prevMeta.tags;
+          this.setHydratedMetaEntry(
+            targetIdLower,
+            {
+              ...prevMeta,
+              ...(resolvedAuthorId ? { author_id: resolvedAuthorId } : {}),
+              license: resolvedLicense || prevMeta.license,
+              media_license: resolvedMediaLicense || prevMeta.media_license,
+              min_minetest_version: minVersion || prevMeta.min_minetest_version || '5.0.0',
+              ...(isAuthoritativePureGit
+                ? { contentdb_author: undefined, contentdb_name: undefined }
+                : {
+                    ...(resolvedContentDbAuthor || prevMeta.contentdb_author
+                      ? { contentdb_author: resolvedContentDbAuthor || prevMeta.contentdb_author }
+                      : {}),
+                    ...(resolvedContentDbName || prevMeta.contentdb_name
+                      ? { contentdb_name: resolvedContentDbName || prevMeta.contentdb_name }
+                      : {})
+                  }),
+              ...(resolvedDetailProvider ? { provider: resolvedDetailProvider } : {}),
+              source: resolvedSourceForMeta,
+              sources: mergedSources,
+              contentdb_downloads: isAuthoritativePureGit
+                ? 0
+                : Math.max(resolvedCdbDownloads, Number(prevMeta.contentdb_downloads || 0)),
+              luantihub_downloads: Math.max(resolvedLhDownloads, Number(prevMeta.luantihub_downloads || 0)),
+              downloads: isAuthoritativePureGit
+                ? Math.max(resolvedDownloads, resolvedLhDownloads)
+                : reconciledDetailDl.downloads || Math.max(resolvedDownloads, Number(prevMeta.downloads || 0)),
+              score: hasVerifiedZeroReviews ? 0 : (resolvedScore || prevMeta.score || 0),
+              ...(reviewThreadCounts || prevMeta.review_thread_counts
+                ? { review_thread_counts: reviewThreadCounts || prevMeta.review_thread_counts }
+                : {}),
+              rating_checked: true,
+              dev_state: data.dev_state ?? prevMeta.dev_state,
+              tags: mergedDetailTags.length > 0 ? mergedDetailTags : prevCleanTags,
+              ...(badgeTags.length > 0 ? { badge_tags: badgeTags } : prevMeta.badge_tags ? { badge_tags: prevMeta.badge_tags } : {}),
+              download_size: rawDownloadSizeBytes > 0 ? rawDownloadSizeBytes : prevMeta.download_size,
+              file_size: sizeFormatted || prevMeta.file_size,
+              video_url: resolvedVideo.video_url || prevMeta.video_url,
+              video_thumbnail_url: resolvedVideo.video_thumbnail_url || prevMeta.video_thumbnail_url,
+              repo_url: repoUrl || prevMeta.repo_url,
+              ...(data.updated_at || pkg.updated_at ? { updated_at: data.updated_at || pkg.updated_at } : {}),
+              ...(data.latest_commit_sha || pkg.latest_commit_sha
+                ? { latest_commit_sha: data.latest_commit_sha || pkg.latest_commit_sha }
+                : {}),
+              ...(repoUrl ? { git_shot_checked: true } : {}),
+              ...(resolvedDetailThumb && resolvedDetailThumb !== 'logo.svg'
+                ? { thumbnail: resolvedDetailThumb }
+                : {}),
+              ...(resolvedDetailBanner && resolvedDetailBanner !== 'logo.svg'
+                ? { banner: resolvedDetailBanner }
+                : {}),
+              ...(screenshots && screenshots.length > 0 ? { screenshots } : {})
+            } as Partial<LuantiPackage>,
+            {
+              updated_at: data.updated_at || pkg.updated_at,
+              latest_commit_sha: data.latest_commit_sha || pkg.latest_commit_sha,
+              release_id: data.release || data.release_id || pkg.release_id
+            }
+          );
           this.scheduleHydratedMetaPersist();
         }
 
@@ -9409,14 +9678,28 @@ export class PackageService {
             const mergedLhDl = reconciledActive.luantihubDownloads;
             const mergedTotalDl = reconciledActive.downloads;
             const { _unhydratedSeed: _dropSeed, ...cleanCurrent } = current;
+            const currentTagsForActive = isAuthoritativePureGit
+              ? (cleanCurrent.tags || []).filter(t => String(t).trim().toLowerCase() !== 'contentdb')
+              : cleanCurrent.tags;
+            const mergedActiveTags = this.mergePackageTagsPreservingExisting(updatedFields.tags, currentTagsForActive)
+              .filter(t => !isAuthoritativePureGit || String(t).trim().toLowerCase() !== 'contentdb');
             const merged = {
               ...cleanCurrent,
               ...updatedFields,
-              ...(data.source ? { source: data.source as PackageSource } : {}),
+              ...(isAuthoritativePureGit
+                ? {
+                    contentdb_author: undefined,
+                    contentdb_name: undefined,
+                    provider: resolvedDetailProvider,
+                    source: 'git' as PackageSource
+                  }
+                : data.source
+                  ? { source: data.source as PackageSource }
+                  : {}),
               contentdb_downloads: mergedCdbDl,
               luantihub_downloads: mergedLhDl,
               downloads: mergedTotalDl,
-              tags: this.mergePackageTagsPreservingExisting(updatedFields.tags, current.tags),
+              tags: mergedActiveTags,
               ...(readmeText ? { readme: readmeText } : {})
             };
             this.updateSeoMeta(merged);
@@ -10542,6 +10825,9 @@ export class PackageService {
       supports_all_games?: boolean;
       game_support?: any[];
       translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+      license?: string | null;
+      media_license?: string | null;
+      resync_git?: boolean;
     }
   ): Promise<{
     success: boolean;
@@ -10554,6 +10840,12 @@ export class PackageService {
     supports_all_games?: boolean;
     game_support?: any[];
     translations?: Record<string, { title?: string; short_desc?: string; desc?: string }>;
+    license?: string;
+    media_license?: string;
+    provider?: GitProvider;
+    source?: PackageSource;
+    sources?: PackageSource[];
+    latest_commit_sha?: string;
     message?: string;
   }> {
     if (!this.authService.canManagePackage(pkg)) {
@@ -10570,16 +10862,20 @@ export class PackageService {
     const cacheKey = (pkg.id || `${resolvedAuthor}/${pkg.name}`).toLowerCase();
 
     try {
-      const requestBody = {
-        ...payload,
+      const requestBody: Record<string, any> = {
         title: pkg.title,
         short_desc: pkg.short_desc,
         type: pkg.type,
         repo_url: pkg.repo_url,
-        license: pkg.license,
-        media_license: pkg.media_license,
-        thumbnail: pkg.thumbnail
+        thumbnail: pkg.thumbnail,
+        ...payload
       };
+      if (payload.license === undefined && !payload.resync_git && pkg.license) {
+        requestBody['license'] = pkg.license;
+      }
+      if (payload.media_license === undefined && !payload.resync_git && pkg.media_license) {
+        requestBody['media_license'] = pkg.media_license;
+      }
       const res = await fetch(`/api/packages/${encodeURIComponent(resolvedAuthor)}/${encodeURIComponent(pkg.name)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -10617,24 +10913,61 @@ export class PackageService {
         data.translations && typeof data.translations === 'object'
           ? data.translations
           : (payload.translations ?? pkg.translations);
+      const updatedLicense: string | undefined =
+        typeof data.license === 'string' && data.license.trim()
+          ? data.license.trim()
+          : (payload.license !== undefined ? (payload.license || undefined) : pkg.license);
+      const updatedMediaLicense: string | undefined =
+        typeof data.media_license === 'string' && data.media_license.trim()
+          ? data.media_license.trim()
+          : (payload.media_license !== undefined ? (payload.media_license || undefined) : pkg.media_license);
+      const updatedProvider: GitProvider | undefined =
+        typeof data.provider === 'string' && data.provider.trim()
+          ? (data.provider.trim().toLowerCase() as GitProvider)
+          : pkg.provider;
+      const updatedSources: PackageSource[] | undefined = Array.isArray(data.sources)
+        ? data.sources.filter((s: any): s is PackageSource => s === 'official' || s === 'git' || s === 'mirror')
+        : undefined;
+      const updatedSource: PackageSource | undefined =
+        updatedSources && updatedSources.length > 0
+          ? (updatedSources.includes('git') ? 'git' : updatedSources[0])
+          : (data.source === 'git' || data.source === 'official' || data.source === 'mirror' ? data.source : undefined);
+      const updatedCommitSha: string | undefined =
+        typeof data.latest_commit_sha === 'string' && data.latest_commit_sha.trim()
+          ? data.latest_commit_sha.trim()
+          : pkg.latest_commit_sha;
 
       this.deepHydratedIds.delete(cacheKey);
       this.inFlightDetailsCache.delete(`${cacheKey}::deep`);
       this.inFlightDetailsCache.delete(`${cacheKey}::light`);
       this.recentlyMutatedPkgKeys.set(cacheKey, { ts: Date.now(), seq: ++this.mutationSeq });
       const prevHydrated = this.hydratedMetaCache.get(cacheKey) || {};
-      this.hydratedMetaCache.set(cacheKey, {
-        ...prevHydrated,
-        tags: updatedTags,
-        badge_tags: updatedBadgeTags,
-        dev_state: updatedDevState,
-        content_warnings: updatedContentWarnings,
-        min_minetest_version: updatedMinVersion,
-        max_minetest_version: updatedMaxVersion,
-        supports_all_games: updatedSupportsAllGames,
-        game_support: updatedGameSupport,
-        translations: updatedTranslations
-      });
+      this.setHydratedMetaEntry(
+        cacheKey,
+        {
+          ...prevHydrated,
+          tags: updatedTags,
+          badge_tags: updatedBadgeTags,
+          dev_state: updatedDevState,
+          content_warnings: updatedContentWarnings,
+          min_minetest_version: updatedMinVersion,
+          max_minetest_version: updatedMaxVersion,
+          supports_all_games: updatedSupportsAllGames,
+          game_support: updatedGameSupport,
+          translations: updatedTranslations,
+          ...(updatedLicense !== undefined ? { license: updatedLicense } : {}),
+          ...(updatedMediaLicense !== undefined ? { media_license: updatedMediaLicense } : {}),
+          ...(updatedProvider ? { provider: updatedProvider } : {}),
+          ...(updatedSources ? { sources: updatedSources } : {}),
+          ...(updatedSource ? { source: updatedSource } : {}),
+          ...(updatedCommitSha ? { latest_commit_sha: updatedCommitSha } : {}),
+          updated_at: new Date().toISOString()
+        },
+        {
+          updated_at: new Date().toISOString(),
+          latest_commit_sha: updatedCommitSha
+        }
+      );
       this.scheduleHydratedMetaPersist();
       this.clearBootCache();
 
@@ -10650,7 +10983,13 @@ export class PackageService {
             max_minetest_version: updatedMaxVersion,
             supports_all_games: updatedSupportsAllGames,
             game_support: updatedGameSupport,
-            translations: updatedTranslations
+            translations: updatedTranslations,
+            ...(updatedLicense !== undefined ? { license: updatedLicense } : {}),
+            ...(updatedMediaLicense !== undefined ? { media_license: updatedMediaLicense } : {}),
+            ...(updatedProvider ? { provider: updatedProvider } : {}),
+            ...(updatedSources ? { sources: updatedSources } : {}),
+            ...(updatedSource ? { source: updatedSource } : {}),
+            ...(updatedCommitSha ? { latest_commit_sha: updatedCommitSha } : {})
           };
         }
         return current;
@@ -10668,7 +11007,13 @@ export class PackageService {
             max_minetest_version: updatedMaxVersion,
             supports_all_games: updatedSupportsAllGames,
             game_support: updatedGameSupport,
-            translations: updatedTranslations
+            translations: updatedTranslations,
+            ...(updatedLicense !== undefined ? { license: updatedLicense } : {}),
+            ...(updatedMediaLicense !== undefined ? { media_license: updatedMediaLicense } : {}),
+            ...(updatedProvider ? { provider: updatedProvider } : {}),
+            ...(updatedSources ? { sources: updatedSources } : {}),
+            ...(updatedSource ? { source: updatedSource } : {}),
+            ...(updatedCommitSha ? { latest_commit_sha: updatedCommitSha } : {})
           };
           merged._searchBlob = this.buildSearchBlob(merged);
           return merged;
@@ -10695,7 +11040,13 @@ export class PackageService {
         max_minetest_version: updatedMaxVersion ?? null,
         supports_all_games: updatedSupportsAllGames,
         game_support: updatedGameSupport,
-        translations: updatedTranslations
+        translations: updatedTranslations,
+        license: updatedLicense,
+        media_license: updatedMediaLicense,
+        provider: updatedProvider,
+        source: updatedSource,
+        sources: updatedSources,
+        latest_commit_sha: updatedCommitSha
       };
     } catch (err: any) {
       return { success: false, message: err.message || 'Network error updating package metadata.' };

@@ -23,7 +23,9 @@ import {
   mergeSharedEdgeRatingsMap,
   SharedEdgeRatingEntry,
   normalizeUtcIsoTimestamp,
-  isCreatedIn2026OrUnknown
+  isCreatedIn2026OrUnknown,
+  resolveGitProviderFromRepoUrl,
+  runWithD1ColumnFallback
 } from '../lib/upstream';
 import { verifySameOriginMutation } from '../auth/lib/session';
 import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
@@ -82,7 +84,7 @@ async function handleHydrateRequest(
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v11_${encodeURIComponent(
+      ? `/__api_hydrate_v12_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -121,7 +123,7 @@ async function handleHydrateRequest(
         const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
         const [d1Res, dailyDlRes, promoTagsRes] = await Promise.all([
           env.DB.prepare(
-            `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, created_at, dev_state, tags, badge_tags, license, media_license, min_minetest_version, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, download_size, file_size, video_url, video_thumbnail_url FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
+            `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, created_at, updated_at, dev_state, tags, badge_tags, license, media_license, min_minetest_version, latest_commit_sha, metadata_synced_at, license_override, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, download_size, file_size, video_url, video_thumbnail_url FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
           ).bind(...exactAndLowerIds, ...lowerIds).all().catch(() =>
             env.DB.prepare(
               `SELECT * FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
@@ -226,6 +228,8 @@ async function handleHydrateRequest(
             dev_state: row.dev_state || undefined,
             download_size: typeof row.download_size === 'number' && row.download_size > 0 ? row.download_size : undefined,
             file_size: row.file_size || undefined,
+            ...(row.latest_commit_sha ? { latest_commit_sha: String(row.latest_commit_sha).slice(0, 12) } : {}),
+            ...(row.updated_at ? { updated_at: row.updated_at } : {}),
             video_url: row.video_url || undefined,
             video_thumbnail_url: row.video_thumbnail_url || undefined,
             repo_url: row.repo_url || undefined,
@@ -241,8 +245,13 @@ async function handleHydrateRequest(
 
           const hasSharpRowBanner =
             Boolean(hydratedMap[lowerKey].banner) && !isContentDbThumbnailUrl(hydratedMap[lowerKey].banner);
+          const potentiallyPoisonedCdbRow =
+            row.provider === 'contentdb' &&
+            Boolean(row.repo_url) &&
+            !(Number(row.contentdb_downloads || 0) > 0);
           if (
             row.license &&
+            !potentiallyPoisonedCdbRow &&
             (cdbDl > 0 || row.provider !== 'contentdb') &&
             hasRealTags &&
             Boolean(hydratedMap[lowerKey].thumbnail) &&
@@ -254,9 +263,14 @@ async function handleHydrateRequest(
               row.type === 'game' &&
               isCreatedIn2026OrUnknown(row.created_at) &&
               !parsedTags.includes('jam_game_2026');
+            const needsD1LicenseSync =
+              row.provider !== 'contentdb' &&
+              !row.metadata_synced_at &&
+              Number(row.license_override || 0) !== 1;
             if (
               ((row.provider !== 'contentdb' && (!row.video_url || !gitShotD1)) ||
-                needsD1Jam2026GameScan) &&
+                needsD1Jam2026GameScan ||
+                needsD1LicenseSync) &&
               row.repo_url &&
               d1RepoScanRows.length < 6
             ) {
@@ -279,7 +293,8 @@ async function handleHydrateRequest(
                 name,
                 row.type || 'mod',
                 row.repo_url,
-                21600
+                21600,
+                { commitSha: row.latest_commit_sha }
               ).catch(() => null);
               const resolvedVid = extractEmbeddedVideo(
                 gitScan?.cdbMeta?.video_url,
@@ -294,8 +309,23 @@ async function handleHydrateRequest(
                 existingRowShots.filter((s: string) => !isGitRepositoryAssetUrl(s))
               );
               const primaryGitShot = scannedGitShot || (isGitRepositoryAssetUrl(mergedRowShots[0]) ? mergedRowShots[0] : undefined);
+              const rowLicenseOverridden = Number(row.license_override || 0) === 1;
+              const scannedLicense =
+                !rowLicenseOverridden && gitScan?.gitRepoStatus === 'verified'
+                  ? (gitScan.license || gitScan.mediaLicense || '')
+                  : '';
+              const scannedMediaLicense =
+                !rowLicenseOverridden && gitScan?.gitRepoStatus === 'verified'
+                  ? (gitScan.mediaLicense || scannedLicense || '')
+                  : '';
 
               if (hydratedMap[lowerKey]) {
+                if (scannedLicense) {
+                  hydratedMap[lowerKey].license = scannedLicense;
+                }
+                if (scannedMediaLicense) {
+                  hydratedMap[lowerKey].media_license = scannedMediaLicense;
+                }
                 if (resolvedVid.video_url) {
                   hydratedMap[lowerKey].video_url = resolvedVid.video_url;
                   hydratedMap[lowerKey].video_thumbnail_url = resolvedVid.video_thumbnail_url;
@@ -332,7 +362,12 @@ async function handleHydrateRequest(
                 isGitRepositoryAssetUrl(row.banner_url) || isGitRepositoryAssetUrl(row.thumbnail_url);
               const newlyDiscoveredVid = !row.video_url && Boolean(resolvedVid.video_url);
               const newlyDiscoveredShot = !hadGitShotD1 && Boolean(primaryGitShot);
-              if (newlyDiscoveredVid || newlyDiscoveredShot) {
+              const licenseUpdated =
+                Boolean(scannedLicense && scannedLicense !== String(row.license || '').trim()) ||
+                Boolean(scannedMediaLicense && scannedMediaLicense !== String(row.media_license || '').trim());
+              const shouldMarkMetadataSynced =
+                gitScan?.gitRepoStatus === 'verified' && !row.metadata_synced_at;
+              if (newlyDiscoveredVid || newlyDiscoveredShot || licenseUpdated || shouldMarkMetadataSynced) {
                 repoUpdateStmts.push(
                   env.DB.prepare(`
                     UPDATE packages
@@ -346,7 +381,19 @@ async function handleHydrateRequest(
                           WHEN ? IS NOT NULL AND ? != '' THEN ?
                           ELSE banner_url
                         END,
-                        screenshots = COALESCE(?, screenshots)
+                        screenshots = COALESCE(?, screenshots),
+                        license = CASE
+                          WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                          ELSE license
+                        END,
+                        media_license = CASE
+                          WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                          ELSE media_license
+                        END,
+                        metadata_synced_at = CASE
+                          WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                          ELSE metadata_synced_at
+                        END
                     WHERE id = ?
                   `).bind(
                     resolvedVid.video_url || null,
@@ -358,6 +405,13 @@ async function handleHydrateRequest(
                     primaryGitShot || null,
                     primaryGitShot || null,
                     mergedRowShots.length > 0 ? JSON.stringify(mergedRowShots) : null,
+                    scannedLicense || null,
+                    scannedLicense || null,
+                    scannedLicense || null,
+                    scannedMediaLicense || null,
+                    scannedMediaLicense || null,
+                    scannedMediaLicense || null,
+                    shouldMarkMetadataSynced || licenseUpdated ? 1 : 0,
                     row.id
                   )
                 );
@@ -365,13 +419,15 @@ async function handleHydrateRequest(
             })
           );
           if (repoUpdateStmts.length > 0) {
-            if (typeof env.DB.batch === 'function') {
-              await env.DB.batch(repoUpdateStmts).catch(() => {});
-            } else {
-              for (const stmt of repoUpdateStmts) {
-                stmt.run().catch(() => {});
+            await runWithD1ColumnFallback(env.DB, async () => {
+              if (typeof env.DB.batch === 'function') {
+                await env.DB.batch(repoUpdateStmts);
+              } else {
+                for (const stmt of repoUpdateStmts) {
+                  await stmt.run();
+                }
               }
-            }
+            }).catch(() => {});
           }
         }
       } catch {
@@ -396,6 +452,13 @@ async function handleHydrateRequest(
           }
         }
       }
+      let cachedVcsCatalogPromise: Promise<any[] | null> | null = null;
+      const getVcsCatalogOnce = () => {
+        if (!cachedVcsCatalogPromise) {
+          cachedVcsCatalogPromise = fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
+        }
+        return cachedVcsCatalogPromise;
+      };
       await Promise.all(
         toFetchUpstream.map(async (rawId) => {
           const [author, name] = rawId.split('/');
@@ -410,8 +473,39 @@ async function handleHydrateRequest(
             3600
           ).catch(() => null);
 
-          let lic = detail?.license || detail?.media_license || existing.license || '';
-          let mediaLic = detail?.media_license || detail?.license || existing.media_license || '';
+          let isPoisonedHydrateRow = false;
+          if (
+            !detail &&
+            existingD1Row?.provider === 'contentdb' &&
+            existingD1Row?.repo_url &&
+            !(Number(existingD1Row?.contentdb_downloads || 0) > 0) &&
+            !(Number(scoreEntry?.downloads || 0) > 0)
+          ) {
+            if (Array.isArray(scoresList) && scoresList.length > 0 && !scoreEntry) {
+              isPoisonedHydrateRow = true;
+            } else {
+              const vcsCatalog = await getVcsCatalogOnce();
+              if (Array.isArray(vcsCatalog) && vcsCatalog.length > 0) {
+                const normTargetName = name.replace(/-/g, '_').toLowerCase();
+                const inVcsCatalog = vcsCatalog.some(
+                  (p: any) =>
+                    String(p?.author || '').trim().toLowerCase() === author.toLowerCase() &&
+                    String(p?.name || '').trim().replace(/-/g, '_').toLowerCase() === normTargetName
+                );
+                if (!inVcsCatalog) {
+                  isPoisonedHydrateRow = true;
+                }
+              }
+            }
+          }
+
+          const licenseOverridden = Number(existingD1Row?.license_override || 0) === 1;
+          let lic = licenseOverridden
+            ? (existing.license || detail?.license || detail?.media_license || '')
+            : (detail?.license || detail?.media_license || existing.license || '');
+          let mediaLic = licenseOverridden
+            ? (existing.media_license || existing.license || detail?.media_license || detail?.license || '')
+            : (detail?.media_license || detail?.license || existing.media_license || '');
           const rawUpstreamTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
@@ -419,6 +513,9 @@ async function handleHydrateRequest(
           let detailTags = Array.from(
             new Set([...(existing.tags || []), ...d1PromoTagsForHydrate, ...rawUpstreamTags])
           ).filter(Boolean);
+          if (isPoisonedHydrateRow) {
+            detailTags = detailTags.filter(t => String(t || '').trim().toLowerCase() !== 'contentdb');
+          }
           let detailRevCounts =
             parseNonZeroReviewThreadCounts(detail?.reviews) ||
             parseNonZeroReviewThreadCounts(scoreEntry?.reviews) ||
@@ -457,18 +554,21 @@ async function handleHydrateRequest(
               0);
           const hasCdbHydrate = Boolean(
             detail ||
-            existing?.sources?.includes('official') ||
-            existing?.source === 'official' ||
-            existing?.provider === 'contentdb' ||
-            Number(existing?.contentdb_downloads || 0) > 0 ||
-            Number(scoreEntry?.downloads || 0) > 0
+            Number(scoreEntry?.downloads || 0) > 0 ||
+            (!isPoisonedHydrateRow &&
+              (existing?.sources?.includes('official') ||
+                existing?.source === 'official' ||
+                existing?.provider === 'contentdb' ||
+                Number(existing?.contentdb_downloads || 0) > 0))
           );
           const reconciledHydrateDl = reconcilePackageDownloadCounts({
-            contentdbDownloads: Math.max(
-              Number(existing.contentdb_downloads || 0),
-              Number(detail?.downloads || 0),
-              Number(scoreEntry?.downloads || 0)
-            ),
+            contentdbDownloads: isPoisonedHydrateRow
+              ? 0
+              : Math.max(
+                  Number(existing.contentdb_downloads || 0),
+                  Number(detail?.downloads || 0),
+                  Number(scoreEntry?.downloads || 0)
+                ),
             luantihubDownloads: Math.max(Number(existing.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0),
             reportedTotalDownloads: Number(existing.downloads || 0),
             hasContentDbSource: hasCdbHydrate,
@@ -490,27 +590,55 @@ async function handleHydrateRequest(
           let pkgType = ['mod', 'game', 'txp', 'modpack'].includes(detail?.type) ? detail.type : 'mod';
 
           // Agnostic server-side Git repository scan (.conf + .cdb.json + LICENSE + screenshot.png + JAM2026.md)
-          // Cached for 6h at Cloudflare Edge. Only run for non-ContentDB packages, packages missing metadata,
-          // or 2026 games whose Git repository has not yet been checked for JAM2026.md.
+          // Cached at Cloudflare Edge (24h commit-keyed / 1h head fallback). Only run for non-ContentDB packages,
+          // unsynced license rows, poisoned rows, missing metadata, or 2026 games missing JAM2026.md check.
           let gitScanShot: string | undefined;
           let gitScanCdbShots: string[] = [];
           let discoveredJam2026Tags: string[] = [];
-          const isNativeGitPkg = Boolean(existingD1Row && existingD1Row.provider !== 'contentdb');
+          let gitScanVerified = false;
+          const isNativeGitPkg = Boolean(
+            isPoisonedHydrateRow || (existingD1Row && existingD1Row.provider !== 'contentdb')
+          );
           const hasExistingBanner = Boolean(existing.banner && existing.banner !== 'logo.svg');
+          const needsUnsyncedGitLicenseScan = Boolean(
+            isNativeGitPkg &&
+            !existingD1Row?.metadata_synced_at &&
+            !licenseOverridden
+          );
           const needsJam2026GameScan =
             pkgType === 'game' &&
             isCreatedIn2026OrUnknown(detail?.created_at || existingD1Row?.created_at) &&
             !detailTags.includes('jam_game_2026');
           if (
-            (!detail || !lic || (isNativeGitPkg && !hasExistingBanner) || needsJam2026GameScan) &&
+            (isPoisonedHydrateRow ||
+              !detail ||
+              (!lic && !licenseOverridden) ||
+              (isNativeGitPkg && !hasExistingBanner) ||
+              needsUnsyncedGitLicenseScan ||
+              needsJam2026GameScan) &&
             repoUrl &&
             repoScanBudget > 0
           ) {
             repoScanBudget--;
-            const gitScan = await scanGitRepoMetadataCached(author, name, pkgType, repoUrl || undefined, 21600).catch(() => null);
+            const gitScan = await scanGitRepoMetadataCached(
+              author,
+              name,
+              pkgType,
+              repoUrl || undefined,
+              21600,
+              { commitSha: existingD1Row?.latest_commit_sha }
+            ).catch(() => null);
             if (gitScan && gitScan.gitRepoStatus === 'verified') {
-              lic = lic || gitScan.license || gitScan.mediaLicense || '';
-              mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
+              gitScanVerified = true;
+              if (!licenseOverridden) {
+                if (!detail && (gitScan.license || gitScan.mediaLicense)) {
+                  lic = gitScan.license || gitScan.mediaLicense || lic;
+                  mediaLic = gitScan.mediaLicense || lic || mediaLic;
+                } else {
+                  lic = lic || gitScan.license || gitScan.mediaLicense || '';
+                  mediaLic = mediaLic || gitScan.mediaLicense || lic || '';
+                }
+              }
               repoUrl = repoUrl || gitScan.repoUrl || '';
               minVer = (minVer === '5.0.0' && gitScan.minVersion) ? gitScan.minVersion : minVer;
               shortDesc = shortDesc || gitScan.cdbMeta?.short_description || gitScan.shortDesc;
@@ -599,6 +727,9 @@ async function handleHydrateRequest(
           ) {
             existingBadgeTags.push('jam_game_2026');
           }
+          const healedProvider = isPoisonedHydrateRow
+            ? resolveGitProviderFromRepoUrl(repoUrl || existingD1Row?.repo_url, 'github')
+            : undefined;
           hydratedMap[lowerKey] = {
             id: canonicalId,
             ...(existing?.author_id ? { author_id: existing.author_id } : {}),
@@ -608,6 +739,11 @@ async function handleHydrateRequest(
             contentdb_downloads: cdbDl,
             luantihub_downloads: lhDl,
             downloads: totalDl,
+            ...(healedProvider ? { provider: healedProvider, source: 'git' as const, sources: ['git' as const] } : {}),
+            ...(existingD1Row?.latest_commit_sha
+              ? { latest_commit_sha: String(existingD1Row.latest_commit_sha).slice(0, 12) }
+              : {}),
+            ...(existingD1Row?.updated_at ? { updated_at: existingD1Row.updated_at } : {}),
             score: resolvedScore > 0 ? resolvedScore : undefined,
             review_thread_counts: detailRevCounts,
             rating_checked: ratingChecked || undefined,
@@ -628,10 +764,17 @@ async function handleHydrateRequest(
             screenshots: mergedHydrateScreenshots.length > 0 ? mergedHydrateScreenshots : undefined
           };
 
-          // Only backfill D1 if this package already exists in D1 AND a missing field was discovered
+          // Only backfill D1 if this package already exists in D1 AND a missing/refreshed field was discovered
           if (env.DB && existingD1Row) {
             const existingValidRevCounts = parseNonZeroReviewThreadCounts(existingD1Row.review_thread_counts);
-            const newLic = !existingD1Row.license && lic ? lic : null;
+            const newLic =
+              !licenseOverridden && lic && lic !== String(existingD1Row.license || '').trim()
+                ? lic
+                : null;
+            const newMediaLic =
+              !licenseOverridden && mediaLic && mediaLic !== String(existingD1Row.media_license || '').trim()
+                ? mediaLic
+                : null;
             const newVid = !existingD1Row.video_url && videoUrl ? videoUrl : null;
             const newRevCounts = !existingValidRevCounts && detailRevCounts
               ? JSON.stringify(detailRevCounts)
@@ -643,9 +786,16 @@ async function handleHydrateRequest(
                 ? resolvedScore
                 : null;
             const existingD1Tags = parseJsonArray(existingD1Row.tags);
-            const mergedD1Tags = Array.from(new Set([...existingD1Tags, ...detailTags])).filter(Boolean);
-            const newTagsJson =
-              mergedD1Tags.length > existingD1Tags.length ? JSON.stringify(mergedD1Tags) : null;
+            const cleanedExistingD1Tags = isPoisonedHydrateRow
+              ? existingD1Tags.filter(t => String(t || '').trim().toLowerCase() !== 'contentdb')
+              : existingD1Tags;
+            const mergedD1Tags = Array.from(new Set([...cleanedExistingD1Tags, ...detailTags]))
+              .filter(t => !isPoisonedHydrateRow || String(t || '').trim().toLowerCase() !== 'contentdb')
+              .filter(Boolean);
+            const tagsChanged =
+              mergedD1Tags.length > existingD1Tags.length ||
+              (isPoisonedHydrateRow && existingD1Tags.some(t => String(t || '').trim().toLowerCase() === 'contentdb'));
+            const newTagsJson = tagsChanged ? JSON.stringify(mergedD1Tags) : null;
             const newThumb =
               (!sanitizePackageImageUrl(existingD1Row.thumbnail_url) ||
                 String(existingD1Row.thumbnail_url || '').includes('/thumbnails/')) &&
@@ -659,11 +809,25 @@ async function handleHydrateRequest(
               resolvedHydrateBanner
                 ? resolvedHydrateBanner
                 : null;
-            if (newLic || newVid || newThumb || newBanner || newRevCounts || newScore !== null || newTagsJson) {
+            const shouldMarkMetadataSynced =
+              !existingD1Row.metadata_synced_at && Boolean(gitScanVerified || detail);
+            if (
+              newLic ||
+              newMediaLic ||
+              newVid ||
+              newThumb ||
+              newBanner ||
+              newRevCounts ||
+              newScore !== null ||
+              newTagsJson ||
+              healedProvider ||
+              shouldMarkMetadataSynced
+            ) {
               persistStatements.push(
                 env.DB.prepare(`
                   UPDATE packages
-                  SET thumbnail_url = CASE
+                  SET provider = COALESCE(?, provider),
+                      thumbnail_url = CASE
                         WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
                         ELSE thumbnail_url
                       END,
@@ -675,8 +839,14 @@ async function handleHydrateRequest(
                         WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
                         ELSE COALESCE(screenshots, ?)
                       END,
-                      license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
-                      media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
+                      license = CASE
+                        WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                        ELSE license
+                      END,
+                      media_license = CASE
+                        WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                        ELSE media_license
+                      END,
                       video_url = COALESCE(video_url, ?),
                       video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
                       review_thread_counts = CASE
@@ -684,21 +854,31 @@ async function handleHydrateRequest(
                         ELSE review_thread_counts
                       END,
                       score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                      metadata_synced_at = CASE
+                        WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                        ELSE metadata_synced_at
+                      END,
                       tags = COALESCE(?, tags)
                   WHERE id = ?
                 `).bind(
+                  healedProvider || null,
                   newThumb || newBanner,
                   newBanner,
                   newBanner,
                   mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
                   mergedHydrateScreenshots.length > 0 ? JSON.stringify(mergedHydrateScreenshots) : null,
                   newLic,
-                  mediaLic || null,
+                  newLic,
+                  newLic,
+                  newMediaLic,
+                  newMediaLic,
+                  newMediaLic,
                   newVid,
                   videoThumbUrl || null,
                   newRevCounts,
                   newScore,
                   newScore,
+                  shouldMarkMetadataSynced || newLic || newMediaLic ? 1 : 0,
                   newTagsJson,
                   existingD1Row.id
                 )
@@ -709,17 +889,15 @@ async function handleHydrateRequest(
       );
 
       if (env.DB && persistStatements.length > 0) {
-        try {
+        await runWithD1ColumnFallback(env.DB, async () => {
           if (typeof env.DB.batch === 'function') {
             await env.DB.batch(persistStatements);
           } else {
             for (const stmt of persistStatements) {
-              await stmt.run().catch(() => {});
+              await stmt.run();
             }
           }
-        } catch {
-          // Non-fatal persistence error
-        }
+        }).catch(() => {});
       }
     }
   }
@@ -739,7 +917,7 @@ async function handleHydrateRequest(
       await mergeSharedEdgeRatingsMap(edgeRatingUpdates).catch(() => {});
     }
     if (hydrateCacheKey) {
-      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 600);
+      await writeEdgeCacheJson(hydrateCacheKey, hydratedMap, 300);
     }
   }
 

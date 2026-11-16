@@ -53,6 +53,7 @@ import { DownloadAnalyticsChartComponent } from '../../shared/components/downloa
 import { PackageCardComponent } from '../card/package-card.component';
 import { BackToTopComponent } from '../../shared/components/back-to-top.component';
 import { TranslatePipe } from '../../core/i18n/translate.pipe';
+import { TranslationService } from '../../core/i18n/translation.service';
 import { ThemeIconComponent } from '../../shared/components/theme-icon.component';
 import {
   LucideX,
@@ -581,6 +582,58 @@ import {
                               }
                             </select>
                           </div>
+                        </div>
+
+                        <!-- 2b. Licenses (SPDX Code & Media License + Live Git Re-sync) -->
+                        <div class="pt-3 border-t border-white/10 space-y-2.5">
+                          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label
+                                for="edit-code-license"
+                                class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                                {{ 'modal.codeLicenseLabel' | translate }}
+                              </label>
+                              <input
+                                id="edit-code-license"
+                                data-testid="edit-code-license"
+                                type="text"
+                                [ngModel]="editableLicense()"
+                                (ngModelChange)="editableLicense.set($event)"
+                                [placeholder]="'modal.licenseSpdxPlaceholder' | translate"
+                                class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                            </div>
+                            <div>
+                              <label
+                                for="edit-media-license"
+                                class="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                                {{ 'modal.mediaLicenseLabel' | translate }}
+                              </label>
+                              <input
+                                id="edit-media-license"
+                                data-testid="edit-media-license"
+                                type="text"
+                                [ngModel]="editableMediaLicense()"
+                                (ngModelChange)="editableMediaLicense.set($event)"
+                                [placeholder]="'modal.licenseSpdxPlaceholder' | translate"
+                                class="w-full glass-input rounded-lg px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 focus:outline-none" />
+                            </div>
+                          </div>
+                          @if (hasValidGitRepo) {
+                            <div class="flex items-center justify-end">
+                              <button
+                                type="button"
+                                data-testid="btn-resync-from-git"
+                                (click)="onResyncFromGit()"
+                                [disabled]="isResyncingGit() || isSavingTags()"
+                                class="px-3 py-1.5 rounded-lg glass-pill hover:border-sky-400/50 text-sky-300 hover:text-white disabled:opacity-50 font-semibold text-[11px] flex items-center gap-1.5 transition cursor-pointer">
+                                <svg
+                                  lucideRefreshCw
+                                  [class]="isResyncingGit() ? 'w-3 h-3 text-sky-400 animate-spin' : 'w-3 h-3 text-sky-400'">
+                                </svg>
+                                <span>{{ (isResyncingGit() ? 'modal.resyncingFromGit' : 'modal.resyncFromGit') | translate }}</span>
+                              </button>
+                            </div>
+                          }
                         </div>
 
                         <!-- 3. Game Support (Universal + Compatible / Incompatible Games) -->
@@ -2621,6 +2674,7 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly settingsService = inject(SettingsService);
   readonly pwaService = inject(PwaService);
   readonly authService = inject(AuthService);
+  private readonly i18n = inject(TranslationService);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly ngZone = inject(NgZone);
 
@@ -2987,6 +3041,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
   readonly editableDevState = signal<string>('');
   readonly editableMinEngineVersion = signal<string>('');
   readonly editableMaxEngineVersion = signal<string>('');
+  readonly editableLicense = signal<string>('');
+  readonly editableMediaLicense = signal<string>('');
+  readonly isResyncingGit = signal(false);
   readonly editableSupportsAllGames = signal<boolean>(false);
   readonly editableGameSupportMap = signal<Record<string, 'compatible' | 'incompatible'>>({});
   readonly editableContentWarnings = signal<string[]>([]);
@@ -4449,6 +4506,8 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
     this.editableDevState.set((pkg?.dev_state || '').trim().toUpperCase());
     this.editableMinEngineVersion.set((pkg?.min_minetest_version || '').trim());
     this.editableMaxEngineVersion.set((pkg?.max_minetest_version || '').trim());
+    this.editableLicense.set((pkg?.license || '').trim());
+    this.editableMediaLicense.set((pkg?.media_license || '').trim());
     this.editableSupportsAllGames.set(Boolean(pkg?.supports_all_games));
 
     const gameMap: Record<string, 'compatible' | 'incompatible'> = {};
@@ -4610,6 +4669,11 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       });
     }
 
+    const nextLicense = this.editableLicense().trim();
+    const origLicense = (pkg.license || '').trim();
+    const nextMediaLicense = this.editableMediaLicense().trim();
+    const origMediaLicense = (pkg.media_license || '').trim();
+
     this.isSavingTags.set(true);
     const res = await this.packageService.updatePackageMetadata(pkg, {
       tags: this.editableTags(),
@@ -4620,7 +4684,9 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
       max_minetest_version: this.editableMaxEngineVersion() || null,
       supports_all_games: this.editableSupportsAllGames(),
       game_support: gameSupportPayload,
-      translations: translationsPayload
+      translations: translationsPayload,
+      ...(nextLicense !== origLicense ? { license: nextLicense || null } : {}),
+      ...(nextMediaLicense !== origMediaLicense ? { media_license: nextMediaLicense || null } : {})
     });
     this.isSavingTags.set(false);
     if (res.success) {
@@ -4634,10 +4700,49 @@ export class PackageDetailModalComponent implements OnInit, OnChanges, AfterView
         max_minetest_version: res.max_minetest_version ?? undefined,
         supports_all_games: res.supports_all_games ?? this.package.supports_all_games,
         game_support: res.game_support ?? this.package.game_support,
-        translations: res.translations ?? this.package.translations
+        translations: res.translations ?? this.package.translations,
+        ...(res.license !== undefined ? { license: res.license } : {}),
+        ...(res.media_license !== undefined ? { media_license: res.media_license } : {}),
+        ...(res.provider ? { provider: res.provider } : {}),
+        ...(res.source ? { source: res.source } : {}),
+        ...(res.sources ? { sources: res.sources } : {}),
+        ...(res.latest_commit_sha ? { latest_commit_sha: res.latest_commit_sha } : {})
       };
       this.isEditingTags.set(false);
       this.pwaService.showToast('Package metadata updated!');
+    } else if (res.message) {
+      this.pwaService.showToast(res.message);
+    }
+  }
+
+  async onResyncFromGit(): Promise<void> {
+    if (!this.canModerate() || !this.hasValidGitRepo || this.isResyncingGit()) return;
+    const pkg = this.packageService.activePackage() || this.package;
+    if (!pkg) return;
+
+    this.isResyncingGit.set(true);
+    const res = await this.packageService.updatePackageMetadata(pkg, { resync_git: true });
+    this.isResyncingGit.set(false);
+    if (res.success) {
+      if (res.license !== undefined) {
+        this.editableLicense.set(res.license || '');
+      }
+      if (res.media_license !== undefined || res.license !== undefined) {
+        this.editableMediaLicense.set(res.media_license || res.license || '');
+      }
+      this.package = {
+        ...this.package,
+        tags: res.tags ?? this.package.tags,
+        badge_tags: res.badge_tags ?? this.package.badge_tags,
+        min_minetest_version: res.min_minetest_version ?? this.package.min_minetest_version,
+        ...(res.license !== undefined ? { license: res.license } : {}),
+        ...(res.media_license !== undefined ? { media_license: res.media_license } : {}),
+        ...(res.provider ? { provider: res.provider } : {}),
+        ...(res.source ? { source: res.source } : {}),
+        ...(res.sources ? { sources: res.sources } : {}),
+        ...(res.latest_commit_sha ? { latest_commit_sha: res.latest_commit_sha } : {})
+      };
+      this.pwaService.showToast(this.i18n.t('modal.resyncFromGitSuccess'));
     } else if (res.message) {
       this.pwaService.showToast(res.message);
     }

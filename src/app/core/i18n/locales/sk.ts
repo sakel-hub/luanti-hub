@@ -256,7 +256,13 @@ export const sk: TranslationDictionary = {
     downloadSecurityTooltipGit: 'Auditovaný Git archív: Zabalený cez HTTPS s ochranou proti ZipSlip, statickou Luacheck kontrolou init.lua a okamžitým ochranným kill-switchom.',
     externalLinkSecurityTooltip: 'Otvorí externú stránku ({host}) v izolovanej karte (noopener noreferrer). Externé súbory mimo LuantiHub vždy overte.',
     reportSecurityTooltip: 'Dôverné moderovanie: Nahláste porušenie DMCA, škodlivý kód alebo únik zo sandboxu. Vaša identita je viditeľná len moderátorom LuantiHub.',
-    reportConfidentialNotice: 'Dôverné moderovanie: Vaša identita nahlasovateľa je viditeľná výlučne moderátorom LuantiHub — nikdy sa nezobrazuje verejne. Potvrdený škodlivý kód alebo porušenie sandboxu okamžite aktivuje HTTP 451 kill-switch pre web aj hru.'
+    reportConfidentialNotice: 'Dôverné moderovanie: Vaša identita nahlasovateľa je viditeľná výlučne moderátorom LuantiHub — nikdy sa nezobrazuje verejne. Potvrdený škodlivý kód alebo porušenie sandboxu okamžite aktivuje HTTP 451 kill-switch pre web aj hru.',
+    codeLicenseLabel: 'Licencia kódu',
+    mediaLicenseLabel: 'Licencia médií',
+    licenseSpdxPlaceholder: 'napr. MIT, GPL-3.0-or-later, LGPL-2.1-only',
+    resyncFromGit: 'Znovu synchronizovať z Gitu',
+    resyncingFromGit: 'Synchronizujem z Gitu...',
+    resyncFromGitSuccess: 'Metadáta a licencia boli znovu synchronizované z Git repozitára!'
   },
   auth: {
     title: 'Prihlásiť sa do LuantiHub',

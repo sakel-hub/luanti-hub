@@ -15,7 +15,10 @@ import {
   syncDebouncedGitVersionStamp,
   invalidateEdgeCacheKeys,
   buildPackageCacheInvalidationKeys,
-  FOR_CLIENT_CACHE_PREFIX
+  FOR_CLIENT_CACHE_PREFIX,
+  scanGitRepoMetadataCached,
+  resolveGitProviderFromRepoUrl,
+  runWithD1ColumnFallback
 } from '../../../lib/upstream';
 import {
   resolveJam2026SyntheticD1Detail,
@@ -346,6 +349,89 @@ export async function onRequestGet(context: {
     d1Pkg = await refreshJam2026D1PkgIfStale(d1Pkg, context.env.DB, noCache);
   }
 
+  let healedPoisonedClientRow = false;
+  if (
+    d1Pkg &&
+    d1Pkg.provider === 'contentdb' &&
+    d1Pkg.repo_url &&
+    !(Number(d1Pkg.contentdb_downloads || 0) > 0)
+  ) {
+    const vcsCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
+    if (Array.isArray(vcsCatalog) && vcsCatalog.length > 0) {
+      const normName = String(d1Pkg.name || name).replace(/-/g, '_').toLowerCase();
+      const targetAuthor = String(d1Pkg.author_name || author).trim().toLowerCase();
+      const inCatalog = vcsCatalog.some(
+        (p: any) =>
+          String(p?.author || '').trim().toLowerCase() === targetAuthor &&
+          String(p?.name || '').trim().replace(/-/g, '_').toLowerCase() === normName
+      );
+      if (!inCatalog) {
+        healedPoisonedClientRow = true;
+        const healedProvider = resolveGitProviderFromRepoUrl(d1Pkg.repo_url, 'github');
+        const cleanedTags = parseJsonArray(d1Pkg.tags).filter(
+          t => String(t || '').trim().toLowerCase() !== 'contentdb'
+        );
+        d1Pkg = {
+          ...d1Pkg,
+          provider: healedProvider,
+          tags: JSON.stringify(cleanedTags)
+        };
+        if (context.env.DB && d1Pkg.id) {
+          context.env.DB.prepare(
+            `UPDATE packages SET provider = ?, tags = ? WHERE id = ?`
+          ).bind(healedProvider, JSON.stringify(cleanedTags), d1Pkg.id).run().catch(() => {});
+        }
+      }
+    }
+  }
+
+  if (
+    d1Pkg &&
+    d1Pkg.provider &&
+    d1Pkg.provider !== 'contentdb' &&
+    d1Pkg.repo_url &&
+    !d1Pkg.metadata_synced_at &&
+    Number(d1Pkg.license_override || 0) !== 1
+  ) {
+    const gitScan = await scanGitRepoMetadataCached(
+      d1Pkg.author_name || author,
+      d1Pkg.name || name,
+      d1Pkg.type || 'mod',
+      d1Pkg.repo_url,
+      21600,
+      { commitSha: d1Pkg.latest_commit_sha, bypassCache: noCache }
+    ).catch(() => null);
+    if (gitScan?.gitRepoStatus === 'verified') {
+      const scannedLic = gitScan.license || gitScan.mediaLicense || '';
+      const scannedMediaLic = gitScan.mediaLicense || scannedLic || '';
+      d1Pkg = {
+        ...d1Pkg,
+        ...(scannedLic ? { license: scannedLic } : {}),
+        ...(scannedMediaLic ? { media_license: scannedMediaLic } : {}),
+        metadata_synced_at: new Date().toISOString()
+      };
+      if (context.env.DB && d1Pkg.id) {
+        await runWithD1ColumnFallback(context.env.DB, () =>
+          context.env.DB.prepare(
+            `UPDATE packages
+             SET license = CASE WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ? ELSE license END,
+                 media_license = CASE WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ? ELSE media_license END,
+                 metadata_synced_at = CURRENT_TIMESTAMP
+             WHERE id = ?`
+          ).bind(
+            scannedLic || null,
+            scannedLic || null,
+            scannedLic || null,
+            scannedMediaLic || null,
+            scannedMediaLic || null,
+            scannedMediaLic || null,
+            d1Pkg.id
+          ).run()
+        ).catch(() => {});
+      }
+    }
+  }
+
   if (d1Pkg) {
     // Verify & self-heal accurate normalized .zip archive size (7-day Edge cached + pre-warms .zip cache)
     let resolvedSizeLabel =
@@ -377,10 +463,11 @@ export async function onRequestGet(context: {
 
     const tags = parseJsonArray(d1Pkg.tags);
     const isPureGitFallback = Boolean(
-      d1Pkg.provider &&
-      d1Pkg.provider !== 'contentdb' &&
-      !tags.includes('contentdb') &&
-      !(Number(d1Pkg.contentdb_downloads || 0) > 0)
+      healedPoisonedClientRow ||
+      (d1Pkg.provider &&
+        d1Pkg.provider !== 'contentdb' &&
+        !tags.includes('contentdb') &&
+        !(Number(d1Pkg.contentdb_downloads || 0) > 0))
     );
     const recFallbackDl = reconcilePackageDownloadCounts({
       contentdbDownloads: Number(d1Pkg.contentdb_downloads) || 0,

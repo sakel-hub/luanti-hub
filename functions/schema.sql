@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS packages (
     translations TEXT,                   -- JSON object of localized package metadata { [lang]: { title, short_desc, desc } }
     review_thread_counts TEXT,           -- JSON object { positive, neutral, negative }
     latest_commit_sha TEXT,              -- Latest Git commit SHA for update notification tracking
+    metadata_synced_at DATETIME,         -- Timestamp when live Git/ContentDB metadata was last synchronized
+    license_override INTEGER DEFAULT 0,  -- 1 when an author/admin explicitly overrode license in LuantiHub
     score REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,

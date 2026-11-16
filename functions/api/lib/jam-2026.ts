@@ -19,6 +19,8 @@ import {
   fetchUpstreamJsonCached,
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables,
+  scanGitRepoMetadataCached,
+  runWithD1ColumnFallback,
   BOOT_CATALOG_EDGE_CACHE_KEY,
   UPDATES_EDGE_CACHE_KEY,
   computeLuantiClientReleaseId
@@ -34,10 +36,10 @@ export const JAM_2026_PRIMARY_TAG = 'jam_game_2026';
 export const JAM_2026_SECONDARY_TAG = 'gamejam';
 export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as const;
 
-const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v2';
+const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v3';
 const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v2';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v4';
-const JAM_2026_STANDALONE_DELTA_CACHE_KEY = '/__jam_2026_standalone_delta_v1';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v5';
+const JAM_2026_STANDALONE_DELTA_CACHE_KEY = '/__jam_2026_standalone_delta_v2';
 const JAM_2026_BREWS_TTL_SECONDS = 300; // 5 minutes Edge + Isolate cache (aligned with jam.luanti.org shelfRefreshMs)
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
@@ -317,8 +319,8 @@ export function normalizeJam2026BrewEntry(raw: any): Jam2026NormalizedPackage | 
     banner: proxiedScreenshotUrl,
     ...(proxiedScreenshotUrl ? { screenshots: [proxiedScreenshotUrl] } : {}),
     tags: [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG, 'git', repoInfo.provider, 'game'],
-    license: 'MIT',
-    media_license: 'CC-BY-SA-4.0',
+    license: '',
+    media_license: '',
     downloads: 0,
     contentdb_downloads: 0,
     luantihub_downloads: 0,
@@ -581,10 +583,78 @@ export async function syncJam2026IntoPromoRowDelta(params: {
       });
 
       if (unsyncedBrews.length > 0) {
+        const batchBrews = unsyncedBrews.slice(0, 40);
+        const existingRowsByLowerId = new Map<string, any>();
+        try {
+          const batchLowerIds = batchBrews.map((b) => b.id.toLowerCase());
+          const ph = batchLowerIds.map(() => '?').join(', ');
+          const exRes = await db
+            .prepare(`SELECT * FROM packages WHERE LOWER(id) IN (${ph})`)
+            .bind(...batchLowerIds)
+            .all();
+          for (const r of exRes?.results || []) {
+            if (r?.id) existingRowsByLowerId.set(String(r.id).toLowerCase(), r);
+          }
+        } catch {
+          // Optional lookup on minimal mock DBs
+        }
+
+        // Scan .conf / .cdb.json / LICENSE for new or SHA-changed Jam repos (bounded to protect Worker 50-subrequest limit)
+        const scannedMetaByLowerId = new Map<string, { license?: string; mediaLicense?: string; minVersion?: string }>();
+        const brewsNeedingScan = batchBrews.filter((b) => {
+          if (!b.repo_url || officialBrewIdsLower.has(b.id.toLowerCase())) return false;
+          const ex = existingRowsByLowerId.get(b.id.toLowerCase());
+          if (Number(ex?.license_override || 0) === 1) return false;
+          if (!ex) return true;
+          const exSha = String(ex.latest_commit_sha || '').trim().toLowerCase();
+          return !ex.metadata_synced_at || (exSha && exSha !== b.latest_commit_sha.toLowerCase());
+        });
+        const skippedScanIds = new Set(brewsNeedingScan.slice(6).map((b) => b.jam_entry_id));
+        if (brewsNeedingScan.length > 0) {
+          await Promise.all(
+            brewsNeedingScan.slice(0, 6).map(async (b) => {
+              const lowerId = b.id.toLowerCase();
+              const scan = await scanGitRepoMetadataCached(
+                b.author,
+                b.name,
+                'game',
+                b.repo_url,
+                86400,
+                { commitSha: b.latest_commit_sha }
+              ).catch(() => null);
+              if (scan && scan.gitRepoStatus === 'verified') {
+                scannedMetaByLowerId.set(lowerId, {
+                  license: scan.license || undefined,
+                  mediaLicense: scan.mediaLicense || undefined,
+                  minVersion: scan.minVersion || undefined
+                });
+                const disc = discoveredByKey.get(lowerId);
+                if (scan.license) {
+                  b.license = scan.license;
+                  if (disc) {
+                    disc.license = scan.license;
+                    (disc as any)._d1LicenseSynced = true;
+                  }
+                }
+                if (scan.mediaLicense) {
+                  b.media_license = scan.mediaLicense;
+                  if (disc) disc.media_license = scan.mediaLicense;
+                }
+                if (scan.minVersion) {
+                  b.min_minetest_version = scan.minVersion;
+                  if (disc) disc.min_minetest_version = scan.minVersion;
+                }
+              }
+            })
+          );
+        }
+
         const stmts: any[] = [];
         const isUnclaimedJamRowSql = `((packages.author_id IS NULL OR packages.author_id LIKE 'ext_jam2026_%') AND COALESCE(packages.provider, '') != 'contentdb')`;
-        for (const b of unsyncedBrews.slice(0, 40)) {
-          const isOfficialUpstreamPkg = officialBrewIdsLower.has(b.id.toLowerCase());
+        for (const b of batchBrews) {
+          const lowerId = b.id.toLowerCase();
+          const isOfficialUpstreamPkg = officialBrewIdsLower.has(lowerId);
+          const scanMeta = scannedMetaByLowerId.get(lowerId);
           // 1. Upsert package into D1 `packages` only if this brew is NOT already an official ContentDB package
           // and no other D1 package with a different `id` already owns `b.repo_url`.
           // Bind `NULL` for `author_id` so unclaimed pure-Git Jam rows satisfy `FOREIGN KEY (author_id) REFERENCES users(id)` in D1
@@ -608,6 +678,17 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                     title = CASE WHEN ${isUnclaimedJamRowSql} THEN excluded.title ELSE packages.title END,
                     short_desc = CASE WHEN ${isUnclaimedJamRowSql} THEN excluded.short_desc ELSE COALESCE(packages.short_desc, excluded.short_desc) END,
                     repo_url = COALESCE(NULLIF(packages.repo_url, ''), excluded.repo_url),
+                    license = CASE
+                      WHEN COALESCE(packages.license_override, 0) = 1 THEN packages.license
+                      WHEN COALESCE(excluded.license, '') != '' THEN excluded.license
+                      ELSE packages.license
+                    END,
+                    media_license = CASE
+                      WHEN COALESCE(packages.license_override, 0) = 1 THEN packages.media_license
+                      WHEN COALESCE(excluded.media_license, '') != '' THEN excluded.media_license
+                      ELSE packages.media_license
+                    END,
+                    min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
                     thumbnail_url = CASE
                       WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%' OR packages.thumbnail_url LIKE '%/api/brews/%' THEN excluded.thumbnail_url
                       WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.thumbnail_url, NULLIF(packages.thumbnail_url, ''))
@@ -664,6 +745,13 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                   b.id
                 )
             );
+            if (scanMeta) {
+              stmts.push(
+                db
+                  .prepare(`UPDATE packages SET metadata_synced_at = CURRENT_TIMESTAMP WHERE LOWER(id) = LOWER(?)`)
+                  .bind(b.id)
+              );
+            }
           }
 
           // 2. Ensure any existing D1 package matching either `b.id` (case-insensitively) or `b.repo_url` has `jam_game_2026` & `gamejam` stamped onto it
@@ -731,7 +819,7 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           batchSucceeded = true;
         } catch (err: any) {
           if (/no such table|no such column/i.test(String(err?.message || ''))) {
-            await ensureExtendedPackageColumns(db);
+            await ensureExtendedPackageColumns(db, true);
             await ensurePromotionAndTagTables(db, true);
             await runBatch().then(() => { batchSucceeded = true; }).catch(() => {});
           }
@@ -745,14 +833,17 @@ export async function syncJam2026IntoPromoRowDelta(params: {
             JAM_2026_STANDALONE_DELTA_CACHE_KEY
           ];
           for (const b of unsyncedBrews) {
-            nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
-            isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
+            if (!skippedScanIds.has(b.jam_entry_id)) {
+              nextDigestMap[b.jam_entry_id] = b.latest_commit_sha;
+              isolateD1SyncedCommits.set(b.jam_entry_id, b.latest_commit_sha);
+            }
             const lowerId = b.id.toLowerCase();
             cacheKeysToInvalidate.push(
               ...buildPackageCacheInvalidationKeys(b.author, b.name, { includeBootCatalog: true }),
               `/__api_hydrate_v9_${lowerId}`,
               `/__api_hydrate_v10_${lowerId}`,
-              `/__api_hydrate_v11_${lowerId}`
+              `/__api_hydrate_v11_${lowerId}`,
+              `/__api_hydrate_v12_${lowerId}`
             );
           }
           await Promise.all([
@@ -762,23 +853,30 @@ export async function syncJam2026IntoPromoRowDelta(params: {
         }
       }
 
-      // Always read back authoritative D1 `updated_at` timestamps so monotonic commit bumps
-      // continue emitting the bumped release integer even when `unsyncedBrews.length === 0`.
+      // Always read back authoritative D1 timestamps & licenses so monotonic commit bumps
+      // and live scanned/edited licenses propagate to catalog overlays even when `unsyncedBrews.length === 0`.
       try {
         const lowerIds = brews.slice(0, 60).map((b) => b.id.toLowerCase());
         if (lowerIds.length > 0) {
           const placeholders = lowerIds.map(() => '?').join(', ');
           const syncedRows = await db
-            .prepare(`SELECT LOWER(id) as lower_id, updated_at, created_at FROM packages WHERE LOWER(id) IN (${placeholders})`)
+            .prepare(`SELECT LOWER(id) as lower_id, updated_at, created_at, license, media_license, min_minetest_version FROM packages WHERE LOWER(id) IN (${placeholders})`)
             .bind(...lowerIds)
             .all();
           for (const row of syncedRows?.results || []) {
             const lowerId = String(row?.lower_id || '').toLowerCase();
             const disc = lowerId ? discoveredByKey.get(lowerId) : undefined;
-            if (disc && row?.updated_at) {
+            if (!disc) continue;
+            if (row?.updated_at) {
               disc.updated_at = String(row.updated_at);
               disc.release = computeLuantiClientReleaseId({ updated_at: row.updated_at, created_at: row.created_at, release: disc.release });
             }
+            if (row?.license) {
+              disc.license = String(row.license);
+              (disc as any)._d1LicenseSynced = true;
+            }
+            if (row?.media_license) disc.media_license = String(row.media_license);
+            if (row?.min_minetest_version) disc.min_minetest_version = String(row.min_minetest_version);
           }
         }
       } catch {
@@ -927,6 +1025,12 @@ export function applyJam2026RepoOverlayOnCatalog(
       !isOfficialPkg && matchedJamBrew && Number(matchedJamBrew.release) > (Number(pkg.release) || 0)
         ? Number(matchedJamBrew.release)
         : undefined;
+    const needsJamLicenseRefresh = Boolean(
+      !isOfficialPkg &&
+      (matchedJamBrew as any)?._d1LicenseSynced &&
+      matchedJamBrew?.license &&
+      matchedJamBrew.license !== pkg.license
+    );
 
     if (
       nextTags ||
@@ -935,7 +1039,8 @@ export function applyJam2026RepoOverlayOnCatalog(
       needsRepoBackfill ||
       needsJamScreenshotRefresh ||
       needsJamCommitRefresh ||
-      nextJamRelease !== undefined
+      nextJamRelease !== undefined ||
+      needsJamLicenseRefresh
     ) {
       if (!clonedList) clonedList = [...packagesList];
       clonedList[i] = {
@@ -957,7 +1062,13 @@ export function applyJam2026RepoOverlayOnCatalog(
               ...(matchedJamBrew.updated_at ? { updated_at: matchedJamBrew.updated_at } : {})
             }
           : {}),
-        ...(nextJamRelease !== undefined ? { release: nextJamRelease } : {})
+        ...(nextJamRelease !== undefined ? { release: nextJamRelease } : {}),
+        ...(needsJamLicenseRefresh
+          ? {
+              license: matchedJamBrew.license,
+              ...(matchedJamBrew.media_license ? { media_license: matchedJamBrew.media_license } : {})
+            }
+          : {})
       };
     }
   }
@@ -995,6 +1106,7 @@ export async function findJam2026BrewBySlug(
   if (!author || !name) return undefined;
   const targetSlug = `${author}/${name}`.toLowerCase();
   const targetAuthorLower = author.toLowerCase();
+  const targetBaseAuthor = targetAuthorLower.replace(/-hub$/, '');
   const targetNormName = name.toLowerCase().replace(/-/g, '_');
   const brews = await fetchJam2026BrewsCached(noCache);
   for (const brew of brews) {
@@ -1004,8 +1116,10 @@ export async function findJam2026BrewBySlug(
     if (brew.aliases?.some((alias) => alias.toLowerCase() === targetSlug)) {
       return brew;
     }
+    const brewAuthorLower = brew.author.toLowerCase();
     if (
-      brew.author.toLowerCase() === targetAuthorLower &&
+      (brewAuthorLower === targetAuthorLower ||
+        (Boolean(targetBaseAuthor) && brewAuthorLower.replace(/-hub$/, '') === targetBaseAuthor)) &&
       brew.name.toLowerCase().replace(/-/g, '_') === targetNormName
     ) {
       return brew;
@@ -1212,16 +1326,84 @@ export async function refreshJam2026D1PkgIfStale(
 ): Promise<any> {
   if (!d1Pkg || !d1Pkg.author_name || !d1Pkg.name) return d1Pkg;
   const tagsStr = String(d1Pkg.tags || '').toLowerCase();
-  if (!tagsStr.includes(JAM_2026_PRIMARY_TAG) && !tagsStr.includes(JAM_2026_SECONDARY_TAG)) {
+  const isJamEntry = tagsStr.includes(JAM_2026_PRIMARY_TAG) || tagsStr.includes(JAM_2026_SECONDARY_TAG);
+  if (!isJamEntry) {
     return d1Pkg;
   }
   const brew = await findJam2026BrewBySlug(d1Pkg.author_name, d1Pkg.name, noCache).catch(() => undefined);
-  if (!brew || !d1Pkg.latest_commit_sha) return d1Pkg;
-  if (brew.latest_commit_sha.toLowerCase() === String(d1Pkg.latest_commit_sha).trim().toLowerCase()) {
+
+  const currentSha = String(d1Pkg.latest_commit_sha || '').trim().toLowerCase();
+  const targetSha = String(brew?.latest_commit_sha || currentSha || '').trim();
+  const shaChanged = Boolean(brew && currentSha && brew.latest_commit_sha.toLowerCase() !== currentSha);
+  const needsMetadataSync =
+    Boolean(d1Pkg.repo_url) &&
+    Number(d1Pkg.license_override || 0) !== 1 &&
+    (!d1Pkg.metadata_synced_at || shaChanged);
+
+  if (!shaChanged && !needsMetadataSync) {
     return d1Pkg;
   }
-  const delta = db ? await buildJam2026StandalonePromoDelta(db, noCache).catch(() => null) : null;
-  const synced = delta?.items?.find((it: any) => String(it?.id || '').toLowerCase() === brew.id.toLowerCase()) || brew;
+
+  let synced: any = brew;
+  if (shaChanged && brew) {
+    const delta = db ? await buildJam2026StandalonePromoDelta(db, noCache).catch(() => null) : null;
+    synced = delta?.items?.find((it: any) => String(it?.id || '').toLowerCase() === brew.id.toLowerCase()) || brew;
+  }
+
+  const scan = d1Pkg.repo_url
+    ? await scanGitRepoMetadataCached(
+        d1Pkg.author_name,
+        d1Pkg.name,
+        d1Pkg.type || 'game',
+        d1Pkg.repo_url,
+        86400,
+        { commitSha: targetSha || undefined, bypassCache: noCache }
+      ).catch(() => null)
+    : null;
+
+  const isOverridden = Number(d1Pkg.license_override || 0) === 1;
+  const nextLicense = !isOverridden && scan?.gitRepoStatus === 'verified' && scan.license
+    ? scan.license
+    : (!isOverridden && shaChanged && synced?.license && synced.license !== 'MIT' ? synced.license : d1Pkg.license);
+  const nextMediaLicense = !isOverridden && scan?.gitRepoStatus === 'verified' && scan.mediaLicense
+    ? scan.mediaLicense
+    : d1Pkg.media_license;
+  const nextMinVer = scan?.minVersion || d1Pkg.min_minetest_version;
+
+  if (db && d1Pkg.id && scan?.gitRepoStatus === 'verified') {
+    await runWithD1ColumnFallback(db, () =>
+      db
+        .prepare(`
+          UPDATE packages
+          SET license = COALESCE(?, license),
+              media_license = COALESCE(?, media_license),
+              min_minetest_version = COALESCE(?, min_minetest_version),
+              metadata_synced_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+        .bind(
+          nextLicense || null,
+          nextMediaLicense || null,
+          nextMinVer || null,
+          d1Pkg.id
+        )
+        .run()
+    ).catch(() => {});
+  }
+
+  if (!shaChanged) {
+    if (scan?.gitRepoStatus !== 'verified') {
+      return d1Pkg;
+    }
+    return {
+      ...d1Pkg,
+      ...(nextLicense ? { license: nextLicense } : {}),
+      ...(nextMediaLicense ? { media_license: nextMediaLicense } : {}),
+      ...(nextMinVer ? { min_minetest_version: nextMinVer } : {}),
+      metadata_synced_at: new Date().toISOString()
+    };
+  }
+
   const isUnclaimedJamRow =
     (!d1Pkg.author_id || String(d1Pkg.author_id).startsWith('ext_jam2026_')) &&
     String(d1Pkg.provider || '') !== 'contentdb';
@@ -1235,21 +1417,25 @@ export async function refreshJam2026D1PkgIfStale(
 
   return {
     ...d1Pkg,
-    latest_commit_sha: synced.latest_commit_sha || brew.latest_commit_sha,
-    updated_at: synced.updated_at || new Date().toISOString(),
+    latest_commit_sha: synced?.latest_commit_sha || brew!.latest_commit_sha,
+    updated_at: synced?.updated_at || new Date().toISOString(),
+    ...(nextLicense ? { license: nextLicense } : {}),
+    ...(nextMediaLicense ? { media_license: nextMediaLicense } : {}),
+    ...(nextMinVer ? { min_minetest_version: nextMinVer } : {}),
+    metadata_synced_at: new Date().toISOString(),
     ...(shouldRefreshScreenshots
       ? {
           thumbnail_url:
-            hasExplicitJamImage && synced.thumbnail === null
+            hasExplicitJamImage && synced?.thumbnail === null
               ? null
-              : (synced.thumbnail ?? d1Pkg.thumbnail_url ?? null),
+              : (synced?.thumbnail ?? d1Pkg.thumbnail_url ?? null),
           banner_url:
-            hasExplicitJamImage && synced.banner === null
+            hasExplicitJamImage && synced?.banner === null
               ? null
-              : (synced.banner ?? d1Pkg.banner_url ?? null),
-          screenshots: synced.screenshots
+              : (synced?.banner ?? d1Pkg.banner_url ?? null),
+          screenshots: synced?.screenshots
             ? JSON.stringify(synced.screenshots)
-            : (synced.thumbnail === null ? null : d1Pkg.screenshots)
+            : (synced?.thumbnail === null ? null : d1Pkg.screenshots)
         }
       : {})
   };
@@ -1274,26 +1460,38 @@ export async function resolveJam2026SyntheticD1Detail(
     return { d1Pkg, bundledReleases };
   }
 
+  const scan = brew.repo_url
+    ? await scanGitRepoMetadataCached(
+        brew.author,
+        brew.name,
+        'game',
+        brew.repo_url,
+        86400,
+        { commitSha: brew.latest_commit_sha, bypassCache: noCache }
+      ).catch(() => null)
+    : null;
+
   const syntheticPkg = {
     id: brew.id,
     author_id: null,
     author_name: brew.author,
     name: brew.name,
-    title: brew.title,
+    title: scan?.title || brew.title,
     type: 'game',
-    short_desc: brew.short_desc,
-    long_desc: brew.short_desc,
+    short_desc: scan?.shortDesc || brew.short_desc,
+    long_desc: scan?.longDesc || brew.short_desc,
     repo_url: brew.repo_url,
     provider: brew.provider,
-    default_branch: 'main',
+    default_branch: scan?.defaultBranch || 'main',
     thumbnail_url: brew.thumbnail,
     banner_url: brew.banner,
     screenshots: brew.screenshots ? JSON.stringify(brew.screenshots) : null,
-    license: brew.license,
-    media_license: brew.media_license,
+    license: scan?.license || brew.license,
+    media_license: scan?.mediaLicense || brew.media_license,
     tags: JSON.stringify(brew.tags),
     badge_tags: JSON.stringify([JAM_2026_PRIMARY_TAG]),
-    min_minetest_version: brew.min_minetest_version,
+    min_minetest_version: scan?.minVersion || brew.min_minetest_version,
+    max_minetest_version: scan?.maxVersion || null,
     latest_commit_sha: brew.latest_commit_sha,
     status: 'active',
     created_at: brew.created_at,

@@ -256,7 +256,13 @@ export const fr: TranslationDictionary = {
     downloadSecurityTooltipGit: 'Archive Git auditée : Générée via HTTPS avec nettoyage des chemins ZipSlip, analyse statique init.lua et protection par coupure immédiate.',
     externalLinkSecurityTooltip: 'Ouvre le site externe ({host}) dans un onglet isolé (noopener noreferrer). Vérifiez toujours les téléchargements hors de LuantiHub.',
     reportSecurityTooltip: 'Modération confidentielle : Signalez un problème DMCA, malware ou sandbox Lua. Votre identité n’est visible que par les modérateurs.',
-    reportConfidentialNotice: 'Modération confidentielle : Votre identité de déclarant est visible uniquement par les modérateurs LuantiHub — jamais publiée. Tout malware ou violation confirmé déclenche un blocage immédiat HTTP 451.'
+    reportConfidentialNotice: 'Modération confidentielle : Votre identité de déclarant est visible uniquement par les modérateurs LuantiHub — jamais publiée. Tout malware ou violation confirmé déclenche un blocage immédiat HTTP 451.',
+    codeLicenseLabel: 'Licence du code',
+    mediaLicenseLabel: 'Licence des médias',
+    licenseSpdxPlaceholder: 'ex. MIT, GPL-3.0-or-later, LGPL-2.1-only',
+    resyncFromGit: 'Resynchroniser depuis Git',
+    resyncingFromGit: 'Synchronisation depuis Git...',
+    resyncFromGitSuccess: 'Métadonnées et licence resynchronisées depuis le dépôt Git !'
   },
   auth: {
     title: 'Connexion à LuantiHub',

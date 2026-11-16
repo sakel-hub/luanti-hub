@@ -200,7 +200,16 @@ export async function fetchRecentContentDbReviewsCached(
   }
 }
 
-const isolateJsonCache = new Map<string, { exp: number; data: any }>();
+interface EdgeCacheEnvelope<T = any> {
+  __lhCacheV1: 1;
+  exp: number;
+  swrExp?: number;
+  data: T;
+}
+
+const isolateJsonCache = new Map<string, { exp: number; swrExp?: number; data: any }>();
+const isolateInFlightSwr = new Map<string, Promise<any>>();
+const d1BackfillCooldowns = new Map<string, { sig: string; exp: number }>();
 const MAX_ISOLATE_CACHE_ENTRIES = 250;
 const NATIVE_FETCH_REF = typeof fetch !== 'undefined' ? fetch : null;
 
@@ -211,30 +220,105 @@ function canUseIsolateCache(): boolean {
   return !Boolean((globalThis.fetch as any)?.mock || (globalThis.fetch as any)?._isMockFunction);
 }
 
-function getIsolateCache<T>(key: string): T | null {
+function getIsolateCacheEntry<T>(key: string): { data: T; stale: boolean } | null {
   if (!canUseIsolateCache()) return null;
   const hit = isolateJsonCache.get(key);
   if (!hit) return null;
-  if (Date.now() > hit.exp) {
-    isolateJsonCache.delete(key);
-    return null;
+  const now = Date.now();
+  if (now <= hit.exp) {
+    return { data: hit.data as T, stale: false };
   }
-  return hit.data as T;
+  if (hit.swrExp && now <= hit.swrExp) {
+    return { data: hit.data as T, stale: true };
+  }
+  isolateJsonCache.delete(key);
+  return null;
 }
 
-function setIsolateCache(key: string, data: any, ttlSeconds: number): void {
+function getIsolateCache<T>(key: string): T | null {
+  const entry = getIsolateCacheEntry<T>(key);
+  return entry && !entry.stale ? entry.data : null;
+}
+
+function setIsolateCache(key: string, data: any, ttlSeconds: number, swrSeconds = 0): void {
   if (!canUseIsolateCache() || ttlSeconds <= 0 || data === undefined || data === null) return;
+  const now = Date.now();
   if (isolateJsonCache.size >= MAX_ISOLATE_CACHE_ENTRIES) {
-    const now = Date.now();
     for (const [k, v] of isolateJsonCache.entries()) {
-      if (now > v.exp) isolateJsonCache.delete(k);
+      const hardExp = v.swrExp ?? v.exp;
+      if (now > hardExp) isolateJsonCache.delete(k);
     }
     if (isolateJsonCache.size >= MAX_ISOLATE_CACHE_ENTRIES) {
       const oldestKey = isolateJsonCache.keys().next().value;
       if (oldestKey) isolateJsonCache.delete(oldestKey);
     }
   }
-  isolateJsonCache.set(key, { exp: Date.now() + ttlSeconds * 1000, data });
+  const safeSwr = Math.max(0, Math.floor(swrSeconds));
+  isolateJsonCache.set(key, {
+    exp: now + ttlSeconds * 1000,
+    ...(safeSwr > 0 ? { swrExp: now + (ttlSeconds + safeSwr) * 1000 } : {}),
+    data
+  });
+}
+
+function unwrapEdgeCacheEnvelope<T>(raw: any): { data: T; exp?: number; swrExp?: number } | null {
+  if (raw === null || raw === undefined) return null;
+  if (
+    typeof raw === 'object' &&
+    raw.__lhCacheV1 === 1 &&
+    'data' in raw &&
+    typeof raw.exp === 'number'
+  ) {
+    return {
+      data: raw.data as T,
+      exp: raw.exp,
+      swrExp: typeof raw.swrExp === 'number' ? raw.swrExp : undefined
+    };
+  }
+  return { data: raw as T };
+}
+
+/**
+ * Deduplicates expensive read-path D1 backfill writes inside a single Worker isolate
+ * so concurrent requests do not burn duplicate D1 row writes. Always returns `true` under mocked tests.
+ */
+export function claimD1BackfillSlot(pkgId: string, signature: string, ttlMs = 600_000): boolean {
+  if (!pkgId || !signature) return false;
+  if (!canUseIsolateCache()) return true;
+  const key = pkgId.trim().toLowerCase();
+  const now = Date.now();
+  const existing = d1BackfillCooldowns.get(key);
+  if (existing && existing.exp > now && existing.sig === signature) {
+    return false;
+  }
+  if (d1BackfillCooldowns.size >= 500) {
+    for (const [k, v] of d1BackfillCooldowns.entries()) {
+      if (v.exp <= now || d1BackfillCooldowns.size >= 400) {
+        d1BackfillCooldowns.delete(k);
+      }
+      if (d1BackfillCooldowns.size < 400) break;
+    }
+  }
+  d1BackfillCooldowns.set(key, { sig: signature, exp: now + ttlMs });
+  return true;
+}
+
+/**
+ * Coalesces concurrent cold cache rebuilds inside the active Worker isolate.
+ */
+export async function runSingleflight<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  if (!canUseIsolateCache()) {
+    return await fn();
+  }
+  const existing = isolateInFlightSwr.get(key);
+  if (existing) {
+    return (await existing) as T;
+  }
+  const promise = fn().finally(() => {
+    isolateInFlightSwr.delete(key);
+  });
+  isolateInFlightSwr.set(key, promise);
+  return await promise;
 }
 
 /**
@@ -339,7 +423,8 @@ function buildEdgeCacheRequestUrl(cacheKeyPath: string): string {
 }
 
 /**
- * Reads a cached JSON response payload from Isolate Memory or Cloudflare's Edge Cache (`caches.default`).
+ * Reads a cached JSON response payload from Isolate Memory or Cloudflare's Edge Cache (`caches.default`),
+ * unwrapping `__lhCacheV1` TTL envelopes so Isolate LRU never outlives the remaining Edge Cache TTL.
  */
 export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<T | null> {
   const keyUrl = buildEdgeCacheRequestUrl(cacheKeyPath);
@@ -354,9 +439,20 @@ export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<
     const cacheReq = new Request(keyUrl, { method: 'GET' });
     const cached = await edgeCache.match(cacheReq);
     if (cached) {
-      const parsed = await cached.json() as T;
-      setIsolateCache(keyUrl, parsed, 180);
-      return parsed;
+      const rawParsed = await cached.json();
+      const unwrapped = unwrapEdgeCacheEnvelope<T>(rawParsed);
+      if (!unwrapped) return null;
+      const now = Date.now();
+      if (typeof unwrapped.exp === 'number') {
+        if (now > unwrapped.exp) {
+          return null;
+        }
+        const remSec = Math.max(1, Math.min(180, Math.ceil((unwrapped.exp - now) / 1000)));
+        setIsolateCache(keyUrl, unwrapped.data, remSec);
+      } else {
+        setIsolateCache(keyUrl, unwrapped.data, 60);
+      }
+      return unwrapped.data;
     }
   } catch {
     // Ignore cache read error
@@ -365,24 +461,91 @@ export async function readEdgeCacheJson<T = any>(cacheKeyPath: string): Promise<
 }
 
 /**
- * Writes a JSON response payload into Isolate Memory and Cloudflare's Edge Cache (`caches.default`) with a TTL.
+ * Reads a cached JSON response with non-blocking Stale-While-Revalidate (`swrSeconds`) via `waitUntil`,
+ * deduplicating concurrent background refreshes per Worker isolate via `runSingleflight`.
+ */
+export async function readEdgeCacheJsonSwr<T = any>(
+  cacheKeyPath: string,
+  waitUntil: ((promise: Promise<any>) => void) | undefined,
+  refreshFn: () => Promise<T | null | undefined>
+): Promise<{ data: T; hitType: 'HIT-EDGE' | 'STALE-EDGE' } | null> {
+  const keyUrl = buildEdgeCacheRequestUrl(cacheKeyPath);
+  const scheduleRefresh = () => {
+    const task = runSingleflight(`swr:${keyUrl}`, () => refreshFn().catch(() => null));
+    if (typeof waitUntil === 'function') {
+      waitUntil(task);
+    }
+  };
+
+  const memEntry = getIsolateCacheEntry<T>(keyUrl);
+  if (memEntry) {
+    if (memEntry.stale) {
+      scheduleRefresh();
+      return { data: memEntry.data, hitType: 'STALE-EDGE' };
+    }
+    return { data: memEntry.data, hitType: 'HIT-EDGE' };
+  }
+
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache) return null;
+  try {
+    const cached = await edgeCache.match(new Request(keyUrl, { method: 'GET' }));
+    if (!cached) return null;
+    const unwrapped = unwrapEdgeCacheEnvelope<T>(await cached.json());
+    if (!unwrapped) return null;
+    const now = Date.now();
+    if (typeof unwrapped.exp !== 'number' || now <= unwrapped.exp) {
+      const remSec = typeof unwrapped.exp === 'number'
+        ? Math.max(1, Math.min(180, Math.ceil((unwrapped.exp - now) / 1000)))
+        : 60;
+      const remSwrSec = typeof unwrapped.swrExp === 'number' && unwrapped.swrExp > now
+        ? Math.max(0, Math.ceil((unwrapped.swrExp - now) / 1000) - remSec)
+        : 0;
+      setIsolateCache(keyUrl, unwrapped.data, remSec, remSwrSec);
+      return { data: unwrapped.data, hitType: 'HIT-EDGE' };
+    }
+    if (typeof unwrapped.swrExp === 'number' && now <= unwrapped.swrExp) {
+      setIsolateCache(keyUrl, unwrapped.data, 1, Math.min(30, Math.max(1, Math.ceil((unwrapped.swrExp - now) / 1000))));
+      scheduleRefresh();
+      return { data: unwrapped.data, hitType: 'STALE-EDGE' };
+    }
+  } catch {
+    // Ignore SWR cache read error
+  }
+  return null;
+}
+
+/**
+ * Writes a JSON response payload into Isolate Memory and Cloudflare's Edge Cache (`caches.default`)
+ * wrapped in a `__lhCacheV1` envelope with optional `swrSeconds` grace storage.
  */
 export async function writeEdgeCacheJson(
   cacheKeyPath: string,
   payload: any,
-  ttlSeconds = 300
+  ttlSeconds = 300,
+  swrSeconds = 0
 ): Promise<void> {
+  const safeTtl = Math.max(1, Math.floor(ttlSeconds));
+  const safeSwr = Math.max(0, Math.floor(swrSeconds));
   const keyUrl = buildEdgeCacheRequestUrl(cacheKeyPath);
-  setIsolateCache(keyUrl, payload, ttlSeconds);
+  setIsolateCache(keyUrl, payload, safeTtl, safeSwr);
 
   const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
   if (!edgeCache) return;
   try {
+    const now = Date.now();
+    const envelope: EdgeCacheEnvelope = {
+      __lhCacheV1: 1,
+      exp: now + safeTtl * 1000,
+      ...(safeSwr > 0 ? { swrExp: now + (safeTtl + safeSwr) * 1000 } : {}),
+      data: payload
+    };
+    const cacheTotalTtl = safeTtl + safeSwr;
     const cacheReq = new Request(keyUrl, { method: 'GET' });
-    const cacheRes = new Response(JSON.stringify(payload), {
+    const cacheRes = new Response(JSON.stringify(envelope), {
       headers: {
         'Content-Type': 'application/json',
-        'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
+        'Cache-Control': `public, max-age=${cacheTotalTtl}, s-maxage=${cacheTotalTtl}`
       }
     });
     await edgeCache.put(cacheReq, cacheRes);
@@ -392,41 +555,20 @@ export async function writeEdgeCacheJson(
 }
 
 /**
- * Evicts one or more keys from Isolate Memory and Cloudflare's Edge Cache (`caches.default`) after a D1 mutation.
- * Automatically expands package detail keys so both `/full/`, `/lite/`, and legacy URLs are evicted.
+ * Evicts active keys from Isolate Memory, D1 backfill cooldowns, and Cloudflare's Edge Cache (`caches.default`)
+ * after a D1 mutation, pruning legacy dead version sweeps to minimize Cache API subrequest consumption.
  */
 export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<void> {
   if (!Array.isArray(cacheKeyPaths)) return;
 
   const expandedUrls = new Set<string>([
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v1',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v2',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v3',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v8',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v9',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v10',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v11',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v12',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v13',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v14',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v15',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v16',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v17',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v18',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v19',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v20',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v21',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v22',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v23',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v24',
-    'https://cache.luantihub.internal/__api_boot_catalog_bundle_v25',
-    'https://cache.luantihub.internal/__api_updates_v3',
+    buildEdgeCacheRequestUrl(BOOT_CATALOG_EDGE_CACHE_KEY),
     UPDATES_EDGE_CACHE_KEY,
-    'https://cache.luantihub.internal/__api_boot_recently_added_v1',
     'https://cache.luantihub.internal/__api_boot_recently_added_v2',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1',
     'https://cache.luantihub.internal/__jam_2026_standalone_delta_v1',
+    'https://cache.luantihub.internal/__jam_2026_standalone_delta_v2',
     'https://cache.luantihub.internal/__promo_row_sync_v5_tags%3Djam_game_2026%7Cauthors%3D',
     'https://cache.luantihub.internal/__promo_row_sync_v5_tags%3Dgamejam%2Cjam_game_2026%7Cauthors%3D'
   ]);
@@ -442,6 +584,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       }
     }
   }
+  const mutatedPackageSlugs: string[] = [];
   for (const p of cacheKeyPaths) {
     if (!p) continue;
     expandedUrls.add(buildEdgeCacheRequestUrl(p));
@@ -449,63 +592,23 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
       /(?:\/__api_pkg_detail_v\d+\/|\/pkg-detail-v\d+\/)(?:full-readme\/|full\/|lite\/)?([^/]+)\/([^/]+)$/i
     );
     if (pkgDetailMatch) {
-      const a = encodeURIComponent(pkgDetailMatch[1].toLowerCase());
-      const n = encodeURIComponent(pkgDetailMatch[2].toLowerCase());
-      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/${a}/${n}`);
-      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/full/${a}/${n}`);
-      expandedUrls.add(`https://cache.luantihub.internal/__api_pkg_detail_v2/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v2/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v3/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v4/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v11/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v12/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v13/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v14/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v15/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v16/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v17/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v18/lite/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${a}/${n}`);
-      expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${a}/${n}`);
+      const decA = safeDecodeParam(pkgDetailMatch[1]).toLowerCase();
+      const decN = safeDecodeParam(pkgDetailMatch[2]).toLowerCase();
+      mutatedPackageSlugs.push(`${decA}/${decN}`);
+      d1BackfillCooldowns.delete(`${decA}/${decN}`);
+      const a = encodeURIComponent(decA);
+      const n = encodeURIComponent(decN);
       expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full-readme/${a}/${n}`);
       expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/${a}/${n}`);
-      for (const loc of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
-        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full/${loc}/${a}/${n}`);
-        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/full-readme/${loc}/${a}/${n}`);
-        expandedUrls.add(`https://edge-cache.luantihub.local/pkg-detail-v19/lite/${loc}/${a}/${n}`);
+      for (const loc of ['sk', 'de', 'fr', 'es', 'ru']) {
         expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/full-readme/${loc}/${a}/${n}`);
         expandedUrls.add(`https://edge-cache.luantihub.local/${PACKAGE_DETAIL_CACHE_VERSION}/lite/${loc}/${a}/${n}`);
-        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/%3Fformspec_version%3D8`);
-        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${a}/${n}/${loc}/`);
-        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${loc}/${a}/${n}/%3Fformspec_version%3D8`);
-        expandedUrls.add(`https://cache.luantihub.internal/__for_client_v5/${loc}/${a}/${n}/`);
-        for (const fsv of ['8', '7', '6', '4']) {
-          expandedUrls.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${loc}/${a}/${n}/fsv=${fsv}`);
-        }
       }
-      expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v3/${a}/${n}/latest`);
+      for (const loc of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
+        expandedUrls.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${loc}/${a}/${n}/fsv=8`);
+      }
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/latest`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/hard`);
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/all`);
@@ -521,36 +624,39 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   for (const url of expandedUrls) {
     isolateJsonCache.delete(url);
   }
-    for (const k of Array.from(isolateJsonCache.keys())) {
-      if (
-        k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
-        k.startsWith('https://cache.luantihub.internal/__api_hydrate_v') ||
-        k.startsWith('https://cache.luantihub.internal/__api_updates_v') ||
-        k.startsWith('https://cache.luantihub.internal/__for_client_v') ||
-        k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
-        k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
-        k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v') ||
-        k.startsWith('https://cache.luantihub.internal/__jam_2026_standalone_delta_v') ||
-        k.startsWith('https://cache.luantihub.internal/__unified_tags_v')
-      ) {
-        isolateJsonCache.delete(k);
-      }
+  for (const k of Array.from(isolateJsonCache.keys())) {
+    if (
+      k.startsWith('https://cache.luantihub.internal/__catalog_edge_v') ||
+      k.startsWith('https://cache.luantihub.internal/__api_hydrate_v') ||
+      k.startsWith('https://cache.luantihub.internal/__api_updates_v') ||
+      k.startsWith('https://cache.luantihub.internal/__for_client_v') ||
+      k.startsWith('https://cache.luantihub.internal/__pkg_deps_v') ||
+      k.startsWith('https://cache.luantihub.internal/__git_zip_size_v') ||
+      k.startsWith('https://cache.luantihub.internal/__promo_row_sync_v') ||
+      k.startsWith('https://cache.luantihub.internal/__jam_2026_standalone_delta_v') ||
+      k.startsWith('https://cache.luantihub.internal/__unified_tags_v') ||
+      (mutatedPackageSlugs.length > 0 &&
+        k.includes('/__git_repo_scan_v') &&
+        mutatedPackageSlugs.some((slug) => k.includes(`/${encodeURIComponent(slug.split('/')[0])}/${encodeURIComponent(slug.split('/')[1])}`)))
+    ) {
+      isolateJsonCache.delete(k);
     }
-
-    const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
-    if (!edgeCache) return;
-
-    await Promise.all(
-      Array.from(expandedUrls).map(async (url) => {
-        try {
-          const req = new Request(url, { method: 'GET' });
-          await edgeCache.delete(req);
-        } catch {
-          // Ignore individual delete error
-        }
-      })
-    );
   }
+
+  const edgeCache = typeof caches !== 'undefined' ? (caches as any).default : null;
+  if (!edgeCache) return;
+
+  await Promise.all(
+    Array.from(expandedUrls).map(async (url) => {
+      try {
+        const req = new Request(url, { method: 'GET' });
+        await edgeCache.delete(req);
+      } catch {
+        // Ignore individual delete error
+      }
+    })
+  );
+}
 
 export const deleteEdgeCacheKeys = invalidateEdgeCacheKeys;
 
@@ -852,20 +958,19 @@ export interface DiscoveredGitRelease {
   released_at: string;
 }
 
-let extendedColumnsEnsured = false;
+const extendedColumnsEnsuredDbs = new WeakSet<object>();
 
 /**
  * Ensures all extended metadata columns (including `content_warnings`, `ai_disclosures`,
- * `maintainers`, `max_minetest_version`, `contentdb_downloads`, `luantihub_downloads`, etc.)
+ * `maintainers`, `max_minetest_version`, `metadata_synced_at`, `license_override`, etc.)
  * exist on `packages` in Cloudflare D1.
  *
- * Production D1 already has all columns, tables, and indexes migrated. To avoid running
- * 15 `PRAGMA` / `CREATE ... IF NOT EXISTS` read queries on every cold Worker isolate start,
- * this helper is a zero-query no-op unless `force === true` (used only when recovering from
- * a missing-column/table error during a write mutation).
+ * Production D1 runs migrations lazily: to avoid running `PRAGMA` / `CREATE ... IF NOT EXISTS`
+ * read queries on every cold Worker isolate start, this helper is a zero-query no-op unless
+ * `force === true` (invoked automatically when recovering from a missing-column/table error).
  */
 export async function ensureExtendedPackageColumns(db: any, force = false): Promise<void> {
-  if (!db || !force || extendedColumnsEnsured) return;
+  if (!db || !force || (typeof db === 'object' && extendedColumnsEnsuredDbs.has(db))) return;
   const requiredCols: Array<[string, string]> = [
     ['tags', 'TEXT'],
     ['badge_tags', 'TEXT'],
@@ -896,7 +1001,9 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
     ['supports_all_games', 'INTEGER DEFAULT 0'],
     ['game_support', 'TEXT'],
     ['translations', 'TEXT'],
-    ['review_thread_counts', 'TEXT']
+    ['review_thread_counts', 'TEXT'],
+    ['metadata_synced_at', 'DATETIME'],
+    ['license_override', 'INTEGER DEFAULT 0']
   ];
   try {
     const info = await db.prepare(`PRAGMA table_info(packages)`).all();
@@ -982,11 +1089,27 @@ export async function ensureExtendedPackageColumns(db: any, force = false): Prom
       }
     }
 
-    if (existing.size > 0) {
-      extendedColumnsEnsured = true;
+    if (existing.size > 0 && typeof db === 'object') {
+      extendedColumnsEnsuredDbs.add(db);
     }
   } catch {
     // Ignore schema inspection errors; will retry on next forced request
+  }
+}
+
+/**
+ * Executes a D1 operation and automatically runs `ensureExtendedPackageColumns(db, true)` + one retry
+ * if the database raises a missing-column error (zero overhead on migrated schemas).
+ */
+export async function runWithD1ColumnFallback<T>(db: any, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err: any) {
+    if (db && /no such column|has no column/i.test(String(err?.message || ''))) {
+      await ensureExtendedPackageColumns(db, true);
+      return await fn();
+    }
+    throw err;
   }
 }
 
@@ -3785,23 +3908,37 @@ export {
  * Agnostic server-side Git repository scanner modeled after `luanti-org/contentdb`
  * (`app/tasks/luanticheck/tree.py` & `app/tasks/importtasks.py`).
  * Scans `.conf` (`mod.conf`, `game.conf`, `modpack.conf`, `texture_pack.conf`),
- * `.cdb.json`, legacy `description.txt` / `depends.txt`, and `LICENSE` files on the Worker,
- * and caches the result in Cloudflare Edge Cache (`caches.default`) for 6 hours (`21600s`)
- * to preserve Worker subrequest and D1 quotas and eliminate browser 404s.
+ * `.cdb.json`, legacy `description.txt` / `depends.txt`, and `LICENSE` / `COPYING` files
+ * on the Worker, keying cache entries by `commitSha` when available for instant invalidation.
  */
 export async function scanGitRepoMetadataCached(
   author: string,
   name: string,
   pkgType = 'mod',
   existingRepoUrl?: string,
-  ttlSeconds = 21600
+  ttlSeconds = 21600,
+  options?: { commitSha?: string; bypassCache?: boolean }
 ): Promise<GitRepoScanResult> {
   const branchHint = extractGitBranchHint(existingRepoUrl);
   const normalizedInputUrl = normalizeGitRepoInputUrl(existingRepoUrl);
-  const cacheKey = `/__git_repo_scan_v12/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}`;
-  const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
-  if (cached && cached.gitRepoStatus) {
-    return cached;
+  const cleanCommitSha = String(options?.commitSha || '').trim().toLowerCase();
+  const hasCommitSha =
+    Boolean(cleanCommitSha) && cleanCommitSha !== 'head' && cleanCommitSha !== 'latest';
+  const shaSegment = hasCommitSha
+    ? `/sha=${encodeURIComponent(cleanCommitSha.slice(0, 12))}`
+    : '';
+  const effectiveTtl =
+    ttlSeconds <= 0
+      ? 0
+      : hasCommitSha
+        ? Math.max(ttlSeconds, 86400)
+        : Math.min(ttlSeconds, 3600);
+  const cacheKey = `/__git_repo_scan_v13/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}${shaSegment}`;
+  if (!options?.bypassCache && effectiveTtl > 0) {
+    const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
+    if (cached && cached.gitRepoStatus) {
+      return cached;
+    }
   }
 
   const confFile =
@@ -3813,12 +3950,45 @@ export async function scanGitRepoMetadataCached(
           ? 'modpack.conf'
           : 'mod.conf';
 
-  const rawBaseCandidates = buildProviderRawBaseCandidates(
+  const baseCandidates = buildProviderRawBaseCandidates(
     normalizedInputUrl,
     author,
     name,
     branchHint
   );
+  let rawBaseCandidates = baseCandidates;
+  if (hasCommitSha && /^[0-9a-f]{7,40}$/.test(cleanCommitSha) && normalizedInputUrl) {
+    const commitCandidates: typeof baseCandidates = [];
+    try {
+      const parsedCommitUrl = new URL(normalizedInputUrl);
+      const commitHost = parsedCommitUrl.hostname.toLowerCase().replace(/^www\./, '');
+      const commitParts = parsedCommitUrl.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+      if ((commitHost === 'codeberg.org' || commitHost.includes('minetest.land')) && commitParts.length >= 2) {
+        const canonicalForgeUrl = `https://${commitHost}/${commitParts[0]}/${commitParts[1]}`;
+        commitCandidates.push({
+          base: `${canonicalForgeUrl}/raw/commit/${cleanCommitSha}`,
+          repoUrl: canonicalForgeUrl,
+          provider: commitHost === 'codeberg.org' ? 'codeberg' : 'mesehub'
+        });
+      }
+    } catch {
+      // Ignore URL parse error
+    }
+    const hintedCommitCands = buildProviderRawBaseCandidates(
+      normalizedInputUrl,
+      author,
+      name,
+      cleanCommitSha
+    );
+    const seenBases = new Set<string>();
+    const mergedCandidates: typeof baseCandidates = [];
+    for (const c of [...commitCandidates, ...hintedCommitCands, ...baseCandidates]) {
+      if (!c?.base || seenBases.has(c.base)) continue;
+      seenBases.add(c.base);
+      mergedCandidates.push(c);
+    }
+    rawBaseCandidates = mergedCandidates;
+  }
 
   const hardDeps: string[] = [];
   const softDeps: string[] = [];
@@ -4066,24 +4236,6 @@ export async function scanGitRepoMetadataCached(
             if ((pkgType === 'txp' || detectedType === 'txp') && !license && mediaLicense) {
               license = mediaLicense;
             }
-
-            if (!license) {
-              for (const licFile of ['LICENSE', 'LICENSE.txt', 'LICENSE.md']) {
-                try {
-                  const licRes = await fetchWithAnubisSupport(`${cand.base}/${licFile}`);
-                  if (licRes.ok) {
-                    const licText = await licRes.text();
-                    const detected = detectSpdxFromText(licText);
-                    if (detected) {
-                      license = detected;
-                      break;
-                    }
-                  }
-                } catch {
-                  // Ignore
-                }
-              }
-            }
             return true;
           }
         }
@@ -4187,6 +4339,35 @@ export async function scanGitRepoMetadataCached(
     }
   }
 
+  // Fallback LICENSE / COPYING detection across all verified scan paths (.conf without license, .cdb.json, modpack, or init.lua)
+  if (!license && gitRepoStatus === 'verified' && resolvedRawBaseUrl) {
+    const licFiles = ['LICENSE', 'LICENSE.txt', 'LICENSE.md', 'COPYING'];
+    const licCtrl = new AbortController();
+    const licTimer = setTimeout(() => licCtrl.abort(), 1400);
+    try {
+      const licResults = await Promise.all(
+        licFiles.map(async (licFile) => {
+          try {
+            const licRes = await fetchWithAnubisSupport(`${resolvedRawBaseUrl}/${licFile}`, {
+              signal: licCtrl.signal
+            });
+            if (!licRes.ok) return '';
+            const licText = await licRes.text();
+            return detectSpdxFromText(licText);
+          } catch {
+            return '';
+          }
+        })
+      );
+      const firstDetected = licResults.find((spdx) => Boolean(spdx));
+      if (firstDetected) {
+        license = firstDetected;
+      }
+    } finally {
+      clearTimeout(licTimer);
+    }
+  }
+
   const cdbScreenshotsRaw = (cdbMeta as CdbJsonMetadata | null)?.screenshots;
   const resolvedCdbScreenshots: string[] = [];
   if (Array.isArray(cdbScreenshotsRaw)) {
@@ -4226,7 +4407,13 @@ export async function scanGitRepoMetadataCached(
       resolvedRawBaseUrl.match(/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/([^/?#]+)/i) ||
       resolvedRawBaseUrl.match(/\/raw\/([^/?#]+)/i);
     const branchCand = branchMatch?.[1] ? decodeURIComponent(branchMatch[1]).trim() : '';
-    if (branchCand && branchCand.toUpperCase() !== 'HEAD' && branchCand.toLowerCase() !== 'branch') {
+    if (
+      branchCand &&
+      branchCand.toUpperCase() !== 'HEAD' &&
+      branchCand.toLowerCase() !== 'branch' &&
+      branchCand.toLowerCase() !== 'commit' &&
+      !/^[0-9a-f]{7,40}$/i.test(branchCand)
+    ) {
       detectedDefaultBranch = branchCand;
     }
   }
@@ -4254,8 +4441,8 @@ export async function scanGitRepoMetadataCached(
     ...(jam2026Tags && jam2026Tags.length > 0 ? { jam2026Tags } : {})
   };
 
-  if (ttlSeconds > 0 && scanResult.gitRepoStatus !== 'unverified') {
-    await writeEdgeCacheJson(cacheKey, scanResult, ttlSeconds);
+  if (effectiveTtl > 0 && scanResult.gitRepoStatus !== 'unverified') {
+    await writeEdgeCacheJson(cacheKey, scanResult, effectiveTtl);
   }
 
   return scanResult;
@@ -5680,17 +5867,32 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Single source of truth for Cloudflare Edge Cache key versions and builders.
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
-export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v25';
+export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v26';
 export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v15_';
 export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v7';
 export const UPDATES_EDGE_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v4';
-export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v23';
+export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v24';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
 
 export function clearIsolateCachesForTests(): void {
   isolateJsonCache.clear();
+  isolateInFlightSwr.clear();
+  d1BackfillCooldowns.clear();
   sharedIsolateZipCache.clear();
+}
+
+/**
+ * Infers a valid Git forge provider from a repository URL, guaranteeing `'contentdb'` is never emitted
+ * as a provider for pure-Git or unverified rows.
+ */
+export function resolveGitProviderFromRepoUrl(repoUrl?: string | null, fallback = 'custom'): string {
+  const cleanUrl = normalizeGitRepoInputUrl(repoUrl || '');
+  const detected = cleanUrl ? detectGitProviderFromUrl(cleanUrl)?.provider : undefined;
+  if (detected) {
+    return detected;
+  }
+  return fallback && fallback !== 'contentdb' ? fallback : 'custom';
 }
 
 /**
@@ -5762,6 +5964,12 @@ export function buildPackageReviewsEdgeCacheKey(author: string, name: string): s
   return `${PACKAGE_REVIEWS_CACHE_PREFIX}/${encA}/${encN}`;
 }
 
+export function buildSsrPackageMetaEdgeCacheKey(author: string, name: string): string {
+  const encA = encodeURIComponent(String(author || '').trim().toLowerCase());
+  const encN = encodeURIComponent(String(name || '').trim().toLowerCase());
+  return `/__ssr_pkg_meta_v5/${encA}/${encN}`;
+}
+
 export function buildAuthorProfileEdgeCacheKey(username: string): string {
   const encU = encodeURIComponent(String(username || '').trim().toLowerCase());
   return `${AUTHOR_PROFILE_CACHE_PREFIX}/${encU}`;
@@ -5782,6 +5990,8 @@ export interface PackageCacheInvalidationOptions {
   includeBootCatalog?: boolean;
   includeAuthorProfile?: boolean;
   includeGitRepoScan?: boolean;
+  repoUrl?: string;
+  commitSha?: string;
   extraAuthors?: string[];
 }
 
@@ -5799,19 +6009,15 @@ export function buildPackageCacheInvalidationKeys(
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'lite', 'en'),
     buildPackageDetailEdgeCacheKey(lowerA, lowerN, 'full-readme', 'en'),
     buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
-    `/__api_hydrate_v9_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
-    `/__api_hydrate_v10_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v11_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
+    `/__api_hydrate_v12_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `https://edge-cache.luantihub.local/pkg-readme-v1/${encA}/${encN}`,
     `https://edge-cache.luantihub.local/pkg-releases-v1/${encA}/${encN}`,
-    `https://cache.luantihub.internal/ssr-pkg-meta-v4/${encA}/${encN}`
+    buildSsrPackageMetaEdgeCacheKey(lowerA, lowerN)
   ]);
 
   for (const lang of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
-    keys.add(`https://cache.luantihub.internal/__for_client_v5/${lang}/${encA}/${encN}/%3Fformspec_version%3D8`);
-    for (const fsv of ['8', '7', '6', '4']) {
-      keys.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${lang}/${encA}/${encN}/fsv=${fsv}`);
-    }
+    keys.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${lang}/${encA}/${encN}/fsv=8`);
   }
 
   for (const d of [7, 30, 90, 365]) {
@@ -5844,7 +6050,7 @@ export function buildPackageCacheInvalidationKeys(
     for (const extra of options!.extraAuthors) {
       const cleanExtra = String(extra || '').trim().toLowerCase();
       if (cleanExtra) {
-        keys.add(`https://cache.luantihub.internal/ssr-pkg-meta-v4/${encodeURIComponent(cleanExtra)}/${encN}`);
+        keys.add(buildSsrPackageMetaEdgeCacheKey(cleanExtra, lowerN));
       }
       addAuthorKeys(extra);
     }
@@ -5853,6 +6059,15 @@ export function buildPackageCacheInvalidationKeys(
   if (options?.includeGitRepoScan) {
     keys.add(`/__git_repo_scan_v11/${encA}/${encN}`);
     keys.add(`/__git_repo_scan_v12/${encA}/${encN}`);
+    const normRepo = options.repoUrl ? normalizeGitRepoInputUrl(options.repoUrl) : '';
+    if (normRepo) {
+      const baseScanKey = `/__git_repo_scan_v13/${encA}/${encN}/${encodeURIComponent(normRepo.toLowerCase())}`;
+      keys.add(baseScanKey);
+      const cleanSha = String(options.commitSha || '').trim().toLowerCase();
+      if (cleanSha && cleanSha !== 'head' && cleanSha !== 'latest') {
+        keys.add(`${baseScanKey}/sha=${encodeURIComponent(cleanSha.slice(0, 12))}`);
+      }
+    }
   }
 
   return Array.from(keys);

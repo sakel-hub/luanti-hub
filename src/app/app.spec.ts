@@ -14395,6 +14395,7 @@ core.register_node(modname .. ":panel", {
 
     // 2. Self-heals poisoned lh_hydrated_meta_v14 in localStorage on reload while preserving Hub downloads
     const pkgService = TestBed.inject(PackageService);
+    localStorage.removeItem('lh_hydrated_meta_v16');
     localStorage.removeItem('lh_hydrated_meta_v15');
     localStorage.setItem(
       'lh_hydrated_meta_v14',
@@ -14542,6 +14543,52 @@ core.register_node(modname .. ":panel", {
       globalThis.fetch = origFetch;
       pkgService.closePackageModal();
     }
+  });
+
+  it('evicts expired and revision-mismatched lh_hydrated_meta_v16 entries so updated licenses are never shadowed', () => {
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).hydratedMetaCache.clear();
+    (pkgService as any).hydratedMetaStamps.clear();
+
+    const nowMs = Date.now();
+    localStorage.setItem(
+      'lh_hydrated_meta_v16',
+      JSON.stringify({
+        __v: 16,
+        entries: {
+          'sakel-hub/expired_mod': {
+            rev: '',
+            exp: nowMs - 60_000,
+            meta: { license: 'MIT' }
+          },
+          'sakel-hub/stale_rev_mod': {
+            rev: '2026-11-15T00:00:00Z|aaaa11112222|',
+            exp: nowMs + 3_600_000,
+            meta: { license: 'MIT', latest_commit_sha: 'aaaa11112222' }
+          }
+        }
+      })
+    );
+
+    (pkgService as any).loadHydratedMetaCache();
+    expect((pkgService as any).hydratedMetaCache.has('sakel-hub/expired_mod')).toBe(false);
+    expect((pkgService as any).hydratedMetaCache.has('sakel-hub/stale_rev_mod')).toBe(true);
+
+    const refreshedPkg = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/stale_rev_mod',
+      author: 'sakel-hub',
+      name: 'stale_rev_mod',
+      title: 'Stale Rev Mod',
+      type: 'mod',
+      provider: 'github',
+      source: 'git',
+      license: 'GPL-3.0-or-later',
+      updated_at: '2026-11-16T10:00:00Z',
+      latest_commit_sha: 'bbbb33334444'
+    });
+    expect(refreshedPkg.license).toBe('GPL-3.0-or-later');
+    expect((pkgService as any).hydratedMetaCache.has('sakel-hub/stale_rev_mod')).toBe(false);
+    localStorage.removeItem('lh_hydrated_meta_v16');
   });
 
   it('should enforce zero-storage PAT security guarantees, reject write-scoped or mismatched tokens, block cross-provider username collision hijacking, rate-limit auth_verify, and wipe tokens from UI memory', async () => {

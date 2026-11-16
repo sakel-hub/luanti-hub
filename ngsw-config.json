@@ -32,7 +32,6 @@
     {
       "name": "luantihub-api",
       "urls": [
-        "/api/packages/**",
         "/api/tags"
       ],
       "cacheConfig": {

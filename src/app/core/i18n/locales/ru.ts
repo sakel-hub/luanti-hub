@@ -256,7 +256,13 @@ export const ru: TranslationDictionary = {
     downloadSecurityTooltipGit: 'Проверенный Git-архив: Собран по HTTPS с фильтрацией путей ZipSlip, статической проверкой песочницы init.lua и мгновенной защитой модерации.',
     externalLinkSecurityTooltip: 'Открывает внешний сайт ({host}) в изолированной вкладке (noopener noreferrer). Всегда проверяйте загрузки вне LuantiHub.',
     reportSecurityTooltip: 'Конфиденциальная модерация: Сообщите о нарушении DMCA, вредоносном коде или выходе из песочницы Lua. Личность отправителя видна только модераторам.',
-    reportConfidentialNotice: 'Конфиденциальная модерация: Ваше имя видно только модераторам LuantiHub и никогда не публикуется. Подтверждённый вредоносный код мгновенно блокируется (HTTP 451) на сайте и в игре.'
+    reportConfidentialNotice: 'Конфиденциальная модерация: Ваше имя видно только модераторам LuantiHub и никогда не публикуется. Подтверждённый вредоносный код мгновенно блокируется (HTTP 451) на сайте и в игре.',
+    codeLicenseLabel: 'Лицензия кода',
+    mediaLicenseLabel: 'Лицензия медиа',
+    licenseSpdxPlaceholder: 'напр. MIT, GPL-3.0-or-later, LGPL-2.1-only',
+    resyncFromGit: 'Обновить из Git',
+    resyncingFromGit: 'Синхронизация с Git...',
+    resyncFromGitSuccess: 'Метаданные и лицензия обновлены из Git-репозитория!'
   },
   auth: {
     title: 'Вход в LuantiHub',

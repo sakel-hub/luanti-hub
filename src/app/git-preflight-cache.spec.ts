@@ -5,7 +5,7 @@ import {
   GIT_SMART_REFS_REFRESH_COOLDOWN_MS
 } from '../../functions/api/packages/git';
 import { createSessionToken } from '../../functions/api/auth/lib/session';
-import { clearIsolateCachesForTests } from '../../functions/api/lib/upstream';
+import { clearIsolateCachesForTests, scanGitRepoMetadataCached } from '../../functions/api/lib/upstream';
 
 function buildSmartRefsAdvertisement(
   headSha: string,
@@ -601,5 +601,74 @@ describe('Git Pre-Flight Check Commit-SHA Caching & Quota Protection', () => {
     const brokenModBody: any = await brokenModRes.json();
     expect(brokenModBody.canPublish).toBe(false);
     expect(brokenModBody.audit.diagnostics.some((d: any) => d.code === 'CONF_MISSING_NAME')).toBe(true);
+  });
+
+  it('keys scanGitRepoMetadataCached by commitSha and bypassCache so new commits immediately refresh license metadata', async () => {
+    const mockCache = createMockEdgeCache();
+    (globalThis as any).caches = mockCache.cachesObj;
+
+    let currentLicense = 'MIT';
+    let confFetchCount = 0;
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.endsWith('/game.conf')) {
+        confFetchCount++;
+        return new Response(`title = Sky-Bridge Alchemists\nlicense = ${currentLicense}\n`, { status: 200 });
+      }
+      if (url.endsWith('/screenshot.png')) {
+        return new Response(null, { status: 200, headers: { 'Content-Type': 'image/png' } });
+      }
+      return new Response('Not Found', { status: 404 });
+    }) as any;
+
+    const sha1 = 'aaaa1111bbbb2222cccc3333dddd4444eeee5555';
+    const sha2 = 'ffff9999eeee8888dddd7777cccc6666bbbb5555';
+
+    const scan1 = await scanGitRepoMetadataCached(
+      'sakel-hub',
+      'sky_bridge_alchemists',
+      'game',
+      'https://github.com/SaKeL/sky_bridge_alchemists',
+      21600,
+      { commitSha: sha1 }
+    );
+    expect(scan1.license).toBe('MIT');
+
+    // Mutate upstream license; same commitSha reads commit-pinned cache
+    currentLicense = 'GPL-3.0-or-later';
+    const prevCount = confFetchCount;
+    const scan1Cached = await scanGitRepoMetadataCached(
+      'sakel-hub',
+      'sky_bridge_alchemists',
+      'game',
+      'https://github.com/SaKeL/sky_bridge_alchemists',
+      21600,
+      { commitSha: sha1 }
+    );
+    expect(scan1Cached.license).toBe('MIT');
+    expect(confFetchCount).toBe(prevCount);
+
+    // Advancing commitSha misses sha1 cache key and immediately picks up GPL-3.0-or-later
+    const scan2 = await scanGitRepoMetadataCached(
+      'sakel-hub',
+      'sky_bridge_alchemists',
+      'game',
+      'https://github.com/SaKeL/sky_bridge_alchemists',
+      21600,
+      { commitSha: sha2 }
+    );
+    expect(scan2.license).toBe('GPL-3.0-or-later');
+
+    // bypassCache: true refreshes even when commitSha is unchanged
+    currentLicense = 'Apache-2.0';
+    const scan2Forced = await scanGitRepoMetadataCached(
+      'sakel-hub',
+      'sky_bridge_alchemists',
+      'game',
+      'https://github.com/SaKeL/sky_bridge_alchemists',
+      21600,
+      { commitSha: sha2, bypassCache: true }
+    );
+    expect(scan2Forced.license).toBe('Apache-2.0');
   });
 });

@@ -3,7 +3,10 @@ import {
   computeGenuineStarRating,
   safeDecodeParam,
   readEdgeCacheJson,
-  writeEdgeCacheJson
+  writeEdgeCacheJson,
+  buildSsrPackageMetaEdgeCacheKey,
+  resolveGitProviderFromRepoUrl,
+  scanGitRepoMetadataCached
 } from '../../api/lib/upstream';
 import { resolveCanonicalAuthorDisplay } from '../../author/[username]';
 import { reconcilePackageDownloadCounts } from '../../../src/app/core/models/package.model';
@@ -187,7 +190,7 @@ export async function onRequestGet(context: {
     return `${canonicalOrigin}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
   };
 
-  const ssrMetaCacheKey = `https://cache.luantihub.internal/ssr-pkg-meta-v4/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}`;
+  const ssrMetaCacheKey = buildSsrPackageMetaEdgeCacheKey(author, name);
 
   const lookupMetadata = async () => {
     try {
@@ -250,8 +253,10 @@ export async function onRequestGet(context: {
       if (context.env?.DB) {
         const [pkgRow, ratingRow] = await Promise.all([
           context.env.DB.prepare(
-            `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)`
-          ).bind(author, name).first(),
+            `SELECT * FROM packages
+             WHERE LOWER(author_name) = LOWER(?)
+               AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = LOWER(REPLACE(?, '-', '_')))`
+          ).bind(author, name, name).first(),
           context.env.DB.prepare(
             `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE LOWER(package_id) = LOWER(?)`
           ).bind(`${author}/${name}`).first()
@@ -265,8 +270,10 @@ export async function onRequestGet(context: {
           if (altAuthor.toLowerCase() !== author.toLowerCase()) {
             try {
               pkgData = await context.env.DB.prepare(
-                `SELECT * FROM packages WHERE LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)`
-              ).bind(altAuthor, name).first();
+                `SELECT * FROM packages
+                 WHERE LOWER(author_name) = LOWER(?)
+                   AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = LOWER(REPLACE(?, '-', '_')))`
+              ).bind(altAuthor, name, name).first();
             } catch {
               // ignore fallback D1 error
             }
@@ -345,6 +352,7 @@ export async function onRequestGet(context: {
         }
       }
 
+      let upstreamFound = false;
       if (!pkgData || pkgData.provider === 'contentdb') {
         let upstream = await fetchUpstreamJsonCached<any>(
           `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
@@ -357,6 +365,7 @@ export async function onRequestGet(context: {
           );
         }
         if (upstream) {
+          upstreamFound = true;
           pkgCleanTitle = upstream.title || pkgCleanTitle;
           pkgDesc = upstream.short_desc || upstream.short_description || pkgDesc;
           pkgLongDesc = upstream.long_description || pkgLongDesc || pkgDesc;
@@ -365,7 +374,11 @@ export async function onRequestGet(context: {
             (Array.isArray(upstream.screenshots) && (upstream.screenshots[0]?.url || upstream.screenshots[0]));
           pkgThumb = pkgBanner || upstreamThumb || pkgThumb;
           pkgType = upstream.type || pkgType || 'mod';
-          pkgLicense = upstream.license || pkgLicense;
+          if (Number(pkgData?.license_override || 0) !== 1 && upstream.license) {
+            pkgLicense = upstream.license;
+          } else {
+            pkgLicense = upstream.license || pkgLicense;
+          }
           const upstreamDl = Math.max(0, Number(upstream.downloads) || 0);
           const recUpstreamSsrDl = reconcilePackageDownloadCounts({
             contentdbDownloads: Math.max(pkgCdbDownloads || 0, upstreamDl),
@@ -396,6 +409,56 @@ export async function onRequestGet(context: {
               (Number(upstream.reviews.negative) || 0);
           }
           pkgScore = computeGenuineStarRating(d1RatingAvg, upstream.reviews);
+        } else if (
+          pkgData?.provider === 'contentdb' &&
+          pkgData?.repo_url &&
+          !(Number(pkgData?.contentdb_downloads) > 0)
+        ) {
+          const cdbVcsCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
+          if (Array.isArray(cdbVcsCatalog) && cdbVcsCatalog.length > 0) {
+            const normTargetName = name.replace(/-/g, '_').toLowerCase();
+            const candidateAuthors = new Set([author.toLowerCase(), authorHubSlug.toLowerCase()]);
+            const presentInContentDb = cdbVcsCatalog.some((p: any) => {
+              const pAuthor = String(p?.author || '').trim().toLowerCase();
+              const pName = String(p?.name || '').trim().replace(/-/g, '_').toLowerCase();
+              return candidateAuthors.has(pAuthor) && pName === normTargetName;
+            });
+            if (!presentInContentDb) {
+              pkgProvider = resolveGitProviderFromRepoUrl(pkgData.repo_url, 'github');
+              pkgSources = ['git'];
+              pkgSource = 'git';
+              pkgTags = pkgTags.filter(t => String(t || '').trim().toLowerCase() !== 'contentdb');
+              const healedSsrDl = reconcilePackageDownloadCounts({
+                contentdbDownloads: 0,
+                luantihubDownloads: Number(pkgData.luantihub_downloads || pkgLhDownloads || 0),
+                reportedTotalDownloads: Number(pkgData.downloads_count || 0),
+                hasContentDbSource: false,
+                isPureGitOnly: true
+              });
+              pkgCdbDownloads = healedSsrDl.contentdbDownloads;
+              pkgLhDownloads = healedSsrDl.luantihubDownloads;
+              pkgDownloads = healedSsrDl.downloads;
+            }
+          }
+        }
+      }
+
+      if (
+        pkgData?.repo_url &&
+        !pkgData.metadata_synced_at &&
+        Number(pkgData.license_override || 0) !== 1 &&
+        (!upstreamFound || pkgProvider !== 'contentdb')
+      ) {
+        const gitScan = await scanGitRepoMetadataCached(
+          author,
+          name,
+          pkgType,
+          pkgData.repo_url,
+          21600,
+          { commitSha: pkgData.latest_commit_sha }
+        ).catch(() => null);
+        if (gitScan?.gitRepoStatus === 'verified' && (gitScan.license || gitScan.mediaLicense)) {
+          pkgLicense = gitScan.license || gitScan.mediaLicense || pkgLicense;
         }
       }
 
@@ -557,6 +620,7 @@ export async function onRequestGet(context: {
       thumbnail: pkgThumb,
       ...(pkgBanner ? { banner: pkgBanner } : {}),
       type: pkgType,
+      ...(pkgLicense && pkgLicense !== 'Open Source' ? { license: pkgLicense } : {}),
       ...(pkgProvider ? { provider: pkgProvider } : {}),
       ...(pkgSource ? { source: pkgSource } : {}),
       ...(pkgSources.length > 0 ? { sources: pkgSources } : {}),

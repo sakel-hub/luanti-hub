@@ -20,10 +20,10 @@ LuantiHub employs a **defense-in-depth, multi-tier caching and high-availability
 ```mermaid
 flowchart TD
     %% ================= Client / Front-End =================
-    subgraph Client ["Client Browser (Angular 19 SPA & PWA)"]
+    subgraph Client ["Client Browser (Angular 22 SPA & PWA)"]
         UI["Angular Components & Pages\n(Catalog, Detail Modal, Hero, Top 10, Profile, Analytics)"]
         State["Angular Signals & In-Memory State\n(PackageService, AuthService, SettingsService)"]
-        LocalStore["Browser Web Storage\n• SessionStorage: lh_boot_cache_v9\n• LocalStorage: lh_hydrated_meta_v4, lh_favorites,\nlh_downloaded_packages, lh_recently_viewed_v1"]
+        LocalStore["Browser Web Storage\n• SessionStorage: lh_boot_cache_v26\n• LocalStorage: lh_hydrated_meta_v16 (2h TTL + rev),\nlh_favorites, lh_downloaded_packages, lh_recently_viewed_v1"]
         IdbOutbox["IndexedDB (lh_sync_outbox_db & lh_pwa_notif_state_db)\nQueued offline mutations (Favorites, Hydrate)"]
 
         UI --> State
@@ -33,9 +33,9 @@ flowchart TD
 
     %% ================= Service Worker Layer =================
     subgraph SW ["Service Worker Tier (ngsw-worker.js + custom-sw.js)"]
-        NGSW["Angular Service Worker (NGSW)\n• App Shell Prefetch: index.html, bundles, icons\n• Lazy Assets: images, fonts\n• Data Freshness (2s network timeout fallback)"]
+        NGSW["Angular Service Worker (NGSW)\n• App Shell Prefetch: index.html, bundles, icons\n• Lazy Assets: images, fonts\n• /api/tags Freshness (2s timeout); excludes /api/packages/**"]
         CustomSW["Custom SW (W3C Sync, Push & Badging)\n• Background Sync (lh-sync-outbox)\n• Periodic Background Sync (lh-periodic-catalog-sync)\n• BroadcastChannel ('lh-pwa-sync')"]
-        SWCacheStorage["CacheStorage\n• 'lh-boot-sync-v1' (/api/packages/?boot=1)\n• NGSW Data Cache (maxAge: 2h / 6h)"]
+        SWCacheStorage["CacheStorage\n• 'lh-boot-sync-v2' (/api/packages/?boot=1)\n• NGSW Data Cache (tags & upstream)"]
 
         IdbOutbox -.->|W3C Background Sync| CustomSW
         CustomSW <--> SWCacheStorage
@@ -103,8 +103,8 @@ The front-end client leverages reactive signals, browser storage, and IndexedDB 
 
 | Storage Mechanism | Key / Identifier | Payload & Purpose | Retention / Invalidation Strategy |
 | :--- | :--- | :--- | :--- |
-| **`sessionStorage`** | `lh_boot_cache_v9` | Bundled boot payload (`/api/packages/?boot=1`): Home tiles, Tags, Top 10 Today & Week, Hero Promotions, Latest Blog Article, Recent Reviews. | Survives page reloads within the same browser tab. Invalidated on hard refresh or when a new deployment bundle hash is detected. |
-| **`localStorage`** | `lh_hydrated_meta_v4` | Deep package metadata dictionary keyed by `author/name` (tags, dependencies, minimum Luanti engine version, licenses, repo URLs). | Persists across sessions. Incrementally populated as packages are loaded or hydrated via `/api/packages/hydrate`. Version bumps evict stale data. |
+| **`sessionStorage`** | `lh_boot_cache_v26` | Bundled boot payload (`/api/packages/?boot=1`): Home tiles, Tags, Top 10 Today & Week, Hero Promotions, Latest Blog Article, Recent Reviews. | Survives page reloads within the same browser tab. Invalidated on hard refresh, mutations (`clearBootCache`), or when a new deployment bundle hash is detected. |
+| **`localStorage`** | `lh_hydrated_meta_v16` | Deep package metadata dictionary keyed by `author/name` with `{ rev, exp, meta }` envelope (`rev = updated_at|latest_commit_sha|release_id`, 2h TTL). | Automatically evicts expired (`exp`) or revision-mismatched entries so updated licenses and healed source provenance take effect immediately. Legacy `v9`–`v15` keys are migrated and removed on boot. |
 | **`localStorage`** | `lh_favorites` | Array of favorited package IDs (`author/name`). | Automatically reconciled with server-side favorites (`POST /api/auth/favorites`) when the user logs in or reconnects. |
 | **`localStorage`** | `lh_active_promotions_v1` | Cached Hero Billboard promotional slides. | Self-prunes whenever an item's `expires_at` timestamp is exceeded. Refreshed on boot sync. |
 | **`localStorage`** | `lh_downloaded_packages` | Mapping of `package_id -> download_count` initiated locally. | Merged with server downloads on boot. Used to calculate personalized `% Match` scores. |
@@ -129,7 +129,7 @@ LuantiHub uses a dual-service-worker approach:
   "dataGroups": [
     {
       "name": "luantihub-api",
-      "urls": ["/api/packages/**", "/api/tags"],
+      "urls": ["/api/tags"],
       "cacheConfig": {
         "maxSize": 250,
         "maxAge": "2h",
@@ -154,7 +154,7 @@ LuantiHub uses a dual-service-worker approach:
 }
 ```
 
-- **Freshness Strategy:** The service worker attempts a live network fetch for up to **2.0 seconds**. If the network responds within this window, the response is served and cached. If the network times out or fails (e.g., offline or slow mobile connection), the cached copy is served instantly.
+- **Freshness Strategy & First-Party Bypass:** `/api/packages/**` is intentionally excluded from NGSW `dataGroups` so slow networks cannot serve a 2-hour-stale Service Worker response instead of Cloudflare Edge / CDN SWR responses. The app boot bundle uses `custom-sw.js` CacheStorage `lh-boot-sync-v2` with explicit mutation clearing.
 
 #### Custom Service Worker Sync & CacheStorage (`custom-sw.js`)
 
@@ -208,14 +208,15 @@ Inbound Request
 └──────────────────────────────────────────────┘
 ```
 
-#### Tier 0: Worker Isolate Memory Cache (`isolateJsonCache`)
+#### Tier 0: Worker Isolate Memory Cache (`isolateJsonCache`) & Quota Guards
 - An in-memory JavaScript `Map<string, { exp: number; data: any }>` retained in the active Cloudflare V8 worker instance.
-- Capacity: 250 entries with proactive LRU eviction.
-- Yields immediate sub-millisecond responses for subsequent hits on the same data center instance.
+- Capacity: 250 entries with proactive LRU eviction, preserving the **exact remaining Edge TTL** (`Math.min(maxTtl, freshUntil - now)`) when promoted from `caches.default`.
+- **`runSingleflight()`**: Deduplicates concurrent cold/SWR rebuilds in the same isolate so stampedes only perform one ContentDB/D1/Git fan-out.
+- **`claimD1BackfillSlot()`**: Debounces read-path D1 backfill `UPDATE`s (`metadata_synced_at`, license/screenshot/download healing) to once per cooldown window per `(packageId, signature)` in the isolate, cutting redundant D1 write rows.
 
-#### Tier 1: Cloudflare Edge Cache (`caches.default`)
-- Distributed edge cache keyed by synthetic internal URLs (e.g. `https://cache.luantihub.internal/...`).
-- Shared across worker isolates in the same Cloudflare Point of Presence (PoP).
+#### Tier 1: Cloudflare Edge Cache (`caches.default`) & `__lhCacheV1` SWR Envelope
+- Distributed edge cache keyed by synthetic internal URLs (e.g. `https://cache.luantihub.internal/...`), wrapped in a `{ __lhCacheV1: true, freshUntil, staleUntil, payload }` envelope so `readEdgeCacheJsonSwr()` can serve stale reads (`STALE-EDGE`) within `staleUntil` while triggering non-blocking `waitUntil` singleflight refreshes.
+- D1 schema tracks `metadata_synced_at` and `license_override` (`0` = auto-sync from ContentDB / Git commit; `1` = manual author override preserved across syncs).
 
 #### Tier 1b: Normalized ZIP Binary Cache (`sharedIsolateZipCache` + `caches.default`)
 - When downloading Git packages, archives are normalized on-the-fly (root folder naming conventions for Luanti engine compatibility).
@@ -230,10 +231,11 @@ Inbound Request
 
 | Endpoint & Method | Upstream / Source | Edge Cache Key | Edge TTL | HTTP `Cache-Control` Header | Invalidation Triggers |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`GET /api/packages/?boot=1`** | D1 + ContentDB + Hero Promos + Luanti Blog RSS | `/__api_boot_catalog_bundle_v19` | 1,800s (30m) | `public, max-age=300, s-maxage=1800, stale-while-revalidate=3600` | Package published, tag modified, promotion edited, or moderation action taken. |
-| **`GET /api/packages/?type=...`** *(In-Game Client)* | Shared from `/__api_boot_catalog_bundle_v19` (`HIT-BOOT-SHARED`) or D1 + ContentDB `/packages/?fmt=vcs` (30m TTL + 24h fallback; skips `/scores/`) | `/__catalog_edge_v10_{query}` | 1,800s (30m) | `public, max-age=120, s-maxage=1800, stale-while-revalidate=3600` | Package mutation in D1. |
-| **`GET /api/packages/:author/:name/?lite=1`** | D1 SQL + ContentDB (fast preview payload) | `/__api_pkg_detail_v*/lite/...` | 1,800s (30m) | `public, max-age=300, s-maxage=1800, stale-while-revalidate=600` | Package edit, moderation, or release update. |
-| **`GET /api/packages/:author/:name/`** | D1 SQL + ContentDB + Git metadata | `/__api_pkg_detail_v*/full/...` | 600s (10m) | `public, max-age=120, s-maxage=600, stale-while-revalidate=86400` | Package edit, moderation, or release update. |
+| **`GET /api/packages/?boot=1`** | D1 + ContentDB + Hero Promos + Luanti Blog RSS | `/__api_boot_catalog_bundle_v26` | 300s fresh / 600s SWR | `public, max-age=120, s-maxage=300, stale-while-revalidate=600` | Package published, tag/license modified, promotion edited, or moderation action taken. |
+| **`GET /api/packages/?type=...`** *(In-Game Client)* | Shared from `/__api_boot_catalog_bundle_v26` (`HIT-BOOT-SHARED`) or D1 + ContentDB `/packages/?fmt=vcs` (30m TTL + 24h fallback; skips `/scores/`) | `/__catalog_edge_v10_{query}` | 1,800s (30m) | `public, max-age=120, s-maxage=1800, stale-while-revalidate=3600` | Package mutation in D1. |
+| **`GET /api/packages/:author/:name/?lite=1`** | D1 SQL + ContentDB (fast preview payload + ETag/`304`) | `/__api_pkg_detail_v24/lite/...` | 600s (10m) | `public, max-age=120, s-maxage=600, stale-while-revalidate=600` | Package edit, license resync, moderation, or release update. |
+| **`GET /api/packages/:author/:name/`** | D1 SQL + ContentDB + Git metadata (`sha=<12>` keyed + ETag/`304`) | `/__api_pkg_detail_v24/full/...` | 300s (5m) | `public, max-age=60, s-maxage=300, stale-while-revalidate=600` | Package edit, license resync, moderation, or release update. |
+| **`scanGitRepoMetadataCached()`** | `.cdb.json` / `mod.conf` / `game.conf` / `LICENSE*` / `COPYING` / `JAM2026.md` | `/__git_repo_scan_v13/<author>/<name>/<repo>[/sha=<12>]` | 86,400s (24h commit-pinned) / 3,600s (1h unpinned) | Internal Worker scanner | Commit SHA advance or explicit `?nocache=1` / `resync_git`. |
 | **`GET /api/packages/:author/:name/readme`** | Git raw README (GitHub / GitLab / Codeberg / Mesehub) | `/__api_pkg_readme_v4/...` | 86,400s (24h) | `public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400` | Package metadata update. |
 | **`GET /api/packages/:author/:name/releases`** | Git smart HTTP refs & forge releases API | `/__git_releases_tags_v3/...` | 120s (2m) | `public, max-age=60, s-maxage=120` *(Bypassed with `?force=1`)* | Time expiration or forced user refresh. |
 | **`POST /api/packages/git`** *(Pre-Flight Audit & Publish)* | Git Smart HTTP (`info/refs`, 10s per-repo cooldown), commit-SHA pinned raw files, `/contents?ref=<sha>`, & release tag-diff guard | `/__git_preflight_sha_v2/.../<sha>` & `/__git_root_entries_v1/.../<sha>` | 300s (5m audit) / 3,600s (1h root tree) | `private` *(Dynamic JSON audit + live caller ownership)* | New Git commit SHA pushed (auto-invalidates by SHA key after 10s `info/refs` cooldown). |
@@ -242,12 +244,12 @@ Inbound Request
 | **`GET /api/packages/:author/:name/reviews`** | D1 `reviews` table + ContentDB `/reviews/` | Direct D1 + ContentDB Proxy | 0s (Live) | `no-store, no-cache, must-revalidate` | Always real-time. |
 | **`POST /api/packages/:author/:name/reviews`** | D1 write mutation | None | N/A | `no-store` | Evicts package detail and boot bundle caches. |
 | **`GET /api/packages/top10`** | D1 `package_daily_downloads` + ContentDB scores | Direct D1 Aggregation | 60s (1m) | `public, max-age=60, s-maxage=300, stale-while-revalidate=60` | Re-aggregated per window. |
-| **`POST /api/packages/hydrate`** | Batch D1 queries for grid package IDs | `/__api_hydrate_v3_{hash}` | 3,600s (1h) | `public, max-age=300, s-maxage=3600` | Time expiration. |
+| **`POST /api/packages/hydrate`** | Batch D1 queries + commit-keyed Git scan for grid package IDs | `/__api_hydrate_v12_{hash}` | 300s (5m) | `public, max-age=120, s-maxage=600, stale-while-revalidate=600` | Package mutation or time expiration. |
 | **`GET /api/tags`** | ContentDB `/tags/` with static fallback | `/__api_tags_v1` | 3,600s (1h) | `public, max-age=1800, s-maxage=3600` | Hourly upstream refresh. |
-| **`GET /api/updates`** | ContentDB `/updates/` + active D1 packages | `/__api_updates_v3_{query}` | 180s (3m) | `public, max-age=120, s-maxage=300, stale-while-revalidate=600` | Evicted on D1 write mutation. |
+| **`GET /api/updates`** | ContentDB `/updates/` + active D1 packages | `/__api_updates_v3_{query}` | 180s fresh / 420s SWR | `public, max-age=120, s-maxage=300, stale-while-revalidate=600` | Evicted on D1 write mutation. |
 | **`GET /api/authors/:username`** | D1 users/identities + ContentDB `/users/` | `/__author_profile_v2/...` | 120s (2m) | `public, max-age=60, s-maxage=120, stale-while-revalidate=300` | User profile update or identity link. |
 | **`GET /api/promotions`** | D1 `hero_promotions` table | `/__active_promotions_v1` | 21,600s (6h) | `public, max-age=300, s-maxage=1800` | Admin promotion create/update/delete. |
-| **`GET /package/:author/:name`** *(SSR)* | Cloudflare `HTMLRewriter` (JSON-LD + meta) | Per-URL Edge Cache | 3,600s (1h) | `public, max-age=300, s-maxage=3600, stale-while-revalidate=86400` | Package metadata update. |
+| **`GET /package/:author/:name`** *(SSR)* | Cloudflare `HTMLRewriter` (JSON-LD + initial license/source meta) | `/__ssr_pkg_meta_v5/...` | 600s (10m) | `public, max-age=300, s-maxage=3600, stale-while-revalidate=86400` | Package metadata update / invalidation. |
 | **`GET /sitemap.xml`** | Static URLs + D1 active packages + ContentDB top 1,500 | Dynamically generated XML | 21,600s (6h) | `public, max-age=3600, s-maxage=21600, stale-while-revalidate=86400` | Recomputed every 6h at Edge. |
 | **`GET/POST /api/auth/me` & `/favorites`** | D1 user tables & sessions | None (Security sensitive) | 0s | `private, no-store, no-cache, must-revalidate` | Never cached. |
 
@@ -262,9 +264,9 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
 ```
 
 ### Invalidation Mechanics:
-1. **Isolate Memory Eviction:** Cleans matching keys and prefix wildcards (`/__catalog_edge_v*`, `/__api_updates_v2_*`, `/__for_client_v2/*`) from the in-memory isolate `Map`.
-2. **Edge Cache Purge:** Concurrently issues `edgeCache.delete(req)` against Cloudflare's `caches.default` across all expanded variants (`/full/`, `/lite/`, `/full-readme/`, legacy keys).
-3. **Boot Bundle Refresh:** Always clears the global home bundle (`/__api_boot_catalog_bundle_v9`) so home page tiles and swimlanes reflect changes immediately.
+1. **Isolate Memory Eviction:** Cleans matching keys, prefix wildcards (`/__catalog_edge_v*`, `/__api_updates_v*`, `/__for_client_v*`), Git scan entries, and `d1BackfillCooldowns` from the in-memory isolate `Map`.
+2. **Edge Cache Purge:** Concurrently issues `edgeCache.delete(req)` against Cloudflare's `caches.default` across active detail variants (`full`, `lite`, `full-readme`), localized `/for-client/` paths, `/__api_hydrate_v12_`, `/__ssr_pkg_meta_v5/`, and commit-keyed `/__git_repo_scan_v13/.../sha=<12>` keys.
+3. **Boot Bundle Refresh:** Clears the global home bundle (`/__api_boot_catalog_bundle_v26`) so home page tiles and swimlanes reflect changes immediately.
 
 ---
 

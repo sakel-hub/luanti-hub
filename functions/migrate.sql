@@ -79,6 +79,8 @@ UPDATE packages SET score = COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM review
 -- ALTER TABLE package_daily_downloads ADD COLUMN views_luanti INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE package_daily_downloads ADD COLUMN views_web INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE packages ADD COLUMN latest_commit_sha TEXT;
+-- ALTER TABLE packages ADD COLUMN metadata_synced_at DATETIME;
+-- ALTER TABLE packages ADD COLUMN license_override INTEGER DEFAULT 0;
 
 -- 8. Per-User Package View History & Counts (Idempotent)
 CREATE TABLE IF NOT EXISTS user_views (

@@ -181,7 +181,9 @@ export function resolveJam2026OverlayForHydratedRepo(
     : Array.from(new Set([...(existingTags || []), ...extraJamTags]));
   const mergedBadges = parseBadgeTagsArray([...(existingBadgeTags || []), 'jam_game_2026']);
   const baseSources =
-    existingSources && existingSources.length > 0 ? existingSources : (['official'] as PackageSource[]);
+    existingSources && existingSources.length > 0
+      ? existingSources
+      : ((repoUrl ? ['git'] : []) as PackageSource[]);
   const mergedSources: PackageSource[] = repoUrl
     ? Array.from(new Set<PackageSource>([...baseSources, 'git']))
     : baseSources;

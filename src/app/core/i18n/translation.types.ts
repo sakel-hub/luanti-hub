@@ -272,6 +272,12 @@ export interface TranslationDictionary {
     externalLinkSecurityTooltip: string;
     reportSecurityTooltip: string;
     reportConfidentialNotice: string;
+    codeLicenseLabel: string;
+    mediaLicenseLabel: string;
+    licenseSpdxPlaceholder: string;
+    resyncFromGit: string;
+    resyncingFromGit: string;
+    resyncFromGitSuccess: string;
   };
   auth: {
     title: string;

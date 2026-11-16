@@ -10,7 +10,11 @@ import {
   parseJsonArray,
   normalizeRepoKey,
   readEdgeCacheJson,
+  readEdgeCacheJsonSwr,
   writeEdgeCacheJson,
+  resolveGitProviderFromRepoUrl,
+  runWithD1ColumnFallback,
+  claimD1BackfillSlot,
   ensureExtendedPackageColumns,
   ensurePromotionAndTagTables,
   scanGitRepoMetadataCached,
@@ -348,9 +352,15 @@ export function overlayPromotionRowDeltaOnCatalog(
       if (isOfficialExisting || isOfficialDelta) continue;
       const maxRelease = Math.max(Number(existing.release) || 0, Number(deltaItem.release) || 0);
       const nextSha = deltaItem.latest_commit_sha || existing.latest_commit_sha;
+      const needsDeltaLicense = Boolean(
+        (deltaItem as any)?._d1LicenseSynced &&
+        deltaItem.license &&
+        deltaItem.license !== existing.license
+      );
       if (
         (maxRelease > 0 && maxRelease !== Number(existing.release || 0)) ||
-        (nextSha && existing.latest_commit_sha !== nextSha)
+        (nextSha && existing.latest_commit_sha !== nextSha) ||
+        needsDeltaLicense
       ) {
         if (!idSyncedList) idSyncedList = [...repoOverlaidList];
         idSyncedList[i] = {
@@ -359,6 +369,12 @@ export function overlayPromotionRowDeltaOnCatalog(
           ...(nextSha ? { latest_commit_sha: nextSha } : {}),
           ...(deltaItem.updated_at && (!existing.updated_at || deltaItem.updated_at > existing.updated_at)
             ? { updated_at: deltaItem.updated_at }
+            : {}),
+          ...(needsDeltaLicense
+            ? {
+                license: deltaItem.license,
+                ...(deltaItem.media_license ? { media_license: deltaItem.media_license } : {})
+              }
             : {})
         };
       }
@@ -865,8 +881,14 @@ export function detectImageMimeType(contentTypeHeader: string, bytes: Uint8Array
   return null;
 }
 
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: {
+  request: Request;
+  env: Env;
+  waitUntil?: (promise: Promise<any>) => void;
+  _internalSwrRebuild?: boolean;
+}) {
   const { request, env } = context;
+  const skipEdgeRead = Boolean(context._internalSwrRebuild);
   const url = new URL(request.url);
 
   const proxyImageRaw = (url.searchParams.get('proxy_image') || '').trim();
@@ -1781,7 +1803,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     return builtRecentlyAdded;
   };
 
-  if (catalogEdgeCacheKey && !noCache) {
+  if (catalogEdgeCacheKey && !noCache && !skipEdgeRead) {
     // Share the already-warmed Web Boot Bundle (`bootEdgeCacheKey`) first for standard in-game Luanti C++ client requests
     // (`GET /api/packages/?type=mod&type=game&type=txp...`) so in-game Content tab opens in < 5ms with zero D1 or upstream calls
     // and immediately reflects any newly submitted or synced D1 Git packages whenever `bootEdgeCacheKey` is refreshed.
@@ -1812,7 +1834,28 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
     }
 
-    const cachedCatalog = await readEdgeCacheJson<any>(catalogEdgeCacheKey);
+    let cachedCatalogHitType: 'HIT-EDGE' | 'HIT-EDGE-SWR' = 'HIT-EDGE';
+    const cachedCatalog = isBootBundle
+      ? await (async () => {
+          const swrRes = await readEdgeCacheJsonSwr<any>(
+            catalogEdgeCacheKey,
+            context.waitUntil,
+            async () => {
+              await onRequestGet({
+                ...context,
+                request: new Request(request.url, { headers: request.headers }),
+                _internalSwrRebuild: true
+              });
+              return null;
+            }
+          );
+          if (!swrRes) return null;
+          if (swrRes.hitType === 'STALE-EDGE') {
+            cachedCatalogHitType = 'HIT-EDGE-SWR';
+          }
+          return swrRes.data;
+        })()
+      : await readEdgeCacheJson<any>(catalogEdgeCacheKey);
     if (
       cachedCatalog &&
       (Array.isArray(cachedCatalog) ||
@@ -1939,7 +1982,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           'Cache-Control': isBootBundle
             ? 'public, max-age=60, s-maxage=180, stale-while-revalidate=300'
             : 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-          'X-LuantiHub-Cache': 'HIT-EDGE'
+          'X-LuantiHub-Cache': cachedCatalogHitType
         }
       });
     }
@@ -2451,11 +2494,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       }
       return undefined;
     })();
+    const rawNameTypeMatch =
+      upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined;
+    const safeNameTypeMatch = (() => {
+      if (!rawNameTypeMatch) return undefined;
+      const candRepoKey = normalizeRepoKey(rawNameTypeMatch.repo || rawNameTypeMatch.repo_url);
+      if (pRepoKey && candRepoKey && pRepoKey !== candRepoKey) return undefined;
+      return rawNameTypeMatch;
+    })();
     const matchedUpstream =
       upstreamById.get(d1Key) ||
       (pRepoKey ? upstreamByRepo.get(pRepoKey) : undefined) ||
       upstreamByNameTitle.get(pNameTitleKey) ||
-      (upstreamByNameTypeCount.get(pNameTypeKey) === 1 ? upstreamByNameType.get(pNameTypeKey) : undefined) ||
+      safeNameTypeMatch ||
       crossAuthorExactMatch;
 
     let canonicalAuthor = matchedUpstream?.author || p.author_name;
@@ -2499,20 +2550,59 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       parsedBadgeTags.push(ORGANIC_CODE_TAG);
     }
     const rawProvider = String(p.provider || '').toLowerCase();
-    const detectedRepoProvider =
-      rawProvider !== 'contentdb' && p.repo_url
-        ? detectGitProviderFromUrl(p.repo_url)?.provider
-        : undefined;
+    const detectedRepoProvider = p.repo_url
+      ? detectGitProviderFromUrl(p.repo_url)?.provider
+      : undefined;
+    const isPoisonedCdbRow = Boolean(
+      upstreamList.length > 0 &&
+      !matchedUpstream &&
+      isGitProviderId(detectedRepoProvider) &&
+      !(Number(p.contentdb_downloads || 0) > 0) &&
+      (rawProvider === 'contentdb' || parsedTags.some((t: string) => String(t).toLowerCase() === 'contentdb'))
+    );
+    const effectiveProvider = isPoisonedCdbRow
+      ? resolveGitProviderFromRepoUrl(p.repo_url, 'github')
+      : (rawProvider || (matchedUpstream ? 'contentdb' : 'github'));
+    const cleanParsedTags = isPoisonedCdbRow
+      ? Array.from(
+          new Set([
+            ...parsedTags.filter((t: string) => String(t).toLowerCase() !== 'contentdb'),
+            'git',
+            ...(effectiveProvider && effectiveProvider !== 'custom' ? [effectiveProvider] : [])
+          ])
+        ).filter(Boolean)
+      : parsedTags;
     const isGitSource =
-      isGitProviderId(rawProvider) ||
+      isGitProviderId(effectiveProvider) ||
       isGitProviderId(detectedRepoProvider) ||
-      parsedTags.includes('git');
-    const isAlsoOfficial = Boolean(matchedUpstream) || rawProvider === 'contentdb' || parsedTags.includes('contentdb');
+      cleanParsedTags.includes('git');
+    const isAlsoOfficial =
+      !isPoisonedCdbRow &&
+      (Boolean(matchedUpstream) ||
+        effectiveProvider === 'contentdb' ||
+        Number(p.contentdb_downloads || 0) > 0 ||
+        cleanParsedTags.includes('contentdb'));
 
     const sources: Array<'official' | 'git'> = [];
     if (isAlsoOfficial) sources.push('official');
     if (isGitSource) sources.push('git');
     if (sources.length === 0) sources.push('official');
+
+    if (
+      isPoisonedCdbRow &&
+      env.DB &&
+      p.id &&
+      dualSourceBackfillStmts.length < 15 &&
+      claimD1BackfillSlot(String(p.id), `boot-heal-provider:${effectiveProvider}`)
+    ) {
+      dualSourceBackfillStmts.push(
+        env.DB.prepare(`UPDATE packages SET provider = ?, tags = ? WHERE id = ?`).bind(
+          effectiveProvider,
+          JSON.stringify(cleanParsedTags),
+          p.id
+        )
+      );
+    }
 
     const d1StarAvg = d1Ratings.get(canonicalKey) ?? d1Ratings.get(d1Key) ?? 0;
     const d1ReviewThreadCounts = parseNonZeroReviewThreadCounts(p.review_thread_counts);
@@ -2523,7 +2613,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     const upstreamTags = Array.isArray(matchedUpstream?.tags)
       ? matchedUpstream.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
       : [];
-    const baseCombinedTags = Array.from(new Set([...parsedTags, ...upstreamTags])).filter(Boolean);
+    const baseCombinedTags = Array.from(new Set([...cleanParsedTags, ...upstreamTags])).filter(Boolean);
     const combinedTags =
       isAlsoOfficial &&
       isGitSource &&
@@ -2685,7 +2775,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       short_description: shortDescText,
       ...(parsedTranslations ? { translations: parsedTranslations } : {}),
       release: releaseId,
-      latest_commit_sha: p.latest_commit_sha || undefined,
+      latest_commit_sha: p.latest_commit_sha ? String(p.latest_commit_sha).slice(0, 12) : undefined,
       updated_at: isGitSource
         ? (p.updated_at || matchedUpstream?.updated_at || undefined)
         : (matchedUpstream?.updated_at || undefined),
@@ -2706,8 +2796,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       contentdb_downloads: cdbDownloads,
       luantihub_downloads: lhDownloads,
       downloads: combinedDownloads,
-      license: p.license || matchedUpstream?.license || '',
-      media_license: p.media_license || matchedUpstream?.media_license || '',
+      license: (
+        matchedUpstream && effectiveProvider === 'contentdb' && Number(p.license_override || 0) !== 1
+          ? (matchedUpstream.license || p.license)
+          : p.license
+      ) || matchedUpstream?.license || '',
+      media_license: (
+        matchedUpstream && effectiveProvider === 'contentdb' && Number(p.license_override || 0) !== 1
+          ? (matchedUpstream.media_license || p.media_license)
+          : p.media_license
+      ) || matchedUpstream?.media_license || '',
       repo_url: p.repo_url || matchedUpstream?.repo || matchedUpstream?.repo_url || undefined,
       video_url: p.video_url || matchedUpstream?.video_url || undefined,
       video_thumbnail_url: p.video_thumbnail_url || matchedUpstream?.video_thumbnail_url || undefined,
@@ -2717,7 +2815,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
       ...(mergedGameSupport.length > 0 ? { game_support: mergedGameSupport } : {}),
       download_size: Number(p.download_size) > 0 ? Number(p.download_size) : undefined,
       file_size: p.file_size || undefined,
-      provider: p.provider || (isGitSource ? 'github' : 'contentdb'),
+      provider: effectiveProvider || (isGitSource ? 'github' : 'contentdb'),
       ...(matchedUpstream?.author &&
       (matchedUpstream.author !== canonicalAuthor || matchedUpstream.author !== p.author_name)
         ? { contentdb_author: matchedUpstream.author }
@@ -2939,12 +3037,20 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         const needsOfficialFullResBanner =
           Boolean(it?.sources?.includes('official')) &&
           (!it?.banner || it?.banner === 'logo.svg' || isContentDbThumbnailUrl(it?.banner));
+        const existingD1Row = d1ById.get(String(it?.id || '').toLowerCase());
+        const needsUnsyncedGitLic =
+          Boolean(it?.sources?.includes('git')) &&
+          Boolean(it?.repo_url) &&
+          Boolean(existingD1Row) &&
+          !existingD1Row.metadata_synced_at &&
+          Number(existingD1Row.license_override || 0) !== 1;
         if (
           it &&
           it.author &&
           it.name &&
           (!it.license ||
             !it.created_at ||
+            needsUnsyncedGitLic ||
             (it.sources?.includes('official') &&
               (!(Number(it.contentdb_downloads || 0) > 0) || !it.review_thread_counts)) ||
             needsGitScreenshotScan ||
@@ -2988,12 +3094,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               ).catch(() => null)
             : null;
           if (!detail && !pkg.repo_url) return;
-          const resolvedLic = detail?.license || detail?.media_license || pkg.license || '';
-          const resolvedMediaLic = detail?.media_license || detail?.license || pkg.media_license || '';
+          const existingD1ForItem = d1ById.get(lowerPkgKey);
+          const itemIsOverridden = Number(existingD1ForItem?.license_override || 0) === 1;
+          let resolvedLic = detail?.license || detail?.media_license || pkg.license || '';
+          let resolvedMediaLic = detail?.media_license || detail?.license || pkg.media_license || '';
           const detailTags = Array.isArray(detail?.tags)
             ? detail.tags.map((t: any) => (typeof t === 'string' ? t : t?.name || t?.title || '')).filter(Boolean)
             : [];
-          if (resolvedLic) {
+          if (resolvedLic && !pkg.sources?.includes('git')) {
+            pkg.license = itemIsOverridden && existingD1ForItem?.license ? existingD1ForItem.license : resolvedLic;
+            pkg.media_license = itemIsOverridden && existingD1ForItem?.media_license ? existingD1ForItem.media_license : resolvedMediaLic;
+          } else if (resolvedLic && !pkg.license) {
             pkg.license = resolvedLic;
             pkg.media_license = resolvedMediaLic;
           }
@@ -3130,15 +3241,33 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
             String(pkg.type || '').toLowerCase() === 'game' &&
             Boolean(candidateRepo) &&
             !(Array.isArray(pkg.tags) && pkg.tags.some((t: string) => String(t).toLowerCase() === 'jam_game_2026'));
-          if ((!rawVideoUrl || needsGitAssetCheck || needsGameJam2026Scan) && candidateRepo && bootRepoScanBudget > 0) {
+          const needsGitLicRefresh =
+            isGitPkg &&
+            Boolean(existingD1ForItem) &&
+            !existingD1ForItem.metadata_synced_at &&
+            !itemIsOverridden;
+          let gitScanVerifiedForLic = false;
+          if ((!rawVideoUrl || needsGitAssetCheck || needsGameJam2026Scan || needsGitLicRefresh) && candidateRepo && bootRepoScanBudget > 0) {
             bootRepoScanBudget--;
             const gitScan = await scanGitRepoMetadataCached(
               pkg.author,
               pkg.name,
               pkg.type || 'mod',
               candidateRepo,
-              21600
+              existingD1ForItem?.latest_commit_sha ? 86400 : 21600,
+              existingD1ForItem?.latest_commit_sha ? { commitSha: existingD1ForItem.latest_commit_sha } : undefined
             ).catch(() => null);
+            if (gitScan?.gitRepoStatus === 'verified') {
+              gitScanVerifiedForLic = true;
+              if (!itemIsOverridden && gitScan.license) {
+                resolvedLic = gitScan.license;
+                pkg.license = gitScan.license;
+              }
+              if (!itemIsOverridden && gitScan.mediaLicense) {
+                resolvedMediaLic = gitScan.mediaLicense;
+                pkg.media_license = gitScan.mediaLicense;
+              }
+            }
             if (gitScan?.cdbMeta?.video_url) {
               rawVideoUrl = gitScan.cdbMeta.video_url;
             }
@@ -3200,7 +3329,17 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const existingD1 = d1ById.get(String(pkg.id || '').toLowerCase());
           if (env.DB && existingD1) {
             const existingValidRevCounts = parseNonZeroReviewThreadCounts(existingD1.review_thread_counts);
-            const newLic = !existingD1.license && resolvedLic ? resolvedLic : null;
+            const canUpdateD1Lic =
+              !itemIsOverridden &&
+              Boolean(resolvedLic) &&
+              (resolvedLic !== existingD1.license || gitScanVerifiedForLic);
+            const newLic = canUpdateD1Lic ? resolvedLic : null;
+            const newMediaLic =
+              !itemIsOverridden &&
+              Boolean(resolvedMediaLic) &&
+              (resolvedMediaLic !== existingD1.media_license || gitScanVerifiedForLic)
+                ? resolvedMediaLic
+                : null;
             const newVid = !existingD1.video_url && pkg.video_url ? pkg.video_url : null;
             const newRevCounts = !existingValidRevCounts && pkg.review_thread_counts
               ? JSON.stringify(pkg.review_thread_counts)
@@ -3225,7 +3364,10 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               sanitizePackageImageUrl(pkg.thumbnail)
                 ? sanitizePackageImageUrl(pkg.thumbnail)!
                 : null;
-            if (newLic || newVid || newShot || newThumb || newRevCounts || newScore !== null) {
+            if (
+              (newLic || newMediaLic || gitScanVerifiedForLic || newVid || newShot || newThumb || newRevCounts || newScore !== null) &&
+              claimD1BackfillSlot(String(existingD1.id), `boot:${newLic || ''}|${newVid || ''}|${newShot || ''}|${newScore ?? ''}`)
+            ) {
               bootHydrateStmts.push(
                 env.DB.prepare(`
                   UPDATE packages
@@ -3241,14 +3383,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                         WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
                         ELSE COALESCE(screenshots, ?)
                       END,
-                      license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
+                      license = CASE WHEN COALESCE(license_override, 0) = 1 THEN license ELSE COALESCE(?, license) END,
+                      media_license = CASE WHEN COALESCE(license_override, 0) = 1 THEN media_license ELSE COALESCE(?, media_license) END,
                       video_url = COALESCE(video_url, ?),
                       video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
                       review_thread_counts = CASE
                         WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
                         ELSE review_thread_counts
                       END,
-                      score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END
+                      score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                      metadata_synced_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE metadata_synced_at END
                   WHERE id = ?
                 `).bind(
                   sanitizePackageImageUrl(pkg.thumbnail) || newShot,
@@ -3257,11 +3401,13 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
                   Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
                   Array.isArray(pkg.screenshots) && pkg.screenshots.length > 0 ? JSON.stringify(pkg.screenshots) : null,
                   newLic,
+                  newMediaLic,
                   newVid,
                   pkg.video_thumbnail_url || null,
                   newRevCounts,
                   newScore,
                   newScore,
+                  gitScanVerifiedForLic || newLic ? 1 : 0,
                   existingD1.id
                 )
               );
@@ -3277,13 +3423,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         ...dualSourceBackfillStmts.splice(0)
       ];
       if (env.DB && combinedBatchStmts.length > 0) {
-        if (typeof env.DB.batch === 'function') {
-          await env.DB.batch(combinedBatchStmts).catch(() => {});
-        } else {
-          for (const stmt of combinedBatchStmts) {
-            stmt.run().catch(() => {});
+        const execBootBatch = async () => {
+          if (typeof env.DB.batch === 'function') {
+            await env.DB.batch(combinedBatchStmts);
+          } else {
+            for (const stmt of combinedBatchStmts) {
+              await stmt.run();
+            }
           }
-        }
+        };
+        await runWithD1ColumnFallback(env.DB, execBootBatch).catch(() => {});
       }
 
       // Sync pre-hydrated fields (sharp banner, screenshots, license, score, review_thread_counts) into top10Today & top10Week
@@ -3356,7 +3505,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     };
 
     if (!noCache && !q && types.length === 0 && !author && Array.isArray(activePromotions)) {
-      await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 1800);
+      await writeEdgeCacheJson(bootEdgeCacheKey, responsePayload, 300, 600);
     }
   } else {
     const knownPromos = await resolveActivePromosWithDbFallback(env.DB);

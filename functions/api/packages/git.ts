@@ -2519,9 +2519,10 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           repo_url, provider, default_branch, latest_commit_sha, thumbnail_url, banner_url, screenshots,
           downloads_count, contentdb_downloads, score, license, media_license, tags, badge_tags, dependencies, optional_dependencies,
           min_minetest_version, max_minetest_version, donate_url, translation_url, forum_url, issue_tracker,
-          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size, status, status_reason, flagged_at, created_at
+          video_url, video_thumbnail_url, dev_state, content_warnings, ai_disclosures, download_size, file_size,
+          status, status_reason, flagged_at, metadata_synced_at, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END, COALESCE(?, CURRENT_TIMESTAMP))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'flagged' THEN CURRENT_TIMESTAMP ELSE NULL END, CURRENT_TIMESTAMP, COALESCE(?, CURRENT_TIMESTAMP))
         ON CONFLICT(id) DO UPDATE SET
           author_id = CASE
             WHEN packages.author_id IS NULL OR packages.author_id LIKE 'ext_%' THEN excluded.author_id
@@ -2540,8 +2541,15 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
           contentdb_downloads = MAX(packages.contentdb_downloads, excluded.contentdb_downloads),
           downloads_count = MAX(packages.downloads_count, excluded.downloads_count),
           score = excluded.score,
-          license = excluded.license,
-          media_license = excluded.media_license,
+          license = CASE
+            WHEN COALESCE(packages.license_override, 0) = 1 AND COALESCE(packages.license, '') != '' THEN packages.license
+            ELSE excluded.license
+          END,
+          media_license = CASE
+            WHEN COALESCE(packages.license_override, 0) = 1 AND COALESCE(packages.media_license, '') != '' THEN packages.media_license
+            ELSE excluded.media_license
+          END,
+          metadata_synced_at = CURRENT_TIMESTAMP,
           tags = excluded.tags,
           badge_tags = excluded.badge_tags,
           dependencies = excluded.dependencies,
@@ -2766,7 +2774,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
       buildPackageCacheInvalidationKeys(canonicalAuthor, technicalName, {
         includeBootCatalog: true,
         includeAuthorProfile: true,
-        includeGitRepoScan: true
+        includeGitRepoScan: true,
+        repoUrl: canonicalRepoUrl,
+        commitSha: latestCommitSha || undefined
       })
     );
 

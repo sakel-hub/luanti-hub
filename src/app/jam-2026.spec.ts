@@ -28,7 +28,11 @@ import {
   onRequestGet as getPackagesCatalog
 } from '../../functions/api/packages/index';
 import { onRequestPost as postPackagesHydrate } from '../../functions/api/packages/hydrate';
-import { onRequestGet as getPackageDetail } from '../../functions/api/packages/[author]/[name]/index';
+import {
+  onRequestGet as getPackageDetail,
+  onRequestPatch as patchPackageDetail
+} from '../../functions/api/packages/[author]/[name]/index';
+import { createSessionToken } from '../../functions/api/auth/lib/session';
 import { onRequestGet as getPackageStats } from '../../functions/api/packages/[author]/[name]/stats';
 import { onRequestGet as getTop10Packages } from '../../functions/api/packages/top10';
 import { PackageDetailModalComponent } from './features/modal/package-detail-modal.component';
@@ -2286,6 +2290,8 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
             tags,
             min_minetest_version,
             latest_commit_sha,
+            metadata_synced_at: new Date().toISOString(),
+            license_override: 0,
             status: 'active',
             downloads_count: 0,
             contentdb_downloads: 0,
@@ -2306,6 +2312,7 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
           } else if (existing.updated_at && existing.updated_at > updated_at) {
             nextUpdatedAt = existing.updated_at;
           }
+          const respectOverride = Number(existing.license_override || 0) === 1;
           packages.set(key, {
             ...existing,
             title,
@@ -2314,6 +2321,13 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
             thumbnail_url,
             banner_url,
             screenshots,
+            license: !respectOverride && license ? license : existing.license,
+            media_license: !respectOverride && media_license ? media_license : existing.media_license,
+            min_minetest_version:
+              min_minetest_version && min_minetest_version !== '5.0.0'
+                ? min_minetest_version
+                : existing.min_minetest_version,
+            metadata_synced_at: new Date().toISOString(),
             latest_commit_sha,
             updated_at: nextUpdatedAt
           });
@@ -2363,11 +2377,18 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
         return { success: true };
       }
 
-      if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at\s+FROM\s+packages/i.test(clean)) {
+      if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at(?:,\s*license,\s*media_license,\s*min_minetest_version)?\s+FROM\s+packages/i.test(clean)) {
         const lowerIds = new Set(args.map((a) => String(a).toLowerCase()));
         const results = Array.from(packages.entries())
           .filter(([k]) => lowerIds.has(k))
-          .map(([k, p]) => ({ lower_id: k, updated_at: p.updated_at, created_at: p.created_at }));
+          .map(([k, p]) => ({
+            lower_id: k,
+            updated_at: p.updated_at,
+            created_at: p.created_at,
+            license: p.license,
+            media_license: p.media_license,
+            min_minetest_version: p.min_minetest_version
+          }));
         return { results };
       }
 
@@ -4002,5 +4023,588 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
       localStorage.removeItem('lh_user_downloads_v1');
       clearIsolateCachesForTests();
     }
+  });
+
+  it('auto-syncs real Git/Jam licenses across ?lite=1, full detail, and boot catalog while honoring manual override until resync_git', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+    await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY, UPDATES_EDGE_CACHE_KEY]);
+
+    const sha1 = '1111aaaa2222bbbb3333cccc4444dddd5555eeee';
+    const sha2 = '9999ffff8888eeee7777dddd6666cccc5555bbbb';
+    let currentSha = sha1;
+    let currentGameConf = 'title = Terrarium Crucible\nlicense = GPL-3.0-or-later\nmedia_license = CC-BY-SA-4.0\nmin_minetest_version = 5.9\n';
+
+    const store = new Map<string, any>();
+    const identities = [{ provider: 'github', username: 'SaKeL', verified: 1 }];
+    const sessionSecret = 'jam-license-test-secret';
+    const ownerCookie = await createSessionToken('user-sakel', sessionSecret);
+
+    const mockDb = {
+      prepare: (sql: string) => {
+        const bound: any[] = [];
+        const exec = async (mode: 'run' | 'first' | 'all') => {
+          const clean = sql.replace(/\s+/g, ' ').trim();
+          if (/FROM users WHERE id =/i.test(clean)) {
+            return { id: 'user-sakel', username: 'SaKeL', display_name: 'SaKeL' };
+          }
+          if (/FROM user_identities WHERE user_id =/i.test(clean)) {
+            return { results: identities };
+          }
+          if (/INSERT\s+INTO\s+packages/i.test(clean) && /SELECT\s+\?/i.test(clean)) {
+            const [
+              id, , author_name, name, title, short_desc, long_desc, repo_url, provider,
+              thumbnail_url, banner_url, screenshots, license, media_license, tags,
+              min_minetest_version, latest_commit_sha, created_at, updated_at
+            ] = bound;
+            const key = String(id).toLowerCase();
+            const existing = store.get(key);
+            const respectOverride = Number(existing?.license_override || 0) === 1;
+            store.set(key, {
+              ...(existing || {}),
+              id,
+              author_id: existing?.author_id ?? null,
+              author_name,
+              name,
+              title,
+              type: 'game',
+              short_desc,
+              long_desc,
+              repo_url,
+              provider,
+              thumbnail_url,
+              banner_url,
+              screenshots,
+              license: !respectOverride && license ? license : (existing?.license || ''),
+              media_license: !respectOverride && media_license ? media_license : (existing?.media_license || ''),
+              tags,
+              min_minetest_version: min_minetest_version || existing?.min_minetest_version || '5.0.0',
+              latest_commit_sha,
+              metadata_synced_at: new Date().toISOString(),
+              license_override: existing?.license_override ?? 0,
+              status: 'active',
+              downloads_count: existing?.downloads_count ?? 0,
+              contentdb_downloads: existing?.contentdb_downloads ?? 0,
+              luantihub_downloads: existing?.luantihub_downloads ?? 0,
+              created_at,
+              updated_at
+            });
+            return mode === 'all' ? { results: [] } : { success: true };
+          }
+          if (/UPDATE packages SET/i.test(clean)) {
+            const targetKey = String(bound[bound.length - 1] || '').toLowerCase();
+            const row = store.get(targetKey) || Array.from(store.values()).find(r => r.id.toLowerCase() === targetKey);
+            if (row) {
+              if (/license_override\s*=\s*\?/i.test(clean) && /license\s*=\s*\?/i.test(clean)) {
+                // onRequestPatch direct license update or resync
+                const hasTitleSet = /title\s*=\s*COALESCE/i.test(clean);
+                if (hasTitleSet) {
+                  // Standard PATCH update: args order includes title, short_desc, type, ..., license, media_license, license_override, ...
+                  const overrideIdx = clean.split('= ?').findIndex(s => /license_override\s*$/.test(s));
+                  if (overrideIdx >= 0 && bound[overrideIdx] !== undefined) {
+                    row.license_override = Number(bound[overrideIdx]) || 0;
+                  }
+                  const licMatchIdx = clean.slice(0, clean.indexOf('license =')).split('?').length - 1;
+                  if (licMatchIdx >= 0) {
+                    // Check COALESCE vs direct assignment
+                    row.license = bound[licMatchIdx] ?? row.license;
+                  }
+                }
+              }
+              if (/license_override\s*=\s*0/i.test(clean)) {
+                row.license_override = 0;
+              }
+              if (/metadata_synced_at\s*=\s*CURRENT_TIMESTAMP/i.test(clean)) {
+                row.metadata_synced_at = new Date().toISOString();
+              }
+            }
+            return { success: true };
+          }
+          if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at/i.test(clean)) {
+            const lowerIds = new Set(bound.map(b => String(b).toLowerCase()));
+            return {
+              results: Array.from(store.entries())
+                .filter(([k]) => lowerIds.has(k))
+                .map(([k, p]) => ({
+                  lower_id: k,
+                  updated_at: p.updated_at,
+                  created_at: p.created_at,
+                  license: p.license,
+                  media_license: p.media_license,
+                  min_minetest_version: p.min_minetest_version
+                }))
+            };
+          }
+          if (/FROM packages/i.test(clean)) {
+            const allRows = Array.from(store.values());
+            if (mode === 'all') return { results: allRows };
+            const b0 = String(bound[0] || '').toLowerCase();
+            return allRows.find(r => r.id.toLowerCase() === b0 || `${r.author_name}/${r.name}`.toLowerCase() === b0) || null;
+          }
+          return mode === 'all' ? { results: [] } : null;
+        };
+        const stmt: any = {
+          bind: (...args: any[]) => {
+            bound.push(...args);
+            return stmt;
+          },
+          run: () => exec('run'),
+          first: () => exec('first'),
+          all: () => exec('all')
+        };
+        return stmt;
+      }
+    };
+
+    // Wrap UPDATE packages cleanly via intercepted handler verification on D1 state too
+    const origPrepare = mockDb.prepare;
+    mockDb.prepare = (sql: string) => {
+      const clean = sql.replace(/\s+/g, ' ').trim();
+      if (/^UPDATE packages SET/i.test(clean)) {
+        const bound: any[] = [];
+        const stmt: any = {
+          bind: (...args: any[]) => {
+            bound.push(...args);
+            return stmt;
+          },
+          run: async () => {
+            const idArg = String(bound[bound.length - 1] || '').toLowerCase();
+            const row = store.get(idArg);
+            if (!row) return { success: true };
+            // Parse ordered SET ? placeholders robustly for test assertions
+            const setPart = clean.slice(clean.indexOf('SET ') + 4, clean.indexOf(' WHERE '));
+            const assignments = setPart.split(/,(?![^(]*\))/);
+            let pIdx = 0;
+            for (const assign of assignments) {
+              const qCount = (assign.match(/\?/g) || []).length;
+              const sliceArgs = bound.slice(pIdx, pIdx + qCount);
+              pIdx += qCount;
+              const colMatch = assign.trim().match(/^([a-z0-9_]+)\s*=/i);
+              const col = colMatch?.[1]?.toLowerCase() || '';
+              if (col === 'license_override') {
+                if (qCount === 0 && /=\s*0/.test(assign)) row.license_override = 0;
+                else if (sliceArgs[0] !== undefined && sliceArgs[0] !== null) row.license_override = Number(sliceArgs[0]);
+              } else if (col === 'license') {
+                const candidate = sliceArgs.find(a => a !== null && a !== undefined);
+                if (candidate && (qCount <= 1 || Number(row.license_override || 0) === 0 || !/license_override/i.test(assign))) {
+                  row.license = String(candidate);
+                }
+              } else if (col === 'media_license') {
+                const candidate = sliceArgs.find(a => a !== null && a !== undefined);
+                if (candidate && (qCount <= 1 || Number(row.license_override || 0) === 0 || !/license_override/i.test(assign))) {
+                  row.media_license = String(candidate);
+                }
+              } else if (col === 'tags' && sliceArgs[0]) {
+                row.tags = String(sliceArgs[0]);
+              } else if (col === 'provider' && sliceArgs[0]) {
+                row.provider = String(sliceArgs[0]);
+              } else if (col === 'latest_commit_sha' && sliceArgs[0]) {
+                row.latest_commit_sha = String(sliceArgs[0]);
+              } else if (col === 'metadata_synced_at') {
+                row.metadata_synced_at = new Date().toISOString();
+              }
+            }
+            return { success: true };
+          },
+          first: async () => null,
+          all: async () => ({ results: [] })
+        };
+        return stmt;
+      }
+      return origPrepare(sql);
+    };
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'terrarium_crucible',
+              title: 'Terrarium Crucible',
+              description: 'Action puzzle game',
+              repository: 'https://github.com/SaKeL/terrarium_crucible',
+              commit: currentSha,
+              publishedAt: '2026-11-16T08:00:00Z',
+              hasScreenshot: false
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/game.conf')) {
+        return new Response(currentGameConf, { status: 200 });
+      }
+      if (url.endsWith('/screenshot.png')) {
+        return new Response('', { status: 200, headers: { 'Content-Type': 'image/png' } });
+      }
+      if (url.includes('content.luanti.org') || url.includes('contentdb.milcho.org')) {
+        if (url.includes('/packages/?fmt=vcs') || url.includes('/scores/')) {
+          return new Response(JSON.stringify([{ author: 'Other', name: 'other_mod', downloads: 5 }]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    // 1. Initial sync discovers real license from game.conf ('GPL-3.0-or-later'), NOT hardcoded 'MIT'
+    await syncJam2026IntoPromoRowDelta({
+      uniqueTags: ['jam_game_2026'],
+      addTagStamp: () => {},
+      discoveredByKey: new Map(),
+      existingD1Pairs: new Set(),
+      queuedUpsertKeys: new Set(),
+      d1UpsertPairs: [],
+      db: mockDb,
+      noCache: true
+    });
+    const saved = store.get('sakel/terrarium_crucible');
+    expect(saved?.license).toBe('GPL-3.0-or-later');
+    expect(saved?.media_license).toBe('CC-BY-SA-4.0');
+
+    // 2. Detail ?lite=1 and full endpoints both return 'GPL-3.0-or-later'
+    const liteRes = await getPackageDetail({
+      params: { author: 'SaKeL', name: 'terrarium_crucible' },
+      request: new Request('https://luantihub.org/api/packages/SaKeL/terrarium_crucible/?lite=1&nocache=1'),
+      env: { DB: mockDb }
+    } as any);
+    const liteJson: any = await liteRes.json();
+    expect(liteJson.license).toBe('GPL-3.0-or-later');
+
+    // 3. Manual author edit via PATCH sets license_override = 1 and survives commit bump
+    const patchManualRes = await patchPackageDetail({
+      params: { author: 'SaKeL', name: 'terrarium_crucible' },
+      request: new Request('https://luantihub.org/api/packages/SaKeL/terrarium_crucible', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          Cookie: `lh_session=${ownerCookie}`
+        },
+        body: JSON.stringify({ license: 'Apache-2.0' })
+      }),
+      env: { DB: mockDb, SESSION_SECRET: sessionSecret }
+    } as any);
+    expect(patchManualRes.status).toBe(200);
+    const patchManualJson: any = await patchManualRes.json();
+    expect(patchManualJson.license).toBe('Apache-2.0');
+    expect(store.get('sakel/terrarium_crucible')?.license_override).toBe(1);
+
+    currentSha = sha2;
+    currentGameConf = 'title = Terrarium Crucible\nlicense = LGPL-2.1-only\nmedia_license = CC0-1.0\n';
+    await syncJam2026IntoPromoRowDelta({
+      uniqueTags: ['jam_game_2026'],
+      addTagStamp: () => {},
+      discoveredByKey: new Map(),
+      existingD1Pairs: new Set(),
+      queuedUpsertKeys: new Set(),
+      d1UpsertPairs: [],
+      db: mockDb,
+      noCache: true
+    });
+    expect(store.get('sakel/terrarium_crucible')?.license).toBe('Apache-2.0');
+
+    // 4. Explicit resync_git clears override and pulls fresh LGPL-2.1-only from Git
+    const resyncRes = await patchPackageDetail({
+      params: { author: 'SaKeL', name: 'terrarium_crucible' },
+      request: new Request('https://luantihub.org/api/packages/SaKeL/terrarium_crucible', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          Cookie: `lh_session=${ownerCookie}`
+        },
+        body: JSON.stringify({ resync_git: true })
+      }),
+      env: { DB: mockDb, SESSION_SECRET: sessionSecret }
+    } as any);
+    expect(resyncRes.status).toBe(200);
+    const resyncJson: any = await resyncRes.json();
+    expect(resyncJson.license).toBe('LGPL-2.1-only');
+    expect(store.get('sakel/terrarium_crucible')?.license_override).toBe(0);
+    expect(store.get('sakel/terrarium_crucible')?.license).toBe('LGPL-2.1-only');
+  });
+
+  it('prevents and self-heals false ContentDB badges for pure-Git Sky-Bridge Alchemists on PATCH, GET detail, and PackageService hydration', async () => {
+    const cachesMock = createInMemoryEdgeCaches();
+    (globalThis as any).caches = cachesMock;
+    clearIsolateCachesForTests();
+    await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY, UPDATES_EDGE_CACHE_KEY]);
+
+    const store = new Map<string, any>();
+    const identities = [{ provider: 'github', username: 'SaKeL', verified: 1 }];
+    const sessionSecret = 'skybridge-secret';
+    const ownerCookie = await createSessionToken('user-sakel', sessionSecret);
+
+    const mockDb = {
+      prepare: (sql: string) => {
+        const bound: any[] = [];
+        const clean = sql.replace(/\s+/g, ' ').trim();
+        const stmt: any = {
+          bind: (...args: any[]) => {
+            bound.push(...args);
+            return stmt;
+          },
+          run: async () => {
+            if (/INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+packages/i.test(clean)) {
+              const id = String(bound[0]);
+              const key = id.toLowerCase();
+              const providerMatch = clean.match(/values\s*\(([\s\S]*?)\)/i);
+              // Find provider arg by scanning bound or looking up github repo url
+              const repoArg = bound.find(a => typeof a === 'string' && a.includes('github.com')) || '';
+              const provArg = bound.find(a => a === 'github' || a === 'contentdb' || a === 'gitlab' || a === 'codeberg') || 'github';
+              store.set(key, {
+                id,
+                author_id: bound[1] ?? null,
+                author_name: bound[2],
+                name: bound[3],
+                title: bound[4],
+                type: 'game',
+                short_desc: bound[6] || '',
+                provider: provArg,
+                repo_url: repoArg,
+                tags: JSON.stringify(['game', 'jam_game_2026']),
+                status: 'active',
+                contentdb_downloads: 0,
+                luantihub_downloads: 0,
+                downloads_count: 0,
+                license: 'MPL-2.0',
+                media_license: 'CC-BY-4.0'
+              });
+            } else if (/^UPDATE packages SET/i.test(clean)) {
+              const targetKey = String(bound[bound.length - 1] || '').toLowerCase();
+              const row = store.get(targetKey);
+              if (row) {
+                const provArg = bound.find(a => a === 'github' || a === 'gitlab' || a === 'codeberg');
+                if (provArg) row.provider = provArg;
+                const tagsArg = bound.find(a => typeof a === 'string' && a.startsWith('[') && !a.includes('http'));
+                if (tagsArg) row.tags = tagsArg;
+                if (clean.includes('metadata_synced_at = CURRENT_TIMESTAMP')) {
+                  row.metadata_synced_at = new Date().toISOString();
+                }
+                const mplIdx = bound.indexOf('MPL-2.0');
+                if (mplIdx >= 0) row.license = 'MPL-2.0';
+              }
+            }
+            return { success: true };
+          },
+          first: async () => {
+            if (/FROM users WHERE id =/i.test(clean)) {
+              return { id: 'user-sakel', username: 'SaKeL', display_name: 'SaKeL' };
+            }
+            if (/FROM packages/i.test(clean)) {
+              for (const b of bound) {
+                const match = Array.from(store.values()).find(
+                  r => r.id.toLowerCase() === String(b).toLowerCase() || r.name.toLowerCase() === String(b).toLowerCase().replace(/-/g, '_')
+                );
+                if (match) return match;
+              }
+              return null;
+            }
+            return null;
+          },
+          all: async () => {
+            if (/FROM user_identities WHERE user_id =/i.test(clean)) {
+              return { results: identities };
+            }
+            return { results: [] };
+          }
+        };
+        return stmt;
+      }
+    };
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'sky_bridge_alchemists',
+              title: 'Sky-Bridge Alchemists',
+              description: 'Alchemist arena game',
+              repository: 'https://github.com/SaKeL/sky_bridge_alchemists',
+              commit: 'deadbeef1234567890abcdef1234567890abcdef',
+              publishedAt: '2026-11-16T08:00:00Z',
+              hasScreenshot: false
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/game.conf')) {
+        return new Response('title = Sky-Bridge Alchemists\nlicense = MPL-2.0\nmedia_license = CC-BY-4.0\n', { status: 200 });
+      }
+      if (url.includes('/packages/?fmt=vcs') || url.includes('/scores/')) {
+        return new Response(JSON.stringify([{ author: 'SomeOtherAuthor', name: 'unrelated_mod', downloads: 12 }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    // (a) PATCH when D1 row is initially missing creates a pure-Git row without 'contentdb'
+    const patchRes = await patchPackageDetail({
+      params: { author: 'sakel-hub', name: 'sky-bridge-alchemists' },
+      request: new Request('https://luantihub.org/api/packages/sakel-hub/sky-bridge-alchemists', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://luantihub.org',
+          Cookie: `lh_session=${ownerCookie}`
+        },
+        body: JSON.stringify({
+          tags: ['adventure'],
+          repo_url: 'https://github.com/SaKeL/sky_bridge_alchemists'
+        })
+      }),
+      env: { DB: mockDb, SESSION_SECRET: sessionSecret }
+    } as any);
+    expect(patchRes.status).toBe(200);
+    const patchJson: any = await patchRes.json();
+    expect(patchJson.provider).toBe('github');
+    expect(patchJson.sources).toEqual(['git']);
+
+    // (b) Legacy poisoned D1 row (provider = 'contentdb', tags = ['game', 'contentdb'], contentdb_downloads = 0)
+    // self-heals on GET detail when ContentDB confirms absence
+    store.set('sakel-hub/sky_bridge_alchemists', {
+      id: 'sakel-hub/sky_bridge_alchemists',
+      author_id: 'user-sakel',
+      author_name: 'sakel-hub',
+      name: 'sky_bridge_alchemists',
+      title: 'Sky-Bridge Alchemists',
+      type: 'game',
+      provider: 'contentdb',
+      repo_url: 'https://github.com/SaKeL/sky_bridge_alchemists',
+      tags: JSON.stringify(['game', 'contentdb', 'jam_game_2026']),
+      badge_tags: JSON.stringify(['jam_game_2026']),
+      status: 'active',
+      contentdb_downloads: 0,
+      luantihub_downloads: 5,
+      downloads_count: 5,
+      license: 'MIT',
+      metadata_synced_at: null,
+      license_override: 0
+    });
+
+    const getHealedRes = await getPackageDetail({
+      params: { author: 'sakel-hub', name: 'sky_bridge_alchemists' },
+      request: new Request('https://luantihub.org/api/packages/sakel-hub/sky_bridge_alchemists/?nocache=1'),
+      env: { DB: mockDb }
+    } as any);
+    expect(getHealedRes.status).toBe(200);
+    const healedJson: any = await getHealedRes.json();
+    expect(healedJson.provider).toBe('github');
+    expect(healedJson.source).toBe('git');
+    expect(healedJson.sources).toEqual(['git']);
+    expect(healedJson.tags).not.toContain('contentdb');
+    expect(healedJson.license).toBe('MPL-2.0');
+
+    // (c) Client PackageService strips phantom 'official' & 'contentdb' when authoritative server response is pure-Git
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting()]
+    });
+    const pkgService = TestBed.inject(PackageService);
+    (pkgService as any).edgeApiAvailable = true;
+    (pkgService as any).setHydratedMetaEntry('sakel-hub/sky_bridge_alchemists', {
+      sources: ['official', 'git'],
+      tags: ['game', 'contentdb', 'jam_game_2026'],
+      contentdb_downloads: 0,
+      license: 'MIT'
+    });
+
+    globalThis.fetch = vi.fn(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.includes('/api/packages/sakel-hub/sky_bridge_alchemists')) {
+        return new Response(JSON.stringify(healedJson), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    const poisonedSeedPkg = (pkgService as any).normalizePackage({
+      id: 'sakel-hub/sky_bridge_alchemists',
+      author: 'sakel-hub',
+      name: 'sky_bridge_alchemists',
+      title: 'Sky-Bridge Alchemists',
+      type: 'game',
+      provider: 'contentdb',
+      sources: ['official', 'git'],
+      contentdb_downloads: 0,
+      luantihub_downloads: 5,
+      downloads: 5,
+      tags: ['game', 'contentdb', 'jam_game_2026'],
+      license: 'MIT'
+    });
+    (pkgService as any)._activePackage.set(poisonedSeedPkg);
+    await pkgService.loadPackageDetails(poisonedSeedPkg, false);
+    const active = pkgService.activePackage()!;
+    expect(active.sources).toEqual(['git']);
+    expect(active.source).toBe('git');
+    expect(active.provider).toBe('github');
+    expect(active.contentdb_author).toBeUndefined();
+    expect(active.contentdb_name).toBeUndefined();
+    expect(active.tags).not.toContain('contentdb');
+    expect(active.license).toBe('MPL-2.0');
+
+    // (d) PackageDetailModalComponent header renders no ContentDB badge, exposes Code/Media License inputs & Re-sync from Git button
+    const modalFixture = TestBed.createComponent(PackageDetailModalComponent);
+    const modalComp = modalFixture.componentInstance;
+    vi.spyOn(modalComp.authService, 'canManagePackage').mockReturnValue(true);
+    modalComp.package = active;
+    modalFixture.detectChanges();
+    const modalEl = modalFixture.nativeElement as HTMLElement;
+    const headerBadges = modalEl.querySelector('[data-testid="modal-header-badges"]')!;
+    expect(headerBadges).toBeTruthy();
+    expect(headerBadges.querySelector('[data-testid="git-badge"]')).toBeTruthy();
+    expect(headerBadges.querySelector('[data-testid="contentdb-badge"]')).toBeNull();
+    expect(modalEl.querySelector('[data-testid="project-link-contentdb"]')).toBeNull();
+
+    modalComp.openEditTags();
+    modalFixture.detectChanges();
+    await modalFixture.whenStable();
+    modalFixture.detectChanges();
+
+    const codeLicInput = modalEl.querySelector('[data-testid="edit-code-license"]') as HTMLInputElement | null;
+    const mediaLicInput = modalEl.querySelector('[data-testid="edit-media-license"]') as HTMLInputElement | null;
+    const resyncBtn = modalEl.querySelector('[data-testid="btn-resync-from-git"]') as HTMLButtonElement | null;
+    expect(codeLicInput?.value).toBe('MPL-2.0');
+    expect(mediaLicInput?.value).toBe('CC-BY-4.0');
+    expect(resyncBtn).toBeTruthy();
+
+    globalThis.fetch = vi.fn(async (_input: any, init?: RequestInit) => {
+      if ((init?.method || 'GET').toUpperCase() === 'PATCH') {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            license: 'GPL-3.0-or-later',
+            media_license: 'CC-BY-SA-4.0',
+            provider: 'github',
+            source: 'git',
+            sources: ['git'],
+            latest_commit_sha: 'cafebabe1234'
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as any;
+
+    await modalComp.onResyncFromGit();
+    modalFixture.detectChanges();
+    expect(modalComp.editableLicense()).toBe('GPL-3.0-or-later');
+    expect(modalComp.editableMediaLicense()).toBe('CC-BY-SA-4.0');
+    expect(modalComp.package.license).toBe('GPL-3.0-or-later');
+    expect(pkgService.activePackage()?.license).toBe('GPL-3.0-or-later');
+    expect(pkgService.activePackage()?.sources).toEqual(['git']);
+    modalFixture.destroy();
+    pkgService.closePackageModal();
   });
 });

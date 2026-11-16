@@ -65,12 +65,16 @@ import {
   buildPackageCacheInvalidationKeys,
   BOOT_CATALOG_EDGE_CACHE_KEY,
   isCreatedIn2026OrUnknown,
-  computeLuantiClientReleaseId
+  computeLuantiClientReleaseId,
+  resolveGitProviderFromRepoUrl,
+  runWithD1ColumnFallback,
+  claimD1BackfillSlot
 } from '../../../lib/upstream';
 import {
   fetchJam2026FallbackReadme,
   resolveJam2026SyntheticD1Detail,
-  refreshJam2026D1PkgIfStale
+  refreshJam2026D1PkgIfStale,
+  findJam2026BrewBySlug
 } from '../../../lib/jam-2026';
 import {
   verifySessionToken,
@@ -248,9 +252,160 @@ async function probeGitRepoConfAndLicense(
   author: string,
   name: string,
   pkgType = 'mod',
-  existingRepoUrl?: string
+  existingRepoUrl?: string,
+  options?: { commitSha?: string; bypassCache?: boolean }
 ): Promise<GitRepoScanResult> {
-  return scanGitRepoMetadataCached(author, name, pkgType, existingRepoUrl, 21600);
+  return scanGitRepoMetadataCached(
+    author,
+    name,
+    pkgType,
+    existingRepoUrl,
+    options?.commitSha ? 86400 : 21600,
+    options
+  );
+}
+
+function buildDetailWeakEtag(payload: any): string {
+  const sig = [
+    payload?.id || '',
+    payload?.updated_at || '',
+    payload?.latest_commit_sha || '',
+    payload?.license || '',
+    payload?.media_license || '',
+    payload?.provider || '',
+    Array.isArray(payload?.sources) ? payload.sources.join(',') : (payload?.source || ''),
+    String(payload?.downloads ?? 0),
+    String(payload?.score ?? 0),
+    String(payload?.readme ? payload.readme.length : 0)
+  ].join('|');
+  let h = 2166136261;
+  for (let i = 0; i < sig.length; i++) {
+    h ^= sig.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `W/"lh-${(h >>> 0).toString(36)}"`;
+}
+
+function buildPackageDetailResponse(
+  payload: any,
+  isLite: boolean,
+  request?: Request,
+  cacheStatus?: 'HIT-EDGE' | 'MISS-EDGE' | 'BYPASS'
+): Response {
+  const etag = buildDetailWeakEtag(payload);
+  const cacheControl = isLite
+    ? 'public, max-age=120, s-maxage=600, stale-while-revalidate=600'
+    : 'public, max-age=60, s-maxage=300, stale-while-revalidate=600';
+  const baseHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': cacheControl,
+    'ETag': etag,
+    ...(cacheStatus ? { 'X-LuantiHub-Cache': cacheStatus } : {})
+  };
+  const ifNoneMatch = request?.headers?.get('If-None-Match') || '';
+  if (ifNoneMatch && ifNoneMatch.split(',').some((tag) => tag.trim() === etag)) {
+    return new Response(null, { status: 304, headers: baseHeaders });
+  }
+  return new Response(JSON.stringify(payload), { headers: baseHeaders });
+}
+
+function normalizeComparableRepoUrl(rawUrl?: string | null): string {
+  const clean = normalizeGitRepoInputUrl(rawUrl || '') || String(rawUrl || '');
+  return clean.trim().toLowerCase().replace(/\.git$/i, '').replace(/\/+$/, '');
+}
+
+function doesCatalogContainPackage(
+  bulkCatalog: any[],
+  author: string,
+  name: string,
+  repoUrl?: string | null
+): boolean {
+  const lowerAuthor = String(author || '').trim().toLowerCase();
+  const baseAuthor = lowerAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+  const lowerName = String(name || '').trim().toLowerCase();
+  const targetRepo = normalizeComparableRepoUrl(repoUrl);
+  for (const item of bulkCatalog) {
+    if (!item || !item.name) continue;
+    const iAuthor = String(item.author || '').trim().toLowerCase();
+    const iName = String(item.name || '').trim().toLowerCase();
+    if (iName === lowerName && (iAuthor === lowerAuthor || (baseAuthor && iAuthor === baseAuthor))) {
+      return true;
+    }
+    const iRepo = normalizeComparableRepoUrl(item.repo || item.repo_url);
+    if (targetRepo && iRepo && iRepo === targetRepo) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Self-heals poisoned D1 rows that mistakenly hold `provider = 'contentdb'` or the `'contentdb'` tag
+ * alongside a valid Git `repo_url` and 0 ContentDB downloads (e.g. from earlier `PATCH` seeding),
+ * strictly when healthy ContentDB catalog confirms the package is not published on ContentDB.
+ */
+async function maybeHealPoisonedContentDbRow(
+  d1Pkg: any,
+  d1PromoTags: string[],
+  db: any,
+  waitUntil: ((p: Promise<any>) => void) | undefined
+): Promise<boolean> {
+  if (!d1Pkg || !d1Pkg.repo_url) return false;
+  const parsedTags = parseJsonArray(d1Pkg.tags);
+  const rawProvider = String(d1Pkg.provider || '').toLowerCase();
+  const hasCdbTag = parsedTags.some((t: string) => String(t).toLowerCase() === 'contentdb');
+  if (rawProvider !== 'contentdb' && !hasCdbTag) return false;
+  if (Number(d1Pkg.contentdb_downloads || 0) > 0) return false;
+
+  const pkgAuthor = String(d1Pkg.author_name || '').trim();
+  const pkgName = String(d1Pkg.name || '').trim();
+  if (!pkgAuthor || !pkgName) return false;
+
+  const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 600).catch(() => null);
+  if (!Array.isArray(bulkCatalog) || bulkCatalog.length === 0) return false;
+  if (doesCatalogContainPackage(bulkCatalog, pkgAuthor, pkgName, d1Pkg.repo_url)) return false;
+
+  const encA = encodeURIComponent(pkgAuthor);
+  const encN = encodeURIComponent(pkgName);
+  const direct = await fetchUpstreamJsonCached<any>(`/packages/${encA}/${encN}/`, 600).catch(() => null);
+  if (direct && typeof direct === 'object' && !Array.isArray(direct) && (direct.name || direct.title)) {
+    return false;
+  }
+
+  const healedProvider = resolveGitProviderFromRepoUrl(d1Pkg.repo_url, 'github');
+  const nextTags = Array.from(
+    new Set([
+      ...parsedTags.filter((t: string) => String(t).toLowerCase() !== 'contentdb'),
+      'git',
+      ...(healedProvider && healedProvider !== 'custom' ? [healedProvider] : [])
+    ])
+  ).filter(Boolean);
+
+  d1Pkg.provider = healedProvider;
+  d1Pkg.tags = JSON.stringify(nextTags);
+
+  if (db && d1Pkg.id && claimD1BackfillSlot(d1Pkg.id, `heal-provider:${healedProvider}`)) {
+    const healTask = (async () => {
+      try {
+        await db
+          .prepare(`UPDATE packages SET provider = ?, tags = ? WHERE id = ?`)
+          .bind(healedProvider, d1Pkg.tags, d1Pkg.id)
+          .run();
+        await invalidateEdgeCacheKeys(
+          buildPackageCacheInvalidationKeys(pkgAuthor, pkgName, { includeBootCatalog: true })
+        ).catch(() => {});
+      } catch {
+        // Non-fatal background self-heal
+      }
+    })();
+    if (typeof waitUntil === 'function') {
+      waitUntil(healTask);
+    } else {
+      await healTask;
+    }
+  }
+  return true;
 }
 
 function buildNormalizedReleases(
@@ -475,15 +630,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   if (!noCache) {
     const cachedEdge = await readEdgeCacheJson<any>(edgeCacheKey);
     if (cachedEdge) {
-      return new Response(JSON.stringify(cachedEdge), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': isLite
-            ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
-            : 'public, max-age=120, s-maxage=600, stale-while-revalidate=86400'
-        }
-      });
+      return buildPackageDetailResponse(cachedEdge, isLite, context.request, 'HIT-EDGE');
     }
   }
 
@@ -496,15 +643,27 @@ export async function onRequestGet(context: { request?: Request; params: { autho
   let d1FavoritesCount = 0;
   let d1PromoTags: string[] = [];
   if (context.env.DB) {
+    const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     const [fetchedD1Pkg, promoTagRows] = await Promise.all([
       context.env.DB.prepare(
-        `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-      ).bind(pkgId, pkgId.toLowerCase(), author, name).first(),
+        `SELECT * FROM packages WHERE id IN (?, ?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
+      ).bind(pkgId, pkgId.toLowerCase(), author, name, sanitizedName).first(),
       context.env.DB.prepare(
         `SELECT tag_name FROM promo_tag_packages WHERE LOWER(package_id) = LOWER(?)`
       ).bind(pkgId).all().catch(() => ({ results: [] }))
     ]);
     d1Pkg = fetchedD1Pkg;
+    if (!d1Pkg) {
+      const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      if (baseAuthor && baseAuthor.toLowerCase() !== author.toLowerCase()) {
+        d1Pkg = await context.env.DB.prepare(
+          `SELECT * FROM packages
+           WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+             AND LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = LOWER(?)
+           LIMIT 1`
+        ).bind(name, sanitizedName, baseAuthor).first().catch(() => null);
+      }
+    }
     d1PromoTags = Array.from(
       new Set(
         (promoTagRows?.results || [])
@@ -544,6 +703,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         const cleanedShots = parseJsonArray(d1Pkg.screenshots).filter(s => !isDeadMirrorScreenshotUrl(s));
         d1Pkg.screenshots = cleanedShots.length > 0 ? JSON.stringify(cleanedShots) : null;
       }
+      await maybeHealPoisonedContentDbRow(d1Pkg, d1PromoTags, context.env.DB, (context as any).waitUntil);
+      if (!isLite) {
+        d1Pkg = await refreshJam2026D1PkgIfStale(d1Pkg, context.env.DB, noCache);
+      }
     }
 
     const effectivePkgId = d1Pkg?.id || pkgId;
@@ -580,6 +743,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     ) {
       const hasStoredGitShotLite =
         isGitRepositoryAssetUrl(d1Pkg.thumbnail_url) || isGitRepositoryAssetUrl(d1Pkg.banner_url);
+      const liteOverridden = Number(d1Pkg.license_override || 0) === 1;
+      const needsLiteScanForLicense = Boolean(
+        !isOfficialFast &&
+        d1Pkg.provider !== 'contentdb' &&
+        !d1Pkg.metadata_synced_at &&
+        !liteOverridden
+      );
       const [revAvgFast, dailyDlFast, liteGitScan] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
@@ -587,13 +757,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         context.env.DB.prepare(
           `SELECT COALESCE(SUM(downloads_count), 0) as total_lh FROM package_daily_downloads WHERE LOWER(package_id) IN (?, ?)`
         ).bind(effectivePkgIdLower, pkgId.toLowerCase()).first().catch(() => ({ total_lh: 0 })),
-        (!d1Pkg.video_url || !hasStoredGitShotLite) && d1Pkg.repo_url
+        ((!d1Pkg.video_url || !hasStoredGitShotLite) || needsLiteScanForLicense) && d1Pkg.repo_url
           ? scanGitRepoMetadataCached(
               d1Pkg.author_name || author,
               d1Pkg.name || name,
               d1Pkg.type || 'mod',
               d1Pkg.repo_url,
-              21600
+              d1Pkg.latest_commit_sha ? 86400 : 21600,
+              d1Pkg.latest_commit_sha ? { commitSha: d1Pkg.latest_commit_sha } : undefined
             ).catch(() => null)
           : Promise.resolve(null)
       ]);
@@ -621,29 +792,70 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           ? formatContentDbCdnUrl(liteScreenshots.find(s => !isGitRepositoryAssetUrl(s)), 'tile')
           : undefined) ||
         (nonGitLiteThumb ? formatContentDbCdnUrl(nonGitLiteThumb, 'tile') || nonGitLiteThumb : undefined);
+      const needsLiteLicenseBackfill = Boolean(
+        needsLiteScanForLicense &&
+        liteGitScan?.gitRepoStatus === 'verified'
+      );
+      const liteLicPersist =
+        needsLiteLicenseBackfill && liteGitScan?.license ? liteGitScan.license : null;
+      const liteMediaLicPersist =
+        needsLiteLicenseBackfill && (liteGitScan?.mediaLicense || liteLicPersist)
+          ? (liteGitScan?.mediaLicense || liteLicPersist)
+          : null;
       if (
         d1Pkg.provider !== 'contentdb' &&
-        ((!d1Pkg.video_url && liteVideo.video_url) || (!hasStoredGitShotLite && liteGitShot))
+        ((!d1Pkg.video_url && liteVideo.video_url) ||
+          (!hasStoredGitShotLite && liteGitShot) ||
+          needsLiteLicenseBackfill)
       ) {
-        context.env.DB.prepare(`
-          UPDATE packages
-          SET video_url = COALESCE(video_url, ?),
-              video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-              thumbnail_url = CASE
-                WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
-                ELSE thumbnail_url
-              END,
-              banner_url = COALESCE(?, banner_url),
-              screenshots = COALESCE(?, screenshots)
-          WHERE id = ?
-        `).bind(
-          liteVideo.video_url || null,
-          liteVideo.video_thumbnail_url || null,
-          liteGitShot || null,
-          liteGitShot || null,
-          liteScreenshots.length > 0 ? JSON.stringify(liteScreenshots) : null,
-          d1Pkg.id
-        ).run().catch(() => {});
+        const liteBackfillSig = `lite:${liteLicPersist || ''}:${liteGitShot || ''}:${liteVideo.video_url || ''}:${needsLiteLicenseBackfill ? '1' : '0'}`;
+        if (claimD1BackfillSlot(String(d1Pkg.id), liteBackfillSig)) {
+          const liteBackfillTask = runWithD1ColumnFallback(context.env.DB, () =>
+            context.env.DB.prepare(`
+              UPDATE packages
+              SET video_url = COALESCE(video_url, ?),
+                  video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                  thumbnail_url = CASE
+                    WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                    ELSE thumbnail_url
+                  END,
+                  banner_url = COALESCE(?, banner_url),
+                  screenshots = COALESCE(?, screenshots),
+                  license = CASE
+                    WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                    ELSE license
+                  END,
+                  media_license = CASE
+                    WHEN COALESCE(license_override, 0) = 0 AND ? IS NOT NULL AND ? != '' THEN ?
+                    ELSE media_license
+                  END,
+                  metadata_synced_at = CASE
+                    WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                    ELSE metadata_synced_at
+                  END
+              WHERE id = ?
+            `).bind(
+              liteVideo.video_url || null,
+              liteVideo.video_thumbnail_url || null,
+              liteGitShot || null,
+              liteGitShot || null,
+              liteScreenshots.length > 0 ? JSON.stringify(liteScreenshots) : null,
+              liteLicPersist,
+              liteLicPersist,
+              liteLicPersist,
+              liteMediaLicPersist,
+              liteMediaLicPersist,
+              liteMediaLicPersist,
+              needsLiteLicenseBackfill ? 1 : 0,
+              d1Pkg.id
+            ).run()
+          ).catch(() => {});
+          if (typeof (context as any).waitUntil === 'function') {
+            (context as any).waitUntil(liteBackfillTask);
+          } else {
+            await liteBackfillTask;
+          }
+        }
       }
       const fastRevAvgVal =
         revAvgFast && Number(revAvgFast.cnt) > 0 && revAvgFast.avg_rating != null
@@ -680,6 +892,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         fastLiteBadgeTags.push('jam_game_2026');
       }
 
+      const liteScannedLic =
+        !liteOverridden && liteGitScan?.gitRepoStatus === 'verified'
+          ? (liteGitScan.license || undefined)
+          : undefined;
+      const liteScannedMediaLic =
+        !liteOverridden && liteGitScan?.gitRepoStatus === 'verified'
+          ? (liteGitScan.mediaLicense || undefined)
+          : undefined;
       const fastLitePayload = {
         id: d1Pkg.id,
         author: d1Pkg.author_name || author,
@@ -701,8 +921,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           d1Pkg.thumbnail_url
         ) || undefined,
         screenshots: liteScreenshots.length > 0 ? liteScreenshots : undefined,
-        license: d1Pkg.license,
-        media_license: d1Pkg.media_license || d1Pkg.license,
+        license: liteScannedLic || d1Pkg.license,
+        media_license: liteScannedMediaLic || d1Pkg.media_license || liteScannedLic || d1Pkg.license,
         min_minetest_version: d1Pkg.min_minetest_version || '5.0.0',
         contentdb_downloads: cdbDl,
         luantihub_downloads: lhDl,
@@ -715,18 +935,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         video_thumbnail_url: liteVideo.video_thumbnail_url || undefined,
         tags: fastLiteTags.length > 0 ? fastLiteTags : [d1Pkg.type || 'mod'],
         badge_tags: fastLiteBadgeTags,
+        provider: d1Pkg.provider || (isGitFast ? 'github' : 'contentdb'),
+        latest_commit_sha: d1Pkg.latest_commit_sha || undefined,
         source: isGitFast ? 'git' : 'official',
         sources: fastSources,
         git_repo_status: d1Pkg.repo_url ? 'verified' : 'unverified'
       };
-      await writeEdgeCacheJson(edgeCacheKey, fastLitePayload, 1800);
-      return new Response(JSON.stringify(fastLitePayload), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
-        }
-      });
+      await writeEdgeCacheJson(edgeCacheKey, fastLitePayload, 600);
+      return buildPackageDetailResponse(fastLitePayload, true, context.request, noCache ? 'BYPASS' : 'MISS-EDGE');
     }
 
     try {
@@ -810,7 +1026,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           );
           const hasCdbGalleryScreenshots = nonGitD1Shots.length >= 2;
           const shouldFetchCdbReviewsFast = isOfficialFast || expectedCdbCount > 0;
-          const [cdbRevPayload, fastGitReleases, fastGitScan, fastCdbDetail, fastCdbReleases] = await Promise.all([
+          const fastNeedsMetadataScan =
+            Number(d1Pkg.license_override || 0) !== 1 && !d1Pkg.metadata_synced_at;
+          let [cdbRevPayload, fastGitReleases, fastGitScan, fastCdbDetail, fastCdbReleases] = await Promise.all([
             shouldFetchCdbReviewsFast
               ? fetchUpstreamJsonCached<any[]>(
                   `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/reviews/`,
@@ -826,13 +1044,14 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                   false
                 ).catch(() => [])
               : Promise.resolve([]),
-            (!d1Pkg.video_url || !hasStoredGitShotFast) && d1Pkg.repo_url
+            (!d1Pkg.video_url || !hasStoredGitShotFast || fastNeedsMetadataScan) && d1Pkg.repo_url
               ? scanGitRepoMetadataCached(
                   d1Pkg.author_name || author,
                   d1Pkg.name || name,
                   d1Pkg.type || 'mod',
                   d1Pkg.repo_url,
-                  21600
+                  d1Pkg.latest_commit_sha ? 86400 : 21600,
+                  d1Pkg.latest_commit_sha ? { commitSha: d1Pkg.latest_commit_sha } : undefined
                 ).catch(() => null)
               : Promise.resolve(null),
             isOfficialFast && (!hasCdbGalleryScreenshots || !parsedRevCounts || !hasValidD1ThumbOrBanner)
@@ -848,6 +1067,37 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                 ).catch(() => null)
               : Promise.resolve(null)
           ]);
+          const fastBundledReleases = buildNormalizedReleases(
+            d1Pkg.author_name || author,
+            d1Pkg.name || name,
+            d1Releases,
+            fastCdbReleases,
+            fastGitReleases
+          );
+          const newestObservedShaFast = String(fastBundledReleases[0]?.commit_sha || '').trim();
+          const storedShaFast = String(d1Pkg.latest_commit_sha || '').trim();
+          const fastShaAdvanced =
+            Boolean(newestObservedShaFast) &&
+            newestObservedShaFast !== 'HEAD' &&
+            Boolean(storedShaFast) &&
+            newestObservedShaFast.toLowerCase() !== storedShaFast.toLowerCase();
+          if (
+            fastShaAdvanced &&
+            d1Pkg.repo_url &&
+            Number(d1Pkg.license_override || 0) !== 1
+          ) {
+            const refreshedShaScan = await scanGitRepoMetadataCached(
+              d1Pkg.author_name || author,
+              d1Pkg.name || name,
+              d1Pkg.type || 'mod',
+              d1Pkg.repo_url,
+              86400,
+              { commitSha: newestObservedShaFast }
+            ).catch(() => null);
+            if (refreshedShaScan && refreshedShaScan.gitRepoStatus === 'verified') {
+              fastGitScan = refreshedShaScan;
+            }
+          }
           const fastBundledReviews = buildNormalizedReviews(d1Reviews, cdbRevPayload, effectivePkgId);
           if (!parsedRevCounts) {
             parsedRevCounts =
@@ -906,6 +1156,29 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           const shouldPersistFastShots =
             fastMergedScreenshots.length > 0 &&
             (fastMergedScreenshots.length >= d1Screenshots.length || !d1Pkg.screenshots);
+          const fastLicenseOverridden = Number(d1Pkg.license_override || 0) === 1;
+          const fastScannedLicense =
+            fastGitScan?.gitRepoStatus === 'verified'
+              ? (fastGitScan.license || fastGitScan.mediaLicense || undefined)
+              : undefined;
+          const fastScannedMediaLic =
+            fastGitScan?.gitRepoStatus === 'verified'
+              ? (fastGitScan.mediaLicense || undefined)
+              : undefined;
+          const resolvedFastLicense =
+            fastLicenseOverridden && d1Pkg.license
+              ? d1Pkg.license
+              : (fastScannedLicense || (!isGitFast ? fastCdbDetail?.license : undefined) || d1Pkg.license || fastCdbDetail?.license);
+          const resolvedFastMediaLicense =
+            fastLicenseOverridden && d1Pkg.media_license
+              ? d1Pkg.media_license
+              : (fastScannedMediaLic || (!isGitFast ? fastCdbDetail?.media_license : undefined) || d1Pkg.media_license || resolvedFastLicense || fastCdbDetail?.media_license);
+          const shouldSyncFastLicense =
+            !fastLicenseOverridden &&
+            ((Boolean(resolvedFastLicense) && resolvedFastLicense !== d1Pkg.license) ||
+              (Boolean(resolvedFastMediaLicense) && resolvedFastMediaLicense !== d1Pkg.media_license) ||
+              (!d1Pkg.metadata_synced_at && fastGitScan?.gitRepoStatus === 'verified'));
+
           if (
             (!d1Pkg.video_url && fastVideo.video_url) ||
             (!hasStoredGitShotFast && fastGitShot) ||
@@ -913,51 +1186,58 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             (!d1Pkg.banner_url && fastBanner) ||
             shouldPersistFastShots ||
             newlyDiscoveredRevCountsFast ||
-            newlyDiscoveredScoreFast !== null
+            newlyDiscoveredScoreFast !== null ||
+            shouldSyncFastLicense
           ) {
-            context.env.DB.prepare(`
-              UPDATE packages
-              SET video_url = COALESCE(video_url, ?),
-                  video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-                  thumbnail_url = CASE
-                    WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
-                    ELSE thumbnail_url
-                  END,
-                  banner_url = CASE
-                    WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
-                    ELSE COALESCE(?, banner_url)
-                  END,
-                  screenshots = CASE
-                    WHEN ? IS NOT NULL THEN ?
-                    ELSE screenshots
-                  END,
-                  review_thread_counts = CASE
-                    WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
-                    ELSE review_thread_counts
-                  END,
-                  score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END
-              WHERE id = ?
-            `).bind(
-              fastVideo.video_url || null,
-              fastVideo.video_thumbnail_url || null,
-              fastThumb || null,
-              fastBanner || null,
-              fastBanner || null,
-              shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
-              shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
-              newlyDiscoveredRevCountsFast,
-              newlyDiscoveredScoreFast,
-              newlyDiscoveredScoreFast,
-              d1Pkg.id
-            ).run().catch(() => {});
+            const fastSig = `${resolvedFastLicense || ''}|${resolvedFastMediaLicense || ''}|${fastThumb || ''}|${fastBanner || ''}|${newlyDiscoveredScoreFast ?? ''}`;
+            if (claimD1BackfillSlot(String(d1Pkg.id), fastSig)) {
+              const runFastBackfill = () =>
+                context.env.DB.prepare(`
+                  UPDATE packages
+                  SET video_url = COALESCE(video_url, ?),
+                      video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                      thumbnail_url = CASE
+                        WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' THEN COALESCE(?, thumbnail_url)
+                        ELSE thumbnail_url
+                      END,
+                      banner_url = CASE
+                        WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' THEN COALESCE(?, banner_url)
+                        ELSE COALESCE(?, banner_url)
+                      END,
+                      screenshots = CASE
+                        WHEN ? IS NOT NULL THEN ?
+                        ELSE screenshots
+                      END,
+                      review_thread_counts = CASE
+                        WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+                        ELSE review_thread_counts
+                      END,
+                      score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                      license = CASE WHEN COALESCE(license_override, 0) = 1 THEN license ELSE COALESCE(?, license) END,
+                      media_license = CASE WHEN COALESCE(license_override, 0) = 1 THEN media_license ELSE COALESCE(?, media_license) END,
+                      min_minetest_version = COALESCE(?, min_minetest_version),
+                      metadata_synced_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE metadata_synced_at END
+                  WHERE id = ?
+                `).bind(
+                  fastVideo.video_url || null,
+                  fastVideo.video_thumbnail_url || null,
+                  fastThumb || null,
+                  fastBanner || null,
+                  fastBanner || null,
+                  shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
+                  shouldPersistFastShots ? JSON.stringify(fastMergedScreenshots) : null,
+                  newlyDiscoveredRevCountsFast,
+                  newlyDiscoveredScoreFast,
+                  newlyDiscoveredScoreFast,
+                  shouldSyncFastLicense ? (resolvedFastLicense || null) : null,
+                  shouldSyncFastLicense ? (resolvedFastMediaLicense || null) : null,
+                  fastGitScan?.minVersion || null,
+                  fastGitScan?.gitRepoStatus === 'verified' ? 1 : 0,
+                  d1Pkg.id
+                ).run();
+              runWithD1ColumnFallback(context.env.DB, runFastBackfill).catch(() => {});
+            }
           }
-          const fastBundledReleases = buildNormalizedReleases(
-            d1Pkg.author_name || author,
-            d1Pkg.name || name,
-            d1Releases,
-            fastCdbReleases,
-            fastGitReleases
-          );
           if (
             context.env.DB &&
             d1Pkg.id &&
@@ -1107,9 +1387,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             banner: fastBanner,
             screenshots: fastMergedScreenshots,
             ...(fastScreenshotMeta.length > 0 ? { screenshot_meta: fastScreenshotMeta } : {}),
-            license: d1Pkg.license || fastCdbDetail?.license,
-            media_license: d1Pkg.media_license || d1Pkg.license || fastCdbDetail?.media_license || fastCdbDetail?.license,
-            min_minetest_version: d1Pkg.min_minetest_version || extractEngineVersionString(fastCdbDetail?.min_minetest_version) || '5.0.0',
+            license: resolvedFastLicense,
+            media_license: resolvedFastMediaLicense,
+            min_minetest_version: (fastGitScan?.minVersion && fastGitScan.minVersion !== '5.0.0' ? fastGitScan.minVersion : undefined) || d1Pkg.min_minetest_version || extractEngineVersionString(fastCdbDetail?.min_minetest_version) || '5.0.0',
             max_minetest_version: d1Pkg.max_minetest_version || extractEngineVersionString(fastCdbDetail?.max_minetest_version) || undefined,
             repo_url: fastRepoUrl,
             git_repo_status: fastRepoUrl ? 'verified' : 'unverified',
@@ -1150,10 +1430,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             optional_dependencies: fastSoftDeps,
             status: d1Pkg.status || 'active',
             provider: d1Pkg.provider || (isGitFast ? 'github' : 'contentdb'),
-            ...(fastCdbDetail?.author && fastCdbDetail.author !== (d1Pkg.author_name || author)
+            ...(isOfficialFast && fastCdbDetail?.author && fastCdbDetail.author !== (d1Pkg.author_name || author)
               ? { contentdb_author: fastCdbDetail.author }
               : {}),
-            ...(fastCdbDetail?.name && fastCdbDetail.name !== (d1Pkg.name || name)
+            ...(isOfficialFast && fastCdbDetail?.name && fastCdbDetail.name !== (d1Pkg.name || name)
               ? { contentdb_name: fastCdbDetail.name }
               : {}),
             source: isGitFast ? 'git' : 'official',
@@ -1162,14 +1442,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             reviews_list: fastBundledReviews
           };
 
-          await writeEdgeCacheJson(edgeCacheKey, fastFullPayload, 600);
-          return new Response(JSON.stringify(fastFullPayload), {
-            headers: {
-              'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
-              'Cache-Control': 'public, max-age=120, s-maxage=600, stale-while-revalidate=86400'
-            }
-          });
+          await writeEdgeCacheJson(edgeCacheKey, fastFullPayload, 300);
+          return buildPackageDetailResponse(fastFullPayload, false, context.request, noCache ? 'BYPASS' : 'MISS-EDGE');
         }
       }
     } catch {
@@ -1370,8 +1644,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       const lowerAuthor = author.toLowerCase();
       const lowerName = name.toLowerCase();
       const lowerTitle = String(d1Pkg?.title || '').trim().toLowerCase();
-      const lowerType = String(d1Pkg?.type || 'mod').toLowerCase();
-      const d1RepoUrl = String(d1Pkg?.repo_url || '').toLowerCase().replace(/\.git$/i, '').replace(/\/+$/, '');
+      const d1RepoUrl = normalizeComparableRepoUrl(d1Pkg?.repo_url);
 
       const exactOrCaseMatch = bulkCatalog.find(
         (item: any) =>
@@ -1387,15 +1660,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         );
         matchedCandidate =
           sameNameItems.find((item: any) => {
-            const itemRepo = String(item.repo || item.repo_url || '').toLowerCase().replace(/\.git$/i, '').replace(/\/+$/, '');
+            const itemRepo = normalizeComparableRepoUrl(item.repo || item.repo_url);
             if (d1RepoUrl && itemRepo && itemRepo === d1RepoUrl) return true;
+            if (d1RepoUrl && itemRepo && itemRepo !== d1RepoUrl) return false;
             const itemTitle = String(item.title || '').trim().toLowerCase();
             if (lowerTitle && itemTitle && itemTitle === lowerTitle) return true;
             return false;
-          }) ||
-          (sameNameItems.length === 1 && String(sameNameItems[0].type || 'mod').toLowerCase() === lowerType
-            ? sameNameItems[0]
-            : null);
+          }) || null;
       }
 
       if (matchedCandidate && matchedCandidate.author && matchedCandidate.name) {
@@ -1444,17 +1715,22 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     const needsAgnosticRepoScan =
       !d1Pkg ||
       !d1Pkg.license ||
+      (!isLite && Boolean(d1Pkg.repo_url) && !d1Pkg.metadata_synced_at && Number(d1Pkg.license_override || 0) !== 1) ||
       !d1Pkg.short_desc ||
       d1HardDeps.length === 0 ||
       (!hasStoredGitShotPure && Boolean(d1Pkg?.repo_url)) ||
       (!isLite && !d1Pkg.video_url && Boolean(d1Pkg.repo_url));
 
+    const pureCommitHint = bundledReleases[0]?.commit_sha && bundledReleases[0].commit_sha !== 'HEAD'
+      ? bundledReleases[0].commit_sha
+      : d1Pkg?.latest_commit_sha;
     const gitScan = needsAgnosticRepoScan
       ? await probeGitRepoConfAndLicense(
           d1Pkg?.author_name || author,
           d1Pkg?.name || name,
           d1Pkg?.type || 'mod',
-          d1Pkg?.repo_url
+          d1Pkg?.repo_url,
+          { commitSha: pureCommitHint, bypassCache: noCache }
         )
       : null;
 
@@ -1605,8 +1881,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       }
       const mergedHardDeps = d1HardDeps.length > 0 ? d1HardDeps : (gitScan?.hardDeps || []);
       const mergedSoftDeps = d1SoftDeps.length > 0 ? d1SoftDeps : (gitScan?.softDeps || []);
-      const mergedLicense = d1Pkg?.license || gitScan?.license || gitScan?.mediaLicense || '';
-      const mergedMediaLicense = d1Pkg?.media_license || gitScan?.mediaLicense || mergedLicense || '';
+      const pureLicenseOverridden = Number(d1Pkg?.license_override || 0) === 1;
+      const verifiedScanLicense =
+        gitScan?.gitRepoStatus === 'verified' ? (gitScan.license || undefined) : undefined;
+      const verifiedScanMediaLic =
+        gitScan?.gitRepoStatus === 'verified' ? (gitScan.mediaLicense || undefined) : undefined;
+      const mergedLicense =
+        pureLicenseOverridden && d1Pkg?.license
+          ? d1Pkg.license
+          : (verifiedScanLicense || d1Pkg?.license || gitScan?.mediaLicense || '');
+      const mergedMediaLicense =
+        pureLicenseOverridden && d1Pkg?.media_license
+          ? d1Pkg.media_license
+          : (verifiedScanMediaLic || d1Pkg?.media_license || mergedLicense || '');
       const mergedShortDesc = d1Pkg?.short_desc || gitScan?.cdbMeta?.short_description || gitScan?.shortDesc || '';
       const mergedTitle = d1Pkg?.title || gitScan?.cdbMeta?.title || gitScan?.title || resolvedName;
       const resolvedGitScreenshotRaw =
@@ -1624,10 +1911,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         parseJsonArray(d1Pkg?.screenshots)
       );
 
-      // Persist newly scanned Git/.cdb.json metadata back into D1 only when at least one field is missing
+      // Persist newly scanned Git/.cdb.json metadata back into D1 (updating license unless license_override=1)
+      const pureLicenseChanged =
+        !pureLicenseOverridden &&
+        ((Boolean(verifiedScanLicense) && verifiedScanLicense !== d1Pkg?.license) ||
+          (Boolean(verifiedScanMediaLic) && verifiedScanMediaLic !== d1Pkg?.media_license));
       const needsPureGitBackfill =
         Boolean(d1Pkg) &&
-        ((!d1Pkg.license && Boolean(mergedLicense)) ||
+        (pureLicenseChanged ||
+          (!d1Pkg?.metadata_synced_at && gitScan?.gitRepoStatus === 'verified') ||
+          (!d1Pkg.license && Boolean(mergedLicense)) ||
           (!d1Pkg.short_desc && Boolean(mergedShortDesc)) ||
           ((!d1Pkg.banner_url || d1Pkg.banner_url === 'logo.svg' || !isGitRepositoryAssetUrl(d1Pkg.banner_url)) &&
             Boolean(gitScan?.screenshotUrl)) ||
@@ -1635,35 +1928,45 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           (!d1Pkg.video_url && Boolean(resolvedGitVideo.video_url)) ||
           (!d1Pkg.dependencies && mergedHardDeps.length > 0));
       if (context.env.DB && d1Pkg && gitScan && gitScan.gitRepoStatus === 'verified' && needsPureGitBackfill) {
-        context.env.DB.prepare(`
-          UPDATE packages SET
-            license = CASE WHEN COALESCE(license, '') = '' THEN ? ELSE license END,
-            media_license = CASE WHEN COALESCE(media_license, '') = '' THEN ? ELSE media_license END,
-            short_desc = CASE WHEN COALESCE(short_desc, '') = '' THEN ? ELSE short_desc END,
-            thumbnail_url = CASE
-              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
-              ELSE thumbnail_url
-            END,
-            banner_url = COALESCE(?, banner_url),
-            screenshots = COALESCE(?, screenshots),
-            video_url = COALESCE(video_url, ?),
-            video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-            dependencies = COALESCE(dependencies, ?),
-            optional_dependencies = COALESCE(optional_dependencies, ?)
-          WHERE id = ?
-        `).bind(
-          mergedLicense,
-          mergedMediaLicense,
-          mergedShortDesc || null,
-          gitScan.screenshotUrl || null,
-          gitScan.screenshotUrl || null,
-          mergedGitScreenshots.length > 0 ? JSON.stringify(mergedGitScreenshots) : null,
-          resolvedGitVideo.video_url || null,
-          resolvedGitVideo.video_thumbnail_url || null,
-          mergedHardDeps.length > 0 ? JSON.stringify(mergedHardDeps) : null,
-          mergedSoftDeps.length > 0 ? JSON.stringify(mergedSoftDeps) : null,
-          d1Pkg.id
-        ).run().catch(() => {});
+        const pureBackfillSig = `${mergedLicense}|${mergedMediaLicense}|${mergedShortDesc.slice(0, 40)}|${gitScan.screenshotUrl || ''}`;
+        if (claimD1BackfillSlot(String(d1Pkg.id), pureBackfillSig)) {
+          const runPureGitBackfill = () =>
+            context.env.DB.prepare(`
+              UPDATE packages SET
+                license = CASE WHEN COALESCE(license_override, 0) = 1 THEN license ELSE COALESCE(?, license) END,
+                media_license = CASE WHEN COALESCE(license_override, 0) = 1 THEN media_license ELSE COALESCE(?, media_license) END,
+                short_desc = CASE WHEN COALESCE(short_desc, '') = '' THEN ? ELSE short_desc END,
+                min_minetest_version = COALESCE(?, min_minetest_version),
+                max_minetest_version = COALESCE(?, max_minetest_version),
+                thumbnail_url = CASE
+                  WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                  ELSE thumbnail_url
+                END,
+                banner_url = COALESCE(?, banner_url),
+                screenshots = COALESCE(?, screenshots),
+                video_url = COALESCE(video_url, ?),
+                video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                dependencies = COALESCE(dependencies, ?),
+                optional_dependencies = COALESCE(optional_dependencies, ?),
+                metadata_synced_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `).bind(
+              mergedLicense || null,
+              mergedMediaLicense || null,
+              mergedShortDesc || null,
+              gitScan.minVersion || null,
+              gitScan.maxVersion || null,
+              gitScan.screenshotUrl || null,
+              gitScan.screenshotUrl || null,
+              mergedGitScreenshots.length > 0 ? JSON.stringify(mergedGitScreenshots) : null,
+              resolvedGitVideo.video_url || null,
+              resolvedGitVideo.video_thumbnail_url || null,
+              mergedHardDeps.length > 0 ? JSON.stringify(mergedHardDeps) : null,
+              mergedSoftDeps.length > 0 ? JSON.stringify(mergedSoftDeps) : null,
+              d1Pkg.id
+            ).run();
+          runWithD1ColumnFallback(context.env.DB, runPureGitBackfill).catch(() => {});
+        }
       }
 
       const pureGitTranslations = parsePackageTranslations(d1Pkg?.translations);
@@ -1775,15 +2078,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         reviews_list: bundledReviews
       };
 
-      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, isLite ? 1800 : 600);
+      await writeEdgeCacheJson(edgeCacheKey, pureGitPayload, isLite ? 900 : 300);
 
-      return new Response(JSON.stringify(pureGitPayload), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=120, s-maxage=600, stale-while-revalidate=86400'
-        }
-      });
+      return buildPackageDetailResponse(pureGitPayload, isLite, context.request, noCache ? 'BYPASS' : 'MISS-EDGE');
     }
     return Response.json({ error: 'Package not found' }, { status: 404, headers: { 'Access-Control-Allow-Origin': '*' } });
   }
@@ -1793,8 +2090,15 @@ export async function onRequestGet(context: { request?: Request; params: { autho
 
   let finalHardDeps = hardDeps;
   let finalSoftDeps = softDeps;
-  let resolvedLicense = d1Pkg?.license || upstreamData.license || upstreamData.media_license || '';
-  let resolvedMediaLicense = d1Pkg?.media_license || upstreamData.media_license || upstreamData.license || d1Pkg?.license || '';
+  const isCdbLicenseOverridden = Number(d1Pkg?.license_override || 0) === 1;
+  let resolvedLicense =
+    isCdbLicenseOverridden && d1Pkg?.license
+      ? d1Pkg.license
+      : (upstreamData.license || d1Pkg?.license || upstreamData.media_license || '');
+  let resolvedMediaLicense =
+    isCdbLicenseOverridden && d1Pkg?.media_license
+      ? d1Pkg.media_license
+      : (upstreamData.media_license || d1Pkg?.media_license || upstreamData.license || d1Pkg?.license || '');
   let repoUrl = normalizeDefunctGitHost(upstreamData.repo || upstreamData.repo_url || d1Pkg?.repo_url || undefined);
   let gitRepoStatus: 'verified' | 'broken_404' | 'unverified' = repoUrl ? 'verified' : 'unverified';
   let minVersion =
@@ -1827,11 +2131,16 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     Boolean(repoUrl) &&
     (!resolvedLicense || !hasResolvedVideo || !hasStoredGitScreenshot || needsJam2026DetailProbe);
   if (needsGitProbe) {
+    const cdbCommitHint =
+      bundledReleases[0]?.commit_sha && bundledReleases[0].commit_sha !== 'HEAD'
+        ? bundledReleases[0].commit_sha
+        : d1Pkg?.latest_commit_sha;
     const gitProbe = await probeGitRepoConfAndLicense(
       upstreamData.author || author,
       upstreamData.name || name,
       upstreamData.type || 'mod',
-      repoUrl
+      repoUrl,
+      cdbCommitHint ? { commitSha: cdbCommitHint } : undefined
     );
     gitProbeScan = gitProbe;
     gitRepoStatus = gitProbe.gitRepoStatus;
@@ -2230,7 +2539,12 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         Math.abs(contentdbDownloads - existingD1CdbDl) >= 10);
     const newCdbDlVal = shouldSyncCdbDownloads ? contentdbDownloads : null;
     const newTotalDlVal = shouldSyncCdbDownloads ? totalDownloads : null;
+    const cdbLicenseChanged =
+      !isCdbLicenseOverridden &&
+      ((Boolean(resolvedLicense) && resolvedLicense !== d1Pkg.license) ||
+        (Boolean(resolvedMediaLicense) && resolvedMediaLicense !== d1Pkg.media_license));
     const needsMetaBackfill =
+      cdbLicenseChanged ||
       (!d1Pkg.license && resolvedLicense) ||
       (!d1Pkg.video_url && videoUrl) ||
       ((!d1Pkg.thumbnail_url || String(d1Pkg.thumbnail_url).includes('/thumbnails/')) && resolvedThumb) ||
@@ -2245,57 +2559,63 @@ export async function onRequestGet(context: { request?: Request; params: { autho
       shouldSyncCdbDownloads;
 
     if (needsMetaBackfill) {
-      context.env.DB.prepare(`
-        UPDATE packages
-        SET short_desc = COALESCE(short_desc, ?),
-            long_desc = COALESCE(long_desc, ?),
-            thumbnail_url = CASE
-              WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
-              ELSE thumbnail_url
-            END,
-            banner_url = CASE
-              WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' OR banner_url LIKE '%/thumbnails/%' THEN COALESCE(?, banner_url)
-              ELSE COALESCE(?, banner_url)
-            END,
-            license = CASE WHEN COALESCE(license, '') = '' THEN COALESCE(?, license) ELSE license END,
-            media_license = CASE WHEN COALESCE(media_license, '') = '' THEN COALESCE(?, media_license) ELSE media_license END,
-            video_url = COALESCE(video_url, ?),
-            video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
-            screenshots = CASE
-              WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
-              ELSE COALESCE(screenshots, ?)
-            END,
-            review_thread_counts = CASE
-              WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
-              ELSE review_thread_counts
-            END,
-            score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
-            tags = COALESCE(?, tags),
-            contentdb_downloads = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(contentdb_downloads, 0), ?) ELSE contentdb_downloads END,
-            downloads_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(downloads_count, 0), ?) ELSE downloads_count END
-        WHERE id = ?
-      `).bind(
-        shortDesc || null,
-        extractedLongDesc || null,
-        resolvedThumb || null,
-        resolvedBanner || null,
-        resolvedBanner || null,
-        resolvedLicense || null,
-        resolvedMediaLicense || resolvedLicense || null,
-        videoUrl || null,
-        videoThumbnailUrl || null,
-        screenshots.length > 0 ? JSON.stringify(screenshots) : null,
-        screenshots.length > 0 ? JSON.stringify(screenshots) : null,
-        newRevCountsJson,
-        newScoreVal,
-        newScoreVal,
-        newTagsJson,
-        newCdbDlVal,
-        newCdbDlVal,
-        newTotalDlVal,
-        newTotalDlVal,
-        targetRowId
-      ).run().catch(() => {});
+      const metaBackfillSig = `${resolvedLicense}|${resolvedMediaLicense}|${resolvedThumb || ''}|${resolvedBanner || ''}|${newScoreVal ?? ''}|${newCdbDlVal ?? ''}`;
+      if (claimD1BackfillSlot(targetRowId, metaBackfillSig)) {
+        const runCdbMetaBackfill = () =>
+          context.env.DB.prepare(`
+            UPDATE packages
+            SET short_desc = COALESCE(short_desc, ?),
+                long_desc = COALESCE(long_desc, ?),
+                thumbnail_url = CASE
+                  WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' OR thumbnail_url LIKE '%/storage/screenshots/%' OR thumbnail_url LIKE '%/shot-0.png' OR thumbnail_url LIKE '%/thumbnails/%' THEN COALESCE(?, thumbnail_url)
+                  ELSE thumbnail_url
+                END,
+                banner_url = CASE
+                  WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' OR banner_url LIKE '%/storage/screenshots/%' OR banner_url LIKE '%/shot-0.png' OR banner_url LIKE '%/thumbnails/%' THEN COALESCE(?, banner_url)
+                  ELSE COALESCE(?, banner_url)
+                END,
+                license = CASE WHEN COALESCE(license_override, 0) = 1 THEN license ELSE COALESCE(?, license) END,
+                media_license = CASE WHEN COALESCE(license_override, 0) = 1 THEN media_license ELSE COALESCE(?, media_license) END,
+                video_url = COALESCE(video_url, ?),
+                video_thumbnail_url = COALESCE(video_thumbnail_url, ?),
+                screenshots = CASE
+                  WHEN COALESCE(screenshots, '') = '' OR screenshots LIKE '%/storage/screenshots/%' THEN COALESCE(?, screenshots)
+                  ELSE COALESCE(screenshots, ?)
+                END,
+                review_thread_counts = CASE
+                  WHEN COALESCE(review_thread_counts, '') = '' OR review_thread_counts = '{"positive":0,"neutral":0,"negative":0}' THEN COALESCE(?, review_thread_counts)
+                  ELSE review_thread_counts
+                END,
+                score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                tags = COALESCE(?, tags),
+                contentdb_downloads = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(contentdb_downloads, 0), ?) ELSE contentdb_downloads END,
+                downloads_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(downloads_count, 0), ?) ELSE downloads_count END,
+                metadata_synced_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).bind(
+            shortDesc || null,
+            extractedLongDesc || null,
+            resolvedThumb || null,
+            resolvedBanner || null,
+            resolvedBanner || null,
+            resolvedLicense || null,
+            resolvedMediaLicense || resolvedLicense || null,
+            videoUrl || null,
+            videoThumbnailUrl || null,
+            screenshots.length > 0 ? JSON.stringify(screenshots) : null,
+            screenshots.length > 0 ? JSON.stringify(screenshots) : null,
+            newRevCountsJson,
+            newScoreVal,
+            newScoreVal,
+            newTagsJson,
+            newCdbDlVal,
+            newCdbDlVal,
+            newTotalDlVal,
+            newTotalDlVal,
+            targetRowId
+          ).run();
+        runWithD1ColumnFallback(context.env.DB, runCdbMetaBackfill).catch(() => {});
+      }
     }
 
     if (d1Pkg.provider !== 'contentdb' && d1Releases.length === 0 && bundledReleases.length > 0) {
@@ -2400,11 +2720,13 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     dependencies: finalHardDeps.length > 0 ? finalHardDeps : d1HardDeps,
     optional_dependencies: finalSoftDeps.length > 0 ? finalSoftDeps : d1SoftDeps,
     status: d1Pkg?.status || 'active',
-    ...(upstreamData.author &&
+    ...(sources.includes('official') &&
+    upstreamData.author &&
     (upstreamData.author !== (d1Pkg?.author_name || author) || upstreamData.author !== author)
       ? { contentdb_author: upstreamData.author }
       : {}),
-    ...(upstreamData.name &&
+    ...(sources.includes('official') &&
+    upstreamData.name &&
     (upstreamData.name !== (d1Pkg?.name || name) || upstreamData.name !== name)
       ? { contentdb_name: upstreamData.name }
       : {}),
@@ -2414,17 +2736,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
     reviews_list: bundledReviews
   };
 
-  await writeEdgeCacheJson(edgeCacheKey, enriched, isLite ? 1800 : 600);
+  await writeEdgeCacheJson(edgeCacheKey, enriched, isLite ? 900 : 300);
 
-  return new Response(JSON.stringify(enriched), {
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': isLite
-        ? 'public, max-age=300, s-maxage=1800, stale-while-revalidate=600'
-        : 'public, max-age=120, s-maxage=600, stale-while-revalidate=86400'
-    }
-  });
+  return buildPackageDetailResponse(enriched, isLite, context.request, noCache ? 'BYPASS' : 'MISS-EDGE');
 }
 
 // PATCH /api/packages/:author/:name — Allow package author or admin to edit package metadata & tags (LuantiHub-first)
@@ -2460,14 +2774,27 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     }
     const resolvedUserId = String(user.id);
 
+    const sanitizedPatchName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     let [identitiesRes, pkgRow] = await Promise.all([
       context.env.DB.prepare(
         `SELECT provider, provider_username as username, verified FROM user_identities WHERE user_id = ?`
       ).bind(resolvedUserId).all().catch(() => ({ results: [] })),
       context.env.DB.prepare(
-        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND LOWER(name) = LOWER(?)) LIMIT 1`
-      ).bind(pkgId, author, name).first()
+        `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) OR (LOWER(author_name) = LOWER(?) AND (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)) LIMIT 1`
+      ).bind(pkgId, author, name, sanitizedPatchName).first()
     ]);
+
+    if (!pkgRow) {
+      const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+      if (baseAuthor && baseAuthor.toLowerCase() !== author.toLowerCase()) {
+        pkgRow = await context.env.DB.prepare(
+          `SELECT * FROM packages
+           WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
+             AND LOWER(REPLACE(REPLACE(author_name, '-hub', ''), '_hub', '')) = LOWER(?)
+           LIMIT 1`
+        ).bind(name, sanitizedPatchName, baseAuthor).first().catch(() => null);
+      }
+    }
 
     const identities = (identitiesRes.results || []).map((id: any) => ({
       provider: String(id.provider || '').toLowerCase(),
@@ -2491,48 +2818,107 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       short_desc?: string;
       type?: string;
       repo_url?: string;
-      license?: string;
-      media_license?: string;
+      license?: string | null;
+      media_license?: string | null;
+      resync_git?: boolean;
       thumbnail?: string;
     };
 
-    // If package is not yet in D1 (e.g., ContentDB-sourced package being customized on LuantiHub),
-    // verify ownership strictly against authoritative upstream metadata (never untrusted body.repo_url).
+    // If package is not yet in D1 (e.g., ContentDB-sourced or Jam 2026 package being customized),
+    // verify ownership strictly against authoritative upstream or Jam metadata (never hardcode provider='contentdb' without upstream!).
+    let patchUpstreamPkg: any = null;
     if (!pkgRow) {
       const encodedAuthor = encodeURIComponent(author);
       const encodedName = encodeURIComponent(name);
-      const upstreamPkg = await fetchUpstreamJsonCached<any>(`/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null);
-      if (!upstreamPkg && !isAdmin) {
+      const [upstreamPkg, jamBrew] = await Promise.all([
+        fetchUpstreamJsonCached<any>(`/packages/${encodedAuthor}/${encodedName}/`, 600).catch(() => null),
+        findJam2026BrewBySlug(author, name).catch(() => undefined)
+      ]);
+      patchUpstreamPkg =
+        upstreamPkg && typeof upstreamPkg === 'object' && !Array.isArray(upstreamPkg) && (upstreamPkg.name || upstreamPkg.title)
+          ? upstreamPkg
+          : null;
+      if (!patchUpstreamPkg && !jamBrew && !isAdmin) {
         return Response.json({
           error: 'Package not found in LuantiHub or official ContentDB registry.'
         }, { status: 404 });
       }
       const trustedUpstreamRepo =
-        upstreamPkg && typeof (upstreamPkg.repo || upstreamPkg.repo_url) === 'string'
-          ? normalizeGitRepoInputUrl(String(upstreamPkg.repo || upstreamPkg.repo_url).trim()) || ''
+        patchUpstreamPkg && typeof (patchUpstreamPkg.repo || patchUpstreamPkg.repo_url) === 'string'
+          ? normalizeGitRepoInputUrl(String(patchUpstreamPkg.repo || patchUpstreamPkg.repo_url).trim()) || ''
           : '';
-      const seedPkg: any = upstreamPkg || {
-        author,
-        name,
-        title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : name,
-        type: typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : 'mod',
-        short_description: typeof body.short_desc === 'string' ? body.short_desc.trim() : '',
-        long_description: '',
-        repo: isAdmin && typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '',
-        license: typeof body.license === 'string' && body.license.trim() ? body.license.trim() : 'MIT',
-        media_license: typeof body.media_license === 'string' && body.media_license.trim() ? body.media_license.trim() : 'CC-BY-SA-4.0',
-        thumbnail: typeof body.thumbnail === 'string' && body.thumbnail.trim() ? (sanitizePackageImageUrl(body.thumbnail.trim()) || null) : null,
-        tags: Array.isArray(body.tags) ? body.tags : []
+      const resolvedSeedRepo =
+        trustedUpstreamRepo ||
+        jamBrew?.repo_url ||
+        (isAdmin && typeof body.repo_url === 'string' ? (normalizeGitRepoInputUrl(body.repo_url.trim()) || '') : '');
+      const seedProvider = patchUpstreamPkg
+        ? 'contentdb'
+        : resolveGitProviderFromRepoUrl(resolvedSeedRepo, jamBrew?.provider || 'custom');
+      const seedScan =
+        !patchUpstreamPkg && resolvedSeedRepo
+          ? await scanGitRepoMetadataCached(
+              jamBrew?.author || author,
+              jamBrew?.name || name,
+              jamBrew?.type || body.type || 'mod',
+              resolvedSeedRepo,
+              86400,
+              jamBrew?.latest_commit_sha ? { commitSha: jamBrew.latest_commit_sha } : undefined
+            ).catch(() => null)
+          : null;
+      const seedPkg: any = patchUpstreamPkg || {
+        author: jamBrew?.author || author,
+        name: jamBrew?.name || name,
+        title: (typeof body.title === 'string' && body.title.trim()) || seedScan?.title || jamBrew?.title || name,
+        type:
+          (typeof body.type === 'string' && ['mod', 'game', 'txp', 'modpack'].includes(body.type) ? body.type : undefined) ||
+          jamBrew?.type ||
+          seedScan?.detectedType ||
+          'mod',
+        short_description:
+          (typeof body.short_desc === 'string' && body.short_desc.trim()) ||
+          seedScan?.shortDesc ||
+          jamBrew?.short_desc ||
+          '',
+        long_description: seedScan?.longDesc || jamBrew?.short_desc || '',
+        repo: resolvedSeedRepo,
+        license:
+          (typeof body.license === 'string' && body.license.trim()) ||
+          seedScan?.license ||
+          jamBrew?.license ||
+          'MIT',
+        media_license:
+          (typeof body.media_license === 'string' && body.media_license.trim()) ||
+          seedScan?.mediaLicense ||
+          jamBrew?.media_license ||
+          seedScan?.license ||
+          'CC-BY-SA-4.0',
+        thumbnail:
+          (typeof body.thumbnail === 'string' && body.thumbnail.trim() ? sanitizePackageImageUrl(body.thumbnail.trim()) : null) ||
+          seedScan?.screenshotUrl ||
+          jamBrew?.thumbnail ||
+          null,
+        tags: Array.isArray(body.tags) ? body.tags : (jamBrew?.tags || [])
       };
+      const baseSeedTags = Array.isArray(seedPkg.tags) ? seedPkg.tags : [];
+      const cleanSeedTags = patchUpstreamPkg
+        ? baseSeedTags
+        : Array.from(
+            new Set([
+              ...baseSeedTags.filter((t: string) => String(t).toLowerCase() !== 'contentdb'),
+              'git',
+              ...(seedProvider !== 'custom' ? [seedProvider] : []),
+              seedPkg.type || 'mod'
+            ])
+          ).filter(Boolean);
       const virtualPkgRow = {
         id: `${seedPkg.author || author}/${seedPkg.name || name}`,
         author_name: seedPkg.author || author,
         name: seedPkg.name || name,
-        repo_url: upstreamPkg ? trustedUpstreamRepo : (isAdmin ? seedPkg.repo || '' : ''),
-        provider: 'contentdb',
-        has_contentdb: Boolean(upstreamPkg),
+        repo_url: resolvedSeedRepo,
+        provider: seedProvider,
+        has_contentdb: Boolean(patchUpstreamPkg),
         type: seedPkg.type || 'mod',
-        tags: JSON.stringify(Array.isArray(seedPkg.tags) ? seedPkg.tags : [])
+        tags: JSON.stringify(cleanSeedTags)
       };
       const canSeed = isAdmin || verifyStrictPackageAuthorOwnership(user, identities, virtualPkgRow, author);
       if (!canSeed) {
@@ -2549,7 +2935,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
       ).bind(
         virtualPkgRow.id,
-        resolvedUserId,
+        patchUpstreamPkg || isAdmin ? resolvedUserId : null,
         virtualPkgRow.author_name,
         virtualPkgRow.name,
         seedPkg.title || virtualPkgRow.name,
@@ -2557,7 +2943,7 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         seedPkg.short_description || '',
         seedPkg.long_description || '',
         virtualPkgRow.repo_url || null,
-        'contentdb',
+        seedProvider,
         seedPkg.license || 'MIT',
         seedPkg.media_license || seedPkg.license || 'CC-BY-SA-4.0',
         seedPkg.thumbnail || null,
@@ -2718,6 +3104,90 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       finalTranslations = mergedTranslations;
     }
 
+    let finalLicense = pkgRow.license ? String(pkgRow.license) : '';
+    let finalMediaLicense = pkgRow.media_license ? String(pkgRow.media_license) : '';
+    let finalLicenseOverride = Number(pkgRow.license_override || 0) === 1 ? 1 : 0;
+    let finalShortDesc = pkgRow.short_desc ? String(pkgRow.short_desc) : '';
+    let finalLatestCommitSha = pkgRow.latest_commit_sha ? String(pkgRow.latest_commit_sha) : null;
+    let finalProvider = String(pkgRow.provider || '').trim() || 'custom';
+    let didSyncGit = false;
+
+    // Self-heal poisoned provider='contentdb' rows during PATCH if confirmed absent from ContentDB
+    if (
+      (finalProvider === 'contentdb' || existingTags.some((t: string) => String(t).toLowerCase() === 'contentdb')) &&
+      pkgRow.repo_url &&
+      !(Number(pkgRow.contentdb_downloads || 0) > 0)
+    ) {
+      await maybeHealPoisonedContentDbRow(pkgRow, [], context.env.DB, undefined);
+      if (pkgRow.provider && pkgRow.provider !== 'contentdb') {
+        finalProvider = String(pkgRow.provider);
+        finalTags = parseJsonArray(pkgRow.tags);
+      }
+    }
+
+    const sanitizeLicenseVal = (val: unknown): string =>
+      String(val || '')
+        .trim()
+        .replace(/[^a-zA-Z0-9.+_\-\s/()]/g, '')
+        .slice(0, 64);
+
+    if (body.resync_git && pkgRow.repo_url) {
+      const smartRefs = await fetchGitSmartHttpRefs(
+        pkgRow.repo_url,
+        pkgRow.author_name || author,
+        pkgRow.name || name,
+        true
+      ).catch(() => null);
+      const liveSha = smartRefs?.headSha || finalLatestCommitSha || undefined;
+      const liveScan = await scanGitRepoMetadataCached(
+        pkgRow.author_name || author,
+        pkgRow.name || name,
+        pkgRow.type || 'mod',
+        pkgRow.repo_url,
+        86400,
+        { commitSha: liveSha, bypassCache: true }
+      ).catch(() => null);
+      didSyncGit = true;
+      finalLicenseOverride = 0;
+      if (liveSha) {
+        finalLatestCommitSha = liveSha;
+      }
+      if (liveScan && liveScan.gitRepoStatus === 'verified') {
+        if (liveScan.license) finalLicense = liveScan.license;
+        if (liveScan.mediaLicense) finalMediaLicense = liveScan.mediaLicense;
+        else if (liveScan.license && !finalMediaLicense) finalMediaLicense = liveScan.license;
+        if (liveScan.shortDesc) finalShortDesc = liveScan.shortDesc;
+        if (liveScan.minVersion) finalMinEngine = liveScan.minVersion;
+        if (liveScan.maxVersion !== undefined) finalMaxEngine = liveScan.maxVersion || null;
+      }
+    } else {
+      if (body.license !== undefined) {
+        if (body.license === null || String(body.license).trim() === '') {
+          finalLicenseOverride = 0;
+        } else {
+          const cleanLic = sanitizeLicenseVal(body.license);
+          if (cleanLic) {
+            finalLicense = cleanLic;
+            finalLicenseOverride = 1;
+          }
+        }
+      }
+      if (body.media_license !== undefined) {
+        if (body.media_license === null || String(body.media_license).trim() === '') {
+          // Allow clearing media_license override cleanly
+          if (body.license === undefined || body.license === null || String(body.license).trim() === '') {
+            finalLicenseOverride = 0;
+          }
+        } else {
+          const cleanMediaLic = sanitizeLicenseVal(body.media_license);
+          if (cleanMediaLic) {
+            finalMediaLicense = cleanMediaLic;
+            finalLicenseOverride = 1;
+          }
+        }
+      }
+    }
+
     const runUpdatePkg = async () => {
       await context.env.DB.prepare(
         `UPDATE packages SET
@@ -2730,6 +3200,13 @@ export async function onRequestPatch(context: { request: Request; params: { auth
           supports_all_games = ?,
           game_support = ?,
           translations = ?,
+          license = COALESCE(NULLIF(?, ''), license),
+          media_license = COALESCE(NULLIF(?, ''), media_license),
+          license_override = ?,
+          provider = ?,
+          short_desc = COALESCE(NULLIF(?, ''), short_desc),
+          latest_commit_sha = COALESCE(?, latest_commit_sha),
+          metadata_synced_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE metadata_synced_at END,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`
       ).bind(
@@ -2742,6 +3219,13 @@ export async function onRequestPatch(context: { request: Request; params: { auth
         finalSupportsAllGames ? 1 : 0,
         JSON.stringify(finalGameSupport),
         Object.keys(finalTranslations).length > 0 ? JSON.stringify(finalTranslations) : null,
+        finalLicense || '',
+        finalMediaLicense || '',
+        finalLicenseOverride,
+        finalProvider,
+        finalShortDesc || '',
+        finalLatestCommitSha,
+        didSyncGit ? 1 : 0,
         pkgRow.id
       ).run();
     };
@@ -2789,9 +3273,27 @@ export async function onRequestPatch(context: { request: Request; params: { auth
     await invalidateEdgeCacheKeys(
       buildPackageCacheInvalidationKeys(author, name, {
         includeBootCatalog: true,
-        includeAuthorProfile: true
+        includeAuthorProfile: true,
+        includeGitRepoScan: Boolean(didSyncGit),
+        repoUrl: pkgRow.repo_url || undefined,
+        commitSha: finalLatestCommitSha || undefined
       })
     );
+
+    const finalLowerTags = finalTags.map((t: string) => String(t || '').trim().toLowerCase());
+    const patchHasContentDb =
+      finalProvider === 'contentdb' ||
+      Number(pkgRow.contentdb_downloads || 0) > 0 ||
+      finalLowerTags.includes('contentdb');
+    const patchHasGit = Boolean(
+      (finalProvider && finalProvider !== 'contentdb') ||
+      pkgRow.repo_url ||
+      finalLowerTags.includes('git')
+    );
+    const finalSources: Array<'official' | 'git'> = [];
+    if (patchHasContentDb) finalSources.push('official');
+    if (patchHasGit || finalSources.length === 0) finalSources.push('git');
+    const finalSource: 'official' | 'git' = finalSources.includes('git') ? 'git' : 'official';
 
     return Response.json({
       success: true,
@@ -2804,7 +3306,14 @@ export async function onRequestPatch(context: { request: Request; params: { auth
       max_minetest_version: finalMaxEngine,
       supports_all_games: finalSupportsAllGames,
       game_support: finalGameSupport,
-      translations: Object.keys(finalTranslations).length > 0 ? finalTranslations : undefined
+      translations: Object.keys(finalTranslations).length > 0 ? finalTranslations : undefined,
+      license: finalLicense || undefined,
+      media_license: finalMediaLicense || undefined,
+      provider: finalProvider,
+      source: finalSource,
+      sources: finalSources,
+      short_desc: finalShortDesc || undefined,
+      latest_commit_sha: finalLatestCommitSha || undefined
     });
   } catch (err: any) {
     return Response.json(

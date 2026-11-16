@@ -14,6 +14,7 @@ import {
   readEdgeCacheJson,
   writeEdgeCacheJson,
   invalidateEdgeCacheKeys,
+  buildPackageCacheInvalidationKeys,
   normalizeGitRepoInputUrl,
   MAX_PACKAGE_RELEASES
 } from '../../../lib/upstream';
@@ -431,13 +432,20 @@ export async function onRequestGet(context: { request: Request; params: { author
             d1Pkg.updated_at = nextIso;
           }
 
-          const lowerA = encodeURIComponent(author.toLowerCase());
-          const lowerN = encodeURIComponent(name.toLowerCase());
-          await invalidateEdgeCacheKeys([
-            `https://edge-cache.luantihub.local/pkg-detail-v7/full/${lowerA}/${lowerN}`,
-            `https://edge-cache.luantihub.local/pkg-detail-v7/full-readme/${lowerA}/${lowerN}`,
-            `https://edge-cache.luantihub.local/pkg-detail-v7/lite/${lowerA}/${lowerN}`
-          ]).catch(() => {});
+          await context.env.DB.prepare(
+            `UPDATE packages
+             SET metadata_synced_at = CASE WHEN COALESCE(license_override, 0) = 0 THEN NULL ELSE metadata_synced_at END
+             WHERE id = ?`
+          ).bind(d1Pkg.id).run().catch(() => {});
+
+          await invalidateEdgeCacheKeys(
+            buildPackageCacheInvalidationKeys(author, name, {
+              includeBootCatalog: true,
+              includeGitRepoScan: true,
+              repoUrl: d1Pkg.repo_url || undefined,
+              commitSha: topMerged?.commit_sha || undefined
+            })
+          ).catch(() => {});
         } catch {
           // Non-blocking D1 sync
         }

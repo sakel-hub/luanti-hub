@@ -1,6 +1,6 @@
 import {
   fetchUpstreamJsonCached,
-  readEdgeCacheJson,
+  readEdgeCacheJsonSwr,
   writeEdgeCacheJson,
   UPDATES_EDGE_CACHE_KEY,
   computeLuantiClientReleaseId
@@ -11,7 +11,12 @@ interface Env {
   DB?: any;
 }
 
-export async function onRequestGet(context: { request: Request; env: Env }) {
+export async function onRequestGet(context: {
+  request: Request;
+  env: Env;
+  waitUntil?: (p: Promise<any>) => void;
+  _internalSwrRebuild?: boolean;
+}) {
   const { env } = context;
   const upstreamPath = '/updates/';
   const edgeCacheKey = UPDATES_EDGE_CACHE_KEY;
@@ -21,18 +26,29 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
     reqUrl?.searchParams.get('nocache') === 'true' ||
     (context.request?.headers?.get('Cache-Control') || '').toLowerCase().includes('no-cache');
 
-  const cachedUpdates = !noCache
-    ? await readEdgeCacheJson<Record<string, number>>(edgeCacheKey)
-    : null;
-  if (cachedUpdates && typeof cachedUpdates === 'object') {
-    return new Response(JSON.stringify(cachedUpdates), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
-        'X-LuantiHub-Cache': 'HIT-EDGE'
+  if (!noCache && !context._internalSwrRebuild) {
+    const swrUpdates = await readEdgeCacheJsonSwr<Record<string, number>>(
+      edgeCacheKey,
+      context.waitUntil,
+      async () => {
+        await onRequestGet({
+          request: context.request,
+          env,
+          waitUntil: context.waitUntil,
+          _internalSwrRebuild: true
+        });
       }
-    });
+    );
+    if (swrUpdates?.data && typeof swrUpdates.data === 'object') {
+      return new Response(JSON.stringify(swrUpdates.data), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=120, s-maxage=300, stale-while-revalidate=600',
+          'X-LuantiHub-Cache': swrUpdates.hitType
+        }
+      });
+    }
   }
 
   const queryD1Rows = async (): Promise<any[]> => {
@@ -153,7 +169,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
   await overlayJam2026UpdatesMap(merged, noCache, env.DB, d1Rows, officialUpstreamKeysLower).catch(() => {});
 
   if (!noCache) {
-    await writeEdgeCacheJson(edgeCacheKey, merged, 300);
+    await writeEdgeCacheJson(edgeCacheKey, merged, 180, 420);
   }
 
   return new Response(JSON.stringify(merged), {
