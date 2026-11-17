@@ -7,10 +7,16 @@ import {
   fetchRepoSizeEstimateFromUrl,
   readEdgeCacheJson,
   writeEdgeCacheJson,
+  readEdgeCacheVariant,
+  writeEdgeCacheVariant,
   resolveLocalizedPackageText,
   toLegacyLuantiClientThumbnailUrl,
   getCanonicalScreenshotKey,
   computeLuantiClientReleaseId,
+  sanitizeLuantiEngineQueryParams,
+  normalizeLuantiBaseAuthor,
+  sanitizeLuantiTechnicalName,
+  isPureGitD1Package,
   fetchGitSmartHttpRefs,
   syncDebouncedGitVersionStamp,
   invalidateEdgeCacheKeys,
@@ -162,20 +168,17 @@ export async function onRequestGet(context: {
     (context.request?.headers.get('Accept-Language') || '').split(',')[0]?.split('-')[0] ||
     'en';
   const normalizedLang = String(rawLang || 'en').trim().toLowerCase().replace(/[^a-z]/g, '').slice(0, 2) || 'en';
-  const forwardParams = new URLSearchParams();
-  for (const allowedKey of ['protocol_version', 'formspec_version', 'engine_version']) {
-    const val = reqUrl.searchParams.get(allowedKey);
-    if (val && val.length <= 32 && /^[a-zA-Z0-9._-]+$/.test(val)) {
-      forwardParams.set(allowedKey, val);
-    }
-  }
-  if (!forwardParams.has('formspec_version')) {
-    forwardParams.set('formspec_version', '8');
-  }
-  const querySuffix = forwardParams.toString() ? `?${forwardParams.toString()}` : '?formspec_version=8';
-  const formspecVersion = forwardParams.get('formspec_version') || '8';
+  const {
+    formspecVersion,
+    versionQuery,
+    forClientQuery
+  } = sanitizeLuantiEngineQueryParams(reqUrl.searchParams);
+  const querySuffix = `?${forClientQuery}`;
+  const variantKey = versionQuery || '__default';
   const edgeCacheKey = `https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${normalizedLang}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/fsv=${encodeURIComponent(formspecVersion)}`;
-  const cachedClient = !noCache ? await readEdgeCacheJson<any>(edgeCacheKey) : null;
+  const cachedClient = !noCache
+    ? await readEdgeCacheVariant<any>(edgeCacheKey, variantKey, !versionQuery)
+    : null;
   if (cachedClient) {
     if (context.env.DB) {
       await recordLuantiClientView(context.env.DB, context.request, pkgId);
@@ -197,7 +200,7 @@ export async function onRequestGet(context: {
   if (context.env.DB) {
     try {
       await ensureExtendedPackageColumns(context.env.DB);
-      const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const sanitizedName = sanitizeLuantiTechnicalName(name, name.toLowerCase());
       d1Pkg = await context.env.DB.prepare(
         `SELECT * FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
       ).bind(pkgId).first();
@@ -208,7 +211,7 @@ export async function onRequestGet(context: {
       }
 
       if (!d1Pkg) {
-        const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+        const baseAuthor = normalizeLuantiBaseAuthor(author);
         d1Pkg = await context.env.DB.prepare(
           `SELECT * FROM packages
            WHERE (LOWER(name) = LOWER(?) OR LOWER(REPLACE(name, '-', '_')) = ?)
@@ -254,13 +257,7 @@ export async function onRequestGet(context: {
     }
   }
 
-  const isPureGitPkg = Boolean(
-    d1Pkg &&
-    d1Pkg.provider &&
-    d1Pkg.provider !== 'contentdb' &&
-    !parseJsonArray(d1Pkg.tags).includes('contentdb') &&
-    !(Number(d1Pkg.contentdb_downloads || 0) > 0)
-  );
+  const isPureGitPkg = isPureGitD1Package(d1Pkg, author);
 
   const data = !isPureGitPkg
     ? await fetchUpstreamJsonCached<any>(
@@ -332,7 +329,7 @@ export async function onRequestGet(context: {
       reviews: mergedReviews,
       screenshots: normalizedScreenshots
     };
-    await writeEdgeCacheJson(edgeCacheKey, enriched, 300);
+    await writeEdgeCacheVariant(edgeCacheKey, variantKey, enriched, 300);
     return new Response(JSON.stringify(enriched), {
       headers: {
         'Content-Type': 'application/json',
@@ -463,11 +460,7 @@ export async function onRequestGet(context: {
 
     const tags = parseJsonArray(d1Pkg.tags);
     const isPureGitFallback = Boolean(
-      healedPoisonedClientRow ||
-      (d1Pkg.provider &&
-        d1Pkg.provider !== 'contentdb' &&
-        !tags.includes('contentdb') &&
-        !(Number(d1Pkg.contentdb_downloads || 0) > 0))
+      healedPoisonedClientRow || isPureGitD1Package(d1Pkg)
     );
     const recFallbackDl = reconcilePackageDownloadCounts({
       contentdbDownloads: Number(d1Pkg.contentdb_downloads) || 0,
@@ -479,7 +472,28 @@ export async function onRequestGet(context: {
     const totalDl = recFallbackDl.downloads;
     const fallbackCdbDl = recFallbackDl.contentdbDownloads;
     const fallbackLhDl = recFallbackDl.luantihubDownloads;
-    const releaseId = computeLuantiClientReleaseId(d1Pkg);
+    let releaseId = 1;
+    if (isPureGitFallback) {
+      releaseId = computeLuantiClientReleaseId(d1Pkg);
+    } else {
+      // Never synthesize 1.77B epoch timestamps for ContentDB-backed rows when upstream `/for-client/` fails.
+      const updatesFallback = await fetchUpstreamJsonCached<Record<string, number>>(
+        versionQuery ? `/updates/?${versionQuery}` : '/updates/',
+        300
+      ).catch(() => null);
+      if (updatesFallback && typeof updatesFallback === 'object') {
+        const lookupKeysLower = new Set([
+          pkgId.toLowerCase(),
+          `${d1Pkg.author_name || author}/${d1Pkg.name || name}`.toLowerCase()
+        ]);
+        for (const [uk, uv] of Object.entries(updatesFallback)) {
+          if (lookupKeysLower.has(uk.toLowerCase()) && typeof uv === 'number' && Number.isFinite(uv) && uv > 0) {
+            releaseId = Math.floor(uv);
+            break;
+          }
+        }
+      }
+    }
     const provides = parseJsonArray(d1Pkg.provides);
     const hardDeps = parseJsonArray(d1Pkg.dependencies);
     const softDeps = parseJsonArray(d1Pkg.optional_dependencies);
@@ -579,7 +593,7 @@ export async function onRequestGet(context: {
     };
 
     if (!noCache) {
-      await writeEdgeCacheJson(edgeCacheKey, clientPayload, 300);
+      await writeEdgeCacheVariant(edgeCacheKey, variantKey, clientPayload, isPureGitFallback ? 300 : 30);
     }
 
     if (

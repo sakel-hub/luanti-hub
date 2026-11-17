@@ -1,9 +1,23 @@
 import {
   fetchUpstreamJsonCached,
+  readEdgeCacheJson,
   readEdgeCacheJsonSwr,
   writeEdgeCacheJson,
+  invalidateEdgeCacheKeys,
   UPDATES_EDGE_CACHE_KEY,
-  computeLuantiClientReleaseId
+  UPDATES_D1_OVERLAY_CACHE_KEY,
+  computeLuantiClientReleaseId,
+  sanitizeLuantiEngineQueryParams,
+  normalizeLuantiBaseAuthor,
+  sanitizeLuantiTechnicalName,
+  normalizeRepoKey,
+  createUpstreamRepoLookup,
+  registerUpstreamRepoEntry,
+  matchUpstreamRepoEntry,
+  hasUpstreamRepoMatch,
+  parseJsonArray,
+  detectGitProviderFromUrl,
+  isGitProviderId
 } from './lib/upstream';
 import { overlayJam2026UpdatesMap } from './lib/jam-2026';
 
@@ -18,15 +32,17 @@ export async function onRequestGet(context: {
   _internalSwrRebuild?: boolean;
 }) {
   const { env } = context;
-  const upstreamPath = '/updates/';
   const edgeCacheKey = UPDATES_EDGE_CACHE_KEY;
   const reqUrl = context.request ? new URL(context.request.url) : null;
+  const { versionQuery } = sanitizeLuantiEngineQueryParams(reqUrl?.searchParams);
+  const hasVersionFilter = Boolean(versionQuery);
+  const upstreamPath = hasVersionFilter ? `/updates/?${versionQuery}` : '/updates/';
   const noCache =
     reqUrl?.searchParams.get('nocache') === '1' ||
     reqUrl?.searchParams.get('nocache') === 'true' ||
     (context.request?.headers?.get('Cache-Control') || '').toLowerCase().includes('no-cache');
 
-  if (!noCache && !context._internalSwrRebuild) {
+  if (!hasVersionFilter && !noCache && !context._internalSwrRebuild) {
     const swrUpdates = await readEdgeCacheJsonSwr<Record<string, number>>(
       edgeCacheKey,
       context.waitUntil,
@@ -55,7 +71,7 @@ export async function onRequestGet(context: {
     if (!env.DB) return [];
     try {
       const res = await env.DB.prepare(
-        `SELECT author_name, name, type, repo_url, updated_at, created_at, latest_commit_sha FROM packages WHERE status = 'active'`
+        `SELECT author_name, name, type, repo_url, provider, contentdb_downloads, tags, updated_at, created_at, latest_commit_sha FROM packages WHERE status = 'active'`
       ).all();
       return res?.results || [];
     } catch {
@@ -70,20 +86,20 @@ export async function onRequestGet(context: {
     }
   };
 
-  const [upstreamUpdates, d1Rows] = await Promise.all([
+  const cachedD1Overlay = !noCache
+    ? await readEdgeCacheJson<{ d1Rows: any[] }>(UPDATES_D1_OVERLAY_CACHE_KEY).catch(() => null)
+    : null;
+
+  const [upstreamUpdates, queriedD1Rows, vcsCatalog] = await Promise.all([
     fetchUpstreamJsonCached<Record<string, number>>(upstreamPath, 300).catch(() => null),
-    queryD1Rows()
+    cachedD1Overlay?.d1Rows ? Promise.resolve(cachedD1Overlay.d1Rows) : queryD1Rows(),
+    fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null)
   ]);
+  const d1Rows = Array.isArray(queriedD1Rows) ? queriedD1Rows : [];
 
   const merged: Record<string, number> = {};
   const officialUpstreamKeysLower = new Set<string>();
   const upstreamByAuthorAndName = new Map<string, { rel: number; canonicalAuthor: string; canonicalName: string }>();
-
-  const normalizeBaseAuthor = (raw: string): string =>
-    String(raw || '')
-      .trim()
-      .toLowerCase()
-      .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
 
   if (upstreamUpdates && typeof upstreamUpdates === 'object') {
     for (const [k, v] of Object.entries(upstreamUpdates)) {
@@ -96,9 +112,9 @@ export async function onRequestGet(context: {
           const canonicalAuthor = k.slice(0, slashIdx);
           const canonicalName = k.slice(slashIdx + 1);
           const authorLower = canonicalAuthor.toLowerCase();
-          const baseAuthor = normalizeBaseAuthor(authorLower);
+          const baseAuthor = normalizeLuantiBaseAuthor(authorLower);
           const pkgName = canonicalName.toLowerCase();
-          const safePkgName = pkgName.replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '') || pkgName;
+          const safePkgName = sanitizeLuantiTechnicalName(pkgName, pkgName);
           officialUpstreamKeysLower.add(`${authorLower}/${safePkgName}`);
           const entry = { rel: v, canonicalAuthor, canonicalName };
           upstreamByAuthorAndName.set(`${authorLower}/${pkgName}`, entry);
@@ -116,31 +132,72 @@ export async function onRequestGet(context: {
     }
   }
 
+  type RepoOfficialEntry = { rel: number; canonicalAuthor: string; canonicalName: string };
+  type VcsCatalogEntry = { canonicalAuthor: string; canonicalName: string; vcsRel: number };
+  const upstreamVcsById = new Set<string>();
+  const upstreamVcsRelById = new Map<string, RepoOfficialEntry>();
+  const vcsRepoLookup = createUpstreamRepoLookup<VcsCatalogEntry>();
+  const officialUpstreamRepoLookup = createUpstreamRepoLookup<RepoOfficialEntry>();
+
+  if (Array.isArray(vcsCatalog)) {
+    for (const item of vcsCatalog) {
+      if (!item?.author || !item?.name) continue;
+      const canonicalAuthor = String(item.author);
+      const canonicalName = String(item.name);
+      const authorLower = canonicalAuthor.toLowerCase();
+      const nameLower = canonicalName.toLowerCase();
+      const safeItemName = sanitizeLuantiTechnicalName(nameLower, nameLower);
+      const vcsRel = typeof item.release === 'number' && item.release > 0 ? Math.floor(item.release) : 0;
+      const lowerPair = `${authorLower}/${nameLower}`;
+      const safePair = `${authorLower}/${safeItemName}`;
+      upstreamVcsById.add(lowerPair);
+      upstreamVcsById.add(safePair);
+      if (vcsRel > 0) {
+        const vcsEntry = { rel: vcsRel, canonicalAuthor, canonicalName };
+        upstreamVcsRelById.set(lowerPair, vcsEntry);
+        upstreamVcsRelById.set(safePair, vcsEntry);
+      }
+      const repoCandidate = item.repo || item.repo_url;
+      registerUpstreamRepoEntry(vcsRepoLookup, repoCandidate, canonicalName, {
+        canonicalAuthor,
+        canonicalName,
+        vcsRel
+      });
+      const upEntry = upstreamByAuthorAndName.get(lowerPair) || upstreamByAuthorAndName.get(safePair);
+      const repoOfficialEntry: RepoOfficialEntry =
+        upEntry || {
+          rel: !upstreamUpdates && !hasVersionFilter && vcsRel > 0 ? vcsRel : 0,
+          canonicalAuthor,
+          canonicalName
+        };
+      registerUpstreamRepoEntry(officialUpstreamRepoLookup, repoCandidate, canonicalName, repoOfficialEntry);
+    }
+  }
+
   for (const row of d1Rows) {
     if (!row?.author_name || !row?.name) continue;
     const authorLower = String(row.author_name).toLowerCase();
-    const baseAuthor = normalizeBaseAuthor(authorLower);
+    const baseAuthor = normalizeLuantiBaseAuthor(authorLower);
     const rawNameLower = String(row.name).toLowerCase();
-    const safeName = rawNameLower
-      .replace(/[^a-z0-9_]/g, '_')
-      .replace(/^_+|_+$/g, '') || 'mod';
+    const safeName = sanitizeLuantiTechnicalName(rawNameLower);
+    const rowRepoKey = normalizeRepoKey(row.repo_url);
 
-    // Match upstream ContentDB package strictly by same author or normalized base-author + technical name
-    // (never across unrelated authors who happen to share a technical mod name) so release IDs match /api/packages/
+    // Match upstream ContentDB package by same author, normalized base-author, or monorepo-safe repository URL
+    // so release IDs match /api/packages/ and ContentDB packages never emit epoch timestamps.
     const matchedUpstream =
       upstreamByAuthorAndName.get(`${authorLower}/${rawNameLower}`) ||
       upstreamByAuthorAndName.get(`${authorLower}/${safeName}`) ||
       (baseAuthor && baseAuthor !== authorLower
         ? upstreamByAuthorAndName.get(`${baseAuthor}/${rawNameLower}`) ||
           upstreamByAuthorAndName.get(`${baseAuthor}/${safeName}`)
+        : undefined) ||
+      (rowRepoKey ? matchUpstreamRepoEntry(officialUpstreamRepoLookup, rowRepoKey, row.name, true) : undefined) ||
+      (!upstreamUpdates && !hasVersionFilter
+        ? upstreamVcsRelById.get(`${authorLower}/${rawNameLower}`) ||
+          upstreamVcsRelById.get(`${authorLower}/${safeName}`)
         : undefined);
 
-    const releaseId = computeLuantiClientReleaseId(
-      { updated_at: row.updated_at, created_at: row.created_at },
-      Number(matchedUpstream?.rel) > 0 ? Number(matchedUpstream!.rel) : undefined
-    );
-
-    const keysToSet = [
+    const candidateKeys = [
       `${row.author_name}/${safeName}`,
       `${row.author_name}/${row.name}`,
       `${authorLower}/${safeName}`,
@@ -156,7 +213,52 @@ export async function onRequestGet(context: {
         : [])
     ];
 
-    for (const key of keysToSet) {
+    if (matchedUpstream && matchedUpstream.rel === 0) {
+      for (const key of candidateKeys) {
+        officialUpstreamKeysLower.add(key.toLowerCase());
+      }
+      continue;
+    }
+
+    if (!matchedUpstream) {
+      const rowTags = parseJsonArray(row.tags);
+      const rawProv = String(row.provider || '').toLowerCase();
+      const detectedGitProv = row.repo_url ? detectGitProviderFromUrl(row.repo_url)?.provider : undefined;
+      const inVcsCatalog =
+        upstreamVcsById.has(`${authorLower}/${rawNameLower}`) ||
+        upstreamVcsById.has(`${authorLower}/${safeName}`) ||
+        Boolean(
+          baseAuthor &&
+          (upstreamVcsById.has(`${baseAuthor}/${rawNameLower}`) ||
+            upstreamVcsById.has(`${baseAuthor}/${safeName}`))
+        ) ||
+        Boolean(rowRepoKey && hasUpstreamRepoMatch(vcsRepoLookup, rowRepoKey, row.name, true));
+      const isUnhealedPureGitRow =
+        Array.isArray(vcsCatalog) &&
+        vcsCatalog.length > 0 &&
+        !inVcsCatalog &&
+        !(Number(row.contentdb_downloads || 0) > 0) &&
+        isGitProviderId(detectedGitProv);
+      const isOfficialCdbRow =
+        inVcsCatalog ||
+        (!isUnhealedPureGitRow &&
+          (rawProv === 'contentdb' ||
+            Number(row.contentdb_downloads || 0) > 0 ||
+            rowTags.some((t: string) => String(t).toLowerCase() === 'contentdb')));
+      if (isOfficialCdbRow) {
+        for (const key of candidateKeys) {
+          officialUpstreamKeysLower.add(key.toLowerCase());
+        }
+        continue;
+      }
+    }
+
+    const releaseId = computeLuantiClientReleaseId(
+      { updated_at: row.updated_at, created_at: row.created_at },
+      Number(matchedUpstream?.rel) > 0 ? Number(matchedUpstream!.rel) : undefined
+    );
+
+    for (const key of candidateKeys) {
       if (Number(matchedUpstream?.rel) > 0) {
         officialUpstreamKeysLower.add(key.toLowerCase());
       }
@@ -166,10 +268,27 @@ export async function onRequestGet(context: {
     }
   }
 
-  await overlayJam2026UpdatesMap(merged, noCache, env.DB, d1Rows, officialUpstreamKeysLower).catch(() => {});
+  const jamDidSyncD1 = await overlayJam2026UpdatesMap(
+    merged,
+    noCache,
+    env.DB,
+    d1Rows,
+    officialUpstreamKeysLower,
+    officialUpstreamRepoLookup
+  ).catch(() => false);
 
-  if (!noCache) {
-    await writeEdgeCacheJson(edgeCacheKey, merged, 180, 420);
+  if (jamDidSyncD1) {
+    await invalidateEdgeCacheKeys([UPDATES_D1_OVERLAY_CACHE_KEY]).catch(() => {});
+  } else if (!noCache && !cachedD1Overlay?.d1Rows && env.DB) {
+    await writeEdgeCacheJson(UPDATES_D1_OVERLAY_CACHE_KEY, { d1Rows }, 180).catch(() => {});
+  }
+
+  if (!noCache && !hasVersionFilter) {
+    if (upstreamUpdates && typeof upstreamUpdates === 'object') {
+      await writeEdgeCacheJson(edgeCacheKey, merged, 180, 420);
+    } else {
+      await writeEdgeCacheJson(edgeCacheKey, merged, 15, 0);
+    }
   }
 
   return new Response(JSON.stringify(merged), {

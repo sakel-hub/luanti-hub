@@ -20,7 +20,10 @@ import {
   buildAuthorStatsEdgeCacheKey,
   readResponseBytesBounded,
   fetchGitSmartHttpRefs,
-  syncDebouncedGitVersionStamp
+  syncDebouncedGitVersionStamp,
+  normalizeLuantiBaseAuthor,
+  sanitizeLuantiTechnicalName,
+  isPureGitD1Package
 } from '../../../lib/upstream';
 import { findJam2026BrewBySlug } from '../../../lib/jam-2026';
 import { parseCookies, verifySessionToken } from '../../../auth/lib/session';
@@ -138,7 +141,7 @@ export async function onRequest(context: {
   // 1. Instant Kill Switch Check & Package Metadata Lookup in Cloudflare D1
   if (env.DB) {
     try {
-      const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      const sanitizedName = sanitizeLuantiTechnicalName(name, name.toLowerCase());
       pkgRecord = await env.DB.prepare(
         `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size, tags, contentdb_downloads, latest_commit_sha, updated_at
          FROM packages
@@ -156,7 +159,7 @@ export async function onRequest(context: {
       }
 
       if (!pkgRecord) {
-        const baseAuthor = (author || '').replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+        const baseAuthor = normalizeLuantiBaseAuthor(author);
         pkgRecord = await env.DB.prepare(
           `SELECT id, author_name, name, type, status, status_reason, repo_url, provider, default_branch, min_minetest_version, download_size, file_size, tags, contentdb_downloads, latest_commit_sha, updated_at
            FROM packages
@@ -356,8 +359,13 @@ export async function onRequest(context: {
   const queryRelease = (reqUrl.searchParams.get('release') || '').trim();
   const rawReason = (reqUrl.searchParams.get('reason') || '').trim().toLowerCase();
 
-  const encAuthor = encodeURIComponent(effectiveAuthor);
-  const encName = encodeURIComponent(effectiveName);
+  const isCrossAuthorD1Match = Boolean(
+    pkgRecord?.author_name && String(pkgRecord.author_name).toLowerCase() !== author.toLowerCase()
+  );
+  const cdbAuthor = isCrossAuthorD1Match ? author : effectiveAuthor;
+  const cdbName = isCrossAuthorD1Match ? name : effectiveName;
+  const cdbEncAuthor = encodeURIComponent(cdbAuthor);
+  const cdbEncName = encodeURIComponent(cdbName);
   let resolvedReleaseId =
     (release && /^\d+$/.test(String(release)) ? String(release) : '') ||
     (/^\d+$/.test(queryRelease) ? queryRelease : '');
@@ -366,12 +374,7 @@ export async function onRequest(context: {
     Number(resolvedReleaseId) >= 2 &&
     Number(resolvedReleaseId) < 1_000_000_000
   );
-  const isPureGitPkg = Boolean(
-    pkgRecord &&
-    pkgRecord.provider &&
-    pkgRecord.provider !== 'contentdb' &&
-    !hasExplicitContentDbReleaseId
-  );
+  const isPureGitPkg = !hasExplicitContentDbReleaseId && isPureGitD1Package(pkgRecord, author);
   const hasJamTag = String(pkgRecord?.tags || '').toLowerCase().includes('jam_game_2026');
   const earlyJamBrew =
     !pkgRecord || isPureGitPkg || hasJamTag
@@ -441,13 +444,13 @@ export async function onRequest(context: {
   const skipUpstreamContentDbFetch = isPureGitPkg || isPureGitJamOnly;
   const [upstreamReleases, upstreamPkg, forClient] = await Promise.all([
     !skipUpstreamContentDbFetch
-      ? fetchUpstreamJsonCached<any[]>(`/packages/${encAuthor}/${encName}/releases/`, releaseMetadataTtl).catch(() => null)
+      ? fetchUpstreamJsonCached<any[]>(`/packages/${cdbEncAuthor}/${cdbEncName}/releases/`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null),
     (!effectiveRepoUrl && !skipUpstreamContentDbFetch)
-      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/`, 600).catch(() => null)
+      ? fetchUpstreamJsonCached<any>(`/packages/${cdbEncAuthor}/${cdbEncName}/`, 600).catch(() => null)
       : Promise.resolve(null),
     (!resolvedReleaseId || !effectiveRepoUrl) && !skipUpstreamContentDbFetch
-      ? fetchUpstreamJsonCached<any>(`/packages/${encAuthor}/${encName}/for-client/?formspec_version=8`, releaseMetadataTtl).catch(() => null)
+      ? fetchUpstreamJsonCached<any>(`/packages/${cdbEncAuthor}/${cdbEncName}/for-client/?formspec_version=8`, releaseMetadataTtl).catch(() => null)
       : Promise.resolve(null)
   ]);
 
@@ -514,8 +517,8 @@ export async function onRequest(context: {
   if (!effectiveRepoUrl && !skipUpstreamContentDbFetch) {
     const bulkCatalog = await fetchUpstreamJsonCached<any[]>('/packages/?fmt=vcs', 1800).catch(() => null);
     if (Array.isArray(bulkCatalog)) {
-      const lowerA = effectiveAuthor.toLowerCase();
-      const lowerN = effectiveName.toLowerCase();
+      const lowerA = cdbAuthor.toLowerCase();
+      const lowerN = cdbName.toLowerCase();
       const found = bulkCatalog.find(
         (item: any) =>
           item &&
@@ -624,8 +627,8 @@ export async function onRequest(context: {
   }
 
   const downloadPath = resolvedReleaseId
-    ? `/packages/${encAuthor}/${encName}/releases/${encodeURIComponent(resolvedReleaseId)}/download/`
-    : `/packages/${encAuthor}/${encName}/download/`;
+    ? `/packages/${cdbEncAuthor}/${cdbEncName}/releases/${encodeURIComponent(resolvedReleaseId)}/download/`
+    : `/packages/${cdbEncAuthor}/${cdbEncName}/download/`;
   const primaryContentDbDownloadUrl = `https://content.luanti.org${downloadPath}`;
 
   // Build prioritized candidate .zip URLs (Git-hosted archives FIRST, ContentDB as fallback)
@@ -673,6 +676,18 @@ export async function onRequest(context: {
     !hasOfficialUpstreamRelease &&
     (isPureGitPkg || !pkgRecord)
   );
+  const isJamSlugFallbackOnly = Boolean(
+    matchedJamBrewFallback && !upstreamPkg && !forClient && !upstreamReleaseUrl
+  );
+  const hasContentDbMirror =
+    (!pkgRecord && !isJamSlugFallbackOnly) ||
+    pkgRecord?.provider === 'contentdb' ||
+    Number(pkgRecord?.contentdb_downloads) > 0 ||
+    String(pkgRecord?.tags || '').includes('"contentdb"') ||
+    Boolean(upstreamReleaseUrl) ||
+    Boolean(upstreamPkg && !Array.isArray(upstreamPkg) && upstreamPkg.name) ||
+    Boolean(forClient && !Array.isArray(forClient) && forClient.name);
+
   if (!requestedTag) {
     if (isAuthoritativeJamArchive && matchedJamBrew?.download_zip_url) {
       addCandidate(matchedJamBrew.download_zip_url);
@@ -680,8 +695,13 @@ export async function onRequest(context: {
     if (liveUpdateArchiveUrl) {
       addCandidate(liveUpdateArchiveUrl);
     }
-    if (hasExplicitContentDbReleaseId && upstreamCommitSha && effectiveRepoUrl) {
-      addCandidate(buildCommitArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, upstreamCommitSha));
+    if (hasExplicitContentDbReleaseId) {
+      if (upstreamCommitSha && effectiveRepoUrl) {
+        addCandidate(buildCommitArchiveUrl(effectiveRepoUrl, effectiveAuthor, effectiveName, upstreamCommitSha));
+      } else if (!upstreamCommitSha && hasContentDbMirror) {
+        addCandidate(upstreamReleaseUrl);
+        addCandidate(primaryContentDbDownloadUrl);
+      }
     }
   }
 
@@ -738,24 +758,12 @@ export async function onRequest(context: {
   }
 
   // Fallback to ContentDB release/package download URLs when package exists on ContentDB
-  const isJamSlugFallbackOnly = Boolean(
-    matchedJamBrewFallback && !upstreamPkg && !forClient && !upstreamReleaseUrl
-  );
-  const hasContentDbMirror =
-    (!pkgRecord && !isJamSlugFallbackOnly) ||
-    pkgRecord?.provider === 'contentdb' ||
-    Number(pkgRecord?.contentdb_downloads) > 0 ||
-    String(pkgRecord?.tags || '').includes('"contentdb"') ||
-    Boolean(upstreamReleaseUrl);
   if (hasContentDbMirror) {
     addCandidate(upstreamReleaseUrl);
     addCandidate(primaryContentDbDownloadUrl);
   }
 
-  const safeFileName = (effectiveName || 'mod')
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/^_+|_+$/g, '') || 'mod';
+  const safeFileName = sanitizeLuantiTechnicalName(effectiveName, 'mod');
 
   const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB threshold for in-memory ZIP normalization
   let zipSafetyError: string | null = null;

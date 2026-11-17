@@ -2,8 +2,13 @@ import {
   fetchUpstreamJsonCached,
   safeDecodeParam,
   parseJsonArray,
-  readEdgeCacheJson,
-  writeEdgeCacheJson
+  readEdgeCacheVariant,
+  writeEdgeCacheVariant,
+  PKG_DEPS_CACHE_PREFIX,
+  sanitizeLuantiEngineQueryParams,
+  normalizeLuantiBaseAuthor,
+  sanitizeLuantiTechnicalName,
+  isPureGitD1Package
 } from '../../../lib/upstream';
 import { resolveJam2026SyntheticD1Detail } from '../../../lib/jam-2026';
 
@@ -37,11 +42,20 @@ export async function onRequestGet(context: {
   } else {
     forwardParams.delete('only_hard');
   }
+  const noCache =
+    forwardParams.get('nocache') === '1' ||
+    forwardParams.get('nocache') === 'true' ||
+    (context.request?.headers?.get('Cache-Control') || '').toLowerCase().includes('no-cache');
+  forwardParams.delete('nocache');
   const queryStr = forwardParams.toString();
   const querySuffix = queryStr ? `?${queryStr}` : '';
+  const { versionQuery } = sanitizeLuantiEngineQueryParams(reqUrl.searchParams);
+  const variantKey = versionQuery || '__default';
 
-  const edgeCacheKey = `https://cache.luantihub.internal/__pkg_deps_v2/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${onlyHard ? 'hard' : 'all'}`;
-  const cachedDeps = await readEdgeCacheJson<any>(edgeCacheKey);
+  const edgeCacheKey = `https://cache.luantihub.internal${PKG_DEPS_CACHE_PREFIX}/${encAuthor.toLowerCase()}/${encName.toLowerCase()}/${onlyHard ? 'hard' : 'all'}`;
+  const cachedDeps = !noCache
+    ? await readEdgeCacheVariant<any>(edgeCacheKey, variantKey, !versionQuery)
+    : null;
   if (cachedDeps) {
     return new Response(JSON.stringify(cachedDeps), {
       headers: {
@@ -56,9 +70,9 @@ export async function onRequestGet(context: {
   let d1Pkg: any = null;
   if (context.env?.DB) {
     try {
-      const sanitizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-      const baseAuthor = author.toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      const depCols = `id, author_name, name, provider, tags, dependencies, optional_dependencies, provides`;
+      const sanitizedName = sanitizeLuantiTechnicalName(name, name.toLowerCase());
+      const baseAuthor = normalizeLuantiBaseAuthor(author);
+      const depCols = `id, author_name, name, repo_url, provider, contentdb_downloads, tags, dependencies, optional_dependencies, provides`;
       d1Pkg = await context.env.DB.prepare(
         `SELECT ${depCols} FROM packages WHERE LOWER(id) = LOWER(?) LIMIT 1`
       ).bind(pkgId).first().catch(() =>
@@ -90,12 +104,7 @@ export async function onRequestGet(context: {
     ({ d1Pkg } = await resolveJam2026SyntheticD1Detail(author, name, d1Pkg, []));
   }
 
-  const isPureGitPkg = Boolean(
-    d1Pkg &&
-    d1Pkg.provider &&
-    d1Pkg.provider !== 'contentdb' &&
-    !parseJsonArray(d1Pkg.tags).includes('contentdb')
-  );
+  const isPureGitPkg = isPureGitD1Package(d1Pkg, author);
 
   const data = !isPureGitPkg
     ? await fetchUpstreamJsonCached<any>(
@@ -105,7 +114,9 @@ export async function onRequestGet(context: {
     : null;
 
   if (data) {
-    await writeEdgeCacheJson(edgeCacheKey, data, 600);
+    if (!noCache) {
+      await writeEdgeCacheVariant(edgeCacheKey, variantKey, data, 600);
+    }
     return new Response(JSON.stringify(data), {
       headers: {
         'Content-Type': 'application/json',
@@ -124,7 +135,9 @@ export async function onRequestGet(context: {
 
       if (hardDeps.length === 0 && softDeps.length === 0) {
         const emptyMap = { [canonicalId]: [], [pkgId]: [] };
-        await writeEdgeCacheJson(edgeCacheKey, emptyMap, 600);
+        if (!noCache) {
+          await writeEdgeCacheVariant(edgeCacheKey, variantKey, emptyMap, 600);
+        }
         return new Response(JSON.stringify(emptyMap), {
           headers: {
             'Content-Type': 'application/json',
@@ -218,7 +231,9 @@ export async function onRequestGet(context: {
         }
       }
 
-      await writeEdgeCacheJson(edgeCacheKey, responseMap, 600);
+      if (!noCache) {
+        await writeEdgeCacheVariant(edgeCacheKey, variantKey, responseMap, 600);
+      }
       return new Response(
         JSON.stringify(responseMap),
         {

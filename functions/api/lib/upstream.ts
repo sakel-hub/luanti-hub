@@ -61,13 +61,21 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
     const mirrorPath = /^\/packages\/[^/?#]+\/[^/?#]+\/?$/.test(path)
       ? `${path.replace(/\/+$/, '')}/for-client/?formspec_version=8`
       : path;
-    return fetch(`${MIRROR_UPSTREAM}${mirrorPath}`, {
+    const mirrorRes = await fetch(`${MIRROR_UPSTREAM}${mirrorPath}`, {
       ...options,
       headers: {
         ...defaultHeaders,
         ...(options.headers || {})
       }
     });
+    const mirrorCt = (mirrorRes.headers?.get('content-type') || '').toLowerCase();
+    if (mirrorCt.includes('text/html')) {
+      return new Response('Mirror HTML fallback rejected', {
+        status: 502,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+    return mirrorRes;
   }
 }
 
@@ -354,10 +362,28 @@ export async function fetchUpstreamJsonCached<T = any>(
     }
   }
 
+  const isUpdatesPath =
+    (path === '/updates/' || path.startsWith('/updates/?')) && (!cleanLang || cleanLang === 'en');
   const fallbackCacheKeyUrl =
     path === '/packages/?fmt=vcs' && (!cleanLang || cleanLang === 'en')
       ? 'https://cache.luantihub.internal/__upstream_fallback_packages_vcs_v1'
+      : isUpdatesPath
+        ? `https://cache.luantihub.internal/__upstream_fallback_updates_v1_${encodeURIComponent(path)}`
+        : null;
+  const unversionedUpdatesFallbackKeyUrl =
+    isUpdatesPath && path !== '/updates/'
+      ? `https://cache.luantihub.internal/__upstream_fallback_updates_v1_${encodeURIComponent('/updates/')}`
       : null;
+
+  const readFallbackCache = async (): Promise<T | null> => {
+    if (!fallbackCacheKeyUrl) return null;
+    const exact = await readEdgeCacheJson<T>(fallbackCacheKeyUrl);
+    if (exact !== null) return exact;
+    if (unversionedUpdatesFallbackKeyUrl) {
+      return await readEdgeCacheJson<T>(unversionedUpdatesFallbackKeyUrl);
+    }
+    return null;
+  };
 
   try {
     const fetchOpts: RequestInit =
@@ -366,10 +392,7 @@ export async function fetchUpstreamJsonCached<T = any>(
         : {};
     const res = await fetchWithFailover(path, fetchOpts);
     if (!res.ok) {
-      if (fallbackCacheKeyUrl) {
-        return await readEdgeCacheJson<T>(fallbackCacheKeyUrl);
-      }
-      return null;
+      return await readFallbackCache();
     }
     const data = await res.json() as T;
 
@@ -407,10 +430,7 @@ export async function fetchUpstreamJsonCached<T = any>(
 
     return data;
   } catch {
-    if (fallbackCacheKeyUrl) {
-      return await readEdgeCacheJson<T>(fallbackCacheKeyUrl);
-    }
-    return null;
+    return await readFallbackCache();
   }
 }
 
@@ -564,6 +584,7 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
   const expandedUrls = new Set<string>([
     buildEdgeCacheRequestUrl(BOOT_CATALOG_EDGE_CACHE_KEY),
     UPDATES_EDGE_CACHE_KEY,
+    UPDATES_D1_OVERLAY_CACHE_KEY,
     'https://cache.luantihub.internal/__api_boot_recently_added_v2',
     'https://cache.luantihub.internal/__recent_reviews_v1',
     'https://cache.luantihub.internal/__d1_recent_reviews_v1',
@@ -610,8 +631,8 @@ export async function invalidateEdgeCacheKeys(cacheKeyPaths: string[]): Promise<
         expandedUrls.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${loc}/${a}/${n}/fsv=8`);
       }
       expandedUrls.add(`https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/latest`);
-      expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/hard`);
-      expandedUrls.add(`https://cache.luantihub.internal/__pkg_deps_v2/${a}/${n}/all`);
+      expandedUrls.add(`https://cache.luantihub.internal${PKG_DEPS_CACHE_PREFIX}/${a}/${n}/hard`);
+      expandedUrls.add(`https://cache.luantihub.internal${PKG_DEPS_CACHE_PREFIX}/${a}/${n}/all`);
       const zipPrefix = `https://cache.luantihub.internal/__pkg_zip_v4/${a}/${n}/`;
       for (const zk of Array.from(sharedIsolateZipCache.keys())) {
         if (zk.startsWith(zipPrefix)) {
@@ -5868,9 +5889,11 @@ export async function fetchRepoReadmeCached(repoUrl?: string): Promise<string | 
  * Centralizes key construction and mutation invalidation so version bumps never leave stale cache entries.
  */
 export const BOOT_CATALOG_EDGE_CACHE_KEY = '/__api_boot_catalog_bundle_v26';
-export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v15_';
-export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v7';
-export const UPDATES_EDGE_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v4';
+export const IN_GAME_CATALOG_CACHE_PREFIX = '/__catalog_edge_v17_';
+export const FOR_CLIENT_CACHE_PREFIX = '/__for_client_v8';
+export const PKG_DEPS_CACHE_PREFIX = '/__pkg_deps_v3';
+export const UPDATES_EDGE_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v6';
+export const UPDATES_D1_OVERLAY_CACHE_KEY = 'https://cache.luantihub.internal/__api_updates_v6_d1_overlay';
 export const PACKAGE_DETAIL_CACHE_VERSION = 'pkg-detail-v24';
 export const AUTHOR_PROFILE_CACHE_PREFIX = '/__api_author_profile_v2';
 export const PACKAGE_REVIEWS_CACHE_PREFIX = '/__pkg_reviews_v2';
@@ -5880,6 +5903,212 @@ export function clearIsolateCachesForTests(): void {
   isolateInFlightSwr.clear();
   d1BackfillCooldowns.clear();
   sharedIsolateZipCache.clear();
+}
+
+/**
+ * Strips known hub/mirror author suffixes (`-hub`, `_git`, etc.) for cross-source matching.
+ */
+export function normalizeLuantiBaseAuthor(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
+}
+
+/**
+ * Normalizes a Luanti technical package name to lowercase `[a-z0-9_]` characters.
+ */
+export function sanitizeLuantiTechnicalName(raw: unknown, fallback = 'mod'): string {
+  return (
+    String(raw || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .replace(/^_+|_+$/g, '') || fallback
+  );
+}
+
+/**
+ * Returns `true` only when a D1 row represents an authoritative pure-Git package owned by `requestedAuthor`
+ * (when provided), never for `-hub` / ContentDB-linked rows that could shadow an official ContentDB package.
+ */
+export function isPureGitD1Package(d1Pkg: any, requestedAuthor?: string): boolean {
+  if (!d1Pkg || !d1Pkg.provider || String(d1Pkg.provider).toLowerCase() === 'contentdb') {
+    return false;
+  }
+  if (
+    requestedAuthor !== undefined &&
+    String(d1Pkg.author_name || '').trim().toLowerCase() !== String(requestedAuthor || '').trim().toLowerCase()
+  ) {
+    return false;
+  }
+  if (Number(d1Pkg.contentdb_downloads || 0) > 0) {
+    return false;
+  }
+  return !parseJsonArray(d1Pkg.tags).some((t: string) => String(t).toLowerCase() === 'contentdb');
+}
+
+/**
+ * Sanitizes Luanti engine compatibility query parameters (`protocol_version`, `engine_version`, `formspec_version`)
+ * before forwarding to ContentDB `/api/updates/`, `/api/packages/`, and `/for-client/` endpoints.
+ */
+export function sanitizeLuantiEngineQueryParams(searchParams?: URLSearchParams | null): {
+  protocolVersion: string;
+  engineVersion: string;
+  formspecVersion: string;
+  versionQuery: string;
+  forClientQuery: string;
+} {
+  const rawProto = (searchParams?.get('protocol_version') || '').trim();
+  const rawEngine = (searchParams?.get('engine_version') || '').trim();
+  const rawFormspec = (searchParams?.get('formspec_version') || '').trim();
+  const protocolVersion = /^\d{1,5}$/.test(rawProto) ? rawProto : '';
+  const engineVersion = /^[a-zA-Z0-9._+-]{1,32}$/.test(rawEngine) ? rawEngine : '';
+  const formspecVersion = /^\d{1,3}$/.test(rawFormspec) ? rawFormspec : '8';
+  const versionParams = new URLSearchParams();
+  const clientParams = new URLSearchParams();
+  if (protocolVersion) {
+    versionParams.set('protocol_version', protocolVersion);
+    clientParams.set('protocol_version', protocolVersion);
+  }
+  clientParams.set('formspec_version', formspecVersion);
+  if (engineVersion) {
+    versionParams.set('engine_version', engineVersion);
+    clientParams.set('engine_version', engineVersion);
+  }
+  return {
+    protocolVersion,
+    engineVersion,
+    formspecVersion,
+    versionQuery: versionParams.toString(),
+    forClientQuery: clientParams.toString()
+  };
+}
+
+/**
+ * Monorepo-safe upstream repository index: matches multi-package repositories by `(repoKey, pkgName)`
+ * and restricts single-package repo-key fallback strictly to repositories with one registered package.
+ */
+export interface UpstreamRepoLookup<T> {
+  byRepoAndName: Map<string, T>;
+  bySingleRepo: Map<string, T | null>;
+  allRepoKeys: Set<string>;
+}
+
+export function createUpstreamRepoLookup<T>(): UpstreamRepoLookup<T> {
+  return {
+    byRepoAndName: new Map<string, T>(),
+    bySingleRepo: new Map<string, T | null>(),
+    allRepoKeys: new Set<string>()
+  };
+}
+
+export function registerUpstreamRepoEntry<T>(
+  lookup: UpstreamRepoLookup<T>,
+  repoUrl: unknown,
+  pkgName: unknown,
+  entry: T
+): void {
+  const repoKey = normalizeRepoKey(typeof repoUrl === 'string' ? repoUrl : '');
+  if (!repoKey) return;
+  lookup.allRepoKeys.add(repoKey);
+  const rawLower = String(pkgName || '').trim().toLowerCase();
+  if (rawLower) {
+    const compositeRaw = `${repoKey}::${rawLower}`;
+    if (!lookup.byRepoAndName.has(compositeRaw)) {
+      lookup.byRepoAndName.set(compositeRaw, entry);
+    }
+    const safeName = sanitizeLuantiTechnicalName(rawLower, rawLower);
+    const compositeSafe = `${repoKey}::${safeName}`;
+    if (!lookup.byRepoAndName.has(compositeSafe)) {
+      lookup.byRepoAndName.set(compositeSafe, entry);
+    }
+  }
+  if (!lookup.bySingleRepo.has(repoKey)) {
+    lookup.bySingleRepo.set(repoKey, entry);
+  } else {
+    // Disallow repo-only fallback once multiple ContentDB packages share a monorepo URL.
+    lookup.bySingleRepo.set(repoKey, null);
+  }
+}
+
+export function matchUpstreamRepoEntry<T>(
+  lookup: UpstreamRepoLookup<T> | undefined,
+  repoUrlOrKey: unknown,
+  pkgName?: unknown,
+  alreadyNormalizedKey = false
+): T | undefined {
+  if (!lookup || typeof repoUrlOrKey !== 'string' || !repoUrlOrKey) return undefined;
+  const repoKey = alreadyNormalizedKey ? repoUrlOrKey : normalizeRepoKey(repoUrlOrKey);
+  if (!repoKey || !lookup.allRepoKeys.has(repoKey)) return undefined;
+  const rawLower = String(pkgName || '').trim().toLowerCase();
+  if (rawLower) {
+    const byRaw = lookup.byRepoAndName.get(`${repoKey}::${rawLower}`);
+    if (byRaw !== undefined) return byRaw;
+    const safeName = sanitizeLuantiTechnicalName(rawLower, rawLower);
+    const bySafe = lookup.byRepoAndName.get(`${repoKey}::${safeName}`);
+    if (bySafe !== undefined) return bySafe;
+  }
+  const single = lookup.bySingleRepo.get(repoKey);
+  return single ?? undefined;
+}
+
+export function hasUpstreamRepoMatch<T>(
+  lookup: UpstreamRepoLookup<T> | undefined,
+  repoUrlOrKey: unknown,
+  pkgName?: unknown,
+  alreadyNormalizedKey = false
+): boolean {
+  return Boolean(matchUpstreamRepoEntry(lookup, repoUrlOrKey, pkgName, alreadyNormalizedKey));
+}
+
+/**
+ * Reads an engine/protocol variant stored inside a single deterministic Edge Cache envelope key
+ * so mutation invalidation clears all client engine variants in one delete call.
+ */
+export async function readEdgeCacheVariant<T>(
+  baseCacheKey: string,
+  variantKey: string,
+  legacyFallbackMatch = false
+): Promise<T | null> {
+  const envelope = await readEdgeCacheJson<any>(baseCacheKey);
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+    return legacyFallbackMatch && envelope ? (envelope as T) : null;
+  }
+  if (envelope.__lhVariants && typeof envelope.__lhVariants === 'object') {
+    const hit = envelope.__lhVariants[variantKey];
+    return hit !== undefined ? (hit as T) : null;
+  }
+  return legacyFallbackMatch ? (envelope as T) : null;
+}
+
+/**
+ * Writes an engine/protocol variant into a single deterministic Edge Cache envelope key,
+ * bounding total stored variants to prevent unbounded JSON growth.
+ */
+export async function writeEdgeCacheVariant<T>(
+  baseCacheKey: string,
+  variantKey: string,
+  value: T,
+  ttlSeconds = 300,
+  maxVariants = 12
+): Promise<void> {
+  const existing = await readEdgeCacheJson<any>(baseCacheKey).catch(() => null);
+  const nextVariants: Record<string, any> =
+    existing && typeof existing === 'object' && !Array.isArray(existing) && existing.__lhVariants && typeof existing.__lhVariants === 'object'
+      ? { ...existing.__lhVariants }
+      : {};
+  if (!(variantKey in nextVariants)) {
+    const keys = Object.keys(nextVariants);
+    while (keys.length >= maxVariants) {
+      const oldestKey = keys.shift();
+      if (oldestKey) {
+        delete nextVariants[oldestKey];
+      }
+    }
+  }
+  nextVariants[variantKey] = value;
+  await writeEdgeCacheJson(baseCacheKey, { __lhVariants: nextVariants }, ttlSeconds);
 }
 
 /**
@@ -6019,6 +6248,8 @@ export function buildPackageCacheInvalidationKeys(
   for (const lang of ['en', 'sk', 'de', 'fr', 'es', 'ru']) {
     keys.add(`https://cache.luantihub.internal${FOR_CLIENT_CACHE_PREFIX}/${lang}/${encA}/${encN}/fsv=8`);
   }
+  keys.add(`https://cache.luantihub.internal${PKG_DEPS_CACHE_PREFIX}/${encA}/${encN}/hard`);
+  keys.add(`https://cache.luantihub.internal${PKG_DEPS_CACHE_PREFIX}/${encA}/${encN}/all`);
 
   for (const d of [7, 30, 90, 365]) {
     keys.add(buildPackageStatsEdgeCacheKey(lowerA, lowerN, d));
@@ -6028,6 +6259,7 @@ export function buildPackageCacheInvalidationKeys(
     keys.add(BOOT_CATALOG_EDGE_CACHE_KEY);
     keys.add(`https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`);
     keys.add(UPDATES_EDGE_CACHE_KEY);
+    keys.add(UPDATES_D1_OVERLAY_CACHE_KEY);
     keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/today');
     keys.add('https://edge-cache.luantihub.local/pkg-top10-v1/week');
   }

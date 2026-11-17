@@ -23,7 +23,10 @@ import {
   runWithD1ColumnFallback,
   BOOT_CATALOG_EDGE_CACHE_KEY,
   UPDATES_EDGE_CACHE_KEY,
-  computeLuantiClientReleaseId
+  computeLuantiClientReleaseId,
+  UpstreamRepoLookup,
+  matchUpstreamRepoEntry,
+  hasUpstreamRepoMatch
 } from './upstream';
 import {
   isUntrustedTunnelOrPrivateHost,
@@ -1257,10 +1260,11 @@ export async function overlayJam2026UpdatesMap(
   noCache = false,
   db?: any,
   d1Rows?: any[],
-  officialUpstreamKeysLower?: Set<string>
-): Promise<void> {
+  officialUpstreamKeysLower?: Set<string>,
+  officialUpstreamRepoLookup?: UpstreamRepoLookup<{ rel: number; canonicalAuthor: string; canonicalName: string }>
+): Promise<boolean> {
   const brews = await fetchJam2026BrewsCached(noCache).catch(() => []);
-  if (!Array.isArray(brews) || brews.length === 0) return;
+  if (!Array.isArray(brews) || brews.length === 0) return false;
 
   const d1ByLowerId = new Map<string, any>();
   if (Array.isArray(d1Rows)) {
@@ -1276,6 +1280,9 @@ export async function overlayJam2026UpdatesMap(
     for (const brew of brews) {
       const brewKeys = [brew.id, ...(Array.isArray(brew.aliases) ? brew.aliases : [])];
       if (officialUpstreamKeysLower && brewKeys.some((k) => Boolean(k && officialUpstreamKeysLower.has(k.toLowerCase())))) {
+        continue;
+      }
+      if (hasUpstreamRepoMatch(officialUpstreamRepoLookup, brew.repo_url || brew.repo, brew.name)) {
         continue;
       }
       const existingRow = d1ByLowerId.get(brew.id.toLowerCase());
@@ -1307,12 +1314,28 @@ export async function overlayJam2026UpdatesMap(
     if (officialUpstreamKeysLower && keys.some((k) => Boolean(k && officialUpstreamKeysLower.has(k.toLowerCase())))) {
       continue;
     }
+    const matchedRepoOfficial = matchUpstreamRepoEntry(
+      officialUpstreamRepoLookup,
+      brew.repo_url || brew.repo,
+      brew.name
+    );
+    if (matchedRepoOfficial) {
+      if (matchedRepoOfficial.rel > 0) {
+        for (const k of keys) {
+          if (k && !updatesMap[k]) {
+            updatesMap[k] = matchedRepoOfficial.rel;
+          }
+        }
+      }
+      continue;
+    }
     for (const k of keys) {
       if (k) {
         updatesMap[k] = Math.max(Number(updatesMap[k]) || 0, rel);
       }
     }
   }
+  return Boolean(hasUnsyncedCommitOrRow && delta);
 }
 
 /**

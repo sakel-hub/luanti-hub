@@ -16061,4 +16061,1268 @@ core.register_node(modname .. ":panel", {
       resetJam2026IsolateCacheForTests();
     }
   });
+
+  it('should align /api/updates/ and in-game /api/packages/ (MISS-EDGE, HIT-EDGE, HIT-BOOT-SHARED, fmt=keys) to Luanti protocol_version & engine_version without polluting unversioned updates', async () => {
+    const { onRequestGet: onPackagesGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: onUpdatesGet } = await import('../../functions/api/updates');
+    const {
+      BOOT_CATALOG_EDGE_CACHE_KEY,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      UPDATES_EDGE_CACHE_KEY,
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys
+    } = await import('../../functions/api/lib/upstream');
+    const { resetJam2026IsolateCacheForTests } = await import('../../functions/api/lib/jam-2026');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+    resetJam2026IsolateCacheForTests();
+
+    const d1Packages = [
+      {
+        id: 'Alice/farming',
+        author_name: 'Alice',
+        name: 'farming',
+        title: 'Alice Custom Farming',
+        type: 'mod',
+        provider: 'github',
+        repo_url: 'https://github.com/Alice/farming',
+        updated_at: '2026-10-20T00:00:00Z',
+        created_at: '2026-10-01T00:00:00Z',
+        status: 'active'
+      },
+      {
+        id: 'NewModder/five_eleven_only',
+        author_name: 'NewModder',
+        name: 'five_eleven_only',
+        title: 'Five Eleven Only',
+        type: 'mod',
+        provider: 'contentdb',
+        repo_url: 'https://github.com/NewModder/five_eleven_only',
+        updated_at: '2026-11-10T00:00:00Z',
+        created_at: '2026-11-01T00:00:00Z',
+        status: 'active'
+      }
+    ];
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            all: async () => (sql.includes('FROM packages') && !sql.includes('flagged') ? { results: d1Packages } : { results: [] }),
+            first: async () => null,
+            run: async () => ({ success: true })
+          }),
+          all: async () => (sql.includes('FROM packages') && !sql.includes('flagged') ? { results: d1Packages } : { results: [] }),
+          first: async () => null,
+          run: async () => ({ success: true })
+        })
+      }
+    };
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('content.luanti.org/api/packages/?fmt=vcs')) {
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'TenPlus1',
+              name: 'farming',
+              title: 'Farming Redo',
+              type: 'mod',
+              short_description: 'Adds many new crops',
+              release: 35000,
+              repo: 'https://codeberg.org/tenplus1/farming',
+              downloads: 120000,
+              score: 450
+            },
+            {
+              author: 'NewModder',
+              name: 'five_eleven_only',
+              title: 'Five Eleven Only',
+              type: 'mod',
+              short_description: 'Requires Luanti 5.11+',
+              release: 36000,
+              repo: 'https://github.com/NewModder/five_eleven_only',
+              downloads: 500,
+              score: 12
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/updates/')) {
+        const is510 = urlStr.includes('protocol_version=46') || urlStr.includes('engine_version=5.10.0');
+        return new Response(
+          JSON.stringify(
+            is510
+              ? { 'TenPlus1/farming': 28100 }
+              : { 'TenPlus1/farming': 35000, 'NewModder/five_eleven_only': 36000 }
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/scores/')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (urlStr.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    const desktop510Url =
+      'https://luantihub.org/api/packages/?type=mod&type=game&type=txp&protocol_version=46&engine_version=5.10.0&hide=desktop_default&hide=nonfree';
+
+    try {
+      // 1. Cold MISS-EDGE for Luanti 5.10.0
+      const missRes = await onPackagesGet({ request: new Request(desktop510Url), env: mockEnv } as any);
+      expect(missRes.status).toBe(200);
+      expect(missRes.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      const missJson: any[] = await missRes.json();
+      expect(missJson.find((p) => p.author === 'TenPlus1' && p.name === 'farming')?.release).toBe(28100);
+      expect(missJson.some((p) => p.name === 'five_eleven_only')).toBe(false);
+      expect(missJson.find((p) => p.author === 'Alice' && p.name === 'farming')?.release).toBeGreaterThan(1700000000);
+
+      // 2. Warm HIT-EDGE for Luanti 5.10.0 (with isolate cache cleared to exercise Edge Cache __lhBaseSlim path)
+      clearIsolateCachesForTests();
+      const hitRes = await onPackagesGet({ request: new Request(desktop510Url), env: mockEnv } as any);
+      expect(hitRes.status).toBe(200);
+      expect(hitRes.headers.get('X-LuantiHub-Cache')).toBe('HIT-EDGE');
+      const hitJson: any[] = await hitRes.json();
+      expect(hitJson.find((p) => p.author === 'TenPlus1' && p.name === 'farming')?.release).toBe(28100);
+      expect(hitJson.some((p) => p.name === 'five_eleven_only')).toBe(false);
+      expect(hitJson.find((p) => p.author === 'Alice' && p.name === 'farming')?.release).toBeGreaterThan(1700000000);
+
+      // 3. Columnar fmt=keys for Luanti 5.10.0
+      const keysRes = await onPackagesGet({ request: new Request(`${desktop510Url}&fmt=keys`), env: mockEnv } as any);
+      expect(keysRes.status).toBe(200);
+      const keysPayload: any = await keysRes.json();
+      const authorCol = keysPayload.keys.indexOf('author');
+      const nameCol = keysPayload.keys.indexOf('name');
+      const releaseCol = keysPayload.keys.indexOf('release');
+      const farmingRow = keysPayload.pkgs.find((r: any[]) => r[authorCol] === 'TenPlus1' && r[nameCol] === 'farming');
+      expect(farmingRow?.[releaseCol]).toBe(28100);
+      expect(keysPayload.pkgs.some((r: any[]) => r[nameCol] === 'five_eleven_only')).toBe(false);
+      expect(keysPayload.pkgs.some((r: any[]) => r[authorCol] === 'Alice' && r[nameCol] === 'farming')).toBe(true);
+
+      // 4. Warm ?boot=1 followed by HIT-BOOT-SHARED for Luanti 5.10.0
+      await invalidateEdgeCacheKeys([BOOT_CATALOG_EDGE_CACHE_KEY, IN_GAME_CATALOG_CACHE_PREFIX]);
+      const bootRes = await onPackagesGet({
+        request: new Request('https://luantihub.org/api/packages/?boot=1'),
+        env: mockEnv
+      } as any);
+      expect(bootRes.status).toBe(200);
+      const sharedRes = await onPackagesGet({ request: new Request(desktop510Url), env: mockEnv } as any);
+      expect(sharedRes.status).toBe(200);
+      expect(sharedRes.headers.get('X-LuantiHub-Cache')).toBe('HIT-BOOT-SHARED');
+      const sharedJson: any[] = await sharedRes.json();
+      expect(sharedJson.find((p) => p.author === 'TenPlus1' && p.name === 'farming')?.release).toBe(28100);
+      expect(sharedJson.some((p) => p.name === 'five_eleven_only')).toBe(false);
+      expect(sharedJson.find((p) => p.author === 'Alice' && p.name === 'farming')?.release).toBeGreaterThan(1700000000);
+
+      // 5. Versioned vs. unversioned /api/updates/ isolation
+      const upd510Res = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/?protocol_version=46&engine_version=5.10.0'),
+        env: mockEnv
+      } as any);
+      expect(upd510Res.status).toBe(200);
+      const upd510Json: Record<string, number> = await upd510Res.json();
+      expect(upd510Json['TenPlus1/farming']).toBe(28100);
+      expect(upd510Json['NewModder/five_eleven_only']).toBeUndefined();
+      expect(upd510Json['Alice/farming']).toBeGreaterThan(1700000000);
+
+      const updLatestRes = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/'),
+        env: mockEnv
+      } as any);
+      expect(updLatestRes.status).toBe(200);
+      const updLatestJson: Record<string, number> = await updLatestRes.json();
+      expect(updLatestJson['TenPlus1/farming']).toBe(35000);
+      expect(updLatestJson['NewModder/five_eleven_only']).toBe(36000);
+      expect(updLatestJson['Alice/farming']).toBeGreaterThan(1700000000);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX,
+        UPDATES_EDGE_CACHE_KEY
+      ]);
+    }
+  });
+
+  it('should prevent 1.77B Unix epoch inflation on ContentDB packages across repo-matched Jam/D1 rows and upstream outages', async () => {
+    const { onRequestGet: onUpdatesGet } = await import('../../functions/api/updates');
+    const {
+      UPDATES_EDGE_CACHE_KEY,
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys
+    } = await import('../../functions/api/lib/upstream');
+    const { resetJam2026IsolateCacheForTests } = await import('../../functions/api/lib/jam-2026');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+    resetJam2026IsolateCacheForTests();
+
+    const d1Packages = [
+      {
+        id: 'sztest/confspace',
+        author_name: 'sztest',
+        name: 'confspace',
+        type: 'game',
+        provider: 'codeberg',
+        repo_url: 'https://codeberg.org/sztest/confspace',
+        updated_at: '2026-11-14T12:00:00Z',
+        created_at: '2026-11-13T12:00:00Z',
+        status: 'active'
+      },
+      {
+        id: 'TenPlus1/farming',
+        author_name: 'TenPlus1',
+        name: 'farming',
+        type: 'mod',
+        provider: 'contentdb',
+        repo_url: 'https://codeberg.org/tenplus1/farming',
+        updated_at: '2026-11-14T12:00:00Z',
+        created_at: '2026-11-13T12:00:00Z',
+        status: 'active'
+      },
+      {
+        id: 'IndieDev/pure_git_mod',
+        author_name: 'IndieDev',
+        name: 'pure_git_mod',
+        type: 'mod',
+        provider: 'github',
+        repo_url: 'https://github.com/IndieDev/pure_git_mod',
+        updated_at: '2026-11-14T12:00:00Z',
+        created_at: '2026-11-13T12:00:00Z',
+        status: 'active'
+      }
+    ];
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            all: async () => (sql.includes('FROM packages') && !sql.includes('flagged') ? { results: d1Packages } : { results: [] }),
+            first: async () => null,
+            run: async () => ({ success: true })
+          }),
+          all: async () => (sql.includes('FROM packages') && !sql.includes('flagged') ? { results: d1Packages } : { results: [] }),
+          first: async () => null,
+          run: async () => ({ success: true })
+        })
+      }
+    };
+
+    let simulateOutage = false;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://codeberg.org/sztest/confspace',
+              commit: 'aaaa1111bbbb2222cccc3333dddd4444eeee5555',
+              title: 'ConfSpace',
+              description: 'ConfSpace Jam Game',
+              hasScreenshot: false,
+              publishedAt: '2026-11-13T12:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/?fmt=vcs')) {
+        if (simulateOutage) return new Response('Bad Gateway', { status: 502 });
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'Warr1024',
+              name: 'confspace',
+              title: 'ConfSpace',
+              type: 'game',
+              repo: 'https://codeberg.org/sztest/confspace',
+              release: 34500
+            },
+            {
+              author: 'TenPlus1',
+              name: 'farming',
+              title: 'Farming Redo',
+              type: 'mod',
+              repo: 'https://codeberg.org/tenplus1/farming',
+              release: 28100
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/updates/')) {
+        if (simulateOutage) return new Response('Bad Gateway', { status: 502 });
+        return new Response(
+          JSON.stringify({ 'Warr1024/confspace': 34500, 'TenPlus1/farming': 28100 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('contentdb.milcho.org')) {
+        return new Response('<!doctype html><html><body>SPA</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. Online baseline: cross-author repo-matched Jam/D1 sztest/confspace maps to ContentDB 34500
+      const onlineRes = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: mockEnv
+      } as any);
+      expect(onlineRes.status).toBe(200);
+      const onlineJson: Record<string, number> = await onlineRes.json();
+      expect(onlineJson['Warr1024/confspace']).toBe(34500);
+      expect(onlineJson['sztest/confspace']).toBe(34500);
+      expect(onlineJson['TenPlus1/farming']).toBe(28100);
+      expect(onlineJson['IndieDev/pure_git_mod']).toBeGreaterThan(1700000000);
+
+      // 2. Upstream outage (502 + mirror SPA HTML) with warm 24h fallback cache serves 34500 / 28100
+      simulateOutage = true;
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([UPDATES_EDGE_CACHE_KEY]);
+      const outageWarmRes = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: mockEnv
+      } as any);
+      expect(outageWarmRes.status).toBe(200);
+      const outageWarmJson: Record<string, number> = await outageWarmRes.json();
+      expect(outageWarmJson['Warr1024/confspace']).toBe(34500);
+      expect(outageWarmJson['sztest/confspace']).toBe(34500);
+      expect(outageWarmJson['TenPlus1/farming']).toBe(28100);
+
+      // 3. Cold outage (empty fallback cache) NEVER emits > 1e9 epoch timestamps for provider='contentdb'
+      cacheStore.clear();
+      clearIsolateCachesForTests();
+      const outageColdRes = await onUpdatesGet({
+        request: new Request('https://luantihub.org/api/updates/?nocache=1'),
+        env: mockEnv
+      } as any);
+      expect(outageColdRes.status).toBe(200);
+      const outageColdJson: Record<string, number> = await outageColdRes.json();
+      expect(outageColdJson['TenPlus1/farming']).toBeUndefined();
+      expect(outageColdJson['IndieDev/pure_git_mod']).toBeGreaterThan(1700000000);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+      await invalidateEdgeCacheKeys([UPDATES_EDGE_CACHE_KEY]);
+    }
+  });
+
+  it('should preserve ContentDB release IDs in cross-author /for-client/ lookups and prioritize manual ContentDB release archives in download.ts', async () => {
+    const { onRequestGet: forClientGet } = await import('../../functions/api/packages/[author]/[name]/for-client');
+    const { onRequest: onDownloadGet } = await import('../../functions/api/packages/[author]/[name]/download');
+    const {
+      FOR_CLIENT_CACHE_PREFIX,
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys
+    } = await import('../../functions/api/lib/upstream');
+
+    const encodeAscii = (str: string) => {
+      const out = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0xff;
+      return out;
+    };
+    const buildStoredZip = (files: Array<{ path: string; content: string }>): Uint8Array => {
+      const crcTable = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+        crcTable[n] = c >>> 0;
+      }
+      const crc32 = (buf: Uint8Array) => {
+        let crc = 0xffffffff;
+        for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+        return (crc ^ 0xffffffff) >>> 0;
+      };
+      const localParts: Uint8Array[] = [];
+      const centralParts: Uint8Array[] = [];
+      let localOffset = 0;
+      for (const f of files) {
+        const nameBytes = encodeAscii(f.path);
+        const dataBytes = encodeAscii(f.content);
+        const crc = crc32(dataBytes);
+        const lfh = new Uint8Array(30 + nameBytes.length);
+        const lfhView = new DataView(lfh.buffer);
+        lfhView.setUint32(0, 0x04034b50, true);
+        lfhView.setUint16(4, 20, true);
+        lfhView.setUint32(14, crc, true);
+        lfhView.setUint32(18, dataBytes.length, true);
+        lfhView.setUint32(22, dataBytes.length, true);
+        lfhView.setUint16(26, nameBytes.length, true);
+        lfh.set(nameBytes, 30);
+        localParts.push(lfh, dataBytes);
+
+        const cdh = new Uint8Array(46 + nameBytes.length);
+        const cdhView = new DataView(cdh.buffer);
+        cdhView.setUint32(0, 0x02014b50, true);
+        cdhView.setUint16(4, 20, true);
+        cdhView.setUint16(6, 20, true);
+        cdhView.setUint32(16, crc, true);
+        cdhView.setUint32(20, dataBytes.length, true);
+        cdhView.setUint32(24, dataBytes.length, true);
+        cdhView.setUint16(28, nameBytes.length, true);
+        cdhView.setUint32(42, localOffset, true);
+        cdh.set(nameBytes, 46);
+        centralParts.push(cdh);
+        localOffset += lfh.length + dataBytes.length;
+      }
+      let cdSize = 0;
+      for (const p of centralParts) cdSize += p.length;
+      const eocd = new Uint8Array(22);
+      const eocdView = new DataView(eocd.buffer);
+      eocdView.setUint32(0, 0x06054b50, true);
+      eocdView.setUint16(8, files.length, true);
+      eocdView.setUint16(10, files.length, true);
+      eocdView.setUint32(12, cdSize, true);
+      eocdView.setUint32(16, localOffset, true);
+      const out = new Uint8Array(localOffset + cdSize + 22);
+      let pos = 0;
+      for (const p of [...localParts, ...centralParts, eocd]) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    };
+
+    const zipManual = buildStoredZip([
+      { path: 'farming/mod.conf', content: 'name = farming\n' },
+      { path: 'farming/init.lua', content: '-- manual_28100\n' }
+    ]);
+    const zipHead = buildStoredZip([
+      { path: 'farming/mod.conf', content: 'name = farming\n' },
+      { path: 'farming/init.lua', content: '-- head_git\n' }
+    ]);
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+
+    const sakelRow = {
+      id: 'sakel-hub/everness',
+      author_name: 'sakel-hub',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      provider: 'bitbucket',
+      repo_url: 'https://bitbucket.org/SaKeL/everness',
+      tags: JSON.stringify(['decor']),
+      contentdb_downloads: 0,
+      updated_at: '2026-11-10T00:00:00Z',
+      created_at: '2026-10-01T00:00:00Z',
+      status: 'active'
+    };
+    const farmingRow = {
+      id: 'TenPlus1/farming',
+      author_name: 'TenPlus1',
+      name: 'farming',
+      title: 'Farming Redo',
+      type: 'mod',
+      provider: 'contentdb',
+      repo_url: 'https://codeberg.org/tenplus1/farming',
+      default_branch: 'master',
+      updated_at: '2026-11-10T00:00:00Z',
+      created_at: '2026-10-01T00:00:00Z',
+      status: 'active'
+    };
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => {
+          const bound: any[] = [];
+          const execFirst = async () => {
+            const joined = bound.map((b) => String(b || '').toLowerCase()).join('|');
+            if (sql.includes('FROM packages')) {
+              if (joined.includes('everness')) return sakelRow;
+              if (joined.includes('farming')) return farmingRow;
+            }
+            return null;
+          };
+          const stmt: any = {
+            bind: (...args: any[]) => {
+              bound.push(...args);
+              return stmt;
+            },
+            first: execFirst,
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true })
+          };
+          return stmt;
+        }
+      }
+    };
+
+    const fetchedDownloadUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr.includes('content.luanti.org/api/packages/SaKeL/everness/for-client/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'SaKeL',
+            name: 'everness',
+            title: 'Everness',
+            type: 'mod',
+            release: 29500,
+            downloads: 50000,
+            reviews: { positive: 10, neutral: 0, negative: 0 },
+            screenshots: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/TenPlus1/farming/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 28100,
+              title: '1.20',
+              commit: null,
+              url: '/uploads/farming_28100_manual.zip'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/uploads/farming_28100_manual.zip')) {
+        fetchedDownloadUrls.push(urlStr);
+        return new Response(zipManual as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (urlStr.includes('codeberg.org/tenplus1/farming/archive/HEAD.zip')) {
+        fetchedDownloadUrls.push(urlStr);
+        return new Response(zipHead as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const fcRes = await forClientGet({
+        params: { author: 'SaKeL', name: 'everness' },
+        request: new Request('https://luantihub.org/api/packages/SaKeL/everness/for-client/?formspec_version=8'),
+        env: mockEnv
+      } as any);
+      expect(fcRes.status).toBe(200);
+      const fcJson: any = await fcRes.json();
+      expect(fcJson.author).toBe('SaKeL');
+      expect(fcJson.release).toBe(29500);
+
+      const dlRes = await onDownloadGet({
+        params: { author: 'TenPlus1', name: 'farming', release: '28100' },
+        request: new Request(
+          'https://luantihub.org/packages/TenPlus1/farming/releases/28100/download/?reason=update'
+        ),
+        env: mockEnv
+      } as any);
+      expect(dlRes.status).toBe(200);
+      const dlText = new TextDecoder().decode(new Uint8Array(await dlRes.arrayBuffer()));
+      expect(dlText).toContain('manual_28100');
+      expect(dlText).not.toContain('head_git');
+      expect(fetchedDownloadUrls[0]).toContain('farming_28100_manual.zip');
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys([`${FOR_CLIENT_CACHE_PREFIX}/en/sakel/everness/fsv=8`]);
+    }
+  });
+
+  it('should isolate /for-client/ cache by engine_version (preserving +) and never emit epoch timestamps on ContentDB outages', async () => {
+    const { onRequestGet: forClientGet } = await import('../../functions/api/packages/[author]/[name]/for-client');
+    const {
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys,
+      buildPackageCacheInvalidationKeys
+    } = await import('../../functions/api/lib/upstream');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+
+    const cdbFarmingRow = {
+      id: 'TenPlus1/farming',
+      author_name: 'TenPlus1',
+      name: 'farming',
+      title: 'Farming Redo',
+      type: 'mod',
+      provider: 'contentdb',
+      repo_url: 'https://codeberg.org/tenplus1/farming',
+      tags: JSON.stringify(['food', 'contentdb']),
+      contentdb_downloads: 120000,
+      updated_at: '2026-11-10T00:00:00Z',
+      created_at: '2024-01-01T00:00:00Z',
+      status: 'active'
+    };
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => {
+          const bound: any[] = [];
+          const stmt: any = {
+            bind: (...args: any[]) => {
+              bound.push(...args);
+              return stmt;
+            },
+            first: async () => (sql.includes('FROM packages') ? cdbFarmingRow : null),
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true })
+          };
+          return stmt;
+        }
+      }
+    };
+
+    const seenUpstreamUrls: string[] = [];
+    let simulateForClientOutage = false;
+    let simulateUpdatesOutage = false;
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      seenUpstreamUrls.push(urlStr);
+      if (urlStr.includes('/packages/TenPlus1/farming/for-client/')) {
+        if (simulateForClientOutage) {
+          return new Response('Service Unavailable', { status: 503 });
+        }
+        const rel = urlStr.includes('engine_version=5.8.0') ? 27500 : 28100;
+        return new Response(
+          JSON.stringify({
+            author: 'TenPlus1',
+            name: 'farming',
+            title: 'Farming Redo',
+            type: 'mod',
+            release: rel,
+            downloads: 120000,
+            reviews: { positive: 20, neutral: 1, negative: 0 },
+            screenshots: []
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('/api/updates/')) {
+        if (simulateUpdatesOutage) {
+          return new Response('Bad Gateway', { status: 502 });
+        }
+        return new Response(JSON.stringify({ 'TenPlus1/farming': 27900 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const res58 = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=43&engine_version=5.8.0&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      expect(res58.status).toBe(200);
+      expect((await res58.json()).release).toBe(27500);
+
+      const res510 = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=46&engine_version=5.10.0%2Bdfsg-1&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      expect(res510.status).toBe(200);
+      expect(res510.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      expect((await res510.json()).release).toBe(28100);
+      expect(seenUpstreamUrls.some((u) => u.includes('engine_version=5.10.0%2Bdfsg-1'))).toBe(true);
+
+      // Re-reading 5.8.0 hits its own cached variant without mixing 5.10.0's release 28100
+      const res58Hit = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=43&engine_version=5.8.0&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      expect(res58Hit.headers.get('X-LuantiHub-Cache')).toBe('HIT-EDGE');
+      expect((await res58Hit.json()).release).toBe(27500);
+
+      // Mutation invalidation evicts ALL cached engine variants in one call
+      await invalidateEdgeCacheKeys(buildPackageCacheInvalidationKeys('TenPlus1', 'farming'));
+      const res58AfterInvalidation = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=43&engine_version=5.8.0&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      expect(res58AfterInvalidation.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+
+      // When upstream /for-client/ is down, fallback uses ContentDB /updates/ integer release (never 1.77B epoch)
+      clearIsolateCachesForTests();
+      cacheStore.clear();
+      simulateForClientOutage = true;
+      const resFallbackFromUpdates = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=43&engine_version=5.8.0&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      const updatesFallbackJson: any = await resFallbackFromUpdates.json();
+      expect(updatesFallbackJson.release).toBe(27900);
+
+      // Even on total ContentDB outage (/for-client/ + /updates/ both failing), never emit 1.77B epoch timestamp
+      await invalidateEdgeCacheKeys(buildPackageCacheInvalidationKeys('TenPlus1', 'farming'));
+      clearIsolateCachesForTests();
+      cacheStore.clear();
+      simulateUpdatesOutage = true;
+      const resTotalOutage = await forClientGet({
+        params: { author: 'TenPlus1', name: 'farming' },
+        request: new Request(
+          'https://luantihub.org/api/packages/TenPlus1/farming/for-client/?protocol_version=46&engine_version=5.10.0&formspec_version=8'
+        ),
+        env: mockEnv
+      } as any);
+      const totalOutageJson: any = await resTotalOutage.json();
+      expect(totalOutageJson.release).toBe(1);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys(buildPackageCacheInvalidationKeys('TenPlus1', 'farming'));
+    }
+  });
+
+  it('should keep single-type /api/packages/?type=game base cache engine-agnostic and isolate monorepo siblings across /api/updates/ and /api/packages/', async () => {
+    const { onRequestGet: packagesIndexGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: updatesGet } = await import('../../functions/api/updates');
+    const {
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys,
+      IN_GAME_CATALOG_CACHE_PREFIX,
+      UPDATES_EDGE_CACHE_KEY,
+      UPDATES_D1_OVERLAY_CACHE_KEY,
+      BOOT_CATALOG_EDGE_CACHE_KEY
+    } = await import('../../functions/api/lib/upstream');
+    const { resetJam2026IsolateCacheForTests } = await import('../../functions/api/lib/jam-2026');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+    resetJam2026IsolateCacheForTests();
+
+    const d1Rows = [
+      {
+        id: 'OldAuthor/legacy_game',
+        author_name: 'OldAuthor',
+        name: 'legacy_game',
+        title: 'Legacy Game',
+        type: 'game',
+        provider: 'contentdb',
+        repo_url: 'https://github.com/OldAuthor/legacy_game',
+        tags: JSON.stringify(['contentdb']),
+        contentdb_downloads: 500,
+        updated_at: '2026-10-01T00:00:00Z',
+        created_at: '2023-01-01T00:00:00Z',
+        status: 'active'
+      },
+      {
+        id: 'helper-hub/foo_decor',
+        author_name: 'helper-hub',
+        name: 'foo_decor',
+        title: 'Foo Decor',
+        type: 'mod',
+        provider: 'github',
+        repo_url: 'https://github.com/mt-mods/mono_pack',
+        tags: JSON.stringify(['decor']),
+        contentdb_downloads: 0,
+        updated_at: '2026-11-11T00:00:00Z',
+        created_at: '2026-01-01T00:00:00Z',
+        status: 'active'
+      },
+      {
+        id: 'indie/foo_bonus',
+        author_name: 'indie',
+        name: 'foo_bonus',
+        title: 'Foo Bonus (Pure Git Submod)',
+        type: 'mod',
+        provider: 'github',
+        repo_url: 'https://github.com/mt-mods/mono_pack',
+        tags: JSON.stringify(['git']),
+        contentdb_downloads: 0,
+        updated_at: '2026-11-12T00:00:00Z',
+        created_at: '2026-02-01T00:00:00Z',
+        status: 'active'
+      }
+    ];
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => {
+          const bound: any[] = [];
+          const stmt: any = {
+            bind: (...args: any[]) => {
+              bound.push(...args);
+              return stmt;
+            },
+            first: async () => null,
+            all: async () => {
+              if (sql.includes('FROM packages') && !sql.includes('flagged')) {
+                return { results: d1Rows };
+              }
+              return { results: [] };
+            },
+            run: async () => ({ success: true })
+          };
+          return stmt;
+        }
+      }
+    };
+
+    const upstreamPackageUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (urlStr === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/')) {
+        upstreamPackageUrls.push(urlStr);
+        return new Response(
+          JSON.stringify([
+            {
+              author: 'OldAuthor',
+              name: 'legacy_game',
+              title: 'Legacy Game',
+              type: 'game',
+              short_description: 'Works on 5.8+',
+              release: 11000,
+              repo: 'https://github.com/OldAuthor/legacy_game'
+            },
+            {
+              author: 'ModernDev',
+              name: 'modern_game',
+              title: 'Modern Game',
+              type: 'game',
+              short_description: 'Requires 5.10+',
+              release: 31000,
+              repo: 'https://github.com/ModernDev/modern_game'
+            },
+            {
+              author: 'mt-mods',
+              name: 'foo_core',
+              title: 'Foo Core',
+              type: 'mod',
+              short_description: 'Core mod in monorepo',
+              release: 12000,
+              repo: 'https://github.com/mt-mods/mono_pack'
+            },
+            {
+              author: 'mt-mods',
+              name: 'foo_decor',
+              title: 'Foo Decor',
+              type: 'mod',
+              short_description: 'Decor mod in monorepo (5.10+ only)',
+              release: 12001,
+              repo: 'https://github.com/mt-mods/mono_pack'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/api/updates/')) {
+        const is58 = urlStr.includes('engine_version=5.8.0');
+        return new Response(
+          JSON.stringify(
+            is58
+              ? { 'OldAuthor/legacy_game': 11000, 'mt-mods/foo_core': 12000 }
+              : {
+                  'OldAuthor/legacy_game': 11000,
+                  'ModernDev/modern_game': 31000,
+                  'mt-mods/foo_core': 12000,
+                  'mt-mods/foo_decor': 12001
+                }
+          ),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. 5.8.0 single-type `type=game` MISS-EDGE must NOT forward engine_version/protocol_version to upstream base catalog
+      const game58Res = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=game&protocol_version=43&engine_version=5.8.0&hide=desktop_default'
+        ),
+        env: mockEnv
+      } as any);
+      expect(game58Res.status).toBe(200);
+      expect(game58Res.headers.get('X-LuantiHub-Cache')).toBe('MISS-EDGE');
+      expect(upstreamPackageUrls.some((u) => u.includes('engine_version=') || u.includes('protocol_version='))).toBe(
+        false
+      );
+      const games58: any[] = await game58Res.json();
+      expect(games58.map((g) => g.name)).toEqual(['legacy_game']);
+
+      // 2. Subsequent 5.10.0 `type=game` HIT-EDGE still surfaces ModernDev/modern_game!
+      const game510Res = await packagesIndexGet({
+        request: new Request(
+          'https://luantihub.org/api/packages/?type=game&protocol_version=46&engine_version=5.10.0&hide=desktop_default'
+        ),
+        env: mockEnv
+      } as any);
+      expect(game510Res.status).toBe(200);
+      expect(game510Res.headers.get('X-LuantiHub-Cache')).toBe('HIT-EDGE');
+      const games510: any[] = await game510Res.json();
+      expect(games510.some((g) => g.name === 'legacy_game')).toBe(true);
+      expect(games510.some((g) => g.name === 'modern_game' && g.release === 31000)).toBe(true);
+
+      // 3. Monorepo isolation on 5.8.0 `/api/updates/`: `foo_decor` (5.10+ only) MUST NOT inherit `foo_core`'s 12000 or 1.77B;
+      //    meanwhile `indie/foo_bonus` (pure Git mod in the same repo) keeps its monotonic epoch timestamp!
+      const upd58Res = await updatesGet({
+        request: new Request('https://luantihub.org/api/updates/?protocol_version=43&engine_version=5.8.0'),
+        env: mockEnv
+      } as any);
+      const upd58: Record<string, number> = await upd58Res.json();
+      expect(upd58['mt-mods/foo_core']).toBe(12000);
+      expect(upd58['mt-mods/foo_decor']).toBeUndefined();
+      expect(upd58['helper-hub/foo_decor']).toBeUndefined();
+      expect(upd58['indie/foo_bonus']).toBeGreaterThan(1700000000);
+
+      // On 5.10.0 `/api/updates/`, `helper-hub/foo_decor` aligns strictly to sibling `mt-mods/foo_decor` (12001, never 12000!)
+      const upd510Res = await updatesGet({
+        request: new Request('https://luantihub.org/api/updates/?protocol_version=46&engine_version=5.10.0'),
+        env: mockEnv
+      } as any);
+      const upd510: Record<string, number> = await upd510Res.json();
+      expect(upd510['helper-hub/foo_decor']).toBe(12001);
+      expect(upd510['indie/foo_bonus']).toBeGreaterThan(1700000000);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      resetJam2026IsolateCacheForTests();
+      await invalidateEdgeCacheKeys([
+        BOOT_CATALOG_EDGE_CACHE_KEY,
+        IN_GAME_CATALOG_CACHE_PREFIX,
+        UPDATES_EDGE_CACHE_KEY,
+        UPDATES_D1_OVERLAY_CACHE_KEY
+      ]);
+    }
+  });
+
+  it('should query upstream ContentDB under canonical author for cross-author -hub D1 rows in download.ts and dependencies.ts', async () => {
+    const { onRequest: onDownloadGet } = await import('../../functions/api/packages/[author]/[name]/download');
+    const { onRequestGet: dependenciesGet } = await import(
+      '../../functions/api/packages/[author]/[name]/dependencies'
+    );
+    const {
+      clearIsolateCachesForTests,
+      invalidateEdgeCacheKeys,
+      buildPackageCacheInvalidationKeys
+    } = await import('../../functions/api/lib/upstream');
+
+    const origFetch = globalThis.fetch;
+    const origCaches = (globalThis as any).caches;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          const hit = cacheStore.get(k);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request | string, res: Response) => {
+          const k = typeof req === 'string' ? req : req.url;
+          cacheStore.set(k, res.clone());
+        },
+        delete: async (req: Request | string) => {
+          const k = typeof req === 'string' ? req : req.url;
+          return cacheStore.delete(k);
+        }
+      }
+    };
+    clearIsolateCachesForTests();
+
+    const sakelRow = {
+      id: 'sakel-hub/everness',
+      author_name: 'sakel-hub',
+      name: 'everness',
+      title: 'Everness',
+      type: 'mod',
+      provider: 'bitbucket',
+      repo_url: 'https://bitbucket.org/SaKeL/everness',
+      tags: JSON.stringify(['decor']),
+      contentdb_downloads: 0,
+      dependencies: JSON.stringify(['default']),
+      optional_dependencies: JSON.stringify([]),
+      provides: JSON.stringify(['everness']),
+      status: 'active'
+    };
+
+    const mockEnv = {
+      DB: {
+        prepare: (sql: string) => {
+          const bound: any[] = [];
+          const stmt: any = {
+            bind: (...args: any[]) => {
+              bound.push(...args);
+              return stmt;
+            },
+            first: async () => (sql.includes('FROM packages') ? sakelRow : null),
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true })
+          };
+          return stmt;
+        }
+      }
+    };
+
+    // Build minimal stored ZIP for Everness release 29500
+    const crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      crcTable[n] = c >>> 0;
+    }
+    const crc32 = (buf: Uint8Array) => {
+      let crc = 0xffffffff;
+      for (let i = 0; i < buf.length; i++) crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+      return (crc ^ 0xffffffff) >>> 0;
+    };
+    const buildZip = (files: Array<{ path: string; content: string }>) => {
+      const enc = (s: string) => Uint8Array.from(Array.from(s, (ch) => ch.charCodeAt(0) & 0xff));
+      const locals: Uint8Array[] = [];
+      const centrals: Uint8Array[] = [];
+      let offset = 0;
+      for (const f of files) {
+        const nb = enc(f.path);
+        const db = enc(f.content);
+        const crc = crc32(db);
+        const lfh = new Uint8Array(30 + nb.length);
+        const lv = new DataView(lfh.buffer);
+        lv.setUint32(0, 0x04034b50, true);
+        lv.setUint16(4, 20, true);
+        lv.setUint32(14, crc, true);
+        lv.setUint32(18, db.length, true);
+        lv.setUint32(22, db.length, true);
+        lv.setUint16(26, nb.length, true);
+        lfh.set(nb, 30);
+        locals.push(lfh, db);
+        const cdh = new Uint8Array(46 + nb.length);
+        const cv = new DataView(cdh.buffer);
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, db.length, true);
+        cv.setUint32(24, db.length, true);
+        cv.setUint16(28, nb.length, true);
+        cv.setUint32(42, offset, true);
+        cdh.set(nb, 46);
+        centrals.push(cdh);
+        offset += lfh.length + db.length;
+      }
+      const cdSize = centrals.reduce((a, b) => a + b.length, 0);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, files.length, true);
+      ev.setUint16(10, files.length, true);
+      ev.setUint32(12, cdSize, true);
+      ev.setUint32(16, offset, true);
+      const out = new Uint8Array(offset + cdSize + 22);
+      let pos = 0;
+      for (const part of [...locals, ...centrals, eocd]) {
+        out.set(part, pos);
+        pos += part.length;
+      }
+      return out;
+    };
+    const evernessZip = buildZip([
+      { path: 'everness/mod.conf', content: 'name = everness\n' },
+      { path: 'everness/init.lua', content: '-- canonical_cdb_everness\n' }
+    ]);
+
+    const seenUpstreamUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      seenUpstreamUrls.push(urlStr);
+      if (urlStr.includes('content.luanti.org/api/packages/SaKeL/everness/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 29500,
+              title: '2.0',
+              commit: null,
+              url: '/uploads/everness_29500.zip'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (urlStr.includes('content.luanti.org/uploads/everness_29500.zip')) {
+        return new Response(evernessZip as unknown as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'application/zip' }
+        });
+      }
+      if (urlStr.includes('content.luanti.org/api/packages/SaKeL/everness/dependencies/')) {
+        const deps = urlStr.includes('engine_version=5.8.0')
+          ? [{ name: 'default', is_optional: false, packages: ['Minetest/default'] }]
+          : [{ name: 'default', is_optional: false, packages: ['Minetest/default', 'Modern/default_alt'] }];
+        return new Response(JSON.stringify({ 'SaKeL/everness': deps }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      // 1. Download without ?release= under SaKeL/everness must query ContentDB as SaKeL/everness (NOT sakel-hub)
+      const dlRes = await onDownloadGet({
+        params: { author: 'SaKeL', name: 'everness' },
+        request: new Request('https://luantihub.org/packages/SaKeL/everness/download/?reason=update'),
+        env: mockEnv
+      } as any);
+      expect(dlRes.status).toBe(200);
+      const dlBodyText = new TextDecoder().decode(new Uint8Array(await dlRes.arrayBuffer()));
+      expect(dlBodyText).toContain('canonical_cdb_everness');
+      expect(seenUpstreamUrls.some((u) => u.includes('/packages/sakel-hub/everness/'))).toBe(false);
+      expect(seenUpstreamUrls.some((u) => u.includes('/packages/SaKeL/everness/releases/'))).toBe(true);
+
+      // 2. Dependencies for SaKeL/everness query ContentDB as SaKeL/everness and isolate engine_version cache variants
+      const deps58 = await dependenciesGet({
+        params: { author: 'SaKeL', name: 'everness' },
+        request: new Request(
+          'https://luantihub.org/api/packages/SaKeL/everness/dependencies/?only_hard=1&protocol_version=43&engine_version=5.8.0'
+        ),
+        env: mockEnv
+      } as any);
+      expect(deps58.status).toBe(200);
+      expect((await deps58.json())['SaKeL/everness'][0].packages).toEqual(['Minetest/default']);
+
+      const deps510 = await dependenciesGet({
+        params: { author: 'SaKeL', name: 'everness' },
+        request: new Request(
+          'https://luantihub.org/api/packages/SaKeL/everness/dependencies/?only_hard=1&protocol_version=46&engine_version=5.10.0'
+        ),
+        env: mockEnv
+      } as any);
+      expect(deps510.status).toBe(200);
+      expect((await deps510.json())['SaKeL/everness'][0].packages).toEqual(['Minetest/default', 'Modern/default_alt']);
+    } finally {
+      globalThis.fetch = origFetch;
+      (globalThis as any).caches = origCaches;
+      clearIsolateCachesForTests();
+      await invalidateEdgeCacheKeys(buildPackageCacheInvalidationKeys('SaKeL', 'everness'));
+    }
+  });
 });

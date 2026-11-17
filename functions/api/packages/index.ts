@@ -55,6 +55,12 @@ import {
   BOOT_CATALOG_EDGE_CACHE_KEY,
   IN_GAME_CATALOG_CACHE_PREFIX,
   computeLuantiClientReleaseId,
+  sanitizeLuantiEngineQueryParams,
+  normalizeLuantiBaseAuthor,
+  sanitizeLuantiTechnicalName,
+  createUpstreamRepoLookup,
+  registerUpstreamRepoEntry,
+  matchUpstreamRepoEntry,
   readResponseBytesBounded,
   isUntrustedTunnelOrPrivateHost
 } from '../lib/upstream';
@@ -1044,23 +1050,17 @@ export async function onRequestGet(context: {
     }
   }
   const requestedFmt = (url.searchParams.get('fmt') || '').trim().toLowerCase();
-  const protocolVersion = (url.searchParams.get('protocol_version') || '').trim();
+  const isWebClientQuery = url.searchParams.get('client') === 'web';
+  const {
+    protocolVersion: sanitizedProto,
+    engineVersion: sanitizedEngine,
+    versionQuery: clientVersionQuery
+  } = sanitizeLuantiEngineQueryParams(url.searchParams);
 
   const sortedUniqueTypes = Array.from(new Set(types)).sort();
   const isAllStandardTypes =
     sortedUniqueTypes.length === 0 ||
     (sortedUniqueTypes.includes('mod') && sortedUniqueTypes.includes('game') && sortedUniqueTypes.includes('txp'));
-
-  const upstreamParams = new URLSearchParams(url.searchParams);
-  upstreamParams.delete('boot');
-  upstreamParams.delete('nocache');
-  // Always request `fmt=vcs` from upstream ContentDB so fetchUpstreamJsonCached receives a JSON array
-  upstreamParams.set('fmt', 'vcs');
-  const upstreamQuery = upstreamParams.toString();
-  // Reuse the canonical `/packages/?fmt=vcs` upstream cache when fetching the full catalog across all types
-  const upstreamPath = (!q && !author && isAllStandardTypes)
-    ? '/packages/?fmt=vcs'
-    : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
 
   const bootEdgeCacheKey = `https://cache.luantihub.internal${BOOT_CATALOG_EDGE_CACHE_KEY}`;
   const rawHideAndFlags = [
@@ -1089,12 +1089,33 @@ export async function onRequestGet(context: {
   const limitFilterSig = (url.searchParams.get('limit') || '').trim();
   const licenseFilterSig = (url.searchParams.get('license') || '').trim().toLowerCase();
   const hasCustomUpstreamFilters = Boolean(
-    tagFilterSig || gameFilterSig || sortFilterSig || orderFilterSig || limitFilterSig || licenseFilterSig
+    tagFilterSig ||
+    gameFilterSig ||
+    sortFilterSig ||
+    orderFilterSig ||
+    limitFilterSig ||
+    licenseFilterSig ||
+    (isWebClientQuery && clientVersionQuery)
   );
-  const effectiveEngineSig = hasCustomUpstreamFilters
-    ? (url.searchParams.get('engine_version') || '').trim().toLowerCase()
-    : '';
-  const effectiveProtoSig = hasCustomUpstreamFilters ? protocolVersion : '';
+  const upstreamParams = new URLSearchParams(url.searchParams);
+  upstreamParams.delete('boot');
+  upstreamParams.delete('nocache');
+  if (!hasCustomUpstreamFilters) {
+    // Keep engine-agnostic base cache keys clean by stripping per-client version params before upstream fetch;
+    // finalizeInGameClientCatalogPayload overlays `/api/updates/?${clientVersionQuery}` per requesting engine version.
+    upstreamParams.delete('protocol_version');
+    upstreamParams.delete('engine_version');
+  }
+  // Always request `fmt=vcs` from upstream ContentDB so fetchUpstreamJsonCached receives a JSON array
+  upstreamParams.set('fmt', 'vcs');
+  const upstreamQuery = upstreamParams.toString();
+  // Reuse the canonical `/packages/?fmt=vcs` upstream cache when fetching the full catalog across all types
+  const upstreamPath = (!q && !author && isAllStandardTypes && !hasCustomUpstreamFilters)
+    ? '/packages/?fmt=vcs'
+    : `/packages/${upstreamQuery ? `?${upstreamQuery}` : ''}`;
+
+  const effectiveEngineSig = hasCustomUpstreamFilters ? sanitizedEngine.toLowerCase() : '';
+  const effectiveProtoSig = hasCustomUpstreamFilters ? sanitizedProto : '';
   const effectiveTypesSig = isAllStandardTypes ? 'all' : sortedUniqueTypes.join(',');
   const extraFilterSig = [
     normalizedHideSig,
@@ -1108,7 +1129,11 @@ export async function onRequestGet(context: {
   ].some(Boolean)
     ? `&h=${normalizedHideSig}&tg=${tagFilterSig}&gm=${gameFilterSig}&ev=${effectiveEngineSig}&s=${sortFilterSig}&o=${orderFilterSig}&lm=${limitFilterSig}&lc=${licenseFilterSig}`
     : '';
-  const isWebClientQuery = url.searchParams.get('client') === 'web';
+  const needsClientVersionOverlay = !isBootBundle && !isWebClientQuery && Boolean(clientVersionQuery);
+  const fetchClientVersionUpdates = (): Promise<Record<string, number> | null> =>
+    needsClientVersionOverlay
+      ? fetchUpstreamJsonCached<Record<string, number>>(`/updates/?${clientVersionQuery}`, 300).catch(() => null)
+      : Promise.resolve(null);
   const normalizedCatalogKey = `q=${q.toLowerCase()}&a=${author.toLowerCase()}&t=${effectiveTypesSig}&p=${effectiveProtoSig}&fmt=${requestedFmt}&cw=${isWebClientQuery ? '1' : '0'}${extraFilterSig}`;
   const catalogEdgeCacheKey = isBootBundle
     ? (!q && types.length === 0 && !author ? bootEdgeCacheKey : null)
@@ -1120,7 +1145,9 @@ export async function onRequestGet(context: {
     .getAll('tag')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
-  const buildInGameClientCatalogResponse = (packagesList: any[]): any => {
+  const buildInGameClientBaseCatalog = (
+    packagesList: any[]
+  ): { isFullWebArray: boolean; items: any[] } => {
     const filtered = (Array.isArray(packagesList) ? packagesList : []).filter((pkg: any) => {
       if (!pkg || !pkg.author || !pkg.name) return false;
       const pkgType = pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod');
@@ -1179,10 +1206,10 @@ export async function onRequestGet(context: {
     });
 
     if (isWebClientQuery && requestedFmt !== 'keys') {
-      return filtered;
+      return { isFullWebArray: true, items: filtered };
     }
 
-    const slimList = filtered.map((pkg: any) => {
+    const baseSlimItems = filtered.map((pkg: any) => {
       let resolvedClientThumb: string | null = null;
       for (const cand of [pkg.thumbnail, pkg.thumbnail_url, pkg.banner, pkg.banner_url]) {
         const clientUrl =
@@ -1192,21 +1219,83 @@ export async function onRequestGet(context: {
           break;
         }
       }
+      const relNum = Number(pkg.release) || 1;
+      const isOfficialCatalogItem = Array.isArray(pkg.sources)
+        ? pkg.sources.includes('official')
+        : (pkg.source === 'official' ||
+            pkg.provider === 'contentdb' ||
+            Number(pkg.contentdb_downloads || 0) > 0);
       const item: Record<string, any> = {
         author: pkg.author,
         name: pkg.name,
         title: pkg.title || pkg.name,
         type: pkg.type === 'modpack' ? 'mod' : (pkg.type || 'mod'),
         short_description: pkg.short_desc || pkg.short_description || '',
-        release: Number(pkg.release) || 1,
+        release: relNum,
         thumbnail: resolvedClientThumb
       };
       if (pkg.aliases) item['aliases'] = pkg.aliases;
       if (pkg.featured) item['featured'] = true;
+      if (isOfficialCatalogItem && relNum > 0 && relNum < 1_000_000_000) {
+        item['_cdb'] = 1;
+      }
       return item;
     });
 
-    if (requestedFmt === 'keys') {
+    return { isFullWebArray: false, items: baseSlimItems };
+  };
+
+  const finalizeInGameClientCatalogPayload = (
+    baseSlimItems: any[],
+    versionedUpdatesMap: Record<string, number> | null,
+    fmt: string
+  ): any => {
+    const lowerUpdates = new Map<string, number>();
+    if (versionedUpdatesMap && typeof versionedUpdatesMap === 'object') {
+      for (const [k, v] of Object.entries(versionedUpdatesMap)) {
+        if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+          lowerUpdates.set(k.toLowerCase(), Math.floor(v));
+        }
+      }
+    }
+
+    const slimList: any[] = [];
+    for (const rawItem of baseSlimItems) {
+      if (!rawItem) continue;
+      const isCdbOfficial = rawItem._cdb === 1;
+      let resolvedRelease = Number(rawItem.release) || 1;
+      if (lowerUpdates.size > 0) {
+        const primaryKey = `${rawItem.author}/${rawItem.name}`.toLowerCase();
+        let compatRel = lowerUpdates.get(primaryKey);
+        if (!compatRel && rawItem.aliases) {
+          const aliasList = Array.isArray(rawItem.aliases)
+            ? rawItem.aliases
+            : (typeof rawItem.aliases === 'string' && rawItem.aliases.trim()
+                ? parseJsonArray(rawItem.aliases)
+                : []);
+          for (const al of aliasList) {
+            const hit = lowerUpdates.get(String(al || '').toLowerCase());
+            if (hit) {
+              compatRel = hit;
+              break;
+            }
+          }
+        }
+        if (isCdbOfficial) {
+          if (!compatRel || compatRel <= 0) {
+            continue;
+          }
+          resolvedRelease = compatRel;
+        } else if (compatRel && compatRel > 0) {
+          resolvedRelease = compatRel;
+        }
+      }
+      const { _cdb, ...cleanItem } = rawItem;
+      cleanItem.release = resolvedRelease;
+      slimList.push(cleanItem);
+    }
+
+    if (fmt === 'keys') {
       const keys = [
         'author',
         'name',
@@ -1821,8 +1910,14 @@ export async function onRequestGet(context: {
           upstreamCatalog: cachedBoot.packages,
           appendMissingItems: true
         });
-        const sharedClientPayload = buildInGameClientCatalogResponse(overlaidBootPackages);
-        await writeEdgeCacheJson(catalogEdgeCacheKey, sharedClientPayload, 300);
+        const baseCat = buildInGameClientBaseCatalog(overlaidBootPackages);
+        const cacheEntryPayload = baseCat.isFullWebArray ? baseCat.items : { __lhBaseSlim: baseCat.items };
+        await writeEdgeCacheJson(catalogEdgeCacheKey, cacheEntryPayload, 300);
+        let sharedClientPayload: any = baseCat.items;
+        if (!baseCat.isFullWebArray) {
+          const versionUpdates = await fetchClientVersionUpdates();
+          sharedClientPayload = finalizeInGameClientCatalogPayload(baseCat.items, versionUpdates, requestedFmt);
+        }
         return new Response(JSON.stringify(sharedClientPayload), {
           headers: {
             'Content-Type': 'application/json',
@@ -1860,9 +1955,14 @@ export async function onRequestGet(context: {
       cachedCatalog &&
       (Array.isArray(cachedCatalog) ||
         Array.isArray(cachedCatalog.keys) ||
+        Array.isArray(cachedCatalog.__lhBaseSlim) ||
         (Array.isArray(cachedCatalog.packages) && cachedCatalog.packages.length > 0))
     ) {
       let edgeBody = cachedCatalog;
+      if (!isBootBundle && Array.isArray(cachedCatalog.__lhBaseSlim)) {
+        const versionUpdates = await fetchClientVersionUpdates();
+        edgeBody = finalizeInGameClientCatalogPayload(cachedCatalog.__lhBaseSlim, versionUpdates, requestedFmt);
+      }
       if (isBootBundle) {
         const nowMs = Date.now();
         // Zero D1 reads and zero upstream subrequests on HIT-EDGE: only read Isolate/Edge Cache overlays
@@ -1995,6 +2095,7 @@ export async function onRequestGet(context: {
   const upstreamPromise: Promise<any[]> = fetchUpstreamJsonCached<any[]>(upstreamPath, upstreamTtl)
     .then((list): any[] => (Array.isArray(list) ? list : []))
     .catch((): any[] => []);
+  const clientVersionUpdatesPromise = fetchClientVersionUpdates();
 
   const scoresPromise = isBootBundle
     ? fetchUpstreamJsonCached<any[]>('/scores/', 900)
@@ -2381,17 +2482,15 @@ export async function onRequestGet(context: {
     }
   }
 
-  // 3. Build upstream ContentDB index by ID, normalized repo URL, (baseAuthor + name + title), and unambiguous (baseAuthor + name + type) to prevent duplicates
+  // 3. Build upstream ContentDB index by ID, monorepo-safe repo lookup, (baseAuthor + name + title), and unambiguous (baseAuthor + name + type) to prevent duplicates
   const upstreamById = new Map<string, any>();
-  const upstreamByRepo = new Map<string, any>();
+  const upstreamRepoLookup = createUpstreamRepoLookup<any>();
   const upstreamByNameTitle = new Map<string, any>();
   const upstreamByNameTypeCount = new Map<string, number>();
   const upstreamByNameType = new Map<string, any>();
   const upstreamByGlobalNameTypeCount = new Map<string, number>();
   const upstreamByGlobalNameType = new Map<string, any>();
   const upstreamCasingByBaseAuthor = new Map<string, string>();
-  const normalizeBaseAuthor = (a: string) =>
-    String(a || '').toLowerCase().replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
   const normalizeIdentityText = (s: unknown) =>
     typeof s === 'string' ? s.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 
@@ -2399,9 +2498,8 @@ export async function onRequestGet(context: {
     if (!item || !item.author || !item.name) continue;
     const uKey = `${item.author}/${item.name}`.toLowerCase();
     upstreamById.set(uKey, item);
-    const rKey = normalizeRepoKey(item.repo || item.repo_url);
-    if (rKey) upstreamByRepo.set(rKey, item);
-    const baseAuthor = normalizeBaseAuthor(item.author);
+    registerUpstreamRepoEntry(upstreamRepoLookup, item.repo || item.repo_url, item.name, item);
+    const baseAuthor = normalizeLuantiBaseAuthor(item.author);
     if (baseAuthor && !upstreamCasingByBaseAuthor.has(baseAuthor)) {
       upstreamCasingByBaseAuthor.set(baseAuthor, String(item.author));
     }
@@ -2436,7 +2534,7 @@ export async function onRequestGet(context: {
       for (const h of handles) {
         const raw = String(h || '').trim();
         if (!raw || !/[-_](?:hub|git|dev|lab|mods?)$/i.test(raw)) continue;
-        const base = normalizeBaseAuthor(raw);
+        const base = normalizeLuantiBaseAuthor(raw);
         if (!base) continue;
         const baseHandleMatch = authorDisplayMap.byHandle.get(base);
         if (baseHandleMatch?.displayName) {
@@ -2468,7 +2566,7 @@ export async function onRequestGet(context: {
     if (blockedIds.has(d1Key)) continue;
 
     const pRepoKey = normalizeRepoKey(p.repo_url);
-    const pBaseAuthor = normalizeBaseAuthor(p.author_name);
+    const pBaseAuthor = normalizeLuantiBaseAuthor(p.author_name);
     const lowerPName = String(p.name || '').toLowerCase();
     const lowerPType = String(p.type || 'mod').toLowerCase();
     const pNameTitleKey = `${pBaseAuthor}::${lowerPName}::${String(p.title || '').trim().toLowerCase()}`;
@@ -2504,7 +2602,7 @@ export async function onRequestGet(context: {
     })();
     const matchedUpstream =
       upstreamById.get(d1Key) ||
-      (pRepoKey ? upstreamByRepo.get(pRepoKey) : undefined) ||
+      (pRepoKey ? matchUpstreamRepoEntry(upstreamRepoLookup, pRepoKey, p.name, true) : undefined) ||
       upstreamByNameTitle.get(pNameTitleKey) ||
       safeNameTypeMatch ||
       crossAuthorExactMatch;
@@ -2519,10 +2617,7 @@ export async function onRequestGet(context: {
 
     // Ensure strict Luanti client validation regex compliance (contentdb.lua:429-430)
     const aliases: string[] = Array.isArray(matchedUpstream?.aliases) ? [...matchedUpstream.aliases] : [];
-    const safeName = String(canonicalName || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9_]/g, '_')
-      .replace(/^_+|_+$/g, '') || 'mod';
+    const safeName = sanitizeLuantiTechnicalName(canonicalName);
     if (safeName !== canonicalName) {
       aliases.push(`${canonicalAuthor}/${canonicalName}`);
       canonicalName = safeName;
@@ -2535,8 +2630,8 @@ export async function onRequestGet(context: {
     }
     // Provide author variant aliases (e.g. sakel/x_mobs for sakel-hub/x_mobs) so Luanti matches mods with author = SaKeL
     if (canonicalAuthor.includes('-') || canonicalAuthor.includes('_')) {
-      const baseAuthor = canonicalAuthor.replace(/[-_](?:hub|git|dev|lab|mods?)$/i, '');
-      if (baseAuthor && baseAuthor.toLowerCase() !== canonicalAuthor.toLowerCase()) {
+      const baseAuthor = normalizeLuantiBaseAuthor(canonicalAuthor);
+      if (baseAuthor && baseAuthor !== canonicalAuthor.toLowerCase()) {
         const baseAlias = `${baseAuthor}/${canonicalName}`;
         if (!aliases.includes(baseAlias)) {
           aliases.push(baseAlias);
@@ -2711,10 +2806,11 @@ export async function onRequestGet(context: {
       }
     }
     const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
-    const releaseId = computeLuantiClientReleaseId(
-      { updated_at: p.updated_at, created_at: p.created_at },
-      Number(matchedUpstream?.release) > 0 ? Number(matchedUpstream.release) : undefined
-    );
+    const upstreamReleaseInt =
+      Number(matchedUpstream?.release) > 0 ? Math.floor(Number(matchedUpstream.release)) : undefined;
+    const releaseId = isAlsoOfficial
+      ? (upstreamReleaseInt ?? 1)
+      : computeLuantiClientReleaseId({ updated_at: p.updated_at, created_at: p.created_at });
 
     const authorMeta = resolveAuthorMeta(
       p.author_id,
@@ -3547,7 +3643,17 @@ export async function onRequestGet(context: {
     }
 
     // Compact ContentDB-compatible payload for in-game Luanti C++ client (`contentdb.lua` / `dlg_contentdb.lua`)
-    responsePayload = buildInGameClientCatalogResponse(merged);
+    const baseCat = buildInGameClientBaseCatalog(merged);
+    if (!noCache && catalogEdgeCacheKey) {
+      await writeEdgeCacheJson(
+        catalogEdgeCacheKey,
+        baseCat.isFullWebArray ? baseCat.items : { __lhBaseSlim: baseCat.items },
+        upstreamList.length > 0 || q || author ? 300 : 15
+      );
+    }
+    responsePayload = baseCat.isFullWebArray
+      ? baseCat.items
+      : finalizeInGameClientCatalogPayload(baseCat.items, await clientVersionUpdatesPromise, requestedFmt);
   }
 
   if (env.DB && dualSourceBackfillStmts.length > 0) {
@@ -3559,10 +3665,6 @@ export async function onRequestGet(context: {
         await stmt.run().catch(() => {});
       }
     }
-  }
-
-  if (!isBootBundle && !noCache && catalogEdgeCacheKey) {
-    await writeEdgeCacheJson(catalogEdgeCacheKey, responsePayload, 300);
   }
 
   return new Response(JSON.stringify(responsePayload), {
