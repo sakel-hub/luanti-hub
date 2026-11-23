@@ -51,7 +51,8 @@ import {
   IN_GAME_CATALOG_CACHE_PREFIX,
   FOR_CLIENT_CACHE_PREFIX,
   invalidateEdgeCacheKeys,
-  clearIsolateCachesForTests
+  clearIsolateCachesForTests,
+  scanGitRepoMetadataCached
 } from '../../functions/api/lib/upstream';
 import { toLegacyLuantiClientThumbnailUrl } from './core/config/git-providers.config';
 import {
@@ -2377,7 +2378,7 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
         return { success: true };
       }
 
-      if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at(?:,\s*license,\s*media_license,\s*min_minetest_version)?\s+FROM\s+packages/i.test(clean)) {
+      if (/SELECT\s+LOWER\(id\)\s+as\s+lower_id,\s+updated_at,\s+created_at/i.test(clean) && /FROM\s+packages/i.test(clean)) {
         const lowerIds = new Set(args.map((a) => String(a).toLowerCase()));
         const results = Array.from(packages.entries())
           .filter(([k]) => lowerIds.has(k))
@@ -2387,7 +2388,10 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
             created_at: p.created_at,
             license: p.license,
             media_license: p.media_license,
-            min_minetest_version: p.min_minetest_version
+            min_minetest_version: p.min_minetest_version,
+            thumbnail_url: p.thumbnail_url,
+            banner_url: p.banner_url,
+            screenshots: p.screenshots
           }));
         return { results };
       }
@@ -4606,5 +4610,209 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
     expect(pkgService.activePackage()?.sources).toEqual(['git']);
     modalFixture.destroy();
     pkgService.closePackageModal();
+  });
+
+  it('discovers screenshot.jpg fallback for exevirus/back_tracks across scanGitRepoMetadataCached, Jam 2026 sync/readback, refreshJam2026D1PkgIfStale, synthetic detail, /api/jam-2026, and Luanti client URL conversion', async () => {
+    const commitSha = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+    const expectedJpgUrl = `https://raw.githubusercontent.com/exevirus/back_tracks/${commitSha}/screenshot.jpg`;
+    const cacheStore = new Map<string, Response>();
+    (globalThis as any).caches = {
+      default: {
+        match: async (req: Request) => {
+          const hit = cacheStore.get(req.url);
+          return hit ? hit.clone() : undefined;
+        },
+        put: async (req: Request, res: Response) => {
+          cacheStore.set(req.url, res.clone());
+        },
+        delete: async (req: Request) => cacheStore.delete(req.url)
+      }
+    };
+
+    const jpgHeadRequests: string[] = [];
+    globalThis.fetch = vi.fn(async (input: any, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === 'https://jam.greenxenith.com/api/brews') {
+        return new Response(
+          JSON.stringify([
+            {
+              repository: 'https://github.com/exevirus/back_tracks',
+              commit: commitSha,
+              title: 'Back Tracks',
+              description: 'Barren Wasteland Racer Shooter',
+              hasScreenshot: false,
+              publishedAt: '2026-11-22T12:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/game.conf') && url.includes('exevirus/back_tracks')) {
+        return new Response(
+          'title = Back Tracks\nname = back_tracks\ndescription = Barren Wasteland Racer Shooter\nmin_minetest_version = 5.14\n',
+          { status: 200, headers: { 'Content-Type': 'text/plain' } }
+        );
+      }
+      if (url.endsWith('/JAM2026.md') && url.includes('exevirus/back_tracks')) {
+        return new Response('Day 1: Driving Mechanics\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      if (url.endsWith('/screenshot.jpg') && url.includes('exevirus/back_tracks')) {
+        jpgHeadRequests.push(`${(init?.method || 'GET').toUpperCase()} ${url}`);
+        return new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg', 'Content-Length': '85822' }
+        });
+      }
+      if (url.endsWith('/screenshot.png') && url.includes('exevirus/back_tracks')) {
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response('Not found', { status: 404 });
+    }) as any;
+
+    try {
+      // 1. Direct Git repo scan falls back from missing screenshot.png to screenshot.jpg
+      const directScan = await scanGitRepoMetadataCached(
+        'exevirus',
+        'back_tracks',
+        'game',
+        'https://github.com/exevirus/back_tracks',
+        86400,
+        { commitSha, bypassCache: true }
+      );
+      expect(directScan.gitRepoStatus).toBe('verified');
+      expect(directScan.screenshotUrl).toBe(expectedJpgUrl);
+      expect(directScan.screenshots).toEqual([expectedJpgUrl]);
+      expect(jpgHeadRequests.some((r) => r.includes(expectedJpgUrl))).toBe(true);
+
+      // 2. Luanti C++ client thumbnail converter accepts .jpg/.jpeg and rejects .webp/.avif/.svg
+      expect(toLegacyLuantiClientThumbnailUrl(expectedJpgUrl)).toBe(expectedJpgUrl);
+      expect(
+        toLegacyLuantiClientThumbnailUrl(`https://raw.githubusercontent.com/exevirus/back_tracks/${commitSha}/screenshot.jpeg`)
+      ).toBe(`https://raw.githubusercontent.com/exevirus/back_tracks/${commitSha}/screenshot.jpeg`);
+      expect(
+        toLegacyLuantiClientThumbnailUrl(`https://raw.githubusercontent.com/exevirus/back_tracks/${commitSha}/screenshot.webp`)
+      ).toBeUndefined();
+      expect(
+        toLegacyLuantiClientThumbnailUrl('https://codeberg.org/api/v1/repos/exevirus/back_tracks/raw/screenshot.webp?ref=main')
+      ).toBeUndefined();
+
+      // 3. Synthetic detail fallback surfaces screenshot.jpg before D1 persistence
+      const synth = await resolveJam2026SyntheticD1Detail('exevirus', 'back_tracks', null, [], true);
+      expect(synth.d1Pkg?.thumbnail_url).toBe(expectedJpgUrl);
+      expect(synth.d1Pkg?.banner_url).toBe(expectedJpgUrl);
+      expect(JSON.parse(synth.d1Pkg?.screenshots || '[]')).toEqual([expectedJpgUrl]);
+
+      // 4. Jam 2026 sync persists screenshot.jpg to D1 and propagates to discoveredByKey (and subsequent D1 readback)
+      const fkD1 = createFkEnforcingJamD1();
+      const discovered1 = new Map<string, any>();
+      await syncJam2026IntoPromoRowDelta({
+        uniqueTags: ['jam_game_2026'],
+        addTagStamp: () => {},
+        discoveredByKey: discovered1,
+        existingD1Pairs: new Set(),
+        queuedUpsertKeys: new Set(),
+        d1UpsertPairs: [],
+        db: fkD1.db,
+        noCache: true
+      });
+      const syncedEntry1 = discovered1.get('exevirus/back_tracks');
+      expect(syncedEntry1?.thumbnail).toBe(expectedJpgUrl);
+      expect(syncedEntry1?.banner).toBe(expectedJpgUrl);
+      expect(syncedEntry1?.screenshots).toEqual([expectedJpgUrl]);
+      expect(fkD1.packages.get('exevirus/back_tracks')?.thumbnail_url).toBe(expectedJpgUrl);
+      expect(fkD1.packages.get('exevirus/back_tracks')?.banner_url).toBe(expectedJpgUrl);
+
+      // Subsequent sync when unsyncedBrews.length === 0 must read back screenshot.jpg from D1
+      const discovered2 = new Map<string, any>();
+      await syncJam2026IntoPromoRowDelta({
+        uniqueTags: ['jam_game_2026'],
+        addTagStamp: () => {},
+        discoveredByKey: discovered2,
+        existingD1Pairs: new Set(),
+        queuedUpsertKeys: new Set(),
+        d1UpsertPairs: [],
+        db: fkD1.db,
+        noCache: false
+      });
+      const syncedEntry2 = discovered2.get('exevirus/back_tracks');
+      expect(syncedEntry2?.thumbnail).toBe(expectedJpgUrl);
+      expect(syncedEntry2?.banner).toBe(expectedJpgUrl);
+      expect(syncedEntry2?.screenshots).toEqual([expectedJpgUrl]);
+
+      // 5. GET /api/jam-2026 overlays D1 screenshot.jpg onto brews with hasScreenshot: false
+      const jamApiDb = {
+        prepare: () => ({
+          bind: () => ({
+            all: async () => ({
+              results: [
+                {
+                  lower_id: 'exevirus/back_tracks',
+                  lower_repo: 'https://github.com/exevirus/back_tracks',
+                  license: 'MIT',
+                  media_license: 'MIT',
+                  min_minetest_version: '5.14',
+                  thumbnail_url: expectedJpgUrl,
+                  banner_url: expectedJpgUrl,
+                  screenshots: JSON.stringify([expectedJpgUrl])
+                }
+              ]
+            })
+          })
+        })
+      };
+      const jamEndpointRes = await getJam2026Endpoint({
+        request: new Request('https://luantihub.org/api/jam-2026'),
+        env: { DB: jamApiDb }
+      });
+      const jamEndpointJson = await jamEndpointRes.json();
+      const apiBrew = jamEndpointJson.brews.find((b: any) => b.id === 'exevirus/back_tracks');
+      expect(apiBrew?.thumbnail).toBe(expectedJpgUrl);
+      expect(apiBrew?.banner).toBe(expectedJpgUrl);
+      expect(apiBrew?.screenshots).toEqual([expectedJpgUrl]);
+
+      // 6. refreshJam2026D1PkgIfStale backfills screenshot.jpg onto an already-synced D1 row missing screenshots
+      const updatedCols: Record<string, any> = {};
+      const refreshDb = {
+        prepare: () => ({
+          bind: (...args: any[]) => ({
+            run: async () => {
+              updatedCols['thumb'] = args[3];
+              updatedCols['banner'] = args[4];
+              updatedCols['screenshots'] = args[5];
+              return { success: true };
+            }
+          })
+        })
+      };
+      const refreshed = await refreshJam2026D1PkgIfStale(
+        {
+          id: 'exevirus/back_tracks',
+          author_name: 'exevirus',
+          name: 'back_tracks',
+          type: 'game',
+          repo_url: 'https://github.com/exevirus/back_tracks',
+          latest_commit_sha: commitSha,
+          tags: JSON.stringify(['jam_game_2026', 'gamejam', 'git', 'github', 'game']),
+          thumbnail_url: null,
+          banner_url: 'logo.svg',
+          screenshots: null,
+          metadata_synced_at: '2026-11-22T12:00:00Z',
+          license_override: 0
+        },
+        refreshDb,
+        false
+      );
+      expect(refreshed.thumbnail_url).toBe(expectedJpgUrl);
+      expect(refreshed.banner_url).toBe(expectedJpgUrl);
+      expect(JSON.parse(refreshed.screenshots || '[]')).toEqual([expectedJpgUrl]);
+      expect(updatedCols['thumb']).toBe(expectedJpgUrl);
+      expect(updatedCols['banner']).toBe(expectedJpgUrl);
+      expect(JSON.parse(updatedCols['screenshots'] || '[]')).toEqual([expectedJpgUrl]);
+    } finally {
+      clearIsolateCachesForTests();
+    }
   });
 });

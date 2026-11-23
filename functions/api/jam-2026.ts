@@ -45,7 +45,7 @@ export async function onRequestGet(context: { request?: Request; env?: Env }): P
       }
       if (whereParts.length > 0) {
         const res = await context.env.DB.prepare(
-          `SELECT LOWER(id) as lower_id, LOWER(repo_url) as lower_repo, license, media_license, min_minetest_version
+          `SELECT LOWER(id) as lower_id, LOWER(repo_url) as lower_repo, license, media_license, min_minetest_version, thumbnail_url, banner_url, screenshots
            FROM packages
            WHERE status = 'active' AND (${whereParts.join(' OR ')})`
         )
@@ -63,11 +63,45 @@ export async function onRequestGet(context: { request?: Request; env?: Env }): P
               byId.get(String(b.id || '').toLowerCase()) ||
               (b.repo_url ? byRepo.get(String(b.repo_url).trim().toLowerCase()) : undefined);
             if (!match) return b;
+            const matchThumb =
+              typeof match.thumbnail_url === 'string' && match.thumbnail_url.trim() && match.thumbnail_url.trim() !== 'logo.svg'
+                ? match.thumbnail_url.trim()
+                : undefined;
+            const matchBanner =
+              typeof match.banner_url === 'string' && match.banner_url.trim() && match.banner_url.trim() !== 'logo.svg'
+                ? match.banner_url.trim()
+                : undefined;
+            let matchShots: string[] | undefined;
+            if ((!Array.isArray(b.screenshots) || b.screenshots.length === 0) && match.screenshots) {
+              try {
+                const parsed = JSON.parse(String(match.screenshots));
+                if (Array.isArray(parsed)) {
+                  const clean = parsed.filter(
+                    (s: unknown): s is string => typeof s === 'string' && Boolean(s.trim()) && s.trim() !== 'logo.svg'
+                  );
+                  if (clean.length > 0) matchShots = clean;
+                }
+              } catch {
+                // Ignore malformed JSON
+              }
+            }
+            const resolvedFallbackThumb = !b.thumbnail ? (matchThumb || matchBanner) : undefined;
+            const resolvedFallbackBanner = !b.banner ? (matchBanner || matchThumb) : undefined;
+            const resolvedFallbackShots =
+              !Array.isArray(b.screenshots) || b.screenshots.length === 0
+                ? (matchShots ||
+                    (resolvedFallbackBanner || resolvedFallbackThumb
+                      ? [String(resolvedFallbackBanner || resolvedFallbackThumb)]
+                      : undefined))
+                : undefined;
             return {
               ...b,
               ...(match.license ? { license: String(match.license) } : {}),
               ...(match.media_license ? { media_license: String(match.media_license) } : {}),
-              ...(match.min_minetest_version ? { min_minetest_version: String(match.min_minetest_version) } : {})
+              ...(match.min_minetest_version ? { min_minetest_version: String(match.min_minetest_version) } : {}),
+              ...(resolvedFallbackThumb ? { thumbnail: resolvedFallbackThumb } : {}),
+              ...(resolvedFallbackBanner ? { banner: resolvedFallbackBanner } : {}),
+              ...(resolvedFallbackShots ? { screenshots: resolvedFallbackShots } : {})
             };
           });
         }

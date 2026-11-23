@@ -3877,6 +3877,10 @@ import {
   isUntrustedTunnelOrPrivateHost,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
+  ROOT_SCREENSHOT_FILENAMES,
+  FALLBACK_ROOT_SCREENSHOT_FILENAMES,
+  isRootScreenshotFilename,
+  findRootScreenshotEntry,
   toProxiedGitImageIfNeeded,
   unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
@@ -3905,6 +3909,10 @@ export {
   isUntrustedTunnelOrPrivateHost,
   buildProviderRootListingApiUrl,
   buildProviderRawFileUrl,
+  ROOT_SCREENSHOT_FILENAMES,
+  FALLBACK_ROOT_SCREENSHOT_FILENAMES,
+  isRootScreenshotFilename,
+  findRootScreenshotEntry,
   toProxiedGitImageIfNeeded,
   unwrapProxiedImageUrl,
   isGitRepositoryAssetUrl,
@@ -3954,7 +3962,7 @@ export async function scanGitRepoMetadataCached(
       : hasCommitSha
         ? Math.max(ttlSeconds, 86400)
         : Math.min(ttlSeconds, 3600);
-  const cacheKey = `/__git_repo_scan_v13/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}${shaSegment}`;
+  const cacheKey = `/__git_repo_scan_v14/${encodeURIComponent(author.toLowerCase())}/${encodeURIComponent(name.toLowerCase())}/${encodeURIComponent((normalizedInputUrl || '').toLowerCase())}${shaSegment}`;
   if (!options?.bypassCache && effectiveTtl > 0) {
     const cached = await readEdgeCacheJson<GitRepoScanResult>(cacheKey);
     if (cached && cached.gitRepoStatus) {
@@ -4120,8 +4128,6 @@ export async function scanGitRepoMetadataCached(
           jam2026Tags = ['jam_game_2026', 'gamejam'];
         }
 
-        const hasCandidateScreenshot = Boolean(probedScreenshotUrl);
-
         if (cdbRes && cdbRes.ok) {
           const cdbText = await cdbRes.text().catch(() => '');
           const parsedCdb = parseCdbJsonMetadata(cdbText);
@@ -4188,8 +4194,8 @@ export async function scanGitRepoMetadataCached(
                 if (fbText && !fbText.trim().startsWith('<!DOCTYPE') && !fbText.trim().startsWith('<html')) {
                   resolvedRepoUrl = cand.repoUrl;
                   resolvedRawBaseUrl = cand.base;
-                  if (hasCandidateScreenshot) {
-                    screenshotUrl = `${cand.base}/screenshot.png`;
+                  if (probedScreenshotUrl) {
+                    screenshotUrl = probedScreenshotUrl;
                   }
                   gitRepoStatus = 'verified';
                   return true;
@@ -4210,8 +4216,8 @@ export async function scanGitRepoMetadataCached(
           if (confText && !confText.trim().startsWith('<!DOCTYPE') && !confText.trim().startsWith('<html')) {
             resolvedRepoUrl = cand.repoUrl;
             resolvedRawBaseUrl = cand.base;
-            if (hasCandidateScreenshot) {
-              screenshotUrl = `${cand.base}/screenshot.png`;
+            if (probedScreenshotUrl) {
+              screenshotUrl = probedScreenshotUrl;
             }
             gitRepoStatus = 'verified';
             const confMap = parseLuantiConf(confText);
@@ -4386,6 +4392,26 @@ export async function scanGitRepoMetadataCached(
       }
     } finally {
       clearTimeout(licTimer);
+    }
+  }
+
+  // Fallback root screenshot probing (screenshot.jpg / screenshot.jpeg / screenshot.webp) only on verified repos
+  // when standard screenshot.png was absent (0 extra subrequests for repos with screenshot.png or 404 candidates)
+  if (!screenshotUrl && gitRepoStatus === 'verified' && resolvedRawBaseUrl) {
+    const shotCtrl = new AbortController();
+    const shotTimer = setTimeout(() => shotCtrl.abort(), 1400);
+    try {
+      const fallbackShots = await Promise.all(
+        FALLBACK_ROOT_SCREENSHOT_FILENAMES.map((fileName) =>
+          probeRawScreenshotUrl(resolvedRawBaseUrl!, shotCtrl.signal, fileName)
+        )
+      );
+      const firstFallbackShot = fallbackShots.find((u) => Boolean(u));
+      if (firstFallbackShot) {
+        screenshotUrl = firstFallbackShot;
+      }
+    } finally {
+      clearTimeout(shotTimer);
     }
   }
 
@@ -6293,11 +6319,13 @@ export function buildPackageCacheInvalidationKeys(
     keys.add(`/__git_repo_scan_v12/${encA}/${encN}`);
     const normRepo = options.repoUrl ? normalizeGitRepoInputUrl(options.repoUrl) : '';
     if (normRepo) {
-      const baseScanKey = `/__git_repo_scan_v13/${encA}/${encN}/${encodeURIComponent(normRepo.toLowerCase())}`;
-      keys.add(baseScanKey);
-      const cleanSha = String(options.commitSha || '').trim().toLowerCase();
-      if (cleanSha && cleanSha !== 'head' && cleanSha !== 'latest') {
-        keys.add(`${baseScanKey}/sha=${encodeURIComponent(cleanSha.slice(0, 12))}`);
+      for (const scanVer of ['v13', 'v14']) {
+        const baseScanKey = `/__git_repo_scan_${scanVer}/${encA}/${encN}/${encodeURIComponent(normRepo.toLowerCase())}`;
+        keys.add(baseScanKey);
+        const cleanSha = String(options.commitSha || '').trim().toLowerCase();
+        if (cleanSha && cleanSha !== 'head' && cleanSha !== 'latest') {
+          keys.add(`${baseScanKey}/sha=${encodeURIComponent(cleanSha.slice(0, 12))}`);
+        }
       }
     }
   }

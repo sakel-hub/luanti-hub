@@ -41,8 +41,8 @@ export const JAM_2026_TAGS = [JAM_2026_PRIMARY_TAG, JAM_2026_SECONDARY_TAG] as c
 
 const JAM_2026_EDGE_CACHE_KEY = '/__jam_2026_brews_v3';
 const JAM_2026_FALLBACK_CACHE_KEY = '/__jam_2026_brews_fallback_v2';
-const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v5';
-const JAM_2026_STANDALONE_DELTA_CACHE_KEY = '/__jam_2026_standalone_delta_v2';
+const JAM_2026_D1_DIGEST_CACHE_KEY = '/__jam_2026_d1_digest_v6';
+const JAM_2026_STANDALONE_DELTA_CACHE_KEY = '/__jam_2026_standalone_delta_v3';
 const JAM_2026_BREWS_TTL_SECONDS = 300; // 5 minutes Edge + Isolate cache (aligned with jam.luanti.org shelfRefreshMs)
 
 const JAM_2026_ALLOWED_IMAGE_HOSTS = new Set<string>([
@@ -602,11 +602,15 @@ export async function syncJam2026IntoPromoRowDelta(params: {
           // Optional lookup on minimal mock DBs
         }
 
-        // Scan .conf / .cdb.json / LICENSE for new or SHA-changed Jam repos (bounded to protect Worker 50-subrequest limit)
+        // Scan .conf / .cdb.json / LICENSE / fallback root screenshots for new, SHA-changed, or screenshot-less Jam repos
+        // (bounded to protect Worker 50-subrequest limit)
         const scannedMetaByLowerId = new Map<string, { license?: string; mediaLicense?: string; minVersion?: string }>();
         const brewsNeedingScan = batchBrews.filter((b) => {
           if (!b.repo_url || officialBrewIdsLower.has(b.id.toLowerCase())) return false;
           const ex = existingRowsByLowerId.get(b.id.toLowerCase());
+          const missingScreenshot =
+            !b.thumbnail && (!ex || !ex.thumbnail_url || String(ex.thumbnail_url) === 'logo.svg');
+          if (missingScreenshot) return true;
           if (Number(ex?.license_override || 0) === 1) return false;
           if (!ex) return true;
           const exSha = String(ex.latest_commit_sha || '').trim().toLowerCase();
@@ -626,26 +630,41 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                 { commitSha: b.latest_commit_sha }
               ).catch(() => null);
               if (scan && scan.gitRepoStatus === 'verified') {
+                const ex = existingRowsByLowerId.get(lowerId);
+                const isOverridden = Number(ex?.license_override || 0) === 1;
                 scannedMetaByLowerId.set(lowerId, {
-                  license: scan.license || undefined,
-                  mediaLicense: scan.mediaLicense || undefined,
+                  license: !isOverridden ? (scan.license || undefined) : undefined,
+                  mediaLicense: !isOverridden ? (scan.mediaLicense || undefined) : undefined,
                   minVersion: scan.minVersion || undefined
                 });
                 const disc = discoveredByKey.get(lowerId);
-                if (scan.license) {
+                if (!isOverridden && scan.license) {
                   b.license = scan.license;
                   if (disc) {
                     disc.license = scan.license;
                     (disc as any)._d1LicenseSynced = true;
                   }
                 }
-                if (scan.mediaLicense) {
+                if (!isOverridden && scan.mediaLicense) {
                   b.media_license = scan.mediaLicense;
                   if (disc) disc.media_license = scan.mediaLicense;
                 }
                 if (scan.minVersion) {
                   b.min_minetest_version = scan.minVersion;
                   if (disc) disc.min_minetest_version = scan.minVersion;
+                }
+                if (!b.thumbnail && scan.screenshotUrl) {
+                  const fallbackShot = scan.screenshotUrl;
+                  const fallbackShots =
+                    scan.screenshots && scan.screenshots.length > 0 ? scan.screenshots : [fallbackShot];
+                  b.thumbnail = fallbackShot;
+                  b.banner = fallbackShot;
+                  b.screenshots = fallbackShots;
+                  if (disc) {
+                    disc.thumbnail = fallbackShot;
+                    disc.banner = fallbackShot;
+                    disc.screenshots = fallbackShots;
+                  }
                 }
               }
             })
@@ -694,18 +713,18 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                     min_minetest_version = COALESCE(NULLIF(excluded.min_minetest_version, ''), packages.min_minetest_version),
                     thumbnail_url = CASE
                       WHEN packages.thumbnail_url LIKE '%jam.greenxenith.com%' OR packages.thumbnail_url LIKE '%/api/brews/%' THEN excluded.thumbnail_url
-                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.thumbnail_url, NULLIF(packages.thumbnail_url, ''))
-                      ELSE COALESCE(NULLIF(packages.thumbnail_url, ''), excluded.thumbnail_url)
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.thumbnail_url, NULLIF(NULLIF(packages.thumbnail_url, ''), 'logo.svg'))
+                      ELSE COALESCE(NULLIF(NULLIF(packages.thumbnail_url, ''), 'logo.svg'), excluded.thumbnail_url)
                     END,
                     banner_url = CASE
                       WHEN packages.banner_url LIKE '%jam.greenxenith.com%' OR packages.banner_url LIKE '%/api/brews/%' THEN excluded.banner_url
-                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.banner_url, NULLIF(packages.banner_url, ''))
-                      ELSE COALESCE(NULLIF(packages.banner_url, ''), excluded.banner_url)
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.banner_url, NULLIF(NULLIF(packages.banner_url, ''), 'logo.svg'))
+                      ELSE COALESCE(NULLIF(NULLIF(packages.banner_url, ''), 'logo.svg'), excluded.banner_url)
                     END,
                     screenshots = CASE
                       WHEN packages.screenshots LIKE '%jam.greenxenith.com%' OR packages.screenshots LIKE '%/api/brews/%' THEN excluded.screenshots
-                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.screenshots, NULLIF(packages.screenshots, ''))
-                      ELSE COALESCE(NULLIF(packages.screenshots, ''), excluded.screenshots)
+                      WHEN ${isUnclaimedJamRowSql} THEN COALESCE(excluded.screenshots, NULLIF(NULLIF(packages.screenshots, ''), '[]'))
+                      ELSE COALESCE(NULLIF(NULLIF(packages.screenshots, ''), '[]'), excluded.screenshots)
                     END,
                     latest_commit_sha = excluded.latest_commit_sha,
                     tags = CASE
@@ -856,14 +875,14 @@ export async function syncJam2026IntoPromoRowDelta(params: {
         }
       }
 
-      // Always read back authoritative D1 timestamps & licenses so monotonic commit bumps
-      // and live scanned/edited licenses propagate to catalog overlays even when `unsyncedBrews.length === 0`.
+      // Always read back authoritative D1 timestamps, licenses, and fallback screenshots so monotonic commit bumps,
+      // live scanned/edited licenses, and non-PNG Git screenshots (e.g. screenshot.jpg) propagate to catalog overlays even when `unsyncedBrews.length === 0`.
       try {
         const lowerIds = brews.slice(0, 60).map((b) => b.id.toLowerCase());
         if (lowerIds.length > 0) {
           const placeholders = lowerIds.map(() => '?').join(', ');
           const syncedRows = await db
-            .prepare(`SELECT LOWER(id) as lower_id, updated_at, created_at, license, media_license, min_minetest_version FROM packages WHERE LOWER(id) IN (${placeholders})`)
+            .prepare(`SELECT LOWER(id) as lower_id, updated_at, created_at, license, media_license, min_minetest_version, thumbnail_url, banner_url, screenshots FROM packages WHERE LOWER(id) IN (${placeholders})`)
             .bind(...lowerIds)
             .all();
           for (const row of syncedRows?.results || []) {
@@ -880,6 +899,36 @@ export async function syncJam2026IntoPromoRowDelta(params: {
             }
             if (row?.media_license) disc.media_license = String(row.media_license);
             if (row?.min_minetest_version) disc.min_minetest_version = String(row.min_minetest_version);
+            const rowThumb = typeof row?.thumbnail_url === 'string' && row.thumbnail_url.trim() && row.thumbnail_url.trim() !== 'logo.svg'
+              ? row.thumbnail_url.trim()
+              : undefined;
+            const rowBanner = typeof row?.banner_url === 'string' && row.banner_url.trim() && row.banner_url.trim() !== 'logo.svg'
+              ? row.banner_url.trim()
+              : undefined;
+            if (!disc.thumbnail && (rowThumb || rowBanner)) {
+              disc.thumbnail = rowThumb || rowBanner || null;
+            }
+            if (!disc.banner && (rowBanner || rowThumb)) {
+              disc.banner = rowBanner || rowThumb || null;
+            }
+            if ((!Array.isArray(disc.screenshots) || disc.screenshots.length === 0) && row?.screenshots) {
+              try {
+                const parsedShots = JSON.parse(String(row.screenshots));
+                if (Array.isArray(parsedShots)) {
+                  const cleanShots = parsedShots.filter(
+                    (s: unknown): s is string => typeof s === 'string' && Boolean(s.trim()) && s.trim() !== 'logo.svg'
+                  );
+                  if (cleanShots.length > 0) {
+                    disc.screenshots = cleanShots;
+                  }
+                }
+              } catch {
+                // Ignore malformed screenshots JSON
+              }
+            }
+            if ((!Array.isArray(disc.screenshots) || disc.screenshots.length === 0) && (disc.banner || disc.thumbnail)) {
+              disc.screenshots = [String(disc.banner || disc.thumbnail)];
+            }
           }
         }
       } catch {
@@ -1358,12 +1407,15 @@ export async function refreshJam2026D1PkgIfStale(
   const currentSha = String(d1Pkg.latest_commit_sha || '').trim().toLowerCase();
   const targetSha = String(brew?.latest_commit_sha || currentSha || '').trim();
   const shaChanged = Boolean(brew && currentSha && brew.latest_commit_sha.toLowerCase() !== currentSha);
+  const hasValidThumb = Boolean(d1Pkg.thumbnail_url && String(d1Pkg.thumbnail_url).trim() !== 'logo.svg');
+  const hasValidBanner = Boolean(d1Pkg.banner_url && String(d1Pkg.banner_url).trim() !== 'logo.svg');
+  const needsScreenshotFallback = Boolean(d1Pkg.repo_url) && (!hasValidThumb || !hasValidBanner);
   const needsMetadataSync =
     Boolean(d1Pkg.repo_url) &&
     Number(d1Pkg.license_override || 0) !== 1 &&
     (!d1Pkg.metadata_synced_at || shaChanged);
 
-  if (!shaChanged && !needsMetadataSync) {
+  if (!shaChanged && !needsMetadataSync && !needsScreenshotFallback) {
     return d1Pkg;
   }
 
@@ -1392,8 +1444,22 @@ export async function refreshJam2026D1PkgIfStale(
     ? scan.mediaLicense
     : d1Pkg.media_license;
   const nextMinVer = scan?.minVersion || d1Pkg.min_minetest_version;
+  const scannedShot = scan?.gitRepoStatus === 'verified' && scan.screenshotUrl ? scan.screenshotUrl : undefined;
+  const scannedShots =
+    scan?.gitRepoStatus === 'verified' && scan.screenshots && scan.screenshots.length > 0
+      ? scan.screenshots
+      : (scannedShot ? [scannedShot] : undefined);
+  const nextFallbackThumb = !hasValidThumb && scannedShot ? scannedShot : null;
+  const nextFallbackBanner = !hasValidBanner && scannedShot ? scannedShot : null;
+  const hasExistingShots = Boolean(d1Pkg.screenshots && String(d1Pkg.screenshots).trim() !== '[]');
+  const nextFallbackShotsJson = !hasExistingShots && scannedShots ? JSON.stringify(scannedShots) : null;
 
-  if (db && d1Pkg.id && scan?.gitRepoStatus === 'verified') {
+  if (
+    db &&
+    d1Pkg.id &&
+    scan?.gitRepoStatus === 'verified' &&
+    (needsMetadataSync || Boolean(nextFallbackThumb || nextFallbackBanner || nextFallbackShotsJson))
+  ) {
     await runWithD1ColumnFallback(db, () =>
       db
         .prepare(`
@@ -1401,6 +1467,18 @@ export async function refreshJam2026D1PkgIfStale(
           SET license = COALESCE(?, license),
               media_license = COALESCE(?, media_license),
               min_minetest_version = COALESCE(?, min_minetest_version),
+              thumbnail_url = CASE
+                WHEN COALESCE(thumbnail_url, '') = '' OR thumbnail_url = 'logo.svg' THEN COALESCE(?, thumbnail_url)
+                ELSE thumbnail_url
+              END,
+              banner_url = CASE
+                WHEN COALESCE(banner_url, '') = '' OR banner_url = 'logo.svg' THEN COALESCE(?, banner_url)
+                ELSE banner_url
+              END,
+              screenshots = CASE
+                WHEN COALESCE(screenshots, '') = '' OR screenshots = '[]' THEN COALESCE(?, screenshots)
+                ELSE screenshots
+              END,
               metadata_synced_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `)
@@ -1408,6 +1486,9 @@ export async function refreshJam2026D1PkgIfStale(
           nextLicense || null,
           nextMediaLicense || null,
           nextMinVer || null,
+          nextFallbackThumb,
+          nextFallbackBanner,
+          nextFallbackShotsJson,
           d1Pkg.id
         )
         .run()
@@ -1423,6 +1504,9 @@ export async function refreshJam2026D1PkgIfStale(
       ...(nextLicense ? { license: nextLicense } : {}),
       ...(nextMediaLicense ? { media_license: nextMediaLicense } : {}),
       ...(nextMinVer ? { min_minetest_version: nextMinVer } : {}),
+      ...(nextFallbackThumb ? { thumbnail_url: nextFallbackThumb } : {}),
+      ...(nextFallbackBanner ? { banner_url: nextFallbackBanner } : {}),
+      ...(nextFallbackShotsJson ? { screenshots: nextFallbackShotsJson } : {}),
       metadata_synced_at: new Date().toISOString()
     };
   }
@@ -1450,15 +1534,17 @@ export async function refreshJam2026D1PkgIfStale(
       ? {
           thumbnail_url:
             hasExplicitJamImage && synced?.thumbnail === null
-              ? null
-              : (synced?.thumbnail ?? d1Pkg.thumbnail_url ?? null),
+              ? (scannedShot ?? null)
+              : (synced?.thumbnail ?? scannedShot ?? d1Pkg.thumbnail_url ?? null),
           banner_url:
             hasExplicitJamImage && synced?.banner === null
-              ? null
-              : (synced?.banner ?? d1Pkg.banner_url ?? null),
+              ? (scannedShot ?? null)
+              : (synced?.banner ?? scannedShot ?? d1Pkg.banner_url ?? null),
           screenshots: synced?.screenshots
             ? JSON.stringify(synced.screenshots)
-            : (synced?.thumbnail === null ? null : d1Pkg.screenshots)
+            : (scannedShots
+                ? JSON.stringify(scannedShots)
+                : (synced?.thumbnail === null ? null : d1Pkg.screenshots))
         }
       : {})
   };
@@ -1494,6 +1580,15 @@ export async function resolveJam2026SyntheticD1Detail(
       ).catch(() => null)
     : null;
 
+  const syntheticThumb = brew.thumbnail || scan?.screenshotUrl || null;
+  const syntheticBanner = brew.banner || scan?.screenshotUrl || null;
+  const syntheticShots =
+    brew.screenshots && brew.screenshots.length > 0
+      ? brew.screenshots
+      : (scan?.screenshots && scan.screenshots.length > 0
+          ? scan.screenshots
+          : (scan?.screenshotUrl ? [scan.screenshotUrl] : null));
+
   const syntheticPkg = {
     id: brew.id,
     author_id: null,
@@ -1506,9 +1601,9 @@ export async function resolveJam2026SyntheticD1Detail(
     repo_url: brew.repo_url,
     provider: brew.provider,
     default_branch: scan?.defaultBranch || 'main',
-    thumbnail_url: brew.thumbnail,
-    banner_url: brew.banner,
-    screenshots: brew.screenshots ? JSON.stringify(brew.screenshots) : null,
+    thumbnail_url: syntheticThumb,
+    banner_url: syntheticBanner,
+    screenshots: syntheticShots ? JSON.stringify(syntheticShots) : null,
     license: scan?.license || brew.license,
     media_license: scan?.mediaLicense || brew.media_license,
     tags: JSON.stringify(brew.tags),

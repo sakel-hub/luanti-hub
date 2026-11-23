@@ -485,6 +485,59 @@ export function buildProviderRawFileUrl(
 }
 
 /**
+ * Priority-ordered repository root screenshot filenames supported across Git scanning,
+ * Git import audit, and client fallback discovery.
+ */
+export const ROOT_SCREENSHOT_FILENAMES = [
+  'screenshot.png',
+  'screenshot.jpg',
+  'screenshot.jpeg',
+  'screenshot.webp'
+] as const;
+
+/**
+ * Fallback root screenshot filenames probed only after `screenshot.png` is absent on a verified repo.
+ */
+export const FALLBACK_ROOT_SCREENSHOT_FILENAMES = [
+  'screenshot.jpg',
+  'screenshot.jpeg',
+  'screenshot.webp'
+] as const;
+
+const ROOT_SCREENSHOT_FILENAME_SET = new Set<string>(ROOT_SCREENSHOT_FILENAMES);
+
+/**
+ * Returns true if `name` matches one of the supported repository root screenshot filenames (case-insensitive).
+ */
+export function isRootScreenshotFilename(name?: string | null): boolean {
+  if (!name || typeof name !== 'string') return false;
+  return ROOT_SCREENSHOT_FILENAME_SET.has(name.trim().toLowerCase());
+}
+
+/**
+ * Selects the highest-priority root screenshot file from a repository directory listing
+ * (`screenshot.png` > `screenshot.jpg` > `screenshot.jpeg` > `screenshot.webp`, case-insensitive).
+ */
+export function findRootScreenshotEntry<T extends { name: string; type?: string }>(
+  entries?: ReadonlyArray<T> | null
+): T | undefined {
+  if (!Array.isArray(entries) || entries.length === 0) return undefined;
+  for (const candidate of ROOT_SCREENSHOT_FILENAMES) {
+    const match = entries.find(
+      (entry) =>
+        entry &&
+        typeof entry.name === 'string' &&
+        (!entry.type || entry.type === 'file') &&
+        entry.name.trim().toLowerCase() === candidate
+    );
+    if (match) {
+      return match;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Rewrites raw image URLs hosted on Anubis PoW-protected Git forges (`git.minetest.land`, `mese.hub`)
  * through `/api/packages?proxy_image=...` so browsers receive verified `image/*` MIME headers
  * and edge-cached responses without failing PoW challenges.
@@ -934,6 +987,9 @@ export function toLegacyLuantiClientThumbnailUrl(rawUrl?: string | null): string
     // Rewrite Gitea/Codeberg `/api/v1/repos/<owner>/<repo>/raw/<path>?ref=<branch>` to branch path without query string
     const giteaRawMatch = u.pathname.match(/^\/api\/v1\/repos\/([^/]+)\/([^/]+)\/raw\/(.+)$/i);
     if (giteaRawMatch) {
+      if (/\.(?:webp|avif|svg)$/i.test(giteaRawMatch[3])) {
+        return undefined;
+      }
       const ref = (u.searchParams.get('ref') || 'HEAD').trim();
       u.pathname = `/${giteaRawMatch[1]}/${giteaRawMatch[2]}/raw/branch/${encodeURIComponent(ref)}/${giteaRawMatch[3]}`;
       u.search = '';
@@ -947,9 +1003,10 @@ export function toLegacyLuantiClientThumbnailUrl(rawUrl?: string | null): string
       return u.toString();
     }
 
-    // Reject query-string endpoints without a .png/.jpg/.jpeg extension (e.g. jam.greenxenith.com WebP query URLs)
-    // because Luanti's C++ `screenshots.lua` parses `.ext` from the raw URL without stripping `?query` and Irrlicht lacks WebP thumbnail support.
-    if (u.search) {
+    // Reject WebP/AVIF/SVG and query-string endpoints without a .png/.jpg/.jpeg extension
+    // because Luanti's C++ `screenshots.lua` parses `.ext` from the raw URL without stripping `?query`
+    // and Irrlicht lacks WebP/AVIF/SVG thumbnail support.
+    if (/\.(?:webp|avif|svg)$/i.test(u.pathname) || u.search) {
       return undefined;
     }
 

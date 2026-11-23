@@ -56,7 +56,9 @@ import {
 } from '../lib/upstream';
 import {
   type GitProviderId,
-  LUA_TUNNEL_C2_PATTERN
+  LUA_TUNNEL_C2_PATTERN,
+  FALLBACK_ROOT_SCREENSHOT_FILENAMES,
+  isRootScreenshotFilename
 } from '../../../src/app/core/config/git-providers.config';
 import { detectSpdxFromLicenseText } from '../../../src/app/core/config/package-utils.config';
 import {
@@ -1575,7 +1577,7 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             }
           } else if (packageType === 'txp') {
             const hasPngFiles = rootEntries.some(
-              e => e.type === 'file' && /\.(png|jpg|tga)$/i.test(e.name) && e.name.toLowerCase() !== 'screenshot.png'
+              e => e.type === 'file' && /\.(png|jpg|tga)$/i.test(e.name) && !isRootScreenshotFilename(e.name)
             );
             const hasAssetSubdirs = rootEntries.some(e => e.type === 'dir' && !e.name.startsWith('.'));
             if (!hasPngFiles && !hasAssetSubdirs) {
@@ -1634,32 +1636,55 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
         ? readmeMarkdown.slice(0, 12000)
         : (confMeta.rawFullDesc || confMeta.rawDesc || 'Decentralized Luanti community package.');
 
-      screenshotUrl = buildRawUrl(branch, 'screenshot.png');
+      const isValidAuditShotResponse = (res: Response | null): boolean => {
+        if (!res || !res.ok) return false;
+        const ct = (res.headers?.get('content-type') || '').toLowerCase();
+        return !ct.includes('text/html') && !ct.includes('application/json') && !ct.includes('text/plain');
+      };
+
+      let foundScreenshotFile: string | undefined;
       try {
-        const shotRes = await fetchAuditFileResponse(branch, 'screenshot.png', { method: 'HEAD' });
-        hasScreenshot = shotRes.ok;
+        const pngRes = await fetchAuditFileResponse(branch, 'screenshot.png', { method: 'HEAD' });
+        if (isValidAuditShotResponse(pngRes)) {
+          foundScreenshotFile = 'screenshot.png';
+        }
       } catch {
-        hasScreenshot = false;
+        // Fallback to non-PNG root screenshot filenames below
       }
 
-      if (!hasScreenshot) {
+      if (!foundScreenshotFile) {
+        const fallbackResults = await Promise.all(
+          FALLBACK_ROOT_SCREENSHOT_FILENAMES.map(async (fileName) => {
+            try {
+              const res = await fetchAuditFileResponse(branch, fileName, { method: 'HEAD' });
+              return isValidAuditShotResponse(res) ? fileName : undefined;
+            } catch {
+              return undefined;
+            }
+          })
+        );
+        foundScreenshotFile = fallbackResults.find((f) => Boolean(f));
+      }
+
+      hasScreenshot = Boolean(foundScreenshotFile);
+      if (!hasScreenshot || !foundScreenshotFile) {
         screenshotUrl = 'logo.svg';
         diagnostics.push({
           code: 'SCREENSHOT_MISSING',
           severity: 'warning',
           file: 'screenshot.png',
           title: 'Optional screenshot.png Not Found',
-          message: 'No screenshot.png was found in the repository root. A default voxel icon will be used until you add one.',
-          howToFix: 'Add a 16:9 PNG image named `screenshot.png` (e.g. 1280×720) to the root of your repository.'
+          message: 'No screenshot.png (or screenshot.jpg / screenshot.jpeg / screenshot.webp) was found in the repository root. A default voxel icon will be used until you add one.',
+          howToFix: 'Add a 16:9 PNG or JPEG image named `screenshot.png` (or `screenshot.jpg`, e.g. 1280×720) to the root of your repository.'
         });
       } else {
-        screenshotUrl = toProxiedGitImageIfNeeded(screenshotUrl);
+        screenshotUrl = toProxiedGitImageIfNeeded(buildRawUrl(branch, foundScreenshotFile));
         diagnostics.push({
           code: 'SCREENSHOT_FOUND',
           severity: 'pass',
-          file: 'screenshot.png',
+          file: foundScreenshotFile,
           title: 'Repository Screenshot Verified',
-          message: 'Found screenshot.png in repository root.'
+          message: `Found ${foundScreenshotFile} in repository root.`
         });
       }
 

@@ -17325,4 +17325,140 @@ core.register_node(modname .. ":panel", {
       await invalidateEdgeCacheKeys(buildPackageCacheInvalidationKeys('SaKeL', 'everness'));
     }
   });
+
+  it('supports screenshot.jpg / screenshot.jpeg / screenshot.webp across findRootScreenshotEntry, Git audit dryRun, and PackageService fallback listing scan', async () => {
+    const { findRootScreenshotEntry, isRootScreenshotFilename } = await import(
+      './core/config/git-providers.config'
+    );
+
+    // 1. Priority order & case-insensitivity in findRootScreenshotEntry / isRootScreenshotFilename
+    expect(isRootScreenshotFilename('screenshot.png')).toBe(true);
+    expect(isRootScreenshotFilename('Screenshot.JPG')).toBe(true);
+    expect(isRootScreenshotFilename('screenshot.jpeg')).toBe(true);
+    expect(isRootScreenshotFilename('screenshot.webp')).toBe(true);
+    expect(isRootScreenshotFilename('other.jpg')).toBe(false);
+
+    expect(
+      findRootScreenshotEntry([
+        { name: 'screenshot.webp', type: 'file' },
+        { name: 'screenshot.jpg', type: 'file' },
+        { name: 'screenshot.png', type: 'dir' }
+      ])?.name
+    ).toBe('screenshot.jpg');
+
+    expect(
+      findRootScreenshotEntry([
+        { name: 'screenshot.jpg', type: 'file' },
+        { name: 'SCREENSHOT.PNG', type: 'file' }
+      ])?.name
+    ).toBe('SCREENSHOT.PNG');
+
+    // 2. Git audit dryRun discovers screenshot.jpg when screenshot.png is 404
+    const origFetch = globalThis.fetch;
+    try {
+      const sessionCookie = await createSessionToken('user-exevirus', 'test-secret');
+      globalThis.fetch = vi.fn(async (input: any, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url === 'https://api.github.com/repos/exevirus/back_tracks') {
+          return new Response(
+            JSON.stringify({
+              name: 'back_tracks',
+              full_name: 'exevirus/back_tracks',
+              default_branch: 'main',
+              license: { spdx_id: 'MIT' }
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('api.github.com/repos/exevirus/back_tracks/contents')) {
+          return new Response(
+            JSON.stringify([
+              { name: 'game.conf', type: 'file' },
+              { name: 'JAM2026.md', type: 'file' },
+              { name: 'mods', type: 'dir' },
+              {
+                name: 'screenshot.jpg',
+                type: 'file',
+                download_url: 'https://raw.githubusercontent.com/exevirus/back_tracks/main/screenshot.jpg'
+              }
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('raw.githubusercontent.com/exevirus/back_tracks/') && url.endsWith('/game.conf')) {
+          return new Response(
+            'title = Back Tracks\nname = back_tracks\ndescription = Barren Wasteland Racer Shooter\n',
+            { status: 200, headers: { 'Content-Type': 'text/plain' } }
+          );
+        }
+        if (url.includes('raw.githubusercontent.com/exevirus/back_tracks/') && url.endsWith('/screenshot.jpg')) {
+          expect((init?.method || 'GET').toUpperCase()).toBe('HEAD');
+          return new Response(null, {
+            status: 200,
+            headers: { 'Content-Type': 'image/jpeg', 'Content-Length': '85822' }
+          });
+        }
+        if (url.includes('raw.githubusercontent.com/exevirus/back_tracks/') && url.endsWith('/screenshot.png')) {
+          return new Response('Not found', { status: 404 });
+        }
+        return new Response('Not found', { status: 404 });
+      }) as any;
+
+      const mockDb = {
+        prepare: (sql: string) => ({
+          bind: () => ({
+            first: async () => {
+              if (sql.includes('FROM users WHERE id =')) {
+                return { id: 'user-exevirus', username: 'exevirus', display_name: 'exevirus' };
+              }
+              return null;
+            },
+            all: async () => {
+              if (sql.includes('FROM user_identities WHERE user_id =')) {
+                return {
+                  results: [{ provider: 'github', username: 'exevirus', verified: 1 }]
+                };
+              }
+              return { results: [] };
+            },
+            run: async () => ({ meta: { changes: 1 } })
+          }),
+          all: async () => ({ results: [] }),
+          run: async () => ({ meta: { changes: 1 } })
+        })
+      };
+
+      const req = new Request('https://luantihub.org/api/packages/git', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `lh_session=${sessionCookie}`
+        },
+        body: JSON.stringify({
+          repoUrl: 'https://github.com/exevirus/back_tracks',
+          dryRun: true,
+          warrantiesAccepted: true
+        })
+      });
+
+      const res = await gitOnRequestPost({
+        request: req,
+        env: { DB: mockDb, SESSION_SECRET: 'test-secret' }
+      });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.package.thumbnail).toBe(
+        'https://raw.githubusercontent.com/exevirus/back_tracks/main/screenshot.jpg'
+      );
+      expect(body.package.banner).toBe(
+        'https://raw.githubusercontent.com/exevirus/back_tracks/main/screenshot.jpg'
+      );
+      const shotDiag = (body.audit?.diagnostics || []).find((d: any) => d.code === 'SCREENSHOT_FOUND');
+      expect(shotDiag).toBeDefined();
+      expect(shotDiag.file).toBe('screenshot.jpg');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

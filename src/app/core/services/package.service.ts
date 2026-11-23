@@ -47,6 +47,7 @@ import {
 import {
   isGitProviderId,
   detectGitProviderFromUrl,
+  findRootScreenshotEntry,
   toProxiedGitImageIfNeeded,
   isGitRepositoryAssetUrl,
   isDeadMirrorScreenshotUrl,
@@ -8548,7 +8549,7 @@ export class PackageService {
       const confEntry = listing.find(f => confFiles.includes(f.name.toLowerCase()));
       const initLuaEntry = listing.find(f => f.name.toLowerCase() === 'init.lua');
       const dependsTxtEntry = listing.find(f => f.name.toLowerCase() === 'depends.txt');
-      const screenshotEntry = listing.find(f => f.name.toLowerCase() === 'screenshot.png');
+      const screenshotEntry = findRootScreenshotEntry(listing);
 
       if (listing.length > 0) {
         resolvedRepoUrl = repo.repoUrl;
@@ -9175,7 +9176,7 @@ export class PackageService {
           const confirmedRepos = await this.discoverConfirmedRepos(pkg, repoUrl);
           for (const repo of confirmedRepos) {
             const listing = await this.getRepoRootListing(repo.forge, repo.fullName);
-            const screenshotEntry = listing.find(f => f.name.toLowerCase() === 'screenshot.png');
+            const screenshotEntry = findRootScreenshotEntry(listing);
             if (screenshotEntry) {
               probedGitScreenshot =
                 screenshotEntry.download_url || `${repo.rawBase}/${encodeURIComponent(screenshotEntry.name)}`;
