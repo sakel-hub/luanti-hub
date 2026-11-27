@@ -63,6 +63,7 @@ async function handleHydrateRequest(
   isGetRequest: boolean
 ): Promise<Response> {
   const hydratedMap: Record<string, any> = {};
+  const d1ReviewAvgByLowerId = new Map<string, number>();
   const responseHeaders: Record<string, string> = isGetRequest
     ? {
         'Cache-Control': 'public, max-age=120, s-maxage=600, stale-while-revalidate=600'
@@ -84,7 +85,7 @@ async function handleHydrateRequest(
 
   const hydrateCacheKey =
     rawIds.length > 0
-      ? `/__api_hydrate_v12_${encodeURIComponent(
+      ? `/__api_hydrate_v13_${encodeURIComponent(
           rawIds
             .map(id => id.toLowerCase())
             .sort()
@@ -114,6 +115,7 @@ async function handleHydrateRequest(
     const d1ById = new Map<string, any>();
     const dailyDlByLowerId = new Map<string, number>();
     const promoTagsByLowerId = new Map<string, string[]>();
+    const cachedScoresByLowerId = new Map<string, any>();
 
     if (env.DB) {
       try {
@@ -121,7 +123,7 @@ async function handleHydrateRequest(
         const exactAndLowerIds = Array.from(new Set([...rawIds, ...lowerIds]));
         const placeholders = exactAndLowerIds.map(() => '?').join(', ');
         const lowerPlaceholders = lowerIds.map(() => '?').join(', ');
-        const [d1Res, dailyDlRes, promoTagsRes] = await Promise.all([
+        const [d1Res, dailyDlRes, promoTagsRes, d1ReviewsRes, cachedScoresList] = await Promise.all([
           env.DB.prepare(
             `SELECT id, author_id, author_name, name, title, type, short_desc, long_desc, status, provider, repo_url, thumbnail_url, banner_url, screenshots, created_at, updated_at, dev_state, tags, badge_tags, license, media_license, min_minetest_version, latest_commit_sha, metadata_synced_at, license_override, downloads_count, contentdb_downloads, luantihub_downloads, score, review_thread_counts, download_size, file_size, video_url, video_thumbnail_url FROM packages WHERE (id IN (${placeholders}) OR LOWER(id) IN (${lowerPlaceholders})) AND status = 'active'`
           ).bind(...exactAndLowerIds, ...lowerIds).all().catch(() =>
@@ -139,8 +141,28 @@ async function handleHydrateRequest(
             `SELECT LOWER(package_id) as pkg_id, tag_name
              FROM promo_tag_packages
              WHERE LOWER(package_id) IN (${lowerPlaceholders})`
-          ).bind(...lowerIds).all().catch(() => ({ results: [] }))
+          ).bind(...lowerIds).all().catch(() => ({ results: [] })),
+          env.DB.prepare(
+            `SELECT LOWER(package_id) as pkg_id, AVG(rating) as avg_rating, COUNT(*) as cnt
+             FROM reviews
+             WHERE LOWER(package_id) IN (${lowerPlaceholders})
+             GROUP BY LOWER(package_id)`
+          ).bind(...lowerIds).all().catch(() => ({ results: [] })),
+          readEdgeCacheJson<any[]>('/scores/').catch(() => null)
         ]);
+
+        for (const revRow of (d1ReviewsRes?.results || [])) {
+          if (revRow?.pkg_id && Number(revRow.cnt) > 0 && revRow.avg_rating != null) {
+            d1ReviewAvgByLowerId.set(String(revRow.pkg_id).toLowerCase(), Number(Number(revRow.avg_rating).toFixed(1)));
+          }
+        }
+        if (Array.isArray(cachedScoresList)) {
+          for (const s of cachedScoresList) {
+            if (s?.author && s?.name) {
+              cachedScoresByLowerId.set(`${s.author}/${s.name}`.toLowerCase(), s);
+            }
+          }
+        }
 
         for (const dlRow of (dailyDlRes?.results || [])) {
           if (dlRow?.pkg_id && Number(dlRow.total_dl) > 0) {
@@ -179,8 +201,12 @@ async function handleHydrateRequest(
             row.provider === 'contentdb' ||
             Number(row.contentdb_downloads || 0) > 0 ||
             parsedTags.includes('contentdb');
+          const cachedScoreEntry = isOfficialD1Row ? cachedScoresByLowerId.get(lowerKey) : undefined;
           const reconciledRowDl = reconcilePackageDownloadCounts({
-            contentdbDownloads: Number(row.contentdb_downloads || 0),
+            contentdbDownloads: Math.max(
+              Number(row.contentdb_downloads || 0),
+              Number(cachedScoreEntry?.downloads || 0)
+            ),
             luantihubDownloads: Math.max(Number(row.luantihub_downloads || 0), dailyDlByLowerId.get(lowerKey) || 0),
             reportedTotalDownloads: Number(row.downloads_count || 0),
             hasContentDbSource: isOfficialD1Row,
@@ -189,10 +215,15 @@ async function handleHydrateRequest(
           const cdbDl = reconciledRowDl.contentdbDownloads;
           const lhDl = reconciledRowDl.luantihubDownloads;
           const totalDl = reconciledRowDl.downloads;
-          const rowScore = computeStarRatingFromData({
-            review_thread_counts: parsedRowRevCounts,
-            score: (!isOfficialD1Row || parsedRowRevCounts) ? row.score : 0
-          });
+          const d1RowReviewAvg = d1ReviewAvgByLowerId.get(lowerKey);
+          const rowScore = computeStarRatingFromData(
+            {
+              review_thread_counts: parsedRowRevCounts,
+              score: parsedRowRevCounts ? row.score : 0
+            },
+            0,
+            d1RowReviewAvg
+          );
           const sanitizedRowBanner = sanitizePackageImageUrl(row.banner_url);
           const sanitizedRowThumb = upgradeContentDbThumbnailUrl(row.thumbnail_url);
           const gitShotD1 = isGitRepositoryAssetUrl(sanitizedRowBanner)
@@ -779,12 +810,22 @@ async function handleHydrateRequest(
             const newRevCounts = !existingValidRevCounts && detailRevCounts
               ? JSON.stringify(detailRevCounts)
               : null;
+            const d1ReviewAvgForRow = d1ReviewAvgByLowerId.get(lowerKey);
             const newScore =
-              !(Number(existingD1Row.score) >= 1 && Number(existingD1Row.score) <= 5) &&
-              resolvedScore >= 1 &&
-              resolvedScore <= 5
-                ? resolvedScore
-                : null;
+              resolvedScore === 0 && !detailRevCounts && !(d1ReviewAvgForRow && d1ReviewAvgForRow > 0) && Number(existingD1Row.score) > 0
+                ? 0
+                : !(Number(existingD1Row.score) >= 1 && Number(existingD1Row.score) <= 5) &&
+                  resolvedScore >= 1 &&
+                  resolvedScore <= 5
+                  ? resolvedScore
+                  : null;
+            const existingD1CdbDl = Number(existingD1Row.contentdb_downloads || 0);
+            const shouldSyncHydrateCdbDl =
+              hasCdbHydrate &&
+              cdbDl > existingD1CdbDl &&
+              (existingD1CdbDl === 0 || cdbDl - existingD1CdbDl >= 5);
+            const newCdbDlVal = shouldSyncHydrateCdbDl ? cdbDl : null;
+            const newTotalDlVal = shouldSyncHydrateCdbDl ? totalDl : null;
             const existingD1Tags = parseJsonArray(existingD1Row.tags);
             const cleanedExistingD1Tags = isPoisonedHydrateRow
               ? existingD1Tags.filter(t => String(t || '').trim().toLowerCase() !== 'contentdb')
@@ -819,6 +860,7 @@ async function handleHydrateRequest(
               newBanner ||
               newRevCounts ||
               newScore !== null ||
+              newCdbDlVal !== null ||
               newTagsJson ||
               healedProvider ||
               shouldMarkMetadataSynced
@@ -854,6 +896,8 @@ async function handleHydrateRequest(
                         ELSE review_thread_counts
                       END,
                       score = CASE WHEN ? IS NOT NULL THEN ? ELSE score END,
+                      contentdb_downloads = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(contentdb_downloads, 0), ?) ELSE contentdb_downloads END,
+                      downloads_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(downloads_count, 0), ?) ELSE downloads_count END,
                       metadata_synced_at = CASE
                         WHEN ? = 1 THEN CURRENT_TIMESTAMP
                         ELSE metadata_synced_at
@@ -878,6 +922,10 @@ async function handleHydrateRequest(
                   newRevCounts,
                   newScore,
                   newScore,
+                  newCdbDlVal,
+                  newCdbDlVal,
+                  newTotalDlVal,
+                  newTotalDlVal,
                   shouldMarkMetadataSynced || newLic || newMediaLic ? 1 : 0,
                   newTagsJson,
                   existingD1Row.id
@@ -905,11 +953,14 @@ async function handleHydrateRequest(
   if (Object.keys(hydratedMap).length > 0) {
     const edgeRatingUpdates: Record<string, SharedEdgeRatingEntry> = {};
     for (const [pkgId, meta] of Object.entries(hydratedMap)) {
-      if ((typeof meta?.score === 'number' && meta.score > 0) || meta?.review_thread_counts || meta?.rating_checked) {
-        edgeRatingUpdates[pkgId.toLowerCase()] = {
-          score: typeof meta.score === 'number' ? meta.score : 0,
+      const lowerPkg = pkgId.toLowerCase();
+      const hasVerifiedRevBasis = Boolean(meta?.review_thread_counts || d1ReviewAvgByLowerId.has(lowerPkg));
+      const verifiedScore = hasVerifiedRevBasis && typeof meta?.score === 'number' && meta.score > 0 ? meta.score : 0;
+      if (verifiedScore > 0 || meta?.review_thread_counts || meta?.rating_checked) {
+        edgeRatingUpdates[lowerPkg] = {
+          score: verifiedScore,
           ...(meta.review_thread_counts ? { review_thread_counts: meta.review_thread_counts } : {}),
-          checked: Boolean(meta.rating_checked || meta.score > 0 || meta.review_thread_counts)
+          checked: Boolean(meta.rating_checked || verifiedScore > 0 || meta.review_thread_counts)
         };
       }
     }

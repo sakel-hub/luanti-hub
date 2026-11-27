@@ -1,6 +1,8 @@
 import {
   fetchUpstreamJsonCached,
   computeGenuineStarRating,
+  computeStarRatingFromData,
+  parseNonZeroReviewThreadCounts,
   safeDecodeParam,
   readEdgeCacheJson,
   writeEdgeCacheJson,
@@ -289,6 +291,7 @@ export async function onRequestGet(context: {
         }
       }
 
+      let isOfficialD1Row = false;
       if (pkgData) {
         let d1Tags: string[] = [];
         try {
@@ -305,6 +308,7 @@ export async function onRequestGet(context: {
           rawProv === 'contentdb' ||
           lowerD1Tags.includes('contentdb') ||
           Number(pkgData.contentdb_downloads || 0) > 0;
+        isOfficialD1Row = isOfficialRow;
 
         if (rawProv) {
           pkgProvider = rawProv;
@@ -339,7 +343,12 @@ export async function onRequestGet(context: {
         pkgThumb = pkgBanner || pkgData.thumbnail_url || pkgThumb;
         pkgType = pkgData.type || 'mod';
         pkgLicense = pkgData.license || pkgLicense;
-        pkgScore = computeGenuineStarRating(d1RatingAvg, pkgData.score);
+        const d1SsrRevCounts = parseNonZeroReviewThreadCounts(pkgData.review_thread_counts);
+        pkgScore = computeStarRatingFromData(
+          { review_thread_counts: d1SsrRevCounts },
+          0,
+          d1RatingAvg
+        );
         try {
           if (pkgData.tags) pkgTags = JSON.parse(pkgData.tags);
         } catch {
@@ -353,7 +362,7 @@ export async function onRequestGet(context: {
       }
 
       let upstreamFound = false;
-      if (!pkgData || pkgData.provider === 'contentdb') {
+      if (!pkgData || pkgData.provider === 'contentdb' || isOfficialD1Row) {
         let upstream = await fetchUpstreamJsonCached<any>(
           `/packages/${encodeURIComponent(author)}/${encodeURIComponent(name)}/`,
           600

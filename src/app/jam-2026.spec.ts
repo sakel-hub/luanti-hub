@@ -4815,4 +4815,121 @@ describe('Luanti Game Jam 2026 Standalone Integration (jam.luanti.org)', () => {
       clearIsolateCachesForTests();
     }
   });
+
+  it('explicitly binds score = 0 on Game Jam 2026 D1 package inserts and ignores legacy score = 5.0 when 0 reviews exist', async () => {
+    const { onRequestGet: pkgDetailGet } = await import('../../functions/api/packages/[author]/[name]/index');
+    const capturedSqls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('jam.greenxenith.com/api/brews')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'jam-blank-slate',
+              repository: 'https://codeberg.org/helpo3d/blank_slate',
+              commit: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+              title: 'Blank Slate',
+              description: 'A blank void that you can fill with life',
+              commitUrl: 'https://codeberg.org/helpo3d/blank_slate/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+              hasScreenshot: true,
+              publishedAt: '2026-11-20T12:00:00Z'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as any;
+
+    try {
+      const mockDb = {
+        prepare: vi.fn((sql: string) => {
+          capturedSqls.push(sql);
+          return {
+            bind: vi.fn(() => ({
+              all: vi.fn(async () => ({ results: [] })),
+              first: vi.fn(async () => null),
+              run: vi.fn(async () => ({}))
+            }))
+          };
+        }),
+        batch: vi.fn(async () => [])
+      };
+
+      await syncJam2026IntoPromoRowDelta({
+        uniqueTags: ['jam_game_2026'],
+        addTagStamp: () => {},
+        discoveredByKey: new Map(),
+        existingD1Pairs: new Set(),
+        queuedUpsertKeys: new Set(),
+        d1UpsertPairs: [],
+        db: mockDb,
+        noCache: true
+      });
+
+      const insertSql = capturedSqls.find((s) => s.includes('INSERT INTO packages'));
+      expect(insertSql).toBeDefined();
+      expect(insertSql).toContain('score, status');
+      expect(insertSql).toContain("0, 'active'");
+
+      // Even if a pre-existing production D1 row still holds legacy DEFAULT 5.0 with 0 reviews,
+      // the ?lite=1 fast path must return score: 0 and schedule a D1 self-heal
+      let healedScoreZero = false;
+      const liteDb = {
+        prepare: (sql: string) => ({
+          bind: (..._args: any[]) => ({
+            first: async () => {
+              if (sql.includes('FROM packages')) {
+                return {
+                  id: 'helpo3d/blank_slate',
+                  author_id: null,
+                  author_name: 'helpo3d',
+                  name: 'blank_slate',
+                  title: 'Blank Slate',
+                  type: 'game',
+                  short_desc: 'A blank void that you can fill with life',
+                  repo_url: 'https://codeberg.org/helpo3d/blank_slate',
+                  provider: 'codeberg',
+                  thumbnail_url: 'https://codeberg.org/helpo3d/blank_slate/raw/branch/main/screenshot.png',
+                  banner_url: 'https://codeberg.org/helpo3d/blank_slate/raw/branch/main/screenshot.png',
+                  license: 'MIT',
+                  media_license: 'MIT',
+                  tags: JSON.stringify(['jam_game_2026', 'gamejam', 'git', 'codeberg', 'game']),
+                  downloads_count: 4,
+                  luantihub_downloads: 4,
+                  contentdb_downloads: 0,
+                  score: 5,
+                  review_thread_counts: null,
+                  metadata_synced_at: '2026-11-20T12:00:00Z',
+                  status: 'active'
+                };
+              }
+              if (sql.includes('FROM reviews')) return { avg_rating: null, cnt: 0 };
+              if (sql.includes('SUM(downloads_count)')) return { total_lh: 4 };
+              return null;
+            },
+            all: async () => ({ results: [] }),
+            run: async () => {
+              if (sql.includes('SET score = 0')) healedScoreZero = true;
+              return { meta: { changes: 1 } };
+            }
+          })
+        })
+      };
+
+      const liteRes = await pkgDetailGet({
+        request: new Request('https://luantihub.org/api/packages/helpo3d/blank_slate/?lite=1'),
+        params: { author: 'helpo3d', name: 'blank_slate' },
+        env: { DB: liteDb }
+      });
+      expect(liteRes.status).toBe(200);
+      const liteJson: any = await liteRes.json();
+      expect(liteJson.score).toBe(0);
+      expect(healedScoreZero).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+      clearIsolateCachesForTests();
+    }
+  });
 });

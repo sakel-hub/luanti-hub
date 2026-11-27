@@ -10962,7 +10962,7 @@ supported_games = minetest_game, voxelibre
     expect(normalizedWavingSnow.contentdb_score).toBe(1.3);
 
     // --- Issue A & C on Backend (`/api/packages/?boot=1`): `titou4/x_entity` approval floor + 0-review star prevention ---
-    await invalidateEdgeCacheKeys(['/__api_boot_catalog_bundle_v19', '/__pkg_ratings_map_v2']);
+    await invalidateEdgeCacheKeys(['/__api_boot_catalog_bundle_v19', '/__pkg_ratings_map_v3']);
 
     const nowMs = Date.now();
     const recentIso = new Date(nowMs - 30 * 60 * 1000).toISOString();
@@ -14395,6 +14395,7 @@ core.register_node(modname .. ":panel", {
 
     // 2. Self-heals poisoned lh_hydrated_meta_v14 in localStorage on reload while preserving Hub downloads
     const pkgService = TestBed.inject(PackageService);
+    localStorage.removeItem('lh_hydrated_meta_v17');
     localStorage.removeItem('lh_hydrated_meta_v16');
     localStorage.removeItem('lh_hydrated_meta_v15');
     localStorage.setItem(
@@ -14545,16 +14546,17 @@ core.register_node(modname .. ":panel", {
     }
   });
 
-  it('evicts expired and revision-mismatched lh_hydrated_meta_v16 entries so updated licenses are never shadowed', () => {
+  it('evicts expired and revision-mismatched lh_hydrated_meta_v17 entries so updated licenses are never shadowed', () => {
     const pkgService = TestBed.inject(PackageService);
     (pkgService as any).hydratedMetaCache.clear();
     (pkgService as any).hydratedMetaStamps.clear();
 
     const nowMs = Date.now();
+    localStorage.removeItem('lh_hydrated_meta_v16');
     localStorage.setItem(
-      'lh_hydrated_meta_v16',
+      'lh_hydrated_meta_v17',
       JSON.stringify({
-        __v: 16,
+        __v: 17,
         entries: {
           'sakel-hub/expired_mod': {
             rev: '',
@@ -14588,7 +14590,7 @@ core.register_node(modname .. ":panel", {
     });
     expect(refreshedPkg.license).toBe('GPL-3.0-or-later');
     expect((pkgService as any).hydratedMetaCache.has('sakel-hub/stale_rev_mod')).toBe(false);
-    localStorage.removeItem('lh_hydrated_meta_v16');
+    localStorage.removeItem('lh_hydrated_meta_v17');
   });
 
   it('should enforce zero-storage PAT security guarantees, reject write-scoped or mismatched tokens, block cross-provider username collision hijacking, rate-limit auth_verify, and wipe tokens from UI memory', async () => {
@@ -17457,6 +17459,316 @@ core.register_node(modname .. ":panel", {
       const shotDiag = (body.audit?.diagnostics || []).find((d: any) => d.code === 'SCREENSHOT_FOUND');
       expect(shotDiag).toBeDefined();
       expect(shotDiag.file).toBe('screenshot.jpg');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('refreshes live ContentDB downloads & updated_at on D1-first detail fast path and backfills stale dual-source rows without starving low-download packages', async () => {
+    const { onRequestGet: pkgDetailGet } = await import('../../functions/api/packages/[author]/[name]/index');
+    const { onRequestGet: packagesBootGet } = await import('../../functions/api/packages/index');
+    const { onRequestGet: hydrateGet } = await import('../../functions/api/packages/hydrate');
+
+    const origFetch = globalThis.fetch;
+    const backfillUpdates: Array<{ sql: string; args: any[] }> = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('content.luanti.org/api/packages/SaKeL/pale_watcher/reviews/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 701,
+              recommends: true,
+              title: 'Spooky!',
+              comment: 'Great horror mod',
+              created_at: '2026-11-03T12:00:00Z',
+              author: { username: 'tester' }
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/SaKeL/pale_watcher/releases/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 5002,
+              title: '1.1.4',
+              commit: 'deadbeef1234',
+              release_date: '2026-11-04T03:43:00Z',
+              size: 960512,
+              url: '/packages/SaKeL/pale_watcher/releases/5002/download/'
+            }
+          ]),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/SaKeL/pale_watcher/')) {
+        return new Response(
+          JSON.stringify({
+            author: 'SaKeL',
+            name: 'pale_watcher',
+            title: 'The Pale Watcher',
+            type: 'mod',
+            short_description: 'Eerie horror creature',
+            license: 'MIT',
+            media_license: 'CC-BY-SA-4.0',
+            downloads: 116,
+            score: 120.4,
+            updated_at: '2026-11-04T03:43:00Z',
+            reviews: { positive: 1, neutral: 0, negative: 0 },
+            screenshots: [
+              'https://content.luanti.org/uploads/pw1.png',
+              'https://content.luanti.org/uploads/pw2.png'
+            ]
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('content.luanti.org/api/packages/?fmt=vcs')) {
+        const items: any[] = [];
+        for (let i = 1; i <= 18; i++) {
+          items.push({
+            author: 'PopularDev',
+            name: `popular_${i}`,
+            title: `Popular ${i}`,
+            type: 'mod',
+            short_description: 'Popular mod',
+            release: 100 + i
+          });
+        }
+        items.push({
+          author: 'SaKeL',
+          name: 'pale_watcher',
+          title: 'The Pale Watcher',
+          type: 'mod',
+          short_description: 'Eerie horror creature',
+          release: 5002
+        });
+        return new Response(JSON.stringify(items), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (url.includes('content.luanti.org/api/scores/')) {
+        const scores: any[] = [];
+        for (let i = 1; i <= 18; i++) {
+          scores.push({
+            author: 'PopularDev',
+            name: `popular_${i}`,
+            downloads: 10000 + i * 100 + 15,
+            score: 500,
+            reviews: { positive: 5, neutral: 0, negative: 0 }
+          });
+        }
+        scores.push({
+          author: 'SaKeL',
+          name: 'pale_watcher',
+          downloads: 116,
+          score: 120.4,
+          reviews: { positive: 1, neutral: 0, negative: 0 }
+        });
+        return new Response(JSON.stringify(scores), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as any;
+
+    try {
+      const stalePaleWatcherRow = {
+        id: 'SaKeL/pale_watcher',
+        author_id: 'user-sakel',
+        author_name: 'SaKeL',
+        name: 'pale_watcher',
+        title: 'The Pale Watcher',
+        type: 'mod',
+        short_desc: 'Eerie horror creature',
+        long_desc: 'Full hydrated markdown description',
+        repo_url: 'https://github.com/SaKeL/pale_watcher',
+        provider: 'github',
+        thumbnail_url: 'https://content.luanti.org/uploads/pw1.png',
+        banner_url: 'https://content.luanti.org/uploads/pw1.png',
+        screenshots: JSON.stringify([
+          'https://content.luanti.org/uploads/pw1.png',
+          'https://content.luanti.org/uploads/pw2.png'
+        ]),
+        license: 'MIT',
+        media_license: 'CC-BY-SA-4.0',
+        tags: JSON.stringify(['contentdb', 'git', 'github', 'mobs']),
+        contentdb_downloads: 36,
+        luantihub_downloads: 2,
+        downloads_count: 38,
+        score: 5,
+        review_thread_counts: JSON.stringify({ positive: 1, neutral: 0, negative: 0 }),
+        status: 'active',
+        metadata_synced_at: '2026-11-03T12:00:00Z',
+        updated_at: '2026-11-03T12:00:00Z',
+        created_at: '2026-11-01T10:00:00Z'
+      };
+
+      // 1. D1-First Full Detail Fast Path refreshes live ContentDB downloads (36 -> 116) and updated_at (Nov 3 -> Nov 4)
+      const detailDb = {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            first: async () => {
+              if (sql.includes('FROM packages')) return { ...stalePaleWatcherRow };
+              if (sql.includes('SUM(downloads_count)')) return { total_lh: 2 };
+              if (sql.includes('FROM user_favorites')) return { cnt: 0 };
+              return null;
+            },
+            all: async () => {
+              if (sql.includes('FROM releases')) {
+                return {
+                  results: [
+                    { id: 1, version: '1.1.3', tag_name: '1.1.3', commit_sha: 'aaa1111', download_url: 'https://example.com/1.1.3.zip', released_at: '2026-11-03T12:00:00Z' },
+                    { id: 2, version: '1.1.2', tag_name: '1.1.2', commit_sha: 'bbb2222', download_url: 'https://example.com/1.1.2.zip', released_at: '2026-11-02T12:00:00Z' }
+                  ]
+                };
+              }
+              return { results: [] };
+            },
+            run: async () => {
+              if (sql.includes('UPDATE packages')) {
+                backfillUpdates.push({ sql, args });
+              }
+              return { meta: { changes: 1 } };
+            }
+          })
+        })
+      };
+
+      const detailRes = await pkgDetailGet({
+        request: new Request('https://luantihub.org/api/packages/SaKeL/pale_watcher/'),
+        params: { author: 'SaKeL', name: 'pale_watcher' },
+        env: { DB: detailDb }
+      });
+      expect(detailRes.status).toBe(200);
+      const detailJson: any = await detailRes.json();
+      expect(detailJson.contentdb_downloads).toBe(116);
+      expect(detailJson.luantihub_downloads).toBe(2);
+      expect(detailJson.downloads).toBe(118);
+      expect(detailJson.updated_at).toBe('2026-11-04T03:43:00Z');
+      expect(
+        backfillUpdates.some(u => u.sql.includes('contentdb_downloads') && u.args.includes(116))
+      ).toBe(true);
+
+      // 2. Boot catalog fairness backfill prioritizes 36 -> 116 (+222% growth) ahead of 18 huge packages with +15 delta
+      const bootUpdatedIds: string[] = [];
+      const manyD1Rows: any[] = [];
+      for (let i = 1; i <= 18; i++) {
+        manyD1Rows.push({
+          ...stalePaleWatcherRow,
+          id: `PopularDev/popular_${i}`,
+          author_name: 'PopularDev',
+          name: `popular_${i}`,
+          title: `Popular ${i}`,
+          repo_url: `https://github.com/PopularDev/popular_${i}`,
+          contentdb_downloads: 10000 + i * 100,
+          luantihub_downloads: 0,
+          downloads_count: 10000 + i * 100
+        });
+      }
+      manyD1Rows.push(stalePaleWatcherRow);
+      // Also include a pure-Git row with legacy D1 DEFAULT 5.0 and 0 reviews
+      manyD1Rows.push({
+        id: 'helpo3d/blank_slate',
+        author_id: null,
+        author_name: 'helpo3d',
+        name: 'blank_slate',
+        title: 'Blank Slate',
+        type: 'game',
+        short_desc: 'A blank void',
+        repo_url: 'https://codeberg.org/helpo3d/blank_slate',
+        provider: 'codeberg',
+        thumbnail_url: 'https://codeberg.org/helpo3d/blank_slate/raw/branch/main/screenshot.png',
+        banner_url: 'https://codeberg.org/helpo3d/blank_slate/raw/branch/main/screenshot.png',
+        license: 'MIT',
+        media_license: 'MIT',
+        tags: JSON.stringify(['jam_game_2026', 'gamejam', 'git', 'codeberg', 'game']),
+        contentdb_downloads: 0,
+        luantihub_downloads: 0,
+        downloads_count: 0,
+        score: 5,
+        review_thread_counts: null,
+        status: 'active',
+        updated_at: '2026-11-20T00:00:00Z',
+        created_at: '2026-11-20T00:00:00Z'
+      });
+
+      const bootDb = {
+        prepare: (sql: string) => ({
+          bind: (...args: any[]) => ({
+            all: async () => {
+              if (sql.includes('FROM packages') && sql.includes("status = 'active'")) {
+                return { results: manyD1Rows };
+              }
+              return { results: [] };
+            },
+            run: async () => {
+              if (sql.includes('UPDATE packages') && sql.includes('contentdb_downloads')) {
+                bootUpdatedIds.push(String(args[args.length - 1]));
+              }
+              return { meta: { changes: 1 } };
+            },
+            _sql: sql,
+            _args: args
+          }),
+          all: async () => {
+            if (sql.includes('FROM packages') && sql.includes("status = 'active'")) {
+              return { results: manyD1Rows };
+            }
+            return { results: [] };
+          }
+        }),
+        batch: async (stmts: any[]) => {
+          for (const s of stmts) {
+            if (s?._sql?.includes('contentdb_downloads') && Array.isArray(s?._args)) {
+              bootUpdatedIds.push(String(s._args[s._args.length - 1]));
+            }
+          }
+          return [];
+        }
+      };
+
+      const bootRes = await packagesBootGet({
+        request: new Request('https://luantihub.org/api/packages/?boot=1'),
+        env: { DB: bootDb }
+      });
+      expect(bootRes.status).toBe(200);
+      const bootJson: any = await bootRes.json();
+      const pwBoot = bootJson.packages.find((p: any) => p.id === 'SaKeL/pale_watcher');
+      expect(pwBoot?.contentdb_downloads).toBe(116);
+      expect(pwBoot?.downloads).toBe(118);
+      expect(bootUpdatedIds).toContain('SaKeL/pale_watcher');
+
+      // Blank Slate (pure-Git, legacy score=5, 0 reviews) MUST have score 0 in boot catalog AND hydrate
+      const blankBoot = bootJson.packages.find((p: any) => p.id === 'helpo3d/blank_slate');
+      expect(blankBoot?.score).toBe(0);
+
+      const hydrateRes = await hydrateGet({
+        request: new Request('https://luantihub.org/api/packages/hydrate?ids=helpo3d/blank_slate'),
+        env: {
+          DB: {
+            prepare: (sql: string) => ({
+              bind: (..._args: any[]) => ({
+                all: async () => {
+                  if (sql.includes('FROM packages')) {
+                    return { results: [manyD1Rows[manyD1Rows.length - 1]] };
+                  }
+                  return { results: [] };
+                },
+                run: async () => ({ meta: { changes: 1 } })
+              })
+            })
+          }
+        }
+      });
+      expect(hydrateRes.status).toBe(200);
+      const hydrateJson: any = await hydrateRes.json();
+      expect(hydrateJson.hydrated['helpo3d/blank_slate']?.score).toBeUndefined();
     } finally {
       globalThis.fetch = origFetch;
     }

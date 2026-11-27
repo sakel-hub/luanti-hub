@@ -750,7 +750,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         !d1Pkg.metadata_synced_at &&
         !liteOverridden
       );
-      const [revAvgFast, dailyDlFast, liteGitScan] = await Promise.all([
+      const [revAvgFast, dailyDlFast, liteGitScan, cachedScoresLite] = await Promise.all([
         context.env.DB.prepare(
           `SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM reviews WHERE package_id IN (?, ?)`
         ).bind(effectivePkgId, effectivePkgIdLower).first().catch(() => null),
@@ -766,8 +766,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               d1Pkg.latest_commit_sha ? 86400 : 21600,
               d1Pkg.latest_commit_sha ? { commitSha: d1Pkg.latest_commit_sha } : undefined
             ).catch(() => null)
+          : Promise.resolve(null),
+        isOfficialFast
+          ? readEdgeCacheJson<any[]>('/scores/').catch(() => null)
           : Promise.resolve(null)
       ]);
+      const liteScoreEntry = Array.isArray(cachedScoresLite)
+        ? cachedScoresLite.find(
+            (s: any) =>
+              s &&
+              String(s.author || '').toLowerCase() === String(d1Pkg.author_name || author).toLowerCase() &&
+              String(s.name || '').toLowerCase() === String(d1Pkg.name || name).toLowerCase()
+          )
+        : null;
       const liteVideo = extractEmbeddedVideo(
         d1Pkg.video_url || liteGitScan?.cdbMeta?.video_url,
         d1Pkg.video_thumbnail_url,
@@ -861,13 +872,25 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         revAvgFast && Number(revAvgFast.cnt) > 0 && revAvgFast.avg_rating != null
           ? Number(revAvgFast.avg_rating)
           : undefined;
+      if (!fastRevAvgVal && !d1ParsedRevCounts && !isOfficialFast && Number(d1Pkg.score) > 0) {
+        d1Pkg.score = 0;
+        if (claimD1BackfillSlot(String(d1Pkg.id), 'heal-lite-score-0')) {
+          context.env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(d1Pkg.id).run().catch(() => {});
+        }
+      }
       const fastStarScore = computeStarRating(
-        { review_thread_counts: d1ParsedRevCounts, score: d1Pkg.score },
-        d1Pkg.score,
+        {
+          review_thread_counts: d1ParsedRevCounts,
+          score: d1ParsedRevCounts ? d1Pkg.score : 0
+        },
+        0,
         fastRevAvgVal
       );
       const reconciledFast = reconcilePackageDownloadCounts({
-        contentdbDownloads: Number(d1Pkg.contentdb_downloads || 0),
+        contentdbDownloads: Math.max(
+          Number(d1Pkg.contentdb_downloads || 0),
+          Number(liteScoreEntry?.downloads || 0)
+        ),
         luantihubDownloads: Math.max(Number(d1Pkg.luantihub_downloads || 0), Number(dailyDlFast?.total_lh || 0)),
         reportedTotalDownloads: Number(d1Pkg.downloads_count || 0),
         hasContentDbSource: isOfficialFast,
@@ -1054,7 +1077,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                   d1Pkg.latest_commit_sha ? { commitSha: d1Pkg.latest_commit_sha } : undefined
                 ).catch(() => null)
               : Promise.resolve(null),
-            isOfficialFast && (!hasCdbGalleryScreenshots || !parsedRevCounts || !hasValidD1ThumbOrBanner)
+            isOfficialFast
               ? fetchUpstreamJsonCached<any>(
                   `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/`,
                   600
@@ -1067,6 +1090,19 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                 ).catch(() => null)
               : Promise.resolve(null)
           ]);
+          const fastCdbUpdatedMs = fastCdbDetail?.updated_at ? Date.parse(String(fastCdbDetail.updated_at)) : NaN;
+          const d1UpdatedMs = d1Pkg.updated_at ? Date.parse(String(d1Pkg.updated_at)) : NaN;
+          if (
+            isOfficialFast &&
+            !fastCdbReleases &&
+            Number.isFinite(fastCdbUpdatedMs) &&
+            (!Number.isFinite(d1UpdatedMs) || fastCdbUpdatedMs > d1UpdatedMs)
+          ) {
+            fastCdbReleases = await fetchUpstreamJsonCached<any[]>(
+              `/packages/${encodeURIComponent(d1Pkg.author_name || author)}/${encodeURIComponent(d1Pkg.name || name)}/releases/`,
+              300
+            ).catch(() => null);
+          }
           const fastBundledReleases = buildNormalizedReleases(
             d1Pkg.author_name || author,
             d1Pkg.name || name,
@@ -1143,10 +1179,34 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             fastGitShot || fastMergedScreenshots[0] || (!fastGitScanVerified ? nonLogoFastD1Banner : undefined) || fastThumb
           );
           const fastScore = computeStarRating(
-            { reviews: parsedRevCounts, reviews_list: fastBundledReviews, score: d1Pkg.score },
-            d1Pkg.score,
+            {
+              reviews: parsedRevCounts,
+              reviews_list: fastBundledReviews,
+              score: parsedRevCounts ? d1Pkg.score : 0
+            },
+            0,
             d1ReviewAvg
           );
+          const reconciledFast = reconcilePackageDownloadCounts({
+            contentdbDownloads: Math.max(
+              Number(d1Pkg.contentdb_downloads || 0),
+              Number(fastCdbDetail?.downloads || 0)
+            ),
+            luantihubDownloads: Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum),
+            reportedTotalDownloads: Number(d1Pkg.downloads_count || 0),
+            hasContentDbSource: isOfficialFast,
+            isPureGitOnly: !isOfficialFast
+          });
+          const cdbDl = reconciledFast.contentdbDownloads;
+          const lhDl = reconciledFast.luantihubDownloads;
+          const totalDl = reconciledFast.downloads;
+          const existingFastCdbDl = Number(d1Pkg.contentdb_downloads || 0);
+          const shouldSyncFastCdbDownloads =
+            isOfficialFast &&
+            cdbDl > existingFastCdbDl &&
+            (existingFastCdbDl === 0 || cdbDl - existingFastCdbDl >= 5);
+          const fastNewCdbDlVal = shouldSyncFastCdbDownloads ? cdbDl : null;
+          const fastNewTotalDlVal = shouldSyncFastCdbDownloads ? totalDl : null;
           const newlyDiscoveredRevCountsFast =
             !d1ParsedRevCounts && parsedRevCounts ? JSON.stringify(parsedRevCounts) : null;
           const newlyDiscoveredScoreFast =
@@ -1187,9 +1247,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
             shouldPersistFastShots ||
             newlyDiscoveredRevCountsFast ||
             newlyDiscoveredScoreFast !== null ||
-            shouldSyncFastLicense
+            shouldSyncFastLicense ||
+            shouldSyncFastCdbDownloads
           ) {
-            const fastSig = `${resolvedFastLicense || ''}|${resolvedFastMediaLicense || ''}|${fastThumb || ''}|${fastBanner || ''}|${newlyDiscoveredScoreFast ?? ''}`;
+            const fastSig = `${resolvedFastLicense || ''}|${resolvedFastMediaLicense || ''}|${fastThumb || ''}|${fastBanner || ''}|${newlyDiscoveredScoreFast ?? ''}|${fastNewCdbDlVal ?? ''}`;
             if (claimD1BackfillSlot(String(d1Pkg.id), fastSig)) {
               const runFastBackfill = () =>
                 context.env.DB.prepare(`
@@ -1216,6 +1277,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                       license = CASE WHEN COALESCE(license_override, 0) = 1 THEN license ELSE COALESCE(?, license) END,
                       media_license = CASE WHEN COALESCE(license_override, 0) = 1 THEN media_license ELSE COALESCE(?, media_license) END,
                       min_minetest_version = COALESCE(?, min_minetest_version),
+                      contentdb_downloads = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(contentdb_downloads, 0), ?) ELSE contentdb_downloads END,
+                      downloads_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(downloads_count, 0), ?) ELSE downloads_count END,
                       metadata_synced_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE metadata_synced_at END
                   WHERE id = ?
                 `).bind(
@@ -1232,6 +1295,10 @@ export async function onRequestGet(context: { request?: Request; params: { autho
                   shouldSyncFastLicense ? (resolvedFastLicense || null) : null,
                   shouldSyncFastLicense ? (resolvedFastMediaLicense || null) : null,
                   fastGitScan?.minVersion || null,
+                  fastNewCdbDlVal,
+                  fastNewCdbDlVal,
+                  fastNewTotalDlVal,
+                  fastNewTotalDlVal,
                   fastGitScan?.gitRepoStatus === 'verified' ? 1 : 0,
                   d1Pkg.id
                 ).run();
@@ -1291,19 +1358,6 @@ export async function onRequestGet(context: { request?: Request; params: { autho
               // Non-fatal D1 sync error
             }
           }
-          const reconciledFast = reconcilePackageDownloadCounts({
-            contentdbDownloads: Math.max(
-              Number(d1Pkg.contentdb_downloads || 0),
-              Number(fastCdbDetail?.downloads || 0)
-            ),
-            luantihubDownloads: Math.max(Number(d1Pkg.luantihub_downloads || 0), d1DailyDownloadsSum),
-            reportedTotalDownloads: Number(d1Pkg.downloads_count || 0),
-            hasContentDbSource: isOfficialFast,
-            isPureGitOnly: !isOfficialFast
-          });
-          const cdbDl = reconciledFast.contentdbDownloads;
-          const lhDl = reconciledFast.luantihubDownloads;
-          const totalDl = reconciledFast.downloads;
           const fastSources: Array<'official' | 'git'> = [];
           if (isOfficialFast) fastSources.push('official');
           if (isGitFast) fastSources.push('git');
@@ -1313,11 +1367,9 @@ export async function onRequestGet(context: { request?: Request; params: { autho
           const resolvedFastCreatedAt = [fastCdbDetail?.approved_at, fastCdbDetail?.created_at, d1Pkg.created_at]
             .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
             .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || d1Pkg.created_at || fastCdbDetail?.created_at || undefined;
-          const resolvedFastUpdatedAt =
-            newestFastReleaseDate &&
-            (!d1Pkg.updated_at || new Date(newestFastReleaseDate).getTime() > new Date(d1Pkg.updated_at).getTime())
-              ? newestFastReleaseDate
-              : (d1Pkg.updated_at || fastCdbDetail?.updated_at || undefined);
+          const resolvedFastUpdatedAt = [newestFastReleaseDate, fastCdbDetail?.updated_at, d1Pkg.updated_at]
+            .filter((d): d is string => typeof d === 'string' && d.trim().length > 0 && Number.isFinite(Date.parse(d)))
+            .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || d1Pkg.updated_at || fastCdbDetail?.updated_at || undefined;
 
           const fastDetailTags = Array.isArray(fastCdbDetail?.tags)
             ? fastCdbDetail.tags
@@ -1989,7 +2041,7 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         d1Pkg?.screenshot_meta || gitScan?.cdbMeta?.screenshots,
         mergedGitScreenshots
       );
-      const pureGitStarScore = d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : Number(d1Pkg?.score || 0);
+      const pureGitStarScore = d1ReviewAvg ? Number(d1ReviewAvg.toFixed(1)) : 0;
       const pureGitFrecency = computeLuantiHubFrecencyMetrics({
         luantihubDownloads: lhDownloads,
         score: pureGitStarScore,
@@ -2534,9 +2586,8 @@ export async function onRequestGet(context: { request?: Request; params: { autho
         : null;
     const existingD1CdbDl = Number(d1Pkg.contentdb_downloads || 0);
     const shouldSyncCdbDownloads =
-      d1Pkg.provider !== 'contentdb' &&
-      ((contentdbDownloads > 0 && existingD1CdbDl === 0) ||
-        Math.abs(contentdbDownloads - existingD1CdbDl) >= 10);
+      contentdbDownloads > existingD1CdbDl &&
+      (existingD1CdbDl === 0 || contentdbDownloads - existingD1CdbDl >= 5);
     const newCdbDlVal = shouldSyncCdbDownloads ? contentdbDownloads : null;
     const newTotalDlVal = shouldSyncCdbDownloads ? totalDownloads : null;
     const cdbLicenseChanged =
@@ -2931,8 +2982,8 @@ export async function onRequestPatch(context: { request: Request; params: { auth
           id, author_id, author_name, name, title, type, short_desc, long_desc,
           repo_url, provider, license, media_license, thumbnail_url, tags, badge_tags,
           dev_state, content_warnings, min_minetest_version, max_minetest_version,
-          supports_all_games, game_support, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+          supports_all_games, game_support, score, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`
       ).bind(
         virtualPkgRow.id,
         patchUpstreamPkg || isAdmin ? resolvedUserId : null,

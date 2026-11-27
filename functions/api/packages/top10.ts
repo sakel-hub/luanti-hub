@@ -2,6 +2,7 @@ import {
   fetchUpstreamJsonCached,
   computeGenuineStarRating,
   computeStarRatingFromData,
+  parseNonZeroReviewThreadCounts,
   computeDependencyPrioritizationMultiplier,
   isPrimarilyDependencyPackage,
   readSharedEdgeRatingsMap,
@@ -117,6 +118,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           p.banner_url,
           p.screenshots,
           p.score,
+          p.review_thread_counts,
           p.license,
           p.provider,
           p.status,
@@ -135,8 +137,19 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
         LIMIT 40;
       `;
 
-      const res = await env.DB.prepare(query).all();
-      const sharedEdgeRatings = await readSharedEdgeRatingsMap().catch(() => ({} as Record<string, any>));
+      const [res, sharedEdgeRatings, cachedScoresTop10] = await Promise.all([
+        env.DB.prepare(query).all(),
+        readSharedEdgeRatingsMap().catch(() => ({} as Record<string, any>)),
+        readEdgeCacheJson<any[]>('/scores/').catch(() => null)
+      ]);
+      const scoresByKeyTop10 = new Map<string, any>();
+      if (Array.isArray(cachedScoresTop10)) {
+        for (const s of cachedScoresTop10) {
+          if (s?.author && s?.name) {
+            scoresByKeyTop10.set(`${s.author}/${s.name}`.toLowerCase(), s);
+          }
+        }
+      }
       if (res.results && res.results.length > 0) {
         const candidates: Array<{ item: any; compositeScore: number; periodDownloads: number; isPureDep: boolean }> = [];
         for (const r of res.results) {
@@ -174,9 +187,16 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           );
           const favCnt = d1Favorites.get(pkgKey) || 0;
           const sharedRating = sharedEdgeRatings[pkgKey];
+          const top10ScoreEntry = scoresByKeyTop10.get(pkgKey);
+          const effectiveRevCounts =
+            parseNonZeroReviewThreadCounts(r.review_thread_counts) ||
+            parseNonZeroReviewThreadCounts(top10ScoreEntry?.reviews) ||
+            parseNonZeroReviewThreadCounts(sharedRating?.review_thread_counts);
           const resolvedScore =
             d1Ratings.get(pkgKey) ??
-            (computeGenuineStarRating(null, r.score) || sharedRating?.score || 0);
+            (effectiveRevCounts
+              ? computeStarRatingFromData({ review_thread_counts: effectiveRevCounts })
+              : 0);
           const starMultiplier = resolvedScore >= 1 ? 0.85 + (resolvedScore / 5) * 0.35 : 1.0;
 
           const candidatePkg = {
@@ -202,10 +222,14 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
           const hasOfficialRow = Boolean(
             r.provider === 'contentdb' ||
             Number(r.contentdb_downloads || 0) > 0 ||
+            Number(top10ScoreEntry?.downloads || 0) > 0 ||
             rowTags.includes('contentdb')
           );
           const recTop10Dl = reconcilePackageDownloadCounts({
-            contentdbDownloads: Number(r.contentdb_downloads || 0),
+            contentdbDownloads: Math.max(
+              Number(r.contentdb_downloads || 0),
+              Number(top10ScoreEntry?.downloads || 0)
+            ),
             luantihubDownloads: Math.max(Number(r.luantihub_downloads || 0), periodDl),
             reportedTotalDownloads: Number(r.downloads_count || 0),
             hasContentDbSource: hasOfficialRow,
@@ -240,7 +264,7 @@ export async function onRequestGet(context: { request: Request; env: Env }) {
               ...(rowScreenshots.length > 0 ? { screenshots: rowScreenshots } : {}),
               dev_state: r.dev_state || undefined,
               score: resolvedScore,
-              review_thread_counts: sharedRating?.review_thread_counts,
+              review_thread_counts: effectiveRevCounts,
               contentdb_downloads: cdbDl,
               luantihub_downloads: lhDl,
               downloads: totalDl,

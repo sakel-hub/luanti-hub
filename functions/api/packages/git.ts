@@ -2402,9 +2402,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             INSERT OR IGNORE INTO packages (
               id, author_id, author_name, name, title, type, short_desc, long_desc,
               repo_url, provider, default_branch, thumbnail_url, banner_url,
-              license, media_license, status, status_reason, flagged_at
+              license, media_license, score, status, status_reason, flagged_at
             )
-            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'flagged', '[ADMIN] Pending repository ownership claim approval', CURRENT_TIMESTAMP)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'flagged', '[ADMIN] Pending repository ownership claim approval', CURRENT_TIMESTAMP)
           `).bind(
             packageId,
             canonicalAuthor,

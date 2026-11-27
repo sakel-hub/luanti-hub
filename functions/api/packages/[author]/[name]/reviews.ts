@@ -507,8 +507,8 @@ export async function onRequestPost(context: { request: Request; params: { autho
     if (!pkgRow) {
       await context.env.DB.prepare(`
         INSERT OR IGNORE INTO packages (
-          id, author_name, name, title, type, repo_url, provider, license, media_license, status
-        ) VALUES (?, ?, ?, ?, 'mod', '', 'contentdb', 'MIT', 'MIT', 'active')
+          id, author_name, name, title, type, repo_url, provider, license, media_license, score, status
+        ) VALUES (?, ?, ?, ?, 'mod', '', 'contentdb', 'MIT', 'MIT', 0, 'active')
       `).bind(effectivePkgId, author, name, name).run().catch(() => {});
     }
 

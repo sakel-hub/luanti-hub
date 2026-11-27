@@ -23,10 +23,10 @@ export function safeDecodeParam(value: unknown, maxIterations = 16): string {
 
 export async function fetchWithFailover(path: string, options: RequestInit = {}): Promise<Response> {
   // Primary ContentDB (https://content.luanti.org/api) is online and serves as our primary source of truth.
-  // Give bulk endpoints (/scores/, ?fmt=vcs) and standard endpoints 4500ms before failing over to the mirror.
+  // Give bulk endpoints (/scores/, ?fmt=vcs) 7000ms (ContentDB /scores/ can take >4.5s on cache miss) and standard endpoints 4000ms before failing over to the mirror.
   const isBulkEndpoint = path.startsWith('/scores') || path.includes('fmt=vcs') || path === '/packages/' || path.startsWith('/packages/?');
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), isBulkEndpoint ? 4500 : 4000);
+  const timeoutId = setTimeout(() => controller.abort(), isBulkEndpoint ? 7000 : 4000);
 
   // Use a transparent Web User-Agent so ContentDB does not mistake automated proxy fetches
   // for in-game Luanti client views (which would trigger PackageDailyStats.notify_view DB writes on ContentDB).
@@ -75,7 +75,17 @@ export async function fetchWithFailover(path: string, options: RequestInit = {})
         headers: { 'Content-Type': 'text/plain' }
       });
     }
-    return mirrorRes;
+    try {
+      const taggedHeaders = new Headers(mirrorRes.headers);
+      taggedHeaders.set('X-LuantiHub-Upstream-Mirror', '1');
+      return new Response(mirrorRes.body, {
+        status: mirrorRes.status,
+        statusText: mirrorRes.statusText,
+        headers: taggedHeaders
+      });
+    } catch {
+      return mirrorRes;
+    }
   }
 }
 
@@ -395,10 +405,16 @@ export async function fetchUpstreamJsonCached<T = any>(
       return await readFallbackCache();
     }
     const data = await res.json() as T;
+    const isMirrorFallback = res.headers?.get('X-LuantiHub-Upstream-Mirror') === '1';
+    const isEmptyBulkArray =
+      Array.isArray(data) &&
+      data.length === 0 &&
+      (path.startsWith('/scores') || path.includes('fmt=vcs') || path === '/packages/');
 
-    if (data) {
-      setIsolateCache(cacheKeyUrl, data, ttlSeconds);
-      if (fallbackCacheKeyUrl) {
+    if (data && !isEmptyBulkArray) {
+      const effectiveTtl = isMirrorFallback ? Math.min(ttlSeconds, 120) : ttlSeconds;
+      setIsolateCache(cacheKeyUrl, data, effectiveTtl);
+      if (fallbackCacheKeyUrl && !isMirrorFallback) {
         setIsolateCache(fallbackCacheKeyUrl, data, 86400);
       }
       if (edgeCache) {
@@ -407,11 +423,11 @@ export async function fetchUpstreamJsonCached<T = any>(
           const cacheRes = new Response(bodyStr, {
             headers: {
               'Content-Type': 'application/json',
-              'Cache-Control': `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`
+              'Cache-Control': `public, max-age=${effectiveTtl}, s-maxage=${effectiveTtl}`
             }
           });
           await edgeCache.put(cacheReq, cacheRes);
-          if (fallbackCacheKeyUrl) {
+          if (fallbackCacheKeyUrl && !isMirrorFallback) {
             await edgeCache.put(
               new Request(fallbackCacheKeyUrl, { method: 'GET' }),
               new Response(bodyStr, {
@@ -884,7 +900,7 @@ export interface SharedEdgeRatingEntry {
   checked?: boolean;
 }
 
-const SHARED_EDGE_RATINGS_CACHE_KEY = '/__pkg_ratings_map_v2';
+const SHARED_EDGE_RATINGS_CACHE_KEY = '/__pkg_ratings_map_v3';
 
 /**
  * Reads the shared Edge Cache map of hydrated package star ratings & review thread counts (`/__pkg_ratings_map_v2`).
@@ -6266,6 +6282,7 @@ export function buildPackageCacheInvalidationKeys(
     buildPackageReviewsEdgeCacheKey(lowerA, lowerN),
     `/__api_hydrate_v11_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `/__api_hydrate_v12_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
+    `/__api_hydrate_v13_${encodeURIComponent(`${lowerA}/${lowerN}`)}`,
     `https://edge-cache.luantihub.local/pkg-readme-v1/${encA}/${encN}`,
     `https://edge-cache.luantihub.local/pkg-releases-v1/${encA}/${encN}`,
     buildSsrPackageMetaEdgeCacheKey(lowerA, lowerN)

@@ -793,9 +793,9 @@ export async function syncVerifiedAuthorGitPackages(
                   INSERT OR IGNORE INTO packages (
                     id, author_id, author_name, name, title, type, short_desc, long_desc,
                     repo_url, provider, default_branch, thumbnail_url, banner_url,
-                    downloads_count, contentdb_downloads, license, media_license, tags, status
+                    downloads_count, contentdb_downloads, score, license, media_license, tags, status
                   )
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', 'main', ?, ?, ?, ?, ?, ?, ?, 'active')
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'contentdb', 'main', ?, ?, ?, ?, 0, ?, ?, ?, 'active')
                 `).bind(
                   canonicalId,
                   resolvedUserId,

@@ -689,9 +689,9 @@ export async function syncJam2026IntoPromoRowDelta(params: {
                     id, author_id, author_name, name, title, type, short_desc, long_desc,
                     repo_url, provider, default_branch, thumbnail_url, banner_url, screenshots,
                     license, media_license, tags, min_minetest_version, latest_commit_sha,
-                    status, created_at, updated_at
+                    score, status, created_at, updated_at
                   )
-                  SELECT ?, ?, ?, ?, ?, 'game', ?, ?, ?, ?, 'main', ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?
+                  SELECT ?, ?, ?, ?, ?, 'game', ?, ?, ?, ?, 'main', ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?
                   WHERE NOT EXISTS (
                     SELECT 1 FROM packages p2
                     WHERE LOWER(p2.repo_url) = LOWER(?) AND LOWER(p2.id) != LOWER(?)
@@ -865,7 +865,8 @@ export async function syncJam2026IntoPromoRowDelta(params: {
               `/__api_hydrate_v9_${lowerId}`,
               `/__api_hydrate_v10_${lowerId}`,
               `/__api_hydrate_v11_${lowerId}`,
-              `/__api_hydrate_v12_${lowerId}`
+              `/__api_hydrate_v12_${lowerId}`,
+              `/__api_hydrate_v13_${lowerId}`
             );
           }
           await Promise.all([

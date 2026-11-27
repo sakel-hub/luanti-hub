@@ -666,9 +666,9 @@ export async function onRequestPost(context: { request: Request; env: Env }) {
             const seedRes = await env.DB.prepare(`
               INSERT OR IGNORE INTO packages (
                 id, author_id, author_name, name, title, type, short_desc,
-                repo_url, provider, license, media_license, status
+                repo_url, provider, license, media_license, score, status
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'active')
             `)
               .bind(
                 claimedPkgId,

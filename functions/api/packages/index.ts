@@ -2560,6 +2560,14 @@ export async function onRequestGet(context: {
   const seenKeys = new Set<string>();
   const merged: any[] = [];
   const dualSourceBackfillStmts: any[] = [];
+  const cdbDownloadBackfillCandidates: Array<{
+    priority: number;
+    relDelta: number;
+    absDelta: number;
+    id: string;
+    cdbDownloads: number;
+    stmt: any;
+  }> = [];
 
   for (const p of d1List) {
     const d1Key = `${p.author_name}/${p.name}`.toLowerCase();
@@ -2770,25 +2778,28 @@ export async function onRequestGet(context: {
     const lhDownloads = reconciledDl.luantihubDownloads;
     const combinedDownloads = reconciledDl.downloads;
 
-    // Queue threshold-gated dual-source ContentDB linkage backfill so D1 fast paths don't lose ContentDB counts or provenance
-    if (
-      env.DB &&
-      dualSourceBackfillStmts.length < 15 &&
-      rawProvider !== 'contentdb' &&
-      matchedUpstream &&
-      p.id
-    ) {
+    // Queue fairness-prioritized ContentDB download & tag backfill so lower-download dual-source packages
+    // (e.g. 36 -> 116 downloads) are never starved by top-15 high-download packages in `d1List` (`ORDER BY downloads_count DESC`)
+    if (env.DB && matchedUpstream && p.id) {
       const existingD1CdbDl = Number(p.contentdb_downloads || 0);
-      const missingContentDbTag = !parsedTags.some((t: string) => String(t).toLowerCase() === 'contentdb');
+      const missingContentDbTag =
+        rawProvider !== 'contentdb' &&
+        !parsedTags.some((t: string) => String(t).toLowerCase() === 'contentdb');
+      const absDelta = Math.max(0, cdbDownloads - existingD1CdbDl);
       const significantCdbDelta =
         (cdbDownloads > 0 && existingD1CdbDl === 0) ||
-        Math.abs(cdbDownloads - existingD1CdbDl) >= 10;
-      if (missingContentDbTag || significantCdbDelta) {
+        absDelta >= 5;
+      if ((missingContentDbTag || significantCdbDelta) && claimD1BackfillSlot(String(p.id), `boot-dl:${cdbDownloads}:${missingContentDbTag ? 1 : 0}`)) {
         const nextD1Tags = missingContentDbTag
           ? Array.from(new Set([...parsedTags, 'contentdb']))
           : null;
-        dualSourceBackfillStmts.push(
-          env.DB.prepare(
+        cdbDownloadBackfillCandidates.push({
+          priority: missingContentDbTag ? 2 : existingD1CdbDl === 0 ? 1 : 0,
+          relDelta: absDelta / Math.max(1, existingD1CdbDl),
+          absDelta,
+          id: String(p.id),
+          cdbDownloads,
+          stmt: env.DB.prepare(
             `UPDATE packages
              SET contentdb_downloads = MAX(COALESCE(contentdb_downloads, 0), ?),
                  luantihub_downloads = MAX(COALESCE(luantihub_downloads, 0), ?),
@@ -2802,7 +2813,7 @@ export async function onRequestGet(context: {
             nextD1Tags ? JSON.stringify(nextD1Tags) : null,
             p.id
           )
-        );
+        });
       }
     }
     const shortDescText = p.short_desc || matchedUpstream?.short_desc || matchedUpstream?.short_description || '';
@@ -2823,10 +2834,25 @@ export async function onRequestGet(context: {
       {
         ...(matchedUpstream || {}),
         review_thread_counts: effectiveReviewThreadCounts,
-        score: (!isAlsoOfficial || effectiveReviewThreadCounts) ? (p.score ?? matchedUpstream?.score) : undefined
+        score: effectiveReviewThreadCounts ? (p.score ?? matchedUpstream?.score) : undefined
       },
       d1StarAvg
     );
+    // Self-heal legacy SQLite `DEFAULT 5.0` score on pure-Git D1 rows that have zero reviews
+    if (
+      env.DB &&
+      p.id &&
+      !isAlsoOfficial &&
+      !effectiveReviewThreadCounts &&
+      !(d1StarAvg > 0) &&
+      Number(p.score) > 0 &&
+      dualSourceBackfillStmts.length < 20 &&
+      claimD1BackfillSlot(String(p.id), 'heal-legacy-score-0')
+    ) {
+      dualSourceBackfillStmts.push(
+        env.DB.prepare(`UPDATE packages SET score = 0 WHERE id = ?`).bind(p.id)
+      );
+    }
     const itemDailyDl = velocity.get(canonicalKey)?.todayDl ?? velocity.get(d1Key)?.todayDl;
     const itemWeeklyDl = velocity.get(canonicalKey)?.weekDl ?? velocity.get(d1Key)?.weekDl;
     const itemConvRate = velocity.get(canonicalKey)?.conversionRate ?? velocity.get(d1Key)?.conversionRate;
@@ -2938,6 +2964,18 @@ export async function onRequestGet(context: {
       source: isGitSource ? 'git' : 'official',
       sources
     });
+  }
+
+  if (cdbDownloadBackfillCandidates.length > 0) {
+    cdbDownloadBackfillCandidates.sort(
+      (a, b) =>
+        b.priority - a.priority ||
+        b.relDelta - a.relDelta ||
+        b.absDelta - a.absDelta
+    );
+    for (const cand of cdbDownloadBackfillCandidates.slice(0, 25)) {
+      dualSourceBackfillStmts.push(cand.stmt);
+    }
   }
 
   const sharedEdgeRatings = isBootBundle

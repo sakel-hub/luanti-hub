@@ -275,7 +275,7 @@ export class PackageService {
   private readonly _deepHydratedVersion = signal<number>(0);
   private readonly hydratedMetaCache = new Map<string, Partial<LuantiPackage>>();
   private readonly hydratedMetaStamps = new Map<string, { rev: string; exp: number }>();
-  private static readonly HYDRATED_META_STORAGE_KEY = 'lh_hydrated_meta_v16';
+  private static readonly HYDRATED_META_STORAGE_KEY = 'lh_hydrated_meta_v17';
   private static readonly HYDRATED_META_TTL_MS = 2 * 60 * 60 * 1000;
   private readonly reviewsCache = new Map<string, CommunityReview[]>();
   private readonly reviewsVerifiedEmptyKeys = new Set<string>();
@@ -2473,7 +2473,8 @@ export class PackageService {
           }
         }
       }
-      const rawV16 = localStorage.getItem(PackageService.HYDRATED_META_STORAGE_KEY);
+      const rawV17 = localStorage.getItem(PackageService.HYDRATED_META_STORAGE_KEY);
+      const rawV16 = localStorage.getItem('lh_hydrated_meta_v16');
       const rawV15 = localStorage.getItem('lh_hydrated_meta_v15');
       const rawV14 = localStorage.getItem('lh_hydrated_meta_v14');
       const rawV13 = localStorage.getItem('lh_hydrated_meta_v13');
@@ -2502,25 +2503,28 @@ export class PackageService {
       if (rawV15) {
         localStorage.removeItem('lh_hydrated_meta_v15');
       }
-      const rawLegacy = rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
-      let useV16 = Boolean(rawV16);
-      if (rawV16 && rawLegacy) {
+      if (rawV16) {
+        localStorage.removeItem('lh_hydrated_meta_v16');
+      }
+      const rawLegacy = rawV16 || rawV15 || rawV14 || rawV13 || rawV12 || rawV11 || rawV10 || rawV9;
+      let useV17 = Boolean(rawV17);
+      if (rawV17 && rawLegacy) {
         try {
-          const parsed16 = JSON.parse(rawV16);
-          const entryCount16 = parsed16?.__v === 16 && parsed16.entries && typeof parsed16.entries === 'object'
-            ? Object.keys(parsed16.entries).length
+          const parsed17 = JSON.parse(rawV17);
+          const entryCount17 = parsed17?.__v === 17 && parsed17.entries && typeof parsed17.entries === 'object'
+            ? Object.keys(parsed17.entries).length
             : 0;
-          if (entryCount16 === 0) useV16 = false;
+          if (entryCount17 === 0) useV17 = false;
         } catch {
-          useV16 = false;
+          useV17 = false;
         }
       }
-      const raw = useV16 ? rawV16 : rawLegacy;
+      const raw = useV17 ? rawV17 : rawLegacy;
       if (!raw) return;
       const isMigratingLegacy =
-        !useV16 && Boolean(rawLegacy);
+        !useV17 && Boolean(rawLegacy);
       const isMigratingPreV14 =
-        !useV16 && !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
+        !useV17 && !rawV16 && !rawV15 && !rawV14 && Boolean(rawV13 || rawV12 || rawV11 || rawV10 || rawV9);
       if (isMigratingLegacy) {
         this.hadLegacyBootCache = true;
         if (typeof caches !== 'undefined' && typeof caches?.delete === 'function') {
@@ -2530,11 +2534,12 @@ export class PackageService {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
         const nowMs = Date.now();
-        const isV16Envelope = parsed.__v === 16 && parsed.entries && typeof parsed.entries === 'object';
-        const rawEntries: Record<string, any> = isV16Envelope ? parsed.entries : parsed;
+        const isCurrentEnvelope =
+          (parsed.__v === 17 || parsed.__v === 16) && parsed.entries && typeof parsed.entries === 'object';
+        const rawEntries: Record<string, any> = isCurrentEnvelope ? parsed.entries : parsed;
         for (const [k, v] of Object.entries(rawEntries)) {
           if (!k || !v || typeof v !== 'object') continue;
-          const isWrapped = isV16Envelope || (v as any).meta !== undefined;
+          const isWrapped = isCurrentEnvelope || (v as any).meta !== undefined;
           const stampExp = isWrapped && typeof (v as any).exp === 'number' ? Number((v as any).exp) : nowMs + PackageService.HYDRATED_META_TTL_MS;
           if (isWrapped && typeof (v as any).exp === 'number' && nowMs > stampExp) {
             continue;
@@ -2566,7 +2571,7 @@ export class PackageService {
           if (entry.review_thread_counts) {
             entry.review_thread_counts = parseNonZeroReviewThreadCounts(entry.review_thread_counts);
           }
-          if (isMigratingPreV14 && !entry.review_thread_counts) {
+          if ((isMigratingPreV14 || isMigratingLegacy) && !entry.review_thread_counts) {
             entry.score = 0;
             entry.rating_checked = false;
           }
@@ -2674,7 +2679,7 @@ export class PackageService {
         }
         localStorage.setItem(
           PackageService.HYDRATED_META_STORAGE_KEY,
-          JSON.stringify({ __v: 16, entries: packed })
+          JSON.stringify({ __v: 17, entries: packed })
         );
       } catch {
         // Ignore quota errors

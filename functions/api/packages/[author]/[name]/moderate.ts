@@ -226,9 +226,9 @@ export async function onRequestPost(context: {
   // Upsert package status in D1 so even upstream ContentDB packages can be immediately delisted via the Kill Switch!
   await env.DB.prepare(`
     INSERT INTO packages (
-      id, author_name, name, title, type, repo_url, provider, license, media_license, status, status_reason, flagged_at
+      id, author_name, name, title, type, repo_url, provider, license, media_license, score, status, status_reason, flagged_at
     )
-    VALUES (?, ?, ?, ?, 'mod', '', 'contentdb', 'NONE', 'NONE', ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, 'mod', '', 'contentdb', 'NONE', 'NONE', 0, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       status_reason = excluded.status_reason,
