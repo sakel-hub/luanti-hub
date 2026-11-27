@@ -14,6 +14,7 @@
     "db:schema:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/schema.sql",
     "db:migrate:remote": "wrangler d1 execute luanti-registry-db --remote --file=functions/migrate.sql",
     "lighthouse:mcp": "node node_modules/lighthouse-mcp/build/index.js",
+    "check:security": "node scripts/verify-security-invariants.mjs",
     "typecheck": "tsc --noEmit",
     "angular:mcp": "ng mcp"
   },
